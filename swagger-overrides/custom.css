@@ -1,0 +1,118 @@
+body {
+  margin: 0;
+  background: #f7fafc;
+}
+
+/* ===== Topbar branding ===== */
+
+.swagger-ui .topbar {
+  display: flex;
+  align-items: center;
+  padding: 8px 16px;
+  background-color: #4079c5; /* your primary */
+}
+
+/* Remove default text logo */
+.swagger-ui .topbar .link span {
+  display: none;
+}
+
+/* Use your SVG as a background, with fixed size */
+.swagger-ui .topbar .link::before {
+  content: "";
+  display: inline-block;
+  width: 160px;              /* adjust as you like */
+  height: 32px;              /* fits nicely in the top bar */
+  background-image: url("./grengin-logo.svg");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+  vertical-align: middle;
+}
+
+.swagger-ui .topbar {
+  display: flex;
+  align-items: center;
+  padding: 8px 16px;
+  background-color: #4079c5; /* primary */
+}
+
+/* Hide ALL default logo content in the link (text + img + svg) */
+.swagger-ui .topbar .link span,
+.swagger-ui .topbar .link img,
+.swagger-ui .topbar .link svg {
+  display: none !important;
+}
+
+/* Use your SVG as a background, with fixed size */
+.swagger-ui .topbar .link::before {
+  content: "";
+  display: inline-block;
+  width: 178px;                 /* adjust to match your logo ratio */
+  height: 40px;
+  background-image: url("./grengin-logo.svg");  /* or ./assets/grengin-logo.svg */
+  background-repeat: no-repeat;
+  background-position: center left;
+  background-size: contain;
+  background-color: #ffffff;
+  vertical-align: middle;
+}
+/* ===== Buttons / primary actions ===== */
+
+.swagger-ui .btn,
+.swagger-ui .btn.execute,
+.swagger-ui .opblock-control__btn {
+  background-color: #4079c5;  /* primary */
+  border-color: #4079c5;
+  color: #ffffff;
+}
+
+.swagger-ui .btn:hover,
+.swagger-ui .btn.execute:hover,
+.swagger-ui .opblock-control__btn:hover {
+  background-color: #3163a2;
+  border-color: #3163a2;
+}
+
+/* Secondary/success style (e.g. 2xx blocks) */
+.swagger-ui .opblock.opblock-get,
+.swagger-ui .opblock.opblock-post {
+  border-color: #2c906a; /* secondary accent */
+}
+
+/* Tag headers */
+.swagger-ui .opblock-tag {
+  background: #e4edf8;
+  color: #1f2933;
+}
+
+/* ===== Try-it-out area / request pane ===== */
+
+.swagger-ui .opblock .opblock-summary-method {
+  background-color: #4079c5;
+}
+
+/* Code blocks / response area */
+.swagger-ui .response-col_description__inner div.markdown,
+.swagger-ui .model-box {
+  border-radius: 4px;
+}
+
+/* Inputs focus color */
+.swagger-ui input:focus,
+.swagger-ui select:focus,
+.swagger-ui textarea:focus {
+  border-color: #4079c5;
+  box-shadow: 0 0 0 1px #4079c5;
+}
+
+/* Make “Authorize” button match primary color */
+.swagger-ui .auth-wrapper .btn.authorize {
+  border-color: #4079c5;
+  color: #4079c5;
+}
+
+.swagger-ui .auth-wrapper .btn.authorize:hover {
+  background-color: #4079c5;
+  color: #ffffff;
+}

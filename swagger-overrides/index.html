@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Grengin API Docs</title>
+
+    <!-- Favicon -->
+    <link rel="icon" type="image/x-icon" href="./grengin-icon.ico" />
+
+    <!-- Default Swagger UI styles -->
+    <link rel="stylesheet" type="text/css" href="./swagger-ui.css" />
+
+    <!-- Your custom theme overrides -->
+    <link rel="stylesheet" type="text/css" href="./custom.css" />
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+
+    <script src="./swagger-ui-bundle.js" charset="UTF-8"></script>
+    <script src="./swagger-ui-standalone-preset.js" charset="UTF-8"></script>
+
+    <script>
+      window.ui = SwaggerUIBundle({
+        url: "/openapi.json",
+        dom_id: "#swagger-ui",
+        presets: [
+          SwaggerUIBundle.presets.apis,
+          SwaggerUIStandalonePreset
+        ],
+        layout: "StandaloneLayout",
+      });
+    </script>
+  </body>
+</html>
