@@ -26,6 +26,8 @@ pub async fn google_login_start(
     // Generate PKCE + CSRF + nonce
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     let (auth_url, csrf_state, nonce) = app_state.google_client
+        .read()
+        .await
         .authorize_url(
         CoreAuthenticationFlow::AuthorizationCode,
         CsrfToken::new_random,
@@ -90,6 +92,8 @@ pub async fn google_oauth_callback(
             eprintln!("db error while deleting oauth_session: {e:?}");
             AuthError::ServiceTemporarilyUnavailable })?;
     let token_resp = app_state.google_client
+        .read()
+        .await
         .exchange_code(AuthorizationCode::new(cb.code))
         .expect("Failed to get token response")
         .set_pkce_verifier(PkceCodeVerifier::new(sess.pkce_verifier.clone()))
@@ -103,17 +107,17 @@ pub async fn google_oauth_callback(
     let id_token = token_resp
         .id_token()
         .ok_or(AuthError::ServiceTemporarilyUnavailable)?;
-    let fresh_client = app_state.get_fresh_google_client() // if signing keys expires
-         .await
-         .map_err(|e|{
-             eprintln!("google client refresh err: {}",e);
-            AuthError::ServiceTemporarilyUnavailable
-         })?;
-    let claims = match id_token.claims(&app_state.google_client.id_token_verifier(),&nonce) {
+    let claims = match id_token.claims(&app_state.google_client.read().await.id_token_verifier(),&nonce) {
       Ok(c) => c,
       Err(_e) => {
+        app_state.refresh_google_client()
+          .await
+          .map_err(|e| {
+            eprintln!("google client refresh error: {e:?}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
         id_token
-            .claims(&fresh_client.id_token_verifier(),&nonce)
+            .claims(&app_state.google_client.read().await.id_token_verifier(),&nonce)
             .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?
      }
     };
@@ -126,6 +130,8 @@ pub async fn google_oauth_callback(
            .redirect(reqwest::redirect::Policy::none())
            .build().unwrap();
         let info: CoreUserInfoClaims = app_state.google_client
+            .read()
+            .await
             .user_info(token_resp.access_token().to_owned(), None)
             .expect("userinfo req")
             .request_async(&http_client)
