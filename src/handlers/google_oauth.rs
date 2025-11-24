@@ -154,6 +154,15 @@ pub async fn google_oauth_callback(
         .map_err(|e| {
             eprintln!("db error while fetching user: {e:?}");
             AuthError::ServiceTemporarilyUnavailable})?;
+    if let Some(u) = &user {
+      let mut active_user:users::ActiveModel = u.clone().into();
+      active_user.last_login_on = Set(Utc::now());
+      active_user.update(&app_state.database)
+         .await
+         .map_err(|e|{
+            eprintln!("db error while updating user {:?}",e);
+            AuthError::ServiceTemporarilyUnavailable})?;
+    }
     if user.is_none() {
         if let Some(ref em) = email {
             user = users::Entity::find()
@@ -184,6 +193,7 @@ pub async fn google_oauth_callback(
             google_id: Set(Some(sub.clone())),
             azure_id:Set(None),
             org_id:Set(None),
+            email_verified:Set(true),
             created_on:Set(Utc::now()),
             updated_on:Set(Utc::now()),
             last_login_on:Set(Utc::now()),

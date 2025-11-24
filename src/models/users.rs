@@ -4,13 +4,18 @@ use sea_orm::entity::prelude::*;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq,EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
-#[sea_orm(rs_type = "String",db_type = "String(StringLen::None)",rename_all = "camelCase")]
-#[serde(rename_all = "camelCase")]   
+#[sea_orm(rs_type = "String",db_type = "String(StringLen::None)",rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]   
 pub enum UserStatus{
     Active,
     InActive,
     Deleted,
     Suspended,
+}
+
+pub enum Roles {
+    User,
+    Admin,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
@@ -23,6 +28,7 @@ pub struct Model {
   pub profile_pic_url:Option<String>,
   #[sea_orm(column_type = "Text", unique, indexed)]
   pub email:String,
+  pub email_verified:bool,
   pub name:Option<String>,
   #[sea_orm(indexed)]
   pub org_id:Option<Uuid>, // Internal Organization model uuid
