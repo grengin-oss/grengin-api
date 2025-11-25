@@ -19,7 +19,7 @@ pub struct ServerSettings {
 pub struct AuthSettings {
     pub jwt_secret: String,
     pub redirect_url:String,
-    pub postgres_uri:String,
+    pub database_url:String,
 }
 
 pub struct GoogleSettings {
@@ -54,8 +54,8 @@ impl AuthSettings {
         let jwt_secret = std::env::var("JWT_SECRET").map_err(|_| ConfigError::Missing("JWT_SECRET"))?;
         KEYS.set(Keys::new(jwt_secret.as_bytes())).map_err(|_| ConfigError::AlreadyInitilized("KEYS"))?;
         let redirect_url = std::env::var("REDIRECT_URL").map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
-        let postgres_uri = std::env::var("POSTGRES_URI").map_err(|_| ConfigError::Missing("POSTGRES_URI"))?;
-        Ok(Self { jwt_secret,redirect_url,postgres_uri })
+        let database_url = std::env::var("DATABASE_URL").map_err(|_| ConfigError::Missing("DATABASE_URL"))?;
+        Ok(Self { jwt_secret,redirect_url,database_url })
     }
 }
 
@@ -65,7 +65,6 @@ impl GoogleSettings {
         let client_secret = std::env::var("GOOGLE_CLIENT_SECRET").map_err(|_| ConfigError::Missing("GOOGLE_CLIENT_SECREL"))?;
         let app_redirect_url = std::env::var("REDIRECT_URL").map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
         let redirect_url = format!("{}/auth/google/login",app_redirect_url.replace("https","http"));
-        println!("{}",&redirect_url);
       Ok(Self {client_id,client_secret,redirect_url })
     }
 }

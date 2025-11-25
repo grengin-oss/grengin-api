@@ -26,6 +26,8 @@ pub async fn google_login_start(
     // Generate PKCE + CSRF + nonce
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     let (auth_url, csrf_state, nonce) = app_state.google_client
+        .read()
+        .await
         .authorize_url(
         CoreAuthenticationFlow::AuthorizationCode,
         CsrfToken::new_random,
@@ -90,6 +92,8 @@ pub async fn google_oauth_callback(
             eprintln!("db error while deleting oauth_session: {e:?}");
             AuthError::ServiceTemporarilyUnavailable })?;
     let token_resp = app_state.google_client
+        .read()
+        .await
         .exchange_code(AuthorizationCode::new(cb.code))
         .expect("Failed to get token response")
         .set_pkce_verifier(PkceCodeVerifier::new(sess.pkce_verifier.clone()))
@@ -103,17 +107,17 @@ pub async fn google_oauth_callback(
     let id_token = token_resp
         .id_token()
         .ok_or(AuthError::ServiceTemporarilyUnavailable)?;
-    let fresh_client = app_state.get_fresh_google_client() // if signing keys expires
-         .await
-         .map_err(|e|{
-             eprintln!("google client refresh err: {}",e);
-            AuthError::ServiceTemporarilyUnavailable
-         })?;
-    let claims = match id_token.claims(&app_state.google_client.id_token_verifier(),&nonce) {
+    let claims = match id_token.claims(&app_state.google_client.read().await.id_token_verifier(),&nonce) {
       Ok(c) => c,
       Err(_e) => {
+        app_state.refresh_google_client()
+          .await
+          .map_err(|e| {
+            eprintln!("google client refresh error: {e:?}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
         id_token
-            .claims(&fresh_client.id_token_verifier(),&nonce)
+            .claims(&app_state.google_client.read().await.id_token_verifier(),&nonce)
             .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?
      }
     };
@@ -126,6 +130,8 @@ pub async fn google_oauth_callback(
            .redirect(reqwest::redirect::Policy::none())
            .build().unwrap();
         let info: CoreUserInfoClaims = app_state.google_client
+            .read()
+            .await
             .user_info(token_resp.access_token().to_owned(), None)
             .expect("userinfo req")
             .request_async(&http_client)
@@ -148,6 +154,15 @@ pub async fn google_oauth_callback(
         .map_err(|e| {
             eprintln!("db error while fetching user: {e:?}");
             AuthError::ServiceTemporarilyUnavailable})?;
+    if let Some(u) = &user {
+      let mut active_user:users::ActiveModel = u.clone().into();
+      active_user.last_login_on = Set(Utc::now());
+      active_user.update(&app_state.database)
+         .await
+         .map_err(|e|{
+            eprintln!("db error while updating user {:?}",e);
+            AuthError::ServiceTemporarilyUnavailable})?;
+    }
     if user.is_none() {
         if let Some(ref em) = email {
             user = users::Entity::find()
@@ -177,12 +192,15 @@ pub async fn google_oauth_callback(
             name: Set(display_name.into()),
             google_id: Set(Some(sub.clone())),
             azure_id:Set(None),
-            org_id:Set(None),
+            email_verified:Set(true),
             created_on:Set(Utc::now()),
             updated_on:Set(Utc::now()),
             last_login_on:Set(Utc::now()),
             status:Set(UserStatus::Active),
-            profile_pic_url:Set(None),
+            two_factor_auth:Set(false),
+            two_factor_secret:Set(None),
+            avatar:Set(None),
+            metadata:Set(None),
         };
         new_user.clone()
            .insert(&app_state.database)
@@ -198,11 +216,7 @@ pub async fn google_oauth_callback(
     let user = user
      .ok_or(AuthError::EmailDoesNotExist)?;
     let claims = Claims::new(user.email, user.name, user.id);
-    let login_type = if user.org_id.is_some(){
-       LoginType::Organization
-    }else{
-        LoginType::Individual
-    };
+    let login_type = LoginType::Individual;
     let token = jsonwebtoken::encode(&jsonwebtoken::Header::default(), &claims, &KEYS.get().unwrap().encoding).unwrap();
     let resp = LoginResponse {
         token,

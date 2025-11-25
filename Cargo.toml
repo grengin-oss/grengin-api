@@ -1,7 +1,10 @@
 [package]
 name = "grengin-api"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
+
+[workspace]
+members = [".","migration"]
 
 [dependencies]
 anyhow = { version = "1.0.100", features = ["backtrace"] }
@@ -9,10 +12,10 @@ axum = "0.8.7"
 axum-extra = { version = "0.12.2", features = ["typed-header"] }
 chrono = { version = "0.4.42", features = ["serde"] }
 jsonwebtoken = { version = "10.2.0", features = ["rust_crypto"] }
-oauth2 = { version = "5.0.0", features = ["reqwest"] }
+oauth2 = "5.0.0"
 openidconnect = { version = "4.0.1", features = ["reqwest"] }
 reqwest = { version = "0.12.24", features = ["json"] }
-sea-orm = { version = "1.1.19", features = ["sqlx-postgres", "sqlx-mysql", "runtime-tokio-rustls", "macros", "with-uuid", "with-chrono"] }
+sea-orm = { version = "1.1.19", features = ["sqlx-postgres", "sqlx-mysql", "runtime-tokio-rustls", "macros", "with-uuid", "with-chrono","with-json"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.17"
@@ -21,3 +24,6 @@ tracing-subscriber = { version = "0.3.20", features = ["fmt"] }
 utoipa = { version = "5.4.0", features = ["axum_extras", "chrono", "url", "uuid"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
+migration = { path = "migration" }
+async-std = "1.13.2"
+openssl = { version = "0.10.75", features = ["vendored"] }
