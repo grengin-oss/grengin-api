@@ -61,6 +61,12 @@ You retain full ownership of your contributions - the CLA simply grants us the r
   cp src/sample.env .env
 ```
 
+## Database Migration
+```bash
+cargo install sea-orm-cli
+sea-orm-cli migrate up
+```
+
 ## Build
 ```bash
   export SWAGGER_UI_OVERWRITE_FOLDER="${PWD}/swagger-overrides" && cargo build --release

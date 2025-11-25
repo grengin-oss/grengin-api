@@ -12,7 +12,7 @@ pub struct AppState {
 
 impl AppState {
     pub async fn from_settings(settings:Settings) -> Result<SharedState,Error> {
-         let database = Database::connect(&settings.auth.postgres_uri).await?;
+         let database = Database::connect(&settings.auth.database_url).await?;
          let google_client = RwLock::new(build_google_client(&settings.google.client_id, &settings.google.client_secret, &settings.google.redirect_url).await?);
          let state =  Self { database, google_client,settings };
         Ok(Arc::new(state))

@@ -192,13 +192,15 @@ pub async fn google_oauth_callback(
             name: Set(display_name.into()),
             google_id: Set(Some(sub.clone())),
             azure_id:Set(None),
-            org_id:Set(None),
             email_verified:Set(true),
             created_on:Set(Utc::now()),
             updated_on:Set(Utc::now()),
             last_login_on:Set(Utc::now()),
             status:Set(UserStatus::Active),
-            profile_pic_url:Set(None),
+            two_factor_auth:Set(false),
+            two_factor_secret:Set(None),
+            avatar:Set(None),
+            metadata:Set(None),
         };
         new_user.clone()
            .insert(&app_state.database)
@@ -214,11 +216,7 @@ pub async fn google_oauth_callback(
     let user = user
      .ok_or(AuthError::EmailDoesNotExist)?;
     let claims = Claims::new(user.email, user.name, user.id);
-    let login_type = if user.org_id.is_some(){
-       LoginType::Organization
-    }else{
-        LoginType::Individual
-    };
+    let login_type = LoginType::Individual;
     let token = jsonwebtoken::encode(&jsonwebtoken::Header::default(), &claims, &KEYS.get().unwrap().encoding).unwrap();
     let resp = LoginResponse {
         token,
