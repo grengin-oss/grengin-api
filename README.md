@@ -56,18 +56,32 @@ You retain full ownership of your contributions - the CLA simply grants us the r
 
 ---
 
-## Configure Environment
-```bash
-  cp src/sample.env .env
-```
+## Getting Started
 
-## Database Migration
+### Configure Environment
+```bash
+cp src/sample.env .env
+```
+### Database Migration (manually)
+#### Install sea-orm-cli
 ```bash
 cargo install sea-orm-cli
-sea-orm-cli migrate up
+```
+#### Check migration status
+```bash
+cargo install sea-orm-cli status
+```
+#### Update migration status
+```bash
+cargo install sea-orm-cli up
 ```
 
-## Build
+### Build
+#### Cargo build
 ```bash
-  export SWAGGER_UI_OVERWRITE_FOLDER="${PWD}/swagger-overrides" && cargo build --release
+export SWAGGER_UI_OVERWRITE_FOLDER="${PWD}/swagger-overrides" && cargo build --release
+```
+#### Docker Build
+```bash
+docker build -t grengin-api .
 ```
