@@ -2,11 +2,12 @@ use anyhow::Error;
 use sea_orm::{Database, DatabaseConnection};
 use tokio::sync::RwLock;
 use std::sync::Arc;
-use crate::{auth::google::build_google_client, config::setting::{OidcClient, Settings}};
+use crate::{auth::{azure::build_azure_client, google::build_google_client}, config::setting::{OidcClient, Settings}, dto::oauth::OidcProvider, models::users};
 
 pub struct AppState {
     pub database:DatabaseConnection,
     pub google_client:RwLock<OidcClient>,
+    pub azure_client:RwLock<OidcClient>,
     pub settings:Settings,
 }
 
@@ -14,13 +15,35 @@ impl AppState {
     pub async fn from_settings(settings:Settings) -> Result<SharedState,Error> {
          let database = Database::connect(&settings.auth.database_url).await?;
          let google_client = RwLock::new(build_google_client(&settings.google.client_id, &settings.google.client_secret, &settings.google.redirect_url).await?);
-         let state =  Self { database, google_client,settings };
+         let azure_client = RwLock::new(build_azure_client(&settings.azure.client_id, &settings.azure.client_secret, &settings.azure.redirect_url,&settings.azure.tenant_id).await?);
+         let state =  Self { database, google_client,azure_client,settings };
         Ok(Arc::new(state))
     }
 
-    pub async fn refresh_google_client(&self) -> Result<(),Error> {
+    pub fn get_oidc_client_and_column(&self,oidc_provider:&OidcProvider) -> (&RwLock<OidcClient>,users::Column) {
+        match oidc_provider {
+            OidcProvider::Azure => (&self.azure_client,users::Column::AzureId),
+            OidcProvider::Google => (&self.google_client,users::Column::GoogleId),
+        }
+    }
+
+    pub async fn refresh_oidc_clinet(&self,oidc_provider:&OidcProvider) -> Result<(),Error>{
+        match oidc_provider {
+            OidcProvider::Azure => self.refresh_azure_client().await?,
+            OidcProvider::Google => self.refresh_google_client().await?,
+        }
+      Ok(())
+    } 
+ 
+    async fn refresh_google_client(&self) -> Result<(),Error> {
          let google_client = build_google_client(&self.settings.google.client_id, &self.settings.google.client_secret, &self.settings.google.redirect_url).await?;
          *self.google_client.write().await = google_client;
+         Ok(())
+    }
+
+    async fn refresh_azure_client(&self) -> Result<(),Error> {
+         let azure_client = build_azure_client(&self.settings.azure.client_id, &self.settings.azure.client_secret, &self.settings.azure.redirect_url,&self.settings.azure.tenant_id).await?;
+         *self.azure_client.write().await = azure_client;
          Ok(())
     }
 }
