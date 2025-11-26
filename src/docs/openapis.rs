@@ -1,5 +1,6 @@
 use utoipa::OpenApi;
 use crate::auth::claims::Claims;
+use crate::auth::error::{ErrorResponse, ErrorDetail, ErrorDetailVariant};
 use crate::docs::security::ApiSecurityAddon;
 use crate::dto::auth::{LoginResponse};
 use crate::dto::oauth::OidcProvider;
@@ -16,6 +17,9 @@ use crate::handlers::oidc;
             LoginResponse,
             Claims,
             OidcProvider
+            ErrorResponse,
+            ErrorDetail,
+            ErrorDetailVariant
         )
     ),
     tags(
