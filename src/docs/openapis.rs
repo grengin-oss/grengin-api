@@ -2,8 +2,7 @@ use utoipa::OpenApi;
 use crate::auth::claims::Claims;
 use crate::auth::error::{ErrorResponse, ErrorDetail, ErrorDetailVariant};
 use crate::docs::security::ApiSecurityAddon;
-use crate::dto::auth::{LoginResponse};
-use crate::dto::oauth::OidcProvider;
+use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, LoginResponse, TokenType, User, UserRole, UserStatus};
 use crate::handlers::oidc;
 
 #[derive(OpenApi)]
@@ -15,8 +14,13 @@ use crate::handlers::oidc;
     components(
         schemas(
             LoginResponse,
+            AuthInitResponse,
+            AuthTokenResponse,
+            TokenType,
+            User,
+            UserRole,
+            UserStatus,
             Claims,
-            OidcProvider
             ErrorResponse,
             ErrorDetail,
             ErrorDetailVariant
