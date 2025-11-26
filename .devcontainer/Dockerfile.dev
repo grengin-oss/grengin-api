@@ -1,0 +1,20 @@
+FROM mcr.microsoft.com/devcontainers/rust:1-bookworm
+
+# Install additional dependencies
+RUN apt-get update && apt-get install -y \
+    postgresql-client \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install sea-orm-cli for database migrations
+RUN cargo install sea-orm-cli
+
+# Install cargo-watch for hot reloading during development
+RUN cargo install cargo-watch
+
+# Create workspace and target directories with correct ownership
+RUN mkdir -p /workspace/target && chown -R vscode:vscode /workspace
+
+# Set the workspace directory
+WORKDIR /workspace

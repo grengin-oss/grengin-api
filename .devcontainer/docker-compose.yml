@@ -1,0 +1,47 @@
+services:
+  app:
+    container_name: grengin-app
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile.dev
+    volumes:
+      - ..:/workspace:cached
+      - cargo-cache:/home/vscode/.cargo/registry
+      - target-cache:/workspace/target
+    command: sleep infinity
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - grengin-network
+
+  db:
+    container_name: grengin-db
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: grengin
+      POSTGRES_PASSWORD: grengin
+      POSTGRES_DB: grengin
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U grengin -d grengin"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - grengin-network
+
+volumes:
+  postgres-data:
+  cargo-cache:
+  target-cache:
+
+networks:
+  grengin-network:
+    driver: bridge
