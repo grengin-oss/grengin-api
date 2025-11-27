@@ -28,12 +28,12 @@ impl MigrationTrait for Migration {
                             .not_null(),
                     )
                     .col(
-                        ColumnDef::new(OAuthSessions::RedirectTo)
+                        ColumnDef::new(OAuthSessions::RedirectUri)
                             .string()
                             .null(),
                     )
                     .col(
-                        ColumnDef::new(OAuthSessions::CreatedOn)
+                        ColumnDef::new(OAuthSessions::CreatedAt)
                             .timestamp_with_time_zone()
                             .not_null(),
                     )
@@ -67,8 +67,8 @@ enum OAuthSessions {
     PkceVerifier,
     #[sea_orm(iden = "nonce")]
     Nonce,
-    #[sea_orm(iden = "redirectTo")]
-    RedirectTo,
-    #[sea_orm(iden = "createdOn")]
-    CreatedOn,
+    #[sea_orm(iden = "redirectUri")]
+    RedirectUri,
+    #[sea_orm(iden = "createdAt")]
+    CreatedAt,
 }

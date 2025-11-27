@@ -17,7 +17,7 @@
   <a href="https://github.com/grengin-oss/grengin-api/blob/main/CONTRIBUTOR_LICENSE.md"><img src="https://img.shields.io/badge/license-CONTRIBUTER-blue" alt="License-CONTRIBUTOR"></a>
 </p>
 
-Grenging is an AI-native business growth engine. It simplifies a well-governed access to the most important AI tools, while collaborating with the other classic and AI tools to work as an assistant for all.
+Grengin is an AI-native business growth engine. It simplifies a well-governed access to the most important AI tools, while collaborating with the other classic and AI tools to work as an assistant for all.
 
 ## License
 

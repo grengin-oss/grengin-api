@@ -7,8 +7,8 @@ use openidconnect::{TokenResponse as OidcTokenResponse};
 use axum::http::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, jwt::KEYS}, dto::{oauth::AuthProvider}, models::{oauth_sessions, users::{self, UserStatus}}};
-use crate::{auth::error::{AuthError, ErrorResponse}, dto::{auth::{AuthInitResponse, AuthTokenResponse, TokenType, User, UserStatus as DtoUserStatus}, oauth::{OAuthCallback, StartParams}}, state::SharedState};
+use crate::{auth::{claims::Claims, jwt::KEYS}, dto::oauth::AuthProvider, models::{oauth_sessions, users::{self, UserRole, UserStatus}}};
+use crate::{auth::error::{AuthError, ErrorResponse}, dto::{auth::{AuthInitResponse, AuthTokenResponse, TokenType, User}, oauth::{OAuthCallback, StartParams}}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -53,8 +53,8 @@ pub async fn oidc_login_start(
         state: Set(state_str.into()),
         pkce_verifier: Set(pkce_verifier.secret().to_string()),
         nonce: Set(nonce.secret().to_string()),
-        redirect_to: Set(redirect_uri),
-        created_on: Set(Utc::now()),
+        redirect_uri: Set(redirect_uri),
+        created_at: Set(Utc::now()),
     };
     sess.insert(&app_state.database)
         .await
@@ -94,7 +94,6 @@ pub async fn oidc_oauth_callback(
         eprintln!("OAuth error: {} - {:?}", error, cb.error_description);
         return Err(AuthError::InvalidCallbackParameters);
     }
-
     let code = cb.code.ok_or(AuthError::InvalidCallbackParameters)?;
 
     let (oidc_client, column) = app_state
@@ -106,7 +105,7 @@ pub async fn oidc_oauth_callback(
        .expect("failed to build openidconnect reqwest client");
     let sess = oauth_sessions::Entity::find()
         .filter(oauth_sessions::Column::State.eq(Some(cb.state.to_owned())))
-        .order_by_desc(oauth_sessions::Column::CreatedOn)
+        .order_by_desc(oauth_sessions::Column::CreatedAt)
         .one(&app_state.database)
         .await
         .map_err(|e| {
@@ -150,13 +149,20 @@ pub async fn oidc_oauth_callback(
                 .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?
         }
     };
-    let sub = claims.subject().as_str().to_string();
-    let mut email = claims.email().map(|e| e.as_str().to_string());
+    let sub = claims.subject()
+       .as_str()
+       .to_string();
+    let mut email = claims.email()
+       .map(|e| e.as_str().to_string());
     let mut display_name: Option<String> = None;
-    let avatar = claims
-       .picture()
+    let picture = claims.picture()
        .and_then(|pic_claim| pic_claim.get(None))       // default locale
        .map(|url| url.as_str().to_owned());
+    let hd = claims.website()
+       .and_then(|website_claim| website_claim.get(None))       // default locale
+       .map(|url| url.as_str().to_owned());
+    let google_id = if provider == "google" {Some(sub.clone())}else{None};
+    let azure_id = if provider == "azure" {Some(sub.clone())}else{None};
     if email.is_none() {
         let http_client = reqwest::ClientBuilder::new()
            .redirect(reqwest::redirect::Policy::none())
@@ -180,7 +186,7 @@ pub async fn oidc_oauth_callback(
     }
     let mut user = users::Entity::find()
         .filter(column.eq(Some(sub.clone())))
-        .order_by_desc(users::Column::CreatedOn)
+        .order_by_desc(users::Column::CreatedAt)
         .one(&app_state.database)
         .await
         .map_err(|e| {
@@ -188,7 +194,7 @@ pub async fn oidc_oauth_callback(
             AuthError::ServiceTemporarilyUnavailable})?;
     if let Some(u) = &user {
       let mut active_user:users::ActiveModel = u.clone().into();
-      active_user.last_login_on = Set(Utc::now());
+      active_user.last_login_at = Set(Utc::now());
       active_user.update(&app_state.database)
          .await
          .map_err(|e|{
@@ -206,9 +212,10 @@ pub async fn oidc_oauth_callback(
                       AuthError::ServiceTemporarilyUnavailable})?;
             if let Some(u) = &user {
                 let mut active_user:users::ActiveModel = u.clone().into();
-                active_user.google_id = Set(Some(sub.clone()));
-                active_user.updated_on = Set(Utc::now());
-                active_user.last_login_on = Set(Utc::now());
+                active_user.google_id = Set(google_id.clone());
+                active_user.azure_id = Set(azure_id.clone());
+                active_user.updated_at = Set(Utc::now());
+                active_user.last_login_at = Set(Utc::now());
                 active_user.update(&app_state.database)
                   .await
                   .map_err(|e|{
@@ -222,17 +229,22 @@ pub async fn oidc_oauth_callback(
             id: Set(Uuid::new_v4()),
             email: Set(email.clone().unwrap_or_else(|| format!("{sub}@users.noreply.oidc"))),
             name: Set(display_name.into()),
-            google_id: Set(Some(sub.clone())),
-            azure_id:Set(None),
+            google_id: Set(google_id),
+            azure_id:Set(azure_id),
             email_verified:Set(true),
-            created_on:Set(Utc::now()),
-            updated_on:Set(Utc::now()),
-            last_login_on:Set(Utc::now()),
+            created_at:Set(Utc::now()),
+            updated_at:Set(Utc::now()),
+            last_login_at:Set(Utc::now()),
+            password_changed_at:Set(None),
+            department:Set(None),
             status:Set(UserStatus::Active),
-            two_factor_auth:Set(false),
-            two_factor_secret:Set(None),
-            avatar:Set(avatar.clone()),
+            mfa_enabled:Set(false),
+            mfa_secret:Set(None),
+            picture:Set(picture.clone()),
+            password:Set(None),
+            role:Set(UserRole::User),
             metadata:Set(None),
+            hd:Set(hd),
         };
         new_user.clone()
            .insert(&app_state.database)
@@ -254,31 +266,23 @@ pub async fn oidc_oauth_callback(
         &KEYS.get().unwrap().encoding
     ).unwrap();
 
-    // Map database UserStatus to DTO UserStatus
-    let dto_status = match user.status {
-        UserStatus::Active => Some(DtoUserStatus::Active),
-        UserStatus::Suspended => Some(DtoUserStatus::Suspended),
-        UserStatus::Deleted => Some(DtoUserStatus::Deactivated),
-        UserStatus::InActive => Some(DtoUserStatus::Deactivated),
-    };
-
     let user_response = User {
         id: user.id,
         sub: sub.clone(),
         email: user.email,
         name: user.name,
-        picture: avatar,
-        hd: None,
-        role: None, // TODO: Map from database if role field exists
-        status: dto_status,
-        department: None,
-        is_super_admin: false, // Default to false, update based on database field if available
-        has_password: false, // SSO-only users don't have password
-        mfa_enabled: user.two_factor_auth,
-        last_login_at: Some(user.last_login_on),
+        picture: picture,
+        hd: user.hd,
+        role: user.role, // TODO: Map from database if role field exists
+        status: user.status,
+        department: user.department,
+        is_super_admin: user.role == UserRole::SuperAdmin, // Default to false, update based on database field if available
+        has_password: user.password.is_some(), // SSO-only users don't have password
+        mfa_enabled: user.mfa_enabled,
+        last_login_at: Some(user.last_login_at),
         password_changed_at: None,
-        created_at: user.created_on,
-        updated_at: user.updated_on,
+        created_at: user.created_at,
+        updated_at: user.updated_at,
     };
 
     let resp = AuthTokenResponse {

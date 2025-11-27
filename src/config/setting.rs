@@ -49,8 +49,8 @@ impl Settings {
 
 impl ServerSettings {
     pub fn from_env() -> Result<Self, ConfigError> {
-        let host = std::env::var("APP_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()); // default
-        let port = std::env::var("APP_PORT")
+        let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()); // default
+        let port = std::env::var("PORT")
             .ok()
             .and_then(|s| s.parse::<u16>().ok())
             .unwrap_or(8080); // default

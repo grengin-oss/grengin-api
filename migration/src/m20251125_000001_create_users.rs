@@ -6,7 +6,6 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // users table
         manager
             .create_table(
                 Table::create()
@@ -24,7 +23,7 @@ impl MigrationTrait for Migration {
                             .not_null(),
                     )
                     .col(
-                        ColumnDef::new(Users::Avatar)
+                        ColumnDef::new(Users::Picture)
                             .string()
                             .null(),
                     )
@@ -45,39 +44,66 @@ impl MigrationTrait for Migration {
                             .null(),
                     )
                     .col(
-                        ColumnDef::new(Users::GoogleId)
-                            .text()
+                        ColumnDef::new(Users::Password)
+                            .string()
                             .null(),
                     )
                     .col(
-                        ColumnDef::new(Users::TwoFactorAuth)
+                        ColumnDef::new(Users::GoogleId)
+                            .text()
+                            .null()
+                            .unique_key(),
+                    )
+                    .col(
+                        ColumnDef::new(Users::AzureId)
+                            .text()
+                            .null()
+                            .unique_key(),
+                    )
+                    .col(
+                        ColumnDef::new(Users::MfaEnabled)
                             .boolean()
                             .not_null(),
                     )
                     .col(
-                        ColumnDef::new(Users::TwoFactorSecret)
+                        ColumnDef::new(Users::MfaSecret)
                             .string()
                             .null(),
                     )
                     .col(
-                        ColumnDef::new(Users::AzureId)
+                        ColumnDef::new(Users::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Users::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Users::LastLoginAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Users::PasswordChangedAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(Users::Role)
+                            .string() // backing type of UserRole enum (rs_type = "String")
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Users::Hd)
                             .string()
                             .null(),
                     )
                     .col(
-                        ColumnDef::new(Users::CreatedOn)
-                            .timestamp_with_time_zone()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Users::UpdatedOn)
-                            .timestamp_with_time_zone()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Users::LastLoginOn)
-                            .timestamp_with_time_zone()
-                            .not_null(),
+                        ColumnDef::new(Users::Department)
+                            .string()
+                            .null(),
                     )
                     .col(
                         ColumnDef::new(Users::Metadata)
@@ -89,6 +115,16 @@ impl MigrationTrait for Migration {
             .await?;
 
         // Indexes for fields marked `indexed` in the model
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx-users-id")
+                    .table(Users::Table)
+                    .col(Users::Id)
+                    .to_owned(),
+            )
+            .await?;
+
         manager
             .create_index(
                 Index::create()
@@ -112,9 +148,9 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("idx-users-two-factor-auth")
+                    .name("idx-users-azure-id")
                     .table(Users::Table)
-                    .col(Users::TwoFactorAuth)
+                    .col(Users::AzureId)
                     .to_owned(),
             )
             .await?;
@@ -139,28 +175,38 @@ enum Users {
     Id,
     #[sea_orm(iden = "status")]
     Status,
-    #[sea_orm(iden = "avatar")]
-    Avatar,
+    #[sea_orm(iden = "picture")]
+    Picture,
     #[sea_orm(iden = "email")]
     Email,
     #[sea_orm(iden = "emailVerified")]
     EmailVerified,
     #[sea_orm(iden = "name")]
     Name,
+    #[sea_orm(iden = "password")]
+    Password,
     #[sea_orm(iden = "googleId")]
     GoogleId,
-    #[sea_orm(iden = "twoFactorAuth")]
-    TwoFactorAuth,
-    #[sea_orm(iden = "twoFactorSecret")]
-    TwoFactorSecret,
     #[sea_orm(iden = "azureId")]
     AzureId,
-    #[sea_orm(iden = "createdOn")]
-    CreatedOn,
-    #[sea_orm(iden = "updatedOn")]
-    UpdatedOn,
-    #[sea_orm(iden = "lastLoginOn")]
-    LastLoginOn,
+    #[sea_orm(iden = "mfaEnabled")]
+    MfaEnabled,
+    #[sea_orm(iden = "mfaSecret")]
+    MfaSecret,
+    #[sea_orm(iden = "createdAt")]
+    CreatedAt,
+    #[sea_orm(iden = "updatedAt")]
+    UpdatedAt,
+    #[sea_orm(iden = "lastLoginAt")]
+    LastLoginAt,
+    #[sea_orm(iden = "passwordChangedAt")]
+    PasswordChangedAt,
+    #[sea_orm(iden = "role")]
+    Role,
+    #[sea_orm(iden = "hd")]
+    Hd,
+    #[sea_orm(iden = "department")]
+    Department,
     #[sea_orm(iden = "metadata")]
     Metadata,
 }

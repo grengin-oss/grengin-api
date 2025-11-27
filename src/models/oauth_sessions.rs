@@ -10,8 +10,8 @@ pub struct Model{
    pub state: String,
    pub pkce_verifier: String,
    pub nonce: String,
-   pub redirect_to: Option<String>,
-   pub created_on:DateTime<Utc>,
+   pub redirect_uri: Option<String>,
+   pub created_at:DateTime<Utc>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -21,7 +21,7 @@ impl ActiveModelBehavior for ActiveModel {
        fn new() -> Self {
         use sea_orm::Set;
         Self {
-            created_on: Set(Utc::now()),
+            created_at: Set(Utc::now()),
             ..ActiveModelTrait::default()
         }
     }

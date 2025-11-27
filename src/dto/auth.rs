@@ -2,6 +2,7 @@ use serde::{Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
+use crate::models::users::{UserRole, UserStatus};
 
 #[derive(Serialize, ToSchema)]
 pub struct AuthInitResponse {
@@ -19,7 +20,7 @@ pub struct LoginResponse {
 }
 
 #[derive(Serialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "camelCase")]
 pub struct AuthTokenResponse {
     /// JWT access token
     pub access_token: String,
@@ -42,7 +43,7 @@ pub enum TokenType {
 }
 
 #[derive(Serialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "camelCase")]
 pub struct User {
     /// User ID (required, UUID)
     pub id: Uuid,
@@ -60,10 +61,8 @@ pub struct User {
     /// Hosted domain (organization domain)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<UserRole>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<UserStatus>,
+    pub role:UserRole,
+    pub status:UserStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub department: Option<String>,
     /// Super admin has full platform control and cannot be deleted (default: false)
@@ -81,20 +80,4 @@ pub struct User {
     pub created_at: DateTime<Utc>,
     /// User last update timestamp (required)
     pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Serialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum UserRole {
-    User,
-    Admin,
-    Observer,
-}
-
-#[derive(Serialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum UserStatus {
-    Active,
-    Suspended,
-    Deactivated,
 }
