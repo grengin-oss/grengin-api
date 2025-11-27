@@ -7,35 +7,40 @@ use openidconnect::{TokenResponse as OidcTokenResponse};
 use axum::http::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, jwt::KEYS}, dto::{oauth::OidcProvider}, models::{oauth_sessions, users::{self, UserStatus}}};
-use crate::{auth::error::AuthError, dto::{auth::LoginResponse, oauth::{OAuthCallback, StartParams}}, state::SharedState};
+use crate::{auth::{claims::Claims, jwt::KEYS}, dto::oauth::AuthProvider, models::{oauth_sessions, users::{self, UserRole, UserStatus}}};
+use crate::{auth::error::{AuthError, ErrorResponse}, dto::{auth::{AuthInitResponse, AuthTokenResponse, TokenType, User}, oauth::{OAuthCallback, StartParams}}, state::SharedState};
 
 #[utoipa::path(
     get,
-    path = "/auth/{oidc_provider}/login",
+    path = "/auth/{provider}",
+    tag = "auth",
+    operation_id = "initiateAuth",
     params(
-        ("oidc_provider" = OidcProvider, Path),
-        ("redirect_to" = Option<String>, Query, description = "Optional post-login redirect target")),
+        ("provider" = String, Path, description = "Auth provider identifier (e.g., google, azure, keycloak)"),
+        ("redirect_uri" = Option<String>, Query, description = "Optional post-login redirect target", format = "uri")),
     responses(
-        (status = 302, description = "Redirects the user to Google for login"),
-        (status = 503, description = "Service temporarily unavailable")
+        (status = 200, body = AuthInitResponse, description = "Authentication initiation response with auth URL and state"),
+        (status = 302, description = "Redirects the user to provider's login page"),
+        (status = 400, body = ErrorResponse, description = "Invalid provider or configuration")
     )
 )]
 pub async fn oidc_login_start(
-    Path(oidc_provider):Path<OidcProvider>,
-    Query(StartParams { redirect_to }): Query<StartParams>,
-    State(app_state):State<SharedState>
+    Path(provider): Path<AuthProvider>,
+    Query(StartParams { redirect_uri }): Query<StartParams>,
+    State(app_state): State<SharedState>
 ) -> Result<Redirect, AuthError> {
     // Generate PKCE + CSRF + nonce
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-    let (oidc_client,_) = app_state.get_oidc_client_and_column(&oidc_provider);
-    let (auth_url, csrf_state, nonce) =  oidc_client
+    let (oidc_client, _) = app_state
+        .get_oidc_client_and_column(&provider)
+        .map_err(|_| AuthError::InvalidProvider)?;
+    let (auth_url, csrf_state, nonce) = oidc_client
         .read()
         .await
         .authorize_url(
-        CoreAuthenticationFlow::AuthorizationCode,
-        CsrfToken::new_random,
-        Nonce::new_random,
+            CoreAuthenticationFlow::AuthorizationCode,
+            CsrfToken::new_random,
+            Nonce::new_random,
         )
         .add_scope(Scope::new("openid".to_string()))
         .add_scope(Scope::new("email".to_string()))
@@ -45,47 +50,62 @@ pub async fn oidc_login_start(
 
     let state_str = csrf_state.secret().to_string();
     let sess = oauth_sessions::ActiveModel {
-        state:Set(state_str.into()),
+        state: Set(state_str.into()),
         pkce_verifier: Set(pkce_verifier.secret().to_string()),
         nonce: Set(nonce.secret().to_string()),
-        redirect_to:Set(redirect_to),
-        created_on:Set(Utc::now()),
+        redirect_uri: Set(redirect_uri),
+        created_at: Set(Utc::now()),
     };
     sess.insert(&app_state.database)
-      .await
-      .map_err(|e|{
-        eprintln!("{:?}",e);
-        AuthError::ServiceTemporarilyUnavailable})?;
+        .await
+        .map_err(|e| {
+            eprintln!("{:?}", e);
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
     Ok(Redirect::to(auth_url.as_str()))
 }
 
 #[utoipa::path(
     get,
-    path = "/auth/{oidc_provider}/callback",
+    path = "/auth/{provider}/callback",
+    tag = "auth",
+    operation_id = "authCallback",
     params(
-        ("oidc_provider" = OidcProvider, Path),
-        ("code" = String, Query, description = "Authorization code from Google"),
-        ("state" = String, Query, description = "CSRF state")
+        ("provider" = String, Path, description = "Auth provider identifier (e.g., google, azure, keycloak)"),
+        ("code" = String, Query, description = "Authorization code from provider"),
+        ("state" = String, Query, description = "CSRF state"),
+        ("error" = Option<String>, Query, description = "Error code from provider"),
+        ("error_description" = Option<String>, Query, description = "Error description from provider")
     ),
     responses(
-        (status = 200, body = LoginResponse, description = "Logged in via Google"),
-        (status = 400, description = "Invalid or expired OAuth state"),
-        (status = 503, description = "Service temporarily unavailable")
+        (status = 200, body = AuthTokenResponse, description = "Successfully authenticated"),
+        (status = 302, description = "Redirect to application with tokens"),
+        (status = 400, body = ErrorResponse, description = "Invalid callback parameters"),
+        (status = 401, body = ErrorResponse, description = "Unauthorized")
     )
 )]
 pub async fn oidc_oauth_callback(
-    Path(oidc_provider):Path<OidcProvider>,
+    Path(provider): Path<AuthProvider>,
     Query(cb): Query<OAuthCallback>,
-    State(app_state):State<SharedState>
-) -> Result<(StatusCode, Json<LoginResponse>), AuthError> {
-    let (oidc_client,column) = app_state.get_oidc_client_and_column(&oidc_provider);
+    State(app_state): State<SharedState>
+) -> Result<(StatusCode, Json<AuthTokenResponse>), AuthError> {
+    // Check for OAuth error responses
+    if let Some(error) = cb.error {
+        eprintln!("OAuth error: {} - {:?}", error, cb.error_description);
+        return Err(AuthError::InvalidCallbackParameters);
+    }
+    let code = cb.code.ok_or(AuthError::InvalidCallbackParameters)?;
+
+    let (oidc_client, column) = app_state
+        .get_oidc_client_and_column(&provider)
+        .map_err(|_| AuthError::InvalidProvider)?;
     let http_client = reqwest::ClientBuilder::new()
        .redirect(reqwest::redirect::Policy::none())
        .build()
        .expect("failed to build openidconnect reqwest client");
     let sess = oauth_sessions::Entity::find()
         .filter(oauth_sessions::Column::State.eq(Some(cb.state.to_owned())))
-        .order_by_desc(oauth_sessions::Column::CreatedOn)
+        .order_by_desc(oauth_sessions::Column::CreatedAt)
         .one(&app_state.database)
         .await
         .map_err(|e| {
@@ -101,7 +121,7 @@ pub async fn oidc_oauth_callback(
     let token_resp = oidc_client
         .read()
         .await
-        .exchange_code(AuthorizationCode::new(cb.code))
+        .exchange_code(AuthorizationCode::new(code))
         .expect("Failed to get token response")
         .set_pkce_verifier(PkceCodeVerifier::new(sess.pkce_verifier.clone()))
         .request_async(&http_client)
@@ -114,27 +134,35 @@ pub async fn oidc_oauth_callback(
     let id_token = token_resp
         .id_token()
         .ok_or(AuthError::ServiceTemporarilyUnavailable)?;
-    let claims = match id_token.claims(&oidc_client.read().await.id_token_verifier(),&nonce) {
-      Ok(c) => c,
-      Err(_e) => {
-        app_state.refresh_oidc_clinet(&oidc_provider)
-          .await
-          .map_err(|e| {
-            eprintln!("oidc client refresh error: {e:?}");
-            AuthError::ServiceTemporarilyUnavailable
-        })?;
-        id_token
-            .claims(&oidc_client.read().await.id_token_verifier(),&nonce)
-            .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?
-     }
+    let claims = match id_token.claims(&oidc_client.read().await.id_token_verifier(), &nonce) {
+        Ok(c) => c,
+        Err(_e) => {
+            app_state
+                .refresh_oidc_clinet(&provider)
+                .await
+                .map_err(|e| {
+                    eprintln!("oidc client refresh error: {e:?}");
+                    AuthError::ServiceTemporarilyUnavailable
+                })?;
+            id_token
+                .claims(&oidc_client.read().await.id_token_verifier(), &nonce)
+                .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?
+        }
     };
-    let sub = claims.subject().as_str().to_string();
-    let mut email = claims.email().map(|e| e.as_str().to_string());
+    let sub = claims.subject()
+       .as_str()
+       .to_string();
+    let mut email = claims.email()
+       .map(|e| e.as_str().to_string());
     let mut display_name: Option<String> = None;
-    let avatar = claims
-       .picture()
+    let picture = claims.picture()
        .and_then(|pic_claim| pic_claim.get(None))       // default locale
        .map(|url| url.as_str().to_owned());
+    let hd = claims.website()
+       .and_then(|website_claim| website_claim.get(None))       // default locale
+       .map(|url| url.as_str().to_owned());
+    let google_id = if provider == "google" {Some(sub.clone())}else{None};
+    let azure_id = if provider == "azure" {Some(sub.clone())}else{None};
     if email.is_none() {
         let http_client = reqwest::ClientBuilder::new()
            .redirect(reqwest::redirect::Policy::none())
@@ -158,7 +186,7 @@ pub async fn oidc_oauth_callback(
     }
     let mut user = users::Entity::find()
         .filter(column.eq(Some(sub.clone())))
-        .order_by_desc(users::Column::CreatedOn)
+        .order_by_desc(users::Column::CreatedAt)
         .one(&app_state.database)
         .await
         .map_err(|e| {
@@ -166,7 +194,7 @@ pub async fn oidc_oauth_callback(
             AuthError::ServiceTemporarilyUnavailable})?;
     if let Some(u) = &user {
       let mut active_user:users::ActiveModel = u.clone().into();
-      active_user.last_login_on = Set(Utc::now());
+      active_user.last_login_at = Set(Utc::now());
       active_user.update(&app_state.database)
          .await
          .map_err(|e|{
@@ -184,9 +212,10 @@ pub async fn oidc_oauth_callback(
                       AuthError::ServiceTemporarilyUnavailable})?;
             if let Some(u) = &user {
                 let mut active_user:users::ActiveModel = u.clone().into();
-                active_user.google_id = Set(Some(sub.clone()));
-                active_user.updated_on = Set(Utc::now());
-                active_user.last_login_on = Set(Utc::now());
+                active_user.google_id = Set(google_id.clone());
+                active_user.azure_id = Set(azure_id.clone());
+                active_user.updated_at = Set(Utc::now());
+                active_user.last_login_at = Set(Utc::now());
                 active_user.update(&app_state.database)
                   .await
                   .map_err(|e|{
@@ -200,17 +229,22 @@ pub async fn oidc_oauth_callback(
             id: Set(Uuid::new_v4()),
             email: Set(email.clone().unwrap_or_else(|| format!("{sub}@users.noreply.oidc"))),
             name: Set(display_name.into()),
-            google_id: Set(Some(sub.clone())),
-            azure_id:Set(None),
+            google_id: Set(google_id),
+            azure_id:Set(azure_id),
             email_verified:Set(true),
-            created_on:Set(Utc::now()),
-            updated_on:Set(Utc::now()),
-            last_login_on:Set(Utc::now()),
+            created_at:Set(Utc::now()),
+            updated_at:Set(Utc::now()),
+            last_login_at:Set(Utc::now()),
+            password_changed_at:Set(None),
+            department:Set(None),
             status:Set(UserStatus::Active),
-            two_factor_auth:Set(false),
-            two_factor_secret:Set(None),
-            avatar:Set(avatar),
+            mfa_enabled:Set(false),
+            mfa_secret:Set(None),
+            picture:Set(picture.clone()),
+            password:Set(None),
+            role:Set(UserRole::User),
             metadata:Set(None),
+            hd:Set(hd),
         };
         new_user.clone()
            .insert(&app_state.database)
@@ -223,12 +257,41 @@ pub async fn oidc_oauth_callback(
              eprintln!("db error while parsing user {:?}",e);
              AuthError::ServiceTemporarilyUnavailable})?);
     };
-    let user = user
-     .ok_or(AuthError::EmailDoesNotExist)?;
-    let claims = Claims::new(user.email, user.name, user.id);
-    let token = jsonwebtoken::encode(&jsonwebtoken::Header::default(), &claims, &KEYS.get().unwrap().encoding).unwrap();
-    let resp = LoginResponse {
-        token,
+    let user = user.ok_or(AuthError::EmailDoesNotExist)?;
+
+    let jwt_claims = Claims::new(user.email.clone(), user.name.clone(), user.id);
+    let access_token = jsonwebtoken::encode(
+        &jsonwebtoken::Header::default(),
+        &jwt_claims,
+        &KEYS.get().unwrap().encoding
+    ).unwrap();
+
+    let user_response = User {
+        id: user.id,
+        sub: sub.clone(),
+        email: user.email,
+        name: user.name,
+        picture: picture,
+        hd: user.hd,
+        role: user.role, // TODO: Map from database if role field exists
+        status: user.status,
+        department: user.department,
+        is_super_admin: user.role == UserRole::SuperAdmin, // Default to false, update based on database field if available
+        has_password: user.password.is_some(), // SSO-only users don't have password
+        mfa_enabled: user.mfa_enabled,
+        last_login_at: Some(user.last_login_at),
+        password_changed_at: None,
+        created_at: user.created_at,
+        updated_at: user.updated_at,
     };
-  Ok((StatusCode::OK, Json(resp)))
+
+    let resp = AuthTokenResponse {
+        access_token,
+        token_type: TokenType::Bearer,
+        expires_in: 3600, // 1 hour - match your JWT expiry
+        refresh_token: None, // TODO: Implement refresh token logic if needed
+        user: Some(user_response),
+    };
+
+    Ok((StatusCode::OK, Json(resp)))
 }

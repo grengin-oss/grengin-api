@@ -2,7 +2,7 @@ use anyhow::Error;
 use sea_orm::{Database, DatabaseConnection};
 use tokio::sync::RwLock;
 use std::sync::Arc;
-use crate::{auth::{azure::build_azure_client, google::build_google_client}, config::setting::{OidcClient, Settings}, dto::oauth::OidcProvider, models::users};
+use crate::{auth::{azure::build_azure_client, google::build_google_client}, config::setting::{OidcClient, Settings}, dto::oauth::AuthProvider, models::users};
 
 pub struct AppState {
     pub database:DatabaseConnection,
@@ -20,19 +20,21 @@ impl AppState {
         Ok(Arc::new(state))
     }
 
-    pub fn get_oidc_client_and_column(&self,oidc_provider:&OidcProvider) -> (&RwLock<OidcClient>,users::Column) {
-        match oidc_provider {
-            OidcProvider::Azure => (&self.azure_client,users::Column::AzureId),
-            OidcProvider::Google => (&self.google_client,users::Column::GoogleId),
+    pub fn get_oidc_client_and_column(&self, provider: &AuthProvider) -> Result<(&RwLock<OidcClient>, users::Column), Error> {
+        match provider.to_lowercase().as_str() {
+            "azure" => Ok((&self.azure_client, users::Column::AzureId)),
+            "google" => Ok((&self.google_client, users::Column::GoogleId)),
+            _ => Err(anyhow::anyhow!("Unknown provider: {}", provider)),
         }
     }
 
-    pub async fn refresh_oidc_clinet(&self,oidc_provider:&OidcProvider) -> Result<(),Error>{
-        match oidc_provider {
-            OidcProvider::Azure => self.refresh_azure_client().await?,
-            OidcProvider::Google => self.refresh_google_client().await?,
+    pub async fn refresh_oidc_clinet(&self, provider: &AuthProvider) -> Result<(), Error> {
+        match provider.to_lowercase().as_str() {
+            "azure" => self.refresh_azure_client().await?,
+            "google" => self.refresh_google_client().await?,
+            _ => return Err(anyhow::anyhow!("Unknown provider: {}", provider)),
         }
-      Ok(())
+        Ok(())
     } 
  
     async fn refresh_google_client(&self) -> Result<(),Error> {
