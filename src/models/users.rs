@@ -2,7 +2,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sea_orm::entity::prelude::*;
 use utoipa::ToSchema;
-use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq,EnumIter, DeriveActiveEnum, Serialize, Deserialize,ToSchema)]
 #[sea_orm(rs_type = "String",db_type = "String(StringLen::None)",rename_all = "lowercase")]
@@ -49,25 +48,23 @@ pub struct Model {
   pub last_login_at:DateTime<Utc>,
   pub password_changed_at:Option<DateTime<Utc>>,
   pub role:UserRole,
-  pub hd: Option<String>, //hosted domain of user email
+  pub hd: Option<String>, //hosted domain of user email/website
   pub department:Option<String>,
   #[sea_orm(column_type = "JsonBinary", nullable)]
-  pub metadata:Option<serde_json::Value>
+  pub metadata:Option<serde_json::Value>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
+pub enum Relation {
+    #[sea_orm(has_many = "super::conversations::Entity")]
+    Conversations,
+}
 
-impl ActiveModelBehavior for ActiveModel {
-    fn new() -> Self {
-        use sea_orm::Set;
-        Self {
-            id: Set(Uuid::new_v4()),
-            created_at: Set(Utc::now()),
-            updated_at: Set(Utc::now()),
-            last_login_at: Set(Utc::now()),
-            ..ActiveModelTrait::default()
-        }
+impl Related<super::conversations::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Conversations.def()
     }
 }
+
+impl ActiveModelBehavior for ActiveModel {}
 
