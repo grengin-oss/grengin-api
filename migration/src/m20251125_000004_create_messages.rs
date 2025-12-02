@@ -32,11 +32,18 @@ impl MigrationTrait for Migration {
                             .timestamp_with_time_zone()
                             .not_null(),
                     )
+                    .col(
+                        ColumnDef::new(Messages::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(Messages::TotalTokens).integer().not_null())
                     .col(ColumnDef::new(Messages::Latency).integer().not_null())
                     // USD decimal; pick ample precision/scale
                     .col(ColumnDef::new(Messages::Cost).decimal_len(20, 10).not_null())
                     .col(ColumnDef::new(Messages::Metadata).json_binary().null())
+                    .col(ColumnDef::new(Messages::ToolsCalls).array(ColumnType::Json))
+                    .col(ColumnDef::new(Messages::ToolsResults).array(ColumnType::Json))
                     .to_owned(),
             )
             .await?;
@@ -98,6 +105,15 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
+                    .name("idx_messages_updatedAt")
+                    .table(Messages::Table)
+                    .col(Messages::UpdatedAt)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
                     .name("idx_messages_role")
                     .table(Messages::Table)
                     .col(Messages::Role)
@@ -140,6 +156,8 @@ enum Messages {
     ResponseTokens,
     #[sea_orm(iden = "createdAt")]
     CreatedAt,
+    #[sea_orm(iden = "updatedAt")]
+    UpdatedAt,
     #[sea_orm(iden = "totalTokens")]
     TotalTokens,
     #[sea_orm(iden = "latency")]
@@ -148,6 +166,10 @@ enum Messages {
     Cost,
     #[sea_orm(iden = "metadata")]
     Metadata,
+    #[sea_orm(iden = "toolCalls")]
+    ToolsCalls,
+    #[sea_orm(iden = "toolResults")]
+    ToolsResults,
 }
 
 #[derive(DeriveIden)]

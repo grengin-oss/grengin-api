@@ -39,7 +39,8 @@ pub struct AzureSettings {
 
 pub struct OpenaiSettings {
     pub api_key:String,
-    pub org_id:String,
+    pub org_id:Option<String>,
+    pub project_id:Option<String>,
     pub timeout_ms:i32,
     pub max_retries:i32,
 }
@@ -101,10 +102,11 @@ impl AzureSettings {
 impl OpenaiSettings {
     pub fn from_env() -> Result<Self,ConfigError> {
         let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| ConfigError::Missing("OPENAI_API_KEY"))?;
-        let org_id = std::env::var("OPENAI_ORG_ID").map_err(|_| ConfigError::Missing("OPENAI_ORG_ID"))?;
+        let org_id = std::env::var("OPENAI_ORG_ID").ok();
+        let project_id = std::env::var("OPENAI_PROJECT_ID").ok();
         let timeout_ms = std::env::var("OPENAI_TIMEOUT_MS").unwrap_or("60000".to_string()).parse::<i32>().map_err(|_| ConfigError::ParseError("OPENAI_TIMEOUT_MS"))?;
         let max_retries = std::env::var("OPENAI_MAX_TRIES").unwrap_or("1".to_string()).parse::<i32>().map_err(|_| ConfigError::ParseError("OPENAI_MAX_RETRIES"))?;
-      Ok(Self { api_key, org_id, timeout_ms, max_retries })
+      Ok(Self { api_key, org_id, project_id, timeout_ms, max_retries })
     }
 }
 

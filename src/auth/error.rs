@@ -11,6 +11,7 @@ pub enum AuthError {
     InvalidToken,
     InvalidProvider,
     InvalidCallbackParameters,
+    InvalidRedirectUri
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -68,6 +69,12 @@ impl IntoResponse for AuthError {
                 StatusCode::BAD_REQUEST,
                 "InvalidCallbackParameters",
                 "Invalid callback parameters. The authentication flow may have been interrupted."
+            ),
+            AuthError::InvalidRedirectUri => (
+                StatusCode::BAD_REQUEST,
+                "InvalidRedirectUri",
+                "Invalid or not supported redirect uri"
+
             ),
         };
 

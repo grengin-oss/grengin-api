@@ -6,7 +6,7 @@ use utoipa::ToSchema;
 #[derive(Debug, Clone,Copy, PartialEq, Eq,EnumIter, DeriveActiveEnum, Serialize, Deserialize, ToSchema)]
 #[sea_orm(rs_type = "String",db_type = "String(StringLen::None)",rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]   
-pub enum PromptRole {
+pub enum ChatRole {
    User,
    Assistant,
    System
@@ -21,13 +21,16 @@ pub struct Model{
    pub conversation_id:Uuid,
    // Self refrence one to one
    pub previous_message_id:Uuid,
-   pub role:PromptRole,
+   pub role:ChatRole,
    pub message_content:String,
    pub model_provider: String,
    pub model_name: String,
    pub request_tokens:i32,
    pub response_tokens:i32,
+   pub tools_calls:Vec<serde_json::Value>,
+   pub tools_results:Vec<serde_json::Value>,
    pub created_at:DateTime<Utc>,
+   pub updated_at:DateTime<Utc>,
    // Total tokens used across all messages in this session.
    pub total_tokens: i32,
    // Latency in milliseconds

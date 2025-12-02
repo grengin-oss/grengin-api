@@ -15,6 +15,7 @@ pub struct Model{
    pub created_at:DateTime<Utc>,
    pub updated_at: DateTime<Utc>,
    pub last_message_at: Option<DateTime<Utc>>,
+   pub archived_at:Option<DateTime<Utc>>,
    // Total message count
    pub message_count: i32,
    // Total tokens used across all messages in this session.

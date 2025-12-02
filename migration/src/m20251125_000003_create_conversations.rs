@@ -41,6 +41,11 @@ impl MigrationTrait for Migration {
                             .timestamp_with_time_zone()
                             .null(),
                     )
+                    .col(
+                        ColumnDef::new(Conversations::ArchivedAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
                     .col(ColumnDef::new(Conversations::MessageCount).integer().not_null())
                     .col(ColumnDef::new(Conversations::TotalTokens).integer().not_null())
                     .col(ColumnDef::new(Conversations::Metadata).json_binary().null())
@@ -130,6 +135,8 @@ enum Conversations {
     UpdatedAt,
     #[sea_orm(iden = "lastMessageAt")]
     LastMessageAt,
+    #[sea_orm(iden = "archivedAt")]
+    ArchivedAt,
     #[sea_orm(iden = "messageCount")]
     MessageCount,
     #[sea_orm(iden = "totalTokens")]
