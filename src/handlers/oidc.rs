@@ -18,7 +18,7 @@ use crate::{auth::error::{AuthError}, dto::{auth::{AuthTokenResponse, TokenType,
         ("provider" = String, Path, description = "Auth provider identifier (e.g., google, azure, keycloak)"),
         ("redirect_uri" = Option<String>, Query, description = "Optional post-login redirect target", format = "uri")),
     responses(
-        (status = 302, description = "Redirects the user to provider's login page"),
+        (status = 303, description = "Redirects the user to provider's login page"),
         (status = 400, body = ErrorResponse, description = "Invalid provider or configuration"),
         (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
     )
