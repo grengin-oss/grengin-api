@@ -3,6 +3,7 @@ use crate::app::init_app;
 
 pub mod app;
 pub mod state;
+pub mod error;
 pub mod dto;
 pub mod docs;
 pub mod utils;

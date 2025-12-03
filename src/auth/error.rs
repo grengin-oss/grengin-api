@@ -1,8 +1,10 @@
 use axum::{response::{IntoResponse, Response},http::StatusCode, Json};
-use serde::{Deserialize, Serialize};
+use serde::{ Serialize};
 use utoipa::ToSchema;
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+use crate::error::{ErrorDetail, ErrorDetailVariant, ErrorResponse};
+
+#[derive(Debug, Serialize, ToSchema)]
 pub enum AuthError {
     ServiceTemporarilyUnavailable,
     InvalidCredentials,
@@ -12,24 +14,6 @@ pub enum AuthError {
     InvalidProvider,
     InvalidCallbackParameters,
     InvalidRedirectUri
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ErrorDetail {
-    pub code: String,
-    pub message: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[serde(untagged)]
-pub enum ErrorDetailVariant {
-    Simple(String),
-    Rich(ErrorDetail),
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ErrorResponse {
-    pub detail: ErrorDetailVariant,
 }
 
 impl IntoResponse for AuthError {

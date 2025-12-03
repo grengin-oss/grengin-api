@@ -67,13 +67,17 @@ cp src/sample.env .env
 ```bash
 cargo install sea-orm-cli
 ```
-#### Check migration status
+#### Check migrations status
 ```bash
 cargo install sea-orm-cli status
 ```
-#### Update migration status
+#### Update migrations status
 ```bash
 cargo install sea-orm-cli up
+```
+#### Rollback migrations
+```bash
+cargo install sea-orm-cli down
 ```
 
 ### Build

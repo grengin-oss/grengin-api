@@ -1,9 +1,10 @@
 use utoipa::OpenApi;
 use crate::auth::claims::Claims;
-use crate::auth::error::{ErrorResponse, ErrorDetail, ErrorDetailVariant};
+use crate::dto::chat::{ArchiveChatRequest, ConversationResponse, File, MessageParts, MessageResponse, TokenUsage};
+use crate::error::{ErrorResponse, ErrorDetail, ErrorDetailVariant};
 use crate::docs::security::ApiSecurityAddon;
 use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, LoginResponse, TokenType, User};
-use crate::handlers::oidc;
+use crate::handlers::{oidc,chat};
 use crate::models::users::{UserRole, UserStatus};
 
 #[derive(OpenApi)]
@@ -11,6 +12,10 @@ use crate::models::users::{UserRole, UserStatus};
     paths(
         oidc::oidc_login_start,
         oidc::oidc_oauth_callback,
+        chat::get_chat_by_id,
+        chat::get_chats,
+        chat::delete_chat_by_id,
+        chat::update_chat_by_id,
     ),
     components(
         schemas(
@@ -24,7 +29,13 @@ use crate::models::users::{UserRole, UserStatus};
             Claims,
             ErrorResponse,
             ErrorDetail,
-            ErrorDetailVariant
+            ErrorDetailVariant,
+            ArchiveChatRequest,
+            MessageResponse,
+            ConversationResponse,
+            File,
+            MessageParts,
+            TokenUsage,
         )
     ),
     tags(

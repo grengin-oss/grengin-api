@@ -6,7 +6,7 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // conversations
+        // Create table
         manager
             .create_table(
                 Table::create()
@@ -18,15 +18,28 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(Conversations::UserId).uuid().not_null())
-                    .col(ColumnDef::new(Conversations::Title).string().null())
+                    .col(
+                        ColumnDef::new(Conversations::UserId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Conversations::Title)
+                            .string()
+                            .null(),
+                    )
                     .col(
                         ColumnDef::new(Conversations::ModelProvider)
                             .string()
                             .not_null(),
                     )
-                    .col(ColumnDef::new(Conversations::ModelName).string().not_null())
                     .col(
+                        ColumnDef::new(Conversations::ModelName)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        // Use timestamp_with_time_zone for Postgres; switch to .timestamp() for MySQL/SQLite
                         ColumnDef::new(Conversations::CreatedAt)
                             .timestamp_with_time_zone()
                             .not_null(),
@@ -46,9 +59,28 @@ impl MigrationTrait for Migration {
                             .timestamp_with_time_zone()
                             .null(),
                     )
-                    .col(ColumnDef::new(Conversations::MessageCount).integer().not_null())
-                    .col(ColumnDef::new(Conversations::TotalTokens).integer().not_null())
-                    .col(ColumnDef::new(Conversations::Metadata).json_binary().null())
+                    .col(
+                        ColumnDef::new(Conversations::MessageCount)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        // For portability: use BigInteger; if you’re on MySQL and want unsigned, use .big_unsigned()
+                        ColumnDef::new(Conversations::TotalTokens)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        // Adjust precision/scale if your usage differs
+                        ColumnDef::new(Conversations::TotalCost)
+                            .decimal_len(18, 6)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Conversations::Metadata)
+                            .json_binary()
+                            .null(),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -57,25 +89,16 @@ impl MigrationTrait for Migration {
         manager
             .create_foreign_key(
                 ForeignKey::create()
+                    .name("fk_conversations_user_id")
                     .from(Conversations::Table, Conversations::UserId)
                     .to(Users::Table, Users::Id)
                     .on_delete(ForeignKeyAction::Cascade)
-                    .on_update(ForeignKeyAction::Cascade)
+                    .on_update(ForeignKeyAction::NoAction)
                     .to_owned(),
             )
             .await?;
 
-        // Indexes
-        manager
-            .create_index(
-                Index::create()
-                    .name("uidx_conversations_id")
-                    .table(Conversations::Table)
-                    .col(Conversations::Id)
-                    .unique()
-                    .to_owned(),
-            )
-            .await?;
+        // Helpful indexes
         manager
             .create_index(
                 Index::create()
@@ -85,15 +108,17 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
+
         manager
             .create_index(
                 Index::create()
-                    .name("idx_conversations_createdAt")
+                    .name("idx_conversations_updatedAt")
                     .table(Conversations::Table)
-                    .col(Conversations::CreatedAt)
+                    .col(Conversations::UpdatedAt)
                     .to_owned(),
             )
             .await?;
+
         manager
             .create_index(
                 Index::create()
@@ -104,51 +129,77 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_conversations_archivedAt")
+                    .table(Conversations::Table)
+                    .col(Conversations::ArchivedAt)
+                    .to_owned(),
+            )
+            .await?;
+
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Drop in reverse order (indexes & FKs are removed automatically with table drop in most DBs,
+        // but doing explicit drops is fine if your engine requires it)
         manager
             .drop_table(Table::drop().table(Conversations::Table).to_owned())
             .await
     }
 }
 
-
-#[derive(DeriveIden)]
+#[derive(Iden)]
 enum Conversations {
-    #[sea_orm(iden = "conversations")]
     Table,
-    #[sea_orm(iden = "id")]
+    /// id
+    #[iden = "id"]
     Id,
-    #[sea_orm(iden = "userId")]
+    /// userId
+    #[iden = "userId"]
     UserId,
-    #[sea_orm(iden = "title")]
+    /// title
+    #[iden = "title"]
     Title,
-    #[sea_orm(iden = "modelProvider")]
+    /// modelProvider
+    #[iden = "modelProvider"]
     ModelProvider,
-    #[sea_orm(iden = "modelName")]
+    /// modelName
+    #[iden = "modelName"]
     ModelName,
-    #[sea_orm(iden = "createdAt")]
+    /// createdAt
+    #[iden = "createdAt"]
     CreatedAt,
-    #[sea_orm(iden = "updatedAt")]
+    /// updatedAt
+    #[iden = "updatedAt"]
     UpdatedAt,
-    #[sea_orm(iden = "lastMessageAt")]
+    /// lastMessageAt
+    #[iden = "lastMessageAt"]
     LastMessageAt,
-    #[sea_orm(iden = "archivedAt")]
+    /// archivedAt
+    #[iden = "archivedAt"]
     ArchivedAt,
-    #[sea_orm(iden = "messageCount")]
+    /// messageCount
+    #[iden = "messageCount"]
     MessageCount,
-    #[sea_orm(iden = "totalTokens")]
+    /// totalTokens
+    #[iden = "totalTokens"]
     TotalTokens,
-    #[sea_orm(iden = "metadata")]
+    /// totalCost
+    #[iden = "totalCost"]
+    TotalCost,
+    /// metadata
+    #[iden = "metadata"]
     Metadata,
 }
 
-#[derive(DeriveIden)]
+// Minimal `users` iden for FK target; adjust if your users table/column names differ.
+#[derive(Iden)]
 enum Users {
-    #[sea_orm(iden = "users")]
+    #[iden = "users"]
     Table,
-    #[sea_orm(iden = "id")]
+    #[iden = "id"]
     Id,
 }

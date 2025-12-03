@@ -6,8 +6,8 @@ use openidconnect::{TokenResponse as OidcTokenResponse};
 use axum::http::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, jwt::KEYS}, dto::oauth::AuthProvider, models::{oauth_sessions, users::{self, UserRole, UserStatus}}};
-use crate::{auth::error::{AuthError, ErrorResponse}, dto::{auth::{AuthInitResponse, AuthTokenResponse, TokenType, User}, oauth::{OAuthCallback, StartParams}}, state::SharedState};
+use crate::{auth::{claims::Claims, jwt::KEYS}, dto::oauth::AuthProvider, error::ErrorResponse, models::{oauth_sessions, users::{self, UserRole, UserStatus}}};
+use crate::{auth::error::{AuthError}, dto::{auth::{AuthTokenResponse, TokenType, User}, oauth::{OAuthCallback, StartParams}}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -18,9 +18,9 @@ use crate::{auth::error::{AuthError, ErrorResponse}, dto::{auth::{AuthInitRespon
         ("provider" = String, Path, description = "Auth provider identifier (e.g., google, azure, keycloak)"),
         ("redirect_uri" = Option<String>, Query, description = "Optional post-login redirect target", format = "uri")),
     responses(
-        (status = 200, body = AuthInitResponse, description = "Authentication initiation response with auth URL and state"),
         (status = 302, description = "Redirects the user to provider's login page"),
         (status = 400, body = ErrorResponse, description = "Invalid provider or configuration"),
+        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
     )
 )]
 pub async fn oidc_login_start(
@@ -83,7 +83,8 @@ pub async fn oidc_login_start(
         (status = 200, body = AuthTokenResponse, description = "Successfully authenticated"),
         (status = 302, description = "Redirect to application with tokens"),
         (status = 400, body = ErrorResponse, description = "Invalid callback parameters"),
-        (status = 401, body = ErrorResponse, description = "Unauthorized")
+        (status = 401, body = ErrorResponse, description = "Unauthorized"),
+        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
     )
 )]
 pub async fn oidc_oauth_callback(

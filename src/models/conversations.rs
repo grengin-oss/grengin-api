@@ -19,7 +19,8 @@ pub struct Model{
    // Total message count
    pub message_count: i32,
    // Total tokens used across all messages in this session.
-   pub total_tokens: i32,
+   pub total_tokens: u64,
+   pub total_cost: Decimal,
     #[sea_orm(column_type = "JsonBinary", nullable)]
    pub metadata: Option<serde_json::Value>,
 }

@@ -6,7 +6,7 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // messages
+        // Create table
         manager
             .create_table(
                 Table::create()
@@ -18,15 +18,58 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(Messages::ConversationId).uuid().not_null())
-                    .col(ColumnDef::new(Messages::PreviousMessageId).uuid().not_null())
-                    // PromptRole stored as lowercase string per your DeriveActiveEnum attributes
-                    .col(ColumnDef::new(Messages::Role).string().not_null())
-                    .col(ColumnDef::new(Messages::MessageContent).text().not_null())
-                    .col(ColumnDef::new(Messages::ModelProvider).string().not_null())
-                    .col(ColumnDef::new(Messages::ModelName).string().not_null())
-                    .col(ColumnDef::new(Messages::RequestTokens).integer().not_null())
-                    .col(ColumnDef::new(Messages::ResponseTokens).integer().not_null())
+                    .col(
+                        ColumnDef::new(Messages::ConversationId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Messages::PreviousMessageId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        // Stored as lowercase text: "user" | "assistant" | "system"
+                        ColumnDef::new(Messages::Role)
+                            .string() // DB text/varchar
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Messages::MessageContent)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Messages::ModelProvider)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Messages::ModelName)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Messages::RequestTokens)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Messages::ResponseTokens)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        // JSON array payloads; store as jsonb with default [] for non-null Vec<..>
+                        ColumnDef::new(Messages::ToolsCalls)
+                            .array(ColumnType::JsonBinary)
+                            .not_null()
+                    )
+                    .col(
+                        ColumnDef::new(Messages::ToolsResults)
+                            .array(ColumnType::JsonBinary)
+                            .not_null()
+                    )
                     .col(
                         ColumnDef::new(Messages::CreatedAt)
                             .timestamp_with_time_zone()
@@ -37,43 +80,58 @@ impl MigrationTrait for Migration {
                             .timestamp_with_time_zone()
                             .not_null(),
                     )
-                    .col(ColumnDef::new(Messages::TotalTokens).integer().not_null())
-                    .col(ColumnDef::new(Messages::Latency).integer().not_null())
-                    // USD decimal; pick ample precision/scale
-                    .col(ColumnDef::new(Messages::Cost).decimal_len(20, 10).not_null())
-                    .col(ColumnDef::new(Messages::Metadata).json_binary().null())
-                    .col(ColumnDef::new(Messages::ToolsCalls).array(ColumnType::Json))
-                    .col(ColumnDef::new(Messages::ToolsResults).array(ColumnType::Json))
+                    .col(
+                        ColumnDef::new(Messages::TotalTokens)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Messages::Latency)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Messages::Cost)
+                            .decimal_len(18, 6)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Messages::Metadata)
+                            .json_binary()
+                            .null(),
+                    )
                     .to_owned(),
             )
             .await?;
 
-        // FK: messages.conversationId -> conversations.id
+        // FKs
+        // messages.conversationId -> conversations.id
         manager
             .create_foreign_key(
                 ForeignKey::create()
+                    .name("fk_messages_conversation_id")
                     .from(Messages::Table, Messages::ConversationId)
                     .to(Conversations::Table, Conversations::Id)
-                    .on_delete(ForeignKeyAction::Cascade)
-                    .on_update(ForeignKeyAction::Cascade)
+                    .on_delete(ForeignKeyAction::Cascade)  // delete messages with their conversation
+                    .on_update(ForeignKeyAction::NoAction)
                     .to_owned(),
             )
             .await?;
 
-        // Self-FK (one-to-one): messages.previousMessageId -> messages.id
-        // Non-null + UNIQUE enforces a strict 1:1 previous->current relationship
+        // Self-reference: messages.previousMessageId -> messages.id
         manager
             .create_foreign_key(
                 ForeignKey::create()
+                    .name("fk_messages_previous_message_id")
                     .from(Messages::Table, Messages::PreviousMessageId)
                     .to(Messages::Table, Messages::Id)
-                    .on_delete(ForeignKeyAction::Restrict) // prevents deleting a previous message while it's referenced
+                    .on_delete(ForeignKeyAction::Restrict)
                     .on_update(ForeignKeyAction::Cascade)
                     .to_owned(),
             )
             .await?;
 
-        // Indexes (and 1:1 uniqueness on previousMessageId)
+        // Indexes
         manager
             .create_index(
                 Index::create()
@@ -83,16 +141,19 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
+
+        // Enforce one-to-one chain on previousMessageId
         manager
             .create_index(
                 Index::create()
-                    .name("uidx_messages_previousMessageId")
+                    .name("uq_messages_previousMessageId")
                     .table(Messages::Table)
                     .col(Messages::PreviousMessageId)
                     .unique()
                     .to_owned(),
             )
             .await?;
+
         manager
             .create_index(
                 Index::create()
@@ -102,6 +163,7 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
+
         manager
             .create_index(
                 Index::create()
@@ -111,6 +173,7 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
+
         manager
             .create_index(
                 Index::create()
@@ -120,7 +183,6 @@ impl MigrationTrait for Migration {
                     .to_owned(),
             )
             .await?;
-
         Ok(())
     }
 
@@ -131,51 +193,66 @@ impl MigrationTrait for Migration {
     }
 }
 
-
-#[derive(DeriveIden)]
+#[derive(Iden)]
 enum Messages {
-    #[sea_orm(iden = "messages")]
     Table,
-    #[sea_orm(iden = "id")]
+    /// id
+    #[iden = "id"]
     Id,
-    #[sea_orm(iden = "conversationId")]
+    /// conversationId
+    #[iden = "conversationId"]
     ConversationId,
-    #[sea_orm(iden = "previousMessageId")]
+    /// previousMessageId
+    #[iden = "previousMessageId"]
     PreviousMessageId,
-    #[sea_orm(iden = "role")]
+    /// role
+    #[iden = "role"]
     Role,
-    #[sea_orm(iden = "messageContent")]
+    /// messageContent
+    #[iden = "messageContent"]
     MessageContent,
-    #[sea_orm(iden = "modelProvider")]
+    /// modelProvider
+    #[iden = "modelProvider"]
     ModelProvider,
-    #[sea_orm(iden = "modelName")]
+    /// modelName
+    #[iden = "modelName"]
     ModelName,
-    #[sea_orm(iden = "requestTokens")]
+    /// requestTokens
+    #[iden = "requestTokens"]
     RequestTokens,
-    #[sea_orm(iden = "responseTokens")]
+    /// responseTokens
+    #[iden = "responseTokens"]
     ResponseTokens,
-    #[sea_orm(iden = "createdAt")]
-    CreatedAt,
-    #[sea_orm(iden = "updatedAt")]
-    UpdatedAt,
-    #[sea_orm(iden = "totalTokens")]
-    TotalTokens,
-    #[sea_orm(iden = "latency")]
-    Latency,
-    #[sea_orm(iden = "cost")]
-    Cost,
-    #[sea_orm(iden = "metadata")]
-    Metadata,
-    #[sea_orm(iden = "toolCalls")]
+    /// toolsCalls
+    #[iden = "toolsCalls"]
     ToolsCalls,
-    #[sea_orm(iden = "toolResults")]
+    /// toolsResults
+    #[iden = "toolsResults"]
     ToolsResults,
+    /// createdAt
+    #[iden = "createdAt"]
+    CreatedAt,
+    /// updatedAt
+    #[iden = "updatedAt"]
+    UpdatedAt,
+    /// totalTokens
+    #[iden = "totalTokens"]
+    TotalTokens,
+    /// latency
+    #[iden = "latency"]
+    Latency,
+    /// cost
+    #[iden = "cost"]
+    Cost,
+    /// metadata
+    #[iden = "metadata"]
+    Metadata,
 }
 
-#[derive(DeriveIden)]
+#[derive(Iden)]
 enum Conversations {
-    #[sea_orm(iden = "conversations")]
+    #[iden = "conversations"]
     Table,
-    #[sea_orm(iden = "id")]
+    #[iden = "id"]
     Id,
 }

@@ -1,6 +1,6 @@
 [package]
 name = "grengin-api"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 
 [workspace]
@@ -30,3 +30,4 @@ async-trait = "0.1.89"
 serde_with = { version = "3.16.1", features = ["base64"] }
 tower-http = { version = "0.6.7", features = ["cors"] }
 openssl = { version = "0.10.75", features = ["vendored"] }
+num-traits = "0.2.19"
