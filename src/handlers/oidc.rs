@@ -55,7 +55,7 @@ pub async fn oidc_login_start(
         state: Set(state_str.into()),
         pkce_verifier: Set(pkce_verifier.secret().to_string()),
         nonce: Set(nonce.secret().to_string()),
-        redirect_uri: Set(query.redirect_uri.or(Some(default_redirect_uri.to_string()))),
+        redirect_uri: Set(Some(query.redirect_uri.unwrap_or(default_redirect_uri.to_string()))),
         created_at: Set(Utc::now()),
     };
     sess.insert(&app_state.database)
@@ -100,7 +100,7 @@ pub async fn oidc_oauth_callback(
     let code = cb
      .code
      .ok_or(AuthError::InvalidCallbackParameters)?;
-    let (oidc_client, column,_) = app_state
+    let (oidc_client, column,default_redirect_uri) = app_state
         .get_oidc_client_and_column_and_redirect_uri(&provider)
         .map_err(|_| AuthError::InvalidProvider)?;
     let sess = oauth_sessions::Entity::find()
@@ -112,6 +112,8 @@ pub async fn oidc_oauth_callback(
             eprintln!("db error while fetching session: {e:?}");
             AuthError::ServiceTemporarilyUnavailable})?
         .ok_or(AuthError::InvalidToken)?;
+    let redirect_uri = RedirectUrl::new(sess.redirect_uri.clone().unwrap_or(default_redirect_uri.to_string()))
+        .map_err(|_| AuthError::InvalidRedirectUri)?;
     let active: oauth_sessions::ActiveModel = sess.clone().into();
     active.delete(&app_state.database)
         .await
@@ -124,6 +126,7 @@ pub async fn oidc_oauth_callback(
         .exchange_code(AuthorizationCode::new(code))
         .expect("Failed to get token response")
         .set_pkce_verifier(PkceCodeVerifier::new(sess.pkce_verifier.clone()))
+        .set_redirect_uri(Cow::Owned(redirect_uri))
         .request_async(&app_state.req_client)
         .await
         .map_err(|e| {
