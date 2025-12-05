@@ -69,15 +69,15 @@ cargo install sea-orm-cli
 ```
 #### Check migrations status
 ```bash
-cargo install sea-orm-cli status
+sea-orm-cli migration status
 ```
 #### Update migrations status
 ```bash
-cargo install sea-orm-cli up
+sea-orm-cli migration up
 ```
 #### Rollback migrations
 ```bash
-cargo install sea-orm-cli down
+sea-orm-cli migration down
 ```
 
 ### Build

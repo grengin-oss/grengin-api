@@ -6,6 +6,24 @@ use uuid::Uuid;
 use crate::models::messages::ChatRole;
 
 #[derive(Deserialize, ToSchema, IntoParams)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatInitRequest{
+  pub provider:String,
+  pub model_name:String,
+  pub config:serde_json::Value,
+  pub web_search:bool,
+  pub selected_tools:Vec<String>,
+  pub messages:Vec<MessageRequest>,
+}
+
+#[derive(Deserialize, ToSchema, IntoParams)]
+pub struct MessageRequest {
+  pub role:ChatRole,
+  pub content:String,
+  pub files:Vec<Attachment>
+}
+
+#[derive(Deserialize, ToSchema, IntoParams)]
 pub struct ArchiveChatRequest{
   pub title:String,
   pub archived: bool,
@@ -59,7 +77,7 @@ pub struct Attachment {
     pub content_type:String
 }
 
-#[derive(Serialize, ToSchema, IntoParams)]
+#[derive(Serialize, Deserialize, ToSchema, IntoParams)]
 pub struct File {
     pub id:Option<String>,
     pub size: Option<usize>,

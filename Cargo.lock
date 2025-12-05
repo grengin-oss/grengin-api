@@ -1138,6 +1138,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "chrono",
+ "futures-util",
  "jsonwebtoken",
  "migration",
  "num-traits",

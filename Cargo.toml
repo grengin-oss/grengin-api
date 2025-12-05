@@ -31,3 +31,4 @@ serde_with = { version = "3.16.1", features = ["base64"] }
 tower-http = { version = "0.6.7", features = ["cors"] }
 openssl = { version = "0.10.75", features = ["vendored"] }
 num-traits = "0.2.19"
+futures-util = "0.3.31"

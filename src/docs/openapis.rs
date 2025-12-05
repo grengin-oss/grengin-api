@@ -16,6 +16,7 @@ use crate::models::users::{UserRole, UserStatus};
         chat::get_chats,
         chat::delete_chat_by_id,
         chat::update_chat_by_id,
+        chat::handle_chat_stream,
     ),
     components(
         schemas(
