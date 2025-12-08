@@ -1,8 +1,9 @@
 use anyhow::Error;
 use async_trait::async_trait;
+use reqwest_eventsource::EventSource;
 use serde::{Deserialize, Serialize};
 use utoipa::{ToSchema};
-use crate::{config::setting::OpenaiSettings, dto::chat::Attachment};
+use crate::{config::setting::OpenaiSettings, dto::chat::{Attachment, File}};
 
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -13,17 +14,12 @@ pub enum LlmProviders{
     Groq
 }
 
-pub struct LLMResponse{
-    
-}
-
 #[async_trait]
-pub trait LLM:OpenAI {
-    async fn get_models(&self) -> Vec<String>;
-    async fn chat(&self,model_name:String,prompt:String,attachments:Vec<Attachment>) -> Result<String,Error>;
-    async fn chat_stream(&self,model_name:String,prompt:String,attachments:Vec<Attachment>) -> Result<String,Error>;
+pub trait OpenaiApis {
+    async fn openai_chat_stream(&self,openai_sesstings:&OpenaiSettings,model_name:String,prompt:String,temperature:Option<f32>,files:Vec<File>) -> Result<EventSource,Error>;
+    async fn openai_upload_file(&self,openai_settings:&OpenaiSettings,attachment:&Attachment) -> Result<String,Error>;
 } 
 
-pub trait OpenAI: Send + Sync {
+pub trait OpenaiHeaders: Send + Sync {
     fn add_openai_headers(self,openai_sesstings:&OpenaiSettings) -> Self;
 }

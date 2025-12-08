@@ -1,5 +1,5 @@
 use axum::{Router, middleware::from_extractor, routing::{delete, get, post}};
-use crate::{auth::claims::Claims, handlers::chat::{delete_chat_by_id, get_chat_by_id, get_chats, handle_chat_stream, update_chat_by_id}, state::SharedState};
+use crate::{auth::claims::Claims, handlers::{chat::{delete_chat_by_id, get_chat_by_id, get_chats, update_chat_by_id}, chat_stream::handle_chat_stream}, state::SharedState};
 
 pub fn chat_routes() -> Router<SharedState> {
    Router::new()

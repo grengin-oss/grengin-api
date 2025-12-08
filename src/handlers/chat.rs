@@ -1,33 +1,10 @@
-use std::{convert::Infallible};
-use axum::{Json, extract::{Path, Query, State}, response::{Sse, sse::{Event, KeepAlive}}};
+use axum::{Json, extract::{Path, Query, State}};
 use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect};
 use uuid::Uuid;
-use crate::{auth::claims::Claims, dto::{chat::{ArchiveChatRequest, ChatInitRequest, ConversationResponse, File, MessageParts, MessageResponse, TokenUsage}, common::PaginationQuery}, error::AppError, models::{conversations, messages}, state::SharedState};
+use crate::{auth::claims::Claims, dto::{chat::{ArchiveChatRequest, ConversationResponse, File, MessageParts, MessageResponse, TokenUsage}, common::PaginationQuery}, error::AppError, models::{conversations, messages::{self}}, state::SharedState};
 use num_traits::cast::ToPrimitive;
-
-#[utoipa::path(
-    post,
-    path = "/chat/stream",
-    tag = "chat",
-    request_body = ChatInitRequest,
-    responses(
-        (status = 200, content_type = "text/event-stream", body = MessageResponse ),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
-        (status = 404, description = "Resource not found"),
-    )
-)]
-pub async fn handle_chat_stream(
-  claims:Claims,
-  Json(req):Json<ChatInitRequest>
-) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>,AppError>{
- let sse_stream = async_stream::try_stream! {
-   yield Event::default()
- };
- let sse_response = Sse::new(sse_stream).keep_alive(KeepAlive::new());
- Ok(sse_response)
-}
 
 #[utoipa::path(
     get,
@@ -104,7 +81,7 @@ pub async fn get_chats(
         ("search" = Option<String>, Query, description = "Search in conversation titles"),
     ),
     responses(
-        (status = 200, body = Vec<ConversationResponse>),
+        (status = 200, body = ConversationResponse),
         (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
         (status = 404, description = "Resource not found"),
     )
@@ -138,8 +115,7 @@ pub async fn get_chat_by_id(
     };
     let messages_models = messages::Entity::find()
       .filter(messages::Column::ConversationId.eq(chat_id))
-      .filter(conversations::Column::UserId.eq(claims.user_id))
-      .order_by_asc(conversations::Column::CreatedAt)
+      .order_by_asc(messages::Column::CreatedAt)
       .limit(query.limit.unwrap_or(30))
       .offset(query.offset.unwrap_or(0))
       .all(&app_state.database)
@@ -181,7 +157,7 @@ pub async fn get_chat_by_id(
           .unwrap()
           .push(message);
       });
- Ok((StatusCode::NO_CONTENT,Json(conversation_response)))
+ Ok((StatusCode::OK,Json(conversation_response)))
 }
 
 #[utoipa::path(

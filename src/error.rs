@@ -7,6 +7,8 @@ use utoipa::ToSchema;
 pub enum AppError {
     ServiceTemporarilyUnavailable,
     ResourceNotFound,
+    InvalidLlmProvider,
+    LlmProviderNotConfigured
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -39,6 +41,16 @@ impl IntoResponse for AppError {
                 StatusCode::NOT_FOUND,
                 "ResourceNotFound",
                 "Resource not found"
+            ),
+            AppError::InvalidLlmProvider =>  (
+                StatusCode::BAD_REQUEST,
+                "InvalidLlmProvider",
+                "Invalid llm provider"
+            ),
+            AppError::LlmProviderNotConfigured =>  (
+                StatusCode::BAD_REQUEST,
+                "LlmProviderNotConfigured",
+                "Not configured llm provider"
             ),
         };
         let error_response = ErrorResponse {

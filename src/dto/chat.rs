@@ -5,6 +5,19 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 use crate::models::messages::ChatRole;
 
+#[derive(Serialize, ToSchema, IntoParams)]
+pub struct ChatStream {
+   pub id:Uuid,
+   pub role:Option<String>,
+   pub content:Option<String>,
+}
+
+impl ChatStream {
+    pub fn to_string(&self) -> String{
+       serde_json::to_string(self).unwrap()
+    }
+}
+
 #[derive(Deserialize, ToSchema, IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatInitRequest{
@@ -13,7 +26,8 @@ pub struct ChatInitRequest{
   pub config:serde_json::Value,
   pub web_search:bool,
   pub selected_tools:Vec<String>,
-  pub messages:Vec<MessageRequest>,
+  pub temperature:Option<f32>,
+  pub message:MessageRequest,
 }
 
 #[derive(Deserialize, ToSchema, IntoParams)]
@@ -39,7 +53,7 @@ pub struct ConversationResponse {
    #[serde(skip_serializing_if = "Option::is_none")]
   pub archived_at:Option<DateTime<Utc>>,
   pub model:String,
-  pub total_tokens:u64,
+  pub total_tokens:i64,
   pub total_cost:f32,
   pub created_at:DateTime<Utc>,
   pub updated_at:DateTime<Utc>,
