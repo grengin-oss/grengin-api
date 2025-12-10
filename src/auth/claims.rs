@@ -19,8 +19,8 @@ impl Claims {
     pub fn new<S: Into<String>>(sub:S,name:Option<S>,user_id:Uuid) -> Self {
          let exp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-           .expect("Time went backwards")
-           .as_secs()+ 3600 * 24 * 30;
+            .expect("Time went backwards")
+            .as_secs()+ 3600;
       Self { sub:sub.into(),
              name:name.map(|v| v.into()),
              user_id,

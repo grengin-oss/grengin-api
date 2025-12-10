@@ -17,12 +17,4 @@ pub struct Model{
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 
-impl ActiveModelBehavior for ActiveModel {
-       fn new() -> Self {
-        use sea_orm::Set;
-        Self {
-            created_at: Set(Utc::now()),
-            ..ActiveModelTrait::default()
-        }
-    }
-}
+impl ActiveModelBehavior for ActiveModel {}

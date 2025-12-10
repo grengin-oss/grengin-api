@@ -1,9 +1,13 @@
 use utoipa::OpenApi;
 use crate::auth::claims::Claims;
-use crate::auth::error::{ErrorResponse, ErrorDetail, ErrorDetailVariant};
+use crate::dto::chat::{ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse, TokenUsage};
+use crate::dto::chat_stream::{ChatInitRequest, ChatStream};
+use crate::dto::files::{File,Attachment};
+use crate::error::{ErrorResponse, ErrorDetail, ErrorDetailVariant};
 use crate::docs::security::ApiSecurityAddon;
 use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, LoginResponse, TokenType, User};
-use crate::handlers::oidc;
+use crate::handlers::{oidc,chat,chat_stream,files};
+use crate::models::messages::ChatRole;
 use crate::models::users::{UserRole, UserStatus};
 
 #[derive(OpenApi)]
@@ -11,6 +15,13 @@ use crate::models::users::{UserRole, UserStatus};
     paths(
         oidc::oidc_login_start,
         oidc::oidc_oauth_callback,
+        chat::get_chat_by_id,
+        chat::get_chats,
+        chat::delete_chat_by_id,
+        chat::update_chat_by_id,
+        chat_stream::handle_chat_stream_doc,
+        chat_stream::handle_chat_stream_path_doc,
+        files::upload_file,
     ),
     components(
         schemas(
@@ -21,10 +32,20 @@ use crate::models::users::{UserRole, UserStatus};
             User,
             UserRole,
             UserStatus,
+            ChatRole,
             Claims,
             ErrorResponse,
             ErrorDetail,
-            ErrorDetailVariant
+            ErrorDetailVariant,
+            ArchiveChatRequest,
+            MessageResponse,
+            ConversationResponse,
+            File,
+            MessageParts,
+            TokenUsage,
+            ChatStream,
+            ChatInitRequest,
+            Attachment,
         )
     ),
     tags(

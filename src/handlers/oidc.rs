@@ -1,14 +1,13 @@
+use std::borrow::Cow;
 use axum::{Json, extract::{Path, Query, State}, response::Redirect};
 use chrono::Utc;
-use oauth2::TokenResponse;
-use openidconnect::{core::{CoreAuthenticationFlow, CoreUserInfoClaims}};
-use openidconnect::{AuthorizationCode, CsrfToken, Nonce, PkceCodeChallenge, PkceCodeVerifier, Scope};
+use openidconnect::{AuthorizationCode, CsrfToken, Nonce, OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, core::{CoreAuthenticationFlow, CoreUserInfoClaims}};
 use openidconnect::{TokenResponse as OidcTokenResponse};
 use axum::http::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, jwt::KEYS}, dto::oauth::AuthProvider, models::{oauth_sessions, users::{self, UserRole, UserStatus}}};
-use crate::{auth::error::{AuthError, ErrorResponse}, dto::{auth::{AuthInitResponse, AuthTokenResponse, TokenType, User}, oauth::{OAuthCallback, StartParams}}, state::SharedState};
+use crate::{auth::{claims::Claims, jwt::KEYS}, dto::oauth::AuthProvider, error::ErrorResponse, models::{oauth_sessions, users::{self, UserRole, UserStatus}}};
+use crate::{auth::error::{AuthError}, dto::{auth::{AuthTokenResponse, TokenType, User}, oauth::{OAuthCallback, StartParams}}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -19,21 +18,23 @@ use crate::{auth::error::{AuthError, ErrorResponse}, dto::{auth::{AuthInitRespon
         ("provider" = String, Path, description = "Auth provider identifier (e.g., google, azure, keycloak)"),
         ("redirect_uri" = Option<String>, Query, description = "Optional post-login redirect target", format = "uri")),
     responses(
-        (status = 200, body = AuthInitResponse, description = "Authentication initiation response with auth URL and state"),
-        (status = 302, description = "Redirects the user to provider's login page"),
-        (status = 400, body = ErrorResponse, description = "Invalid provider or configuration")
+        (status = 303, description = "Redirects the user to provider's login page"),
+        (status = 400, body = ErrorResponse, description = "Invalid provider or configuration"),
+        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
     )
 )]
 pub async fn oidc_login_start(
     Path(provider): Path<AuthProvider>,
-    Query(StartParams { redirect_uri }): Query<StartParams>,
+    Query(query): Query<StartParams>,
     State(app_state): State<SharedState>
 ) -> Result<Redirect, AuthError> {
     // Generate PKCE + CSRF + nonce
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-    let (oidc_client, _) = app_state
-        .get_oidc_client_and_column(&provider)
+    let (oidc_client, _,default_redirect_uri) = app_state
+        .get_oidc_client_and_column_and_redirect_uri(&provider)
         .map_err(|_| AuthError::InvalidProvider)?;
+    let redirect_uri = RedirectUrl::new(query.redirect_uri.clone().unwrap_or(default_redirect_uri.to_string()))
+        .map_err(|_| AuthError::InvalidRedirectUri)?;
     let (auth_url, csrf_state, nonce) = oidc_client
         .read()
         .await
@@ -42,6 +43,7 @@ pub async fn oidc_login_start(
             CsrfToken::new_random,
             Nonce::new_random,
         )
+        .set_redirect_uri(Cow::Owned(redirect_uri))
         .add_scope(Scope::new("openid".to_string()))
         .add_scope(Scope::new("email".to_string()))
         .add_scope(Scope::new("profile".to_string()))
@@ -53,7 +55,7 @@ pub async fn oidc_login_start(
         state: Set(state_str.into()),
         pkce_verifier: Set(pkce_verifier.secret().to_string()),
         nonce: Set(nonce.secret().to_string()),
-        redirect_uri: Set(redirect_uri),
+        redirect_uri: Set(Some(query.redirect_uri.unwrap_or(default_redirect_uri.to_string()))),
         created_at: Set(Utc::now()),
     };
     sess.insert(&app_state.database)
@@ -81,7 +83,8 @@ pub async fn oidc_login_start(
         (status = 200, body = AuthTokenResponse, description = "Successfully authenticated"),
         (status = 302, description = "Redirect to application with tokens"),
         (status = 400, body = ErrorResponse, description = "Invalid callback parameters"),
-        (status = 401, body = ErrorResponse, description = "Unauthorized")
+        (status = 401, body = ErrorResponse, description = "Unauthorized"),
+        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
     )
 )]
 pub async fn oidc_oauth_callback(
@@ -94,15 +97,12 @@ pub async fn oidc_oauth_callback(
         eprintln!("OAuth error: {} - {:?}", error, cb.error_description);
         return Err(AuthError::InvalidCallbackParameters);
     }
-    let code = cb.code.ok_or(AuthError::InvalidCallbackParameters)?;
-
-    let (oidc_client, column) = app_state
-        .get_oidc_client_and_column(&provider)
+    let code = cb
+     .code
+     .ok_or(AuthError::InvalidCallbackParameters)?;
+    let (oidc_client, column,default_redirect_uri) = app_state
+        .get_oidc_client_and_column_and_redirect_uri(&provider)
         .map_err(|_| AuthError::InvalidProvider)?;
-    let http_client = reqwest::ClientBuilder::new()
-       .redirect(reqwest::redirect::Policy::none())
-       .build()
-       .expect("failed to build openidconnect reqwest client");
     let sess = oauth_sessions::Entity::find()
         .filter(oauth_sessions::Column::State.eq(Some(cb.state.to_owned())))
         .order_by_desc(oauth_sessions::Column::CreatedAt)
@@ -112,6 +112,8 @@ pub async fn oidc_oauth_callback(
             eprintln!("db error while fetching session: {e:?}");
             AuthError::ServiceTemporarilyUnavailable})?
         .ok_or(AuthError::InvalidToken)?;
+    let redirect_uri = RedirectUrl::new(sess.redirect_uri.clone().unwrap_or(default_redirect_uri.to_string()))
+        .map_err(|_| AuthError::InvalidRedirectUri)?;
     let active: oauth_sessions::ActiveModel = sess.clone().into();
     active.delete(&app_state.database)
         .await
@@ -124,7 +126,8 @@ pub async fn oidc_oauth_callback(
         .exchange_code(AuthorizationCode::new(code))
         .expect("Failed to get token response")
         .set_pkce_verifier(PkceCodeVerifier::new(sess.pkce_verifier.clone()))
-        .request_async(&http_client)
+        .set_redirect_uri(Cow::Owned(redirect_uri))
+        .request_async(&app_state.req_client)
         .await
         .map_err(|e| {
             eprintln!("token exchange err: {e:?}");
@@ -164,15 +167,12 @@ pub async fn oidc_oauth_callback(
     let google_id = if provider == "google" {Some(sub.clone())}else{None};
     let azure_id = if provider == "azure" {Some(sub.clone())}else{None};
     if email.is_none() {
-        let http_client = reqwest::ClientBuilder::new()
-           .redirect(reqwest::redirect::Policy::none())
-           .build().unwrap();
         let info: CoreUserInfoClaims = oidc_client
             .read()
             .await
             .user_info(token_resp.access_token().to_owned(), None)
             .expect("userinfo req")
-            .request_async(&http_client)
+            .request_async(&app_state.req_client)
             .await
             .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
         email = info.email().map(|e| e.as_str().to_string());
