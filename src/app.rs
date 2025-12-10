@@ -5,7 +5,7 @@ use anyhow::Error;
 use migration::MigratorTrait;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::{config::setting::Settings, routes::{chat::chat_routes, oidc::oidc_routes, swagger_ui::swagger_ui_routes}, state::AppState};
+use crate::{config::setting::Settings, routes::{chat::chat_routes, files::files_routes, oidc::oidc_routes, swagger_ui::swagger_ui_routes}, state::AppState};
 
 async fn sample_root() -> (StatusCode,Json<serde_json::Value>){
     (StatusCode::OK,Json(json!({"status":"Okay","version":env!("CARGO_PKG_VERSION")})))
@@ -27,6 +27,7 @@ pub async fn init_app() -> Result<(),Error>{
       .merge(swagger_ui_routes())
       .merge(oidc_routes())
       .merge(chat_routes())
+      .merge(files_routes())
       .layer(cors)
       .with_state(app_state);
     let listener = tokio::net::TcpListener::bind(&address).await?;

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::dto::chat::File;
+use crate::dto::{files::File};
 
 #[derive(Serialize, Deserialize)]
 pub struct OpenaiChatCompletionRequest {
@@ -28,6 +28,17 @@ pub struct OpenaiChatChunkChoice {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct OpenaiChatCompletionResponse {
+    pub choices: Vec<OpenaiChatChoiceResponse>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OpenaiChatChoiceResponse {
+    pub index: u32,
+    pub message:OpenaiMessageDelta,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct OpenaiMessageDelta {
     pub role: Option<String>,      
     pub content: Option<String>,
@@ -48,20 +59,21 @@ pub struct OpenaiMessage{
 }
 
 impl OpenaiMessage {
-    pub fn from_text_and_files(prompt: String,files:Vec<File>) -> OpenaiMessage {
-     let mut content = vec![
-            OpenaiContent {
-                content_type: OpenaiContentType::InputText,
-                content: Some(prompt),
-                file_id: None,
-            }
-     ];
+    pub fn from_text_and_files(prompts: Vec<String>,files:Vec<File>) -> Self {
+     let mut content = vec![];
      for file in files {
-            content.push(OpenaiContent {
+          content.push(OpenaiContent {
                 content_type: OpenaiContentType::InputFile,
-                content: None,
-                file_id: file.id,
-            });
+                text: None,
+                file:Some(OpenaiFileObject{file_id:file.id}),
+          });
+     }
+     for prompt in prompts {
+          content.push(OpenaiContent {
+                content_type: OpenaiContentType::InputText,
+                text: Some(prompt),
+                file:None,
+            })
      }
      OpenaiMessage {
          role: "user".to_string(),
@@ -75,9 +87,15 @@ impl OpenaiMessage {
     #[serde(rename = "type")]
     pub content_type:OpenaiContentType,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content:Option<String>,
+    pub text:Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub file_id:Option<String>,
+    pub file:Option<OpenaiFileObject>,
+ }
+
+ #[derive(Serialize,Deserialize)]
+ pub struct OpenaiFileObject {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<String>,
  }
 
  #[derive(Deserialize)]

@@ -20,7 +20,7 @@ pub struct Model{
    pub id: Uuid,
    pub conversation_id:Uuid,
    // Self refrence one to one
-       #[sea_orm(nullable)]
+    #[sea_orm(nullable)]
    pub previous_message_id:Option<Uuid>,
    pub role:ChatRole,
    pub message_content:String,
@@ -28,6 +28,8 @@ pub struct Model{
    pub model_name: String,
    pub request_tokens:i32,
    pub response_tokens:i32,
+    #[sea_orm(nullable)]
+   pub request_id:Option<String>,
    pub tools_calls:Vec<serde_json::Value>,
    pub tools_results:Vec<serde_json::Value>,
    pub created_at:DateTime<Utc>,

@@ -3,7 +3,7 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect};
 use uuid::Uuid;
-use crate::{auth::claims::Claims, dto::{chat::{ArchiveChatRequest, ConversationResponse, File, MessageParts, MessageResponse, TokenUsage}, common::PaginationQuery}, error::AppError, models::{conversations, messages::{self}}, state::SharedState};
+use crate::{auth::claims::Claims, dto::{chat::{ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse, TokenUsage}, common::PaginationQuery, files::File}, error::AppError, models::{conversations, messages::{self}}, state::SharedState};
 use num_traits::cast::ToPrimitive;
 
 #[utoipa::path(
@@ -30,7 +30,7 @@ pub async fn get_chats(
     let mut response = Vec::new();
     let mut conversations_filter = conversations::Entity::find()
       .filter(conversations::Column::UserId.eq(claims.user_id))
-      .order_by_asc(conversations::Column::CreatedAt)
+      .order_by_desc(conversations::Column::CreatedAt)
       .limit(query.limit.unwrap_or(20))
       .offset(query.offset.unwrap_or(0));
     
@@ -144,7 +144,7 @@ pub async fn get_chat_by_id(
             cost:message_model.cost.to_f32().unwrap_or_default(),
             created_at: message_model.created_at,
             updated_at: message_model.updated_at,
-            request_id:None,
+            request_id:message_model.request_id,
             model:message_model.model_name,
             model_params: model_params,
             tool_calls: message_model.tools_calls,

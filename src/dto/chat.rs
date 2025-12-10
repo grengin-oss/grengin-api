@@ -1,41 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, base64::Base64};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
-use crate::models::messages::ChatRole;
-
-#[derive(Serialize, ToSchema, IntoParams)]
-pub struct ChatStream {
-   pub id:Uuid,
-   pub role:Option<String>,
-   pub content:Option<String>,
-}
-
-impl ChatStream {
-    pub fn to_string(&self) -> String{
-       serde_json::to_string(self).unwrap()
-    }
-}
-
-#[derive(Deserialize, ToSchema, IntoParams)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatInitRequest{
-  pub provider:String,
-  pub model_name:String,
-  pub config:serde_json::Value,
-  pub web_search:bool,
-  pub selected_tools:Vec<String>,
-  pub temperature:Option<f32>,
-  pub message:MessageRequest,
-}
-
-#[derive(Deserialize, ToSchema, IntoParams)]
-pub struct MessageRequest {
-  pub role:ChatRole,
-  pub content:String,
-  pub files:Vec<Attachment>
-}
+use crate::{dto::files::File, models::messages::ChatRole};
 
 #[derive(Deserialize, ToSchema, IntoParams)]
 pub struct ArchiveChatRequest{
@@ -80,25 +47,7 @@ pub struct MessageResponse {
   pub usage:TokenUsage,
 }
 
-#[serde_as]
-#[derive(Deserialize,Serialize, ToSchema, IntoParams)]
-pub struct Attachment {
-    #[serde_as(as = "Option<Base64>")]
-    #[schema(value_type = String, format = Byte)]
-    pub file:Option<Vec<u8>>,
-    pub name:String,
-    #[serde(rename = "type")]
-    pub content_type:String
-}
 
-#[derive(Serialize, Deserialize, ToSchema, IntoParams)]
-pub struct File {
-    pub id:Option<String>,
-    pub size: Option<usize>,
-    pub name:String,
-    #[serde(rename = "type")]
-    pub content_type:String
-}
 
 #[derive(Serialize, ToSchema, IntoParams)]
 #[serde(rename_all = "camelCase")]

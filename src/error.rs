@@ -8,7 +8,8 @@ pub enum AppError {
     ServiceTemporarilyUnavailable,
     ResourceNotFound,
     InvalidLlmProvider,
-    LlmProviderNotConfigured
+    LlmProviderNotConfigured,
+    NoMessageInRequest,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -51,6 +52,11 @@ impl IntoResponse for AppError {
                 StatusCode::BAD_REQUEST,
                 "LlmProviderNotConfigured",
                 "Not configured llm provider"
+            ),
+            AppError::NoMessageInRequest =>  (
+                StatusCode::BAD_REQUEST,
+                "NoMessageInRequest",
+                "No Message found in request"
             ),
         };
         let error_response = ErrorResponse {

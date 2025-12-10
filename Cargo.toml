@@ -1,6 +1,6 @@
 [package]
 name = "grengin-api"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 
 [workspace]
@@ -19,8 +19,6 @@ serde_json = "1.0.145"
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["full"] }
 tracing-subscriber = { version = "0.3.20", features = ["fmt"] }
-utoipa = { version = "5.4.0", features = ["axum_extras", "chrono", "url", "uuid"] }
-utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
 migration = { path = "migration" }
 async-stream = "0.3.6"
@@ -32,3 +30,5 @@ openssl = { version = "0.10.75", features = ["vendored"] }
 num-traits = "0.2.19"
 futures-util = "0.3.31"
 reqwest-eventsource = "0.6.0"
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+utoipa = { version = "5.4.0", features = ["axum_extras", "chrono", "url", "uuid"] }

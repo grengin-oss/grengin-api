@@ -1,8 +1,8 @@
-use anyhow::{Error, Ok};
+use anyhow::{Error, Ok,anyhow};
 use async_trait::async_trait;
 use reqwest::{Client as ReqwestClient, RequestBuilder, multipart};
 use reqwest_eventsource::EventSource;
-use crate::{config::setting::OpenaiSettings, dto::{chat::{Attachment, File}, openai::{FileUploadResponse, OpenaiChatCompletionRequest, OpenaiMessage}}, llm::provider::{OpenaiApis, OpenaiHeaders}};
+use crate::{config::setting::OpenaiSettings, dto::{files::{Attachment, File}, openai::{FileUploadResponse, OpenaiChatCompletionRequest, OpenaiChatCompletionResponse, OpenaiMessage}}, llm::provider::{OpenaiApis, OpenaiHeaders}};
 
 pub const OPENAI_API_URL:&str = "https://api.openai.com";
 
@@ -46,7 +46,7 @@ impl OpenaiApis for ReqwestClient {
      Ok(res.id)
     }
 
-   async fn openai_chat_stream(&self,openai_sesstings:&OpenaiSettings,model_name:String,prompt:String,temperature:Option<f32>,files:Vec<File>) -> Result<EventSource,Error>{
+   async fn openai_chat_stream(&self,openai_sesstings:&OpenaiSettings,model_name:String,prompt:Vec<String>,temperature:Option<f32>,files:Vec<File>) -> Result<EventSource,Error>{
        let body = OpenaiChatCompletionRequest {
             model: model_name,
             stream: true,
@@ -60,5 +60,31 @@ impl OpenaiApis for ReqwestClient {
      let es = EventSource::new(request)?;
      Ok(es)
    }
+
+    async fn openai_get_title(&self,openai_settings:&OpenaiSettings,prompt:String) -> Result<String,Error>{
+      let title_prompt = format!("Write a short title for the given prompt respond only in title name: {prompt}");
+        let body = OpenaiChatCompletionRequest {
+            model: "gpt-5.1-nano".to_string(),
+            stream: false,
+            temperature:None,
+            messages:vec![OpenaiMessage::from_text_and_files(vec![title_prompt], Vec::new())],
+        };
+      let response:OpenaiChatCompletionResponse = self
+          .post(format!("{OPENAI_API_URL}/v1/chat/completions"))
+          .add_openai_headers(&openai_settings)
+          .json(&body)
+          .send()
+          .await?
+          .json()
+          .await?;
+     let title = response
+          .choices
+          .first()
+          .take()
+          .map(|choice| choice.message.content.clone())
+          .ok_or(anyhow!("openai response choices is empty"))?
+          .ok_or(anyhow!("openai choice message content is empty"))?;
+      Ok(title)      
+    }
 }
 
