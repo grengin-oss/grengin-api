@@ -1,7 +1,7 @@
 use axum::{Json, extract::{Path, Query, State}};
 use chrono::Utc;
 use reqwest::StatusCode;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, PaginatorTrait as _, QueryFilter, QueryOrder, QuerySelect};
 use uuid::Uuid;
 use crate::{auth::claims::Claims, dto::{chat::{ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse, TokenUsage}, common::PaginationQuery, files::File}, error::AppError, models::{conversations, messages::{self}}, state::SharedState};
 use num_traits::cast::ToPrimitive;
@@ -33,7 +33,6 @@ pub async fn get_chats(
       .order_by_desc(conversations::Column::CreatedAt)
       .limit(query.limit.unwrap_or(20))
       .offset(query.offset.unwrap_or(0));
-    
     if let Some(title) = query.search {
         conversations_filter = conversations_filter.filter(conversations::Column::Title.eq(title));
     }
@@ -49,10 +48,16 @@ pub async fn get_chats(
         eprintln!("{}",e);
         AppError::ServiceTemporarilyUnavailable}
     )?;
-    conversations_models
-      .into_iter()
-      .for_each(|conversation_model|{
-        let conversation_response = ConversationResponse{ 
+    for conversation_model in conversations_models {
+      let message_count = messages::Entity::find()
+        .filter(messages::Column::ConversationId.eq(conversation_model.id.clone()))
+        .count(&app_state.database)
+        .await
+        .map_err(|e|{
+          eprintln!("{}",e);
+          AppError::ServiceTemporarilyUnavailable}
+       )?;
+       let conversation_response = ConversationResponse{ 
             id: conversation_model.id,
             title: conversation_model.title,
             archived: conversation_model.archived_at.is_some(),
@@ -63,10 +68,11 @@ pub async fn get_chats(
             created_at: conversation_model.created_at,
             updated_at: conversation_model.updated_at,
             last_message_at: conversation_model.last_message_at,
+            message_count,
             messages:None 
         };
         response.push(conversation_response);
-    });
+     }
   Ok((StatusCode::OK,Json(response)))
 }
 
@@ -79,6 +85,7 @@ pub async fn get_chats(
         ("offset" = Option<u64>, Query, description = "Default value : 0"),
         ("archived" = Option<bool>, Query, description = "Default value : false"),
         ("search" = Option<String>, Query, description = "Search in conversation titles"),
+        ("ascending" = Option<bool>, Query, description = "Order of message list default true"),
     ),
     responses(
         (status = 200, body = ConversationResponse),
@@ -100,6 +107,14 @@ pub async fn get_chat_by_id(
         eprintln!("{}",e);
         AppError::ServiceTemporarilyUnavailable})?
       .ok_or(AppError::ResourceNotFound)?;
+    let message_count = messages::Entity::find()
+        .filter(messages::Column::ConversationId.eq(conversation_model.id.clone()))
+        .count(&app_state.database)
+        .await
+        .map_err(|e|{
+          eprintln!("{}",e);
+          AppError::ServiceTemporarilyUnavailable}
+       )?;
     let mut conversation_response = ConversationResponse{
         id: conversation_model.id,
         title: conversation_model.title,
@@ -111,13 +126,19 @@ pub async fn get_chat_by_id(
         created_at: conversation_model.created_at,
         updated_at: conversation_model.updated_at,
         last_message_at: conversation_model.last_message_at,
-        messages:Some(Vec::new()), 
+        messages:Some(Vec::new()),
+        message_count 
     };
-    let messages_models = messages::Entity::find()
+    let mut message_filter = messages::Entity::find()
       .filter(messages::Column::ConversationId.eq(chat_id))
-      .order_by_asc(messages::Column::CreatedAt)
       .limit(query.limit.unwrap_or(30))
-      .offset(query.offset.unwrap_or(0))
+      .offset(query.offset.unwrap_or(0));
+    if query.ascending.unwrap_or(true){
+      message_filter = message_filter.order_by_asc(messages::Column::CreatedAt)
+    }else{
+      message_filter = message_filter.order_by_desc(messages::Column::CreatedAt)
+    }
+    let messages_models = message_filter
       .all(&app_state.database)
       .await
       .map_err(|e|{
@@ -188,6 +209,14 @@ pub async fn update_chat_by_id(
         eprintln!("{}",e);
         AppError::ServiceTemporarilyUnavailable})?
       .ok_or(AppError::ResourceNotFound)?;
+     let message_count = messages::Entity::find()
+       .filter(messages::Column::ConversationId.eq(conversation_model.id.clone()))
+       .count(&app_state.database)
+       .await
+       .map_err(|e|{
+          eprintln!("{}",e);
+          AppError::ServiceTemporarilyUnavailable}
+       )?;
     let mut active_model = conversation_model
      .clone()
      .into_active_model();
@@ -214,6 +243,7 @@ pub async fn update_chat_by_id(
         updated_at: conversation_model.updated_at,
         last_message_at: conversation_model.last_message_at,
         messages:None,
+        message_count
     };
  Ok((StatusCode::OK,Json(response)))
 }

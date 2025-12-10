@@ -2,10 +2,10 @@ use std::{convert::Infallible};
 use axum::{Json, extract::{Path, State}, response::{Sse, sse::{Event, KeepAlive}}};
 use chrono::Utc;
 use futures_util::StreamExt;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, IntoActiveModel, prelude::Decimal};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, prelude::Decimal};
 use serde_json::json;
 use uuid::Uuid;
-use crate::{auth::claims::Claims, dto::{chat_stream::{ChatInitRequest, ChatStream}, files::File, openai::OpenaiChatCompletionChunk}, error::AppError, llm::provider::OpenaiApis, models::{conversations, messages::{self, ChatRole}}, state::SharedState};
+use crate::{auth::claims::Claims, dto::{chat_stream::{ChatInitRequest, ChatStream}, files::File, openai::{OpenaiResponseStreamEvent}}, error::AppError, llm::{prompt::Prompt, provider::OpenaiApis}, models::{conversations, messages::{self, ChatRole}}, state::SharedState};
 use reqwest_eventsource::{Event as ReqwestEvent};
 
 #[utoipa::path(
@@ -59,7 +59,7 @@ pub async fn handle_chat_stream(
  if let Some(conversation_id) = req.conversation_id{
     chat_id = Some(Path(conversation_id));
  }
- let conversation_id = if let Some(Path(conversation_id)) = chat_id {
+ let (conversation_id,mut previous_prompts) = if let Some(Path(conversation_id)) = chat_id {
     let mut conversation = conversations::Entity::find_by_id(conversation_id.clone())
        .one(&app_state.database)
        .await
@@ -85,7 +85,27 @@ pub async fn handle_chat_stream(
       .map_err(|e| {
           eprintln!("{:?}", e);
           AppError::ServiceTemporarilyUnavailable})?;
-     conversation_id
+   let previous_messages = messages::Entity::find()
+      .filter(messages::Column::ConversationId.eq(conversation_id.clone()))
+      .order_by_desc(messages::Column::CreatedAt)
+      .all(&app_state.database)
+      .await
+      .map_err(|e| {
+          eprintln!("{:?}", e);
+          AppError::ServiceTemporarilyUnavailable})?;
+   let previous_prompts = previous_messages
+     .into_iter()
+     .map(|message| Prompt {
+        text: message.message_content,
+        role: message.role,
+        files: message
+            .metadata
+            .and_then(|json| json.get("files").cloned())
+            .and_then(|files_val| serde_json::from_value::<Vec<File>>(files_val).ok())
+            .unwrap_or_default(), // Vec::new()
+    })
+    .collect::<Vec<Prompt>>();
+  (conversation_id,previous_prompts)
  }else{
   let first_prompt = req.messages
     .first()
@@ -119,7 +139,7 @@ pub async fn handle_chat_stream(
     .map_err(|e| {
        eprintln!("{:?}", e);
        AppError::ServiceTemporarilyUnavailable})?;
-    new_conversation_id
+    (new_conversation_id,Vec::new())
  };
  let mut previous_message_id = None;
  for message in &req.messages {
@@ -156,20 +176,15 @@ pub async fn handle_chat_stream(
         eprintln!("{:?}", e);
         AppError::ServiceTemporarilyUnavailable})?;
  }
- let prompts = req.messages
-   .iter()
-   .map(|message| message.content.clone())
-   .collect();
- let files:Vec<File> = req.messages
+ let mut current_prompts:Vec<Prompt> = req.messages
    .into_iter()
-   .map(|message| message.files)
-   .collect::<Vec<Vec<File>>>()
-   .into_iter()
-   .flatten()
+   .map(|message| Prompt { text:message.content, role:message.role, files:message.files})
    .collect();
+ previous_prompts.append(&mut current_prompts);
+ println!("{:?}",current_prompts);
  let mut event_source = app_state
    .req_client
-   .openai_chat_stream(&llm_provider_settings,req.model_name.clone(),prompts,req.temperature,files)
+   .openai_chat_stream(&llm_provider_settings,req.model_name.clone(),req.temperature,previous_prompts)
    .await
    .map_err(|e|{
       eprintln!("event source loding error {} for llm provider {}",e,&req.provider);
@@ -183,8 +198,22 @@ pub async fn handle_chat_stream(
                 println!("SSE connection open");
             }
             Ok(ReqwestEvent::Message(msg)) => {
-                if msg.data == "[DONE]" {
-                    let new_llm_message = messages::ActiveModel{ 
+                if let Ok(stream_event) = serde_json::from_str::<OpenaiResponseStreamEvent>(&msg.data){
+                  match stream_event{
+                     OpenaiResponseStreamEvent::OutputTextDelta(openai_output_text_delta) => {
+                     message_content = format!("{}{}",message_content,openai_output_text_delta.delta);
+                     let chat_stream = ChatStream{id:conversation_id.clone(),role:None,content:Some(openai_output_text_delta.delta)};
+                     yield Event::default().event("chunk").data(chat_stream.to_string());
+                     request_id = Some(openai_output_text_delta.item_id);
+                    },
+                    OpenaiResponseStreamEvent::Other => (),
+                  }
+               }
+             }
+            Err(e) => {
+                if e.to_string() == "Stream ended" {
+                  println!("{}",e.to_string());
+                  let new_llm_message = messages::ActiveModel{ 
                        id:Set(Uuid::new_v4()),
                        conversation_id:Set(conversation_id.clone()),
                        previous_message_id:Set(previous_message_id),
@@ -204,25 +233,14 @@ pub async fn handle_chat_stream(
                        cost:Set(Decimal::from(0)),
                        metadata:Set(None),
                    };
-                   new_llm_message
+                 new_llm_message
                     .insert(&app_state.database)
                     .await
                     .expect("failed to insert llm response in table messages");
                   yield Event::default().event("chunk").data("[DONE]");
-                  break;
-                }
-                if let Ok(chunk) = serde_json::from_str::<OpenaiChatCompletionChunk>(&msg.data){
-                  if let Some(delta) = chunk.choices.first().map(|c| &c.delta){
-                    let chat_stream = ChatStream{id:conversation_id.clone(),role:delta.role.clone(),content:delta.content.clone()};
-                    yield Event::default().event("chunk").data(chat_stream.to_string());
-                    request_id = Some(chunk.id);
-                    message_content = format!("{}{}",message_content,delta.content.clone().unwrap_or(String::new()));
-                 }
-               }
-             }
-            Err(e) => {
-                eprintln!("chat stream error: {e}");
                 break;
+              }
+              println!("chat stream error -> {}",e);
             }
         }
       };

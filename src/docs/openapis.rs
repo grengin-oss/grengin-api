@@ -7,6 +7,7 @@ use crate::error::{ErrorResponse, ErrorDetail, ErrorDetailVariant};
 use crate::docs::security::ApiSecurityAddon;
 use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, LoginResponse, TokenType, User};
 use crate::handlers::{oidc,chat,chat_stream,files};
+use crate::models::messages::ChatRole;
 use crate::models::users::{UserRole, UserStatus};
 
 #[derive(OpenApi)]
@@ -31,6 +32,7 @@ use crate::models::users::{UserRole, UserStatus};
             User,
             UserRole,
             UserStatus,
+            ChatRole,
             Claims,
             ErrorResponse,
             ErrorDetail,

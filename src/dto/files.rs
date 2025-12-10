@@ -13,7 +13,7 @@ pub struct Attachment {
     pub content_type:String
 }
 
-#[derive(Serialize, Deserialize, ToSchema, IntoParams)]
+#[derive(Debug,Serialize, Deserialize, ToSchema, IntoParams)]
 pub struct File {
     pub id:Option<String>,
     pub size: Option<usize>,

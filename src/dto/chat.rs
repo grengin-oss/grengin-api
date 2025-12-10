@@ -28,6 +28,7 @@ pub struct ConversationResponse {
   pub last_message_at:Option<DateTime<Utc>>,
    #[serde(skip_serializing_if = "Option::is_none")]
   pub messages:Option<Vec<MessageResponse>>,
+  pub message_count:u64
 }
 
 #[derive(Serialize, ToSchema, IntoParams)]

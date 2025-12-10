@@ -1,5 +1,30 @@
 use serde::{Deserialize, Serialize};
-use crate::dto::{files::File};
+use crate::{dto::files::File, llm::prompt::Prompt, models::messages::ChatRole};
+
+#[derive(Serialize, Deserialize)]
+pub struct OpenaiChatRequest {
+    pub model: String,
+    pub input: Vec<OpenaiMessage>,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub enum OpenaiResponseStreamEvent {
+    #[serde(rename = "response.output_text.delta")]
+    OutputTextDelta(OpenaiOutputTextDelta),
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenaiOutputTextDelta {
+    pub item_id: String,
+    pub delta: String,
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct OpenaiChatCompletionRequest {
@@ -45,40 +70,92 @@ pub struct OpenaiMessageDelta {
 }
 
 #[derive(Serialize,Deserialize)]
+#[serde(rename_all="lowercase")]
 pub enum OpenaiContentType{
- #[serde(rename = "text")]
+ #[serde(rename = "input_text")]
   InputText,
- #[serde(rename = "file")]
-  InputFile
+ #[serde(rename = "output_text")]
+  OutputText,
+  Text,
+ #[serde(rename = "input_file")]
+  InputFile,
+ #[serde(rename = "input_image")]
+  InputImage,
 }
 
 #[derive(Serialize,Deserialize)]
 pub struct OpenaiMessage{
-    pub role:String,
+    pub role:ChatRole,
     pub content:Vec<OpenaiContent>
 }
 
 impl OpenaiMessage {
-    pub fn from_text_and_files(prompts: Vec<String>,files:Vec<File>) -> Self {
+    pub fn from_text_and_files_input(prompts: Vec<String>,files:Vec<File>) -> Self {
      let mut content = vec![];
      for file in files {
           content.push(OpenaiContent {
                 content_type: OpenaiContentType::InputFile,
                 text: None,
-                file:Some(OpenaiFileObject{file_id:file.id}),
+                file_id:file.id,
           });
      }
      for prompt in prompts {
           content.push(OpenaiContent {
                 content_type: OpenaiContentType::InputText,
                 text: Some(prompt),
-                file:None,
+                file_id:None,
             })
      }
      OpenaiMessage {
-         role: "user".to_string(),
+         role:ChatRole::User,
          content,
     }
+  }
+
+  pub fn from_text(prompts: Vec<String>) -> Self {
+     let mut content = vec![];
+     for prompt in prompts {
+          content.push(OpenaiContent {
+                content_type: OpenaiContentType::Text,
+                text: Some(prompt),
+                file_id:None,
+            })
+     }
+     OpenaiMessage {
+         role:ChatRole::User,
+         content,
+    }
+  }
+
+  pub fn from_prompts(prompts:Vec<Prompt>) -> Vec<Self> {
+      let mut messages = vec![];
+      for prompt in prompts {
+         let mut content = vec![];
+         let content_type = if prompt.role == ChatRole::Assistant{
+            OpenaiContentType::OutputText
+         }else{
+            OpenaiContentType::InputText
+         };
+         content.push(OpenaiContent {
+                content_type,
+                text: Some(prompt.text),
+                file_id:None,
+         });
+         for file in prompt.files{
+            let content_type = if file.content_type.contains("image"){
+                OpenaiContentType::InputImage
+            }else{
+                OpenaiContentType::InputFile
+            };
+            content.push(OpenaiContent{
+                content_type,
+                file_id:file.id,
+                text:None
+            })
+         }
+         messages.push(Self { role:prompt.role, content});
+      }
+    messages   
   }
 }
 
@@ -89,13 +166,7 @@ impl OpenaiMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text:Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub file:Option<OpenaiFileObject>,
- }
-
- #[derive(Serialize,Deserialize)]
- pub struct OpenaiFileObject {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file_id: Option<String>,
+    pub file_id:Option<String>,
  }
 
  #[derive(Deserialize)]

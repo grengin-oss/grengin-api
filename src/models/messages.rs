@@ -9,7 +9,8 @@ use utoipa::ToSchema;
 pub enum ChatRole {
    User,
    Assistant,
-   System
+   System,
+   Tool
 }
 
 #[derive(Clone, Debug, PartialEq, Eq , DeriveEntityModel, Serialize, Deserialize)]
