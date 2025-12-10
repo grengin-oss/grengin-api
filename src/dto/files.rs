@@ -25,5 +25,5 @@ pub struct File {
 #[derive(Serialize, Deserialize, ToSchema, IntoParams)]
 pub struct FileUploadRequest{
     pub provider:Option<String>,
-    pub attactment:Attachment
+    pub attachment:Attachment
 }
