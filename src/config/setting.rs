@@ -83,7 +83,7 @@ impl GoogleSettings {
         let client_id = std::env::var("GOOGLE_CLIENT_ID").map_err(|_| ConfigError::Missing("GOOGLE_CLIENT_ID"))?;
         let client_secret = std::env::var("GOOGLE_CLIENT_SECRET").map_err(|_| ConfigError::Missing("GOOGLE_CLIENT_SECRET"))?;
         let app_redirect_url = std::env::var("REDIRECT_URL").map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
-        let redirect_url = format!("{}/auth/google/callback",app_redirect_url.replace("https","http"));
+        let redirect_url = format!("{}/auth/google/callback",app_redirect_url);
       Ok(Self {client_id,client_secret,redirect_url })
     }
 }
