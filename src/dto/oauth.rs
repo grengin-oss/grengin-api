@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use utoipa::ToSchema;
 
 // Free-form string identifier for auth providers (e.g., "google", "azure", "keycloak", "authentik", "okta")
 // The provider serves as a URL slug and display name. Actual OIDC behavior is determined by configuration.
@@ -9,7 +10,7 @@ pub struct StartParams {
    pub redirect_uri: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct OAuthCallback {
     pub code: Option<String>,
     pub state: String,

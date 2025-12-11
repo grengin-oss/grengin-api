@@ -6,6 +6,7 @@ use crate::dto::files::{File,Attachment};
 use crate::error::{ErrorResponse, ErrorDetail, ErrorDetailVariant};
 use crate::docs::security::ApiSecurityAddon;
 use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, LoginResponse, TokenType, User};
+use crate::dto::oauth::OAuthCallback;
 use crate::handlers::{oidc,chat,chat_stream,files};
 use crate::models::messages::ChatRole;
 use crate::models::users::{UserRole, UserStatus};
@@ -14,7 +15,8 @@ use crate::models::users::{UserRole, UserStatus};
 #[openapi(
     paths(
         oidc::oidc_login_start,
-        oidc::oidc_oauth_callback,
+        oidc::oidc_oauth_callback_get,
+        oidc::oidc_oauth_callback_post,
         chat::get_chat_by_id,
         chat::get_chats,
         chat::delete_chat_by_id,
@@ -46,6 +48,7 @@ use crate::models::users::{UserRole, UserStatus};
             ChatStream,
             ChatInitRequest,
             Attachment,
+            OAuthCallback,
         )
     ),
     tags(
