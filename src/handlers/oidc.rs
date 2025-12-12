@@ -44,7 +44,6 @@ pub async fn oidc_login_start(
             Nonce::new_random,
         )
         .set_redirect_uri(Cow::Owned(redirect_uri))
-        .add_scope(Scope::new("openid".to_string()))
         .add_scope(Scope::new("email".to_string()))
         .add_scope(Scope::new("profile".to_string()))
         .set_pkce_challenge(pkce_challenge)
