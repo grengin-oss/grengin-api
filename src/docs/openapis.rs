@@ -6,7 +6,7 @@ use crate::dto::files::{File,Attachment};
 use crate::error::{ErrorResponse, ErrorDetail, ErrorDetailVariant};
 use crate::docs::security::ApiSecurityAddon;
 use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, LoginResponse, TokenType, User};
-use crate::handlers::{oidc,chat,chat_stream,files};
+use crate::handlers::{oidc,chat,chat_stream,files,message};
 use crate::models::messages::ChatRole;
 use crate::models::users::{UserRole, UserStatus};
 
@@ -22,6 +22,8 @@ use crate::models::users::{UserRole, UserStatus};
         chat_stream::handle_chat_stream_doc,
         chat_stream::handle_chat_stream_path_doc,
         files::upload_file,
+        message::delete_chat_message_by_id,
+        message::edit_chat_message_by_id_and_stream,
     ),
     components(
         schemas(
