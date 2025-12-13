@@ -23,6 +23,7 @@ pub struct Model{
    // Self refrence one to one
     #[sea_orm(nullable)]
    pub previous_message_id:Option<Uuid>,
+   pub deleted:bool,
    pub role:ChatRole,
    pub message_content:String,
    pub model_provider: String,

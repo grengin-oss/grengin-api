@@ -53,7 +53,6 @@ impl OpenaiApis for ReqwestClient {
             temperature,
             input:OpenaiMessage::from_prompts(prompts),
         };
-        println!("{}",serde_json::to_string(&body).unwrap());
       let request = self
             .post(format!("{OPENAI_API_URL}/v1/responses"))
             .add_openai_headers(openai_sesstings)

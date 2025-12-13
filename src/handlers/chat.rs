@@ -1,9 +1,9 @@
 use axum::{Json, extract::{Path, Query, State}};
 use chrono::Utc;
 use reqwest::StatusCode;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, PaginatorTrait as _, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, Iterable, PaginatorTrait as _, QueryFilter, QueryOrder, QuerySelect};
 use uuid::Uuid;
-use crate::{auth::claims::Claims, dto::{chat::{ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse, TokenUsage}, common::PaginationQuery, files::File}, error::AppError, models::{conversations, messages::{self}}, state::SharedState};
+use crate::{auth::claims::Claims, dto::{chat::{ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse, TokenUsage}, common::PaginationQuery, files::File}, error::AppError, models::{conversations::{self, ConversationWithCount}, messages::{self}}, state::SharedState};
 use num_traits::cast::ToPrimitive;
 
 #[utoipa::path(
@@ -28,46 +28,60 @@ pub async fn get_chats(
   State(app_state): State<SharedState>
 ) -> Result<(StatusCode,Json<Vec<ConversationResponse>>),AppError>{
     let mut response = Vec::new();
-    let mut conversations_filter = conversations::Entity::find()
-      .filter(conversations::Column::UserId.eq(claims.user_id))
-      .order_by_desc(conversations::Column::CreatedAt)
-      .limit(query.limit.unwrap_or(20))
-      .offset(query.offset.unwrap_or(0));
+    let limit = query.limit.unwrap_or(20);
+    let offset = query.offset.unwrap_or(0);
+
+    let mut select = conversations::Entity::find()
+        .select_only()
+        .columns(conversations::Column::iter())
+        .column_as(messages::Column::Id.count(), "messageCount")
+        .left_join(messages::Entity)
+        .filter(conversations::Column::UserId.eq(claims.user_id));
+
     if let Some(title) = query.search {
-        conversations_filter = conversations_filter.filter(conversations::Column::Title.eq(title));
+        select = select.filter(conversations::Column::Title.contains(title));
     }
     if query.archived.unwrap_or(false){
-        conversations_filter = conversations_filter.filter(conversations::Column::ArchivedAt.is_not_null());
+        select = select.filter(conversations::Column::ArchivedAt.is_not_null());
     }else{
-        conversations_filter = conversations_filter.filter(conversations::Column::ArchivedAt.is_null());
+        select = select.filter(conversations::Column::ArchivedAt.is_null());
     }
-    let conversations_models = conversations_filter
-      .all(&app_state.database)
-      .await
-      .map_err(|e|{
-        eprintln!("{}",e);
-        AppError::ServiceTemporarilyUnavailable}
-    )?;
-    for conversation_model in conversations_models {
+    
+    select = select
+        .group_by(conversations::Column::Id)
+        .order_by_desc(conversations::Column::CreatedAt)
+        .limit(limit)
+        .offset(offset);
+
+    // Run query into our projection struct
+    let rows:Vec<ConversationWithCount> = select
+        .into_model::<ConversationWithCount>()
+        .all(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("conversation in count query error -> {e}");
+            AppError::ServiceTemporarilyUnavailable
+        })?;
+    for conversation_with_count in rows {
       let message_count = messages::Entity::find()
-        .filter(messages::Column::ConversationId.eq(conversation_model.id.clone()))
+        .filter(messages::Column::ConversationId.eq(conversation_with_count.id.clone()))
         .count(&app_state.database)
         .await
         .map_err(|e|{
-          eprintln!("{}",e);
+          eprintln!("conversation in count error {}",e);
           AppError::ServiceTemporarilyUnavailable}
        )?;
        let conversation_response = ConversationResponse{ 
-            id: conversation_model.id,
-            title: conversation_model.title,
-            archived: conversation_model.archived_at.is_some(),
-            archived_at: conversation_model.archived_at,
-            model:conversation_model.model_name,
-            total_tokens: conversation_model.total_tokens,
-            total_cost: conversation_model.total_cost.to_f32().unwrap_or_default(),
-            created_at: conversation_model.created_at,
-            updated_at: conversation_model.updated_at,
-            last_message_at: conversation_model.last_message_at,
+            id: conversation_with_count.id,
+            title: conversation_with_count.title,
+            archived: conversation_with_count.archived_at.is_some(),
+            archived_at: conversation_with_count.archived_at,
+            model:conversation_with_count.model_name,
+            total_tokens: conversation_with_count.total_tokens,
+            total_cost: conversation_with_count.total_cost.to_f32().unwrap_or_default(),
+            created_at: conversation_with_count.created_at,
+            updated_at: conversation_with_count.updated_at,
+            last_message_at: conversation_with_count.last_message_at,
             message_count,
             messages:None 
         };
@@ -106,15 +120,31 @@ pub async fn get_chat_by_id(
       .map_err(|e|{
         eprintln!("{}",e);
         AppError::ServiceTemporarilyUnavailable})?
-      .ok_or(AppError::ResourceNotFound)?;
-    let message_count = messages::Entity::find()
-        .filter(messages::Column::ConversationId.eq(conversation_model.id.clone()))
-        .count(&app_state.database)
-        .await
-        .map_err(|e|{
-          eprintln!("{}",e);
-          AppError::ServiceTemporarilyUnavailable}
-       )?;
+      .ok_or(AppError::ResourceNotFound)?; 
+
+    let limit = query.limit.unwrap_or(30);
+    let offset = query.offset.unwrap_or(0);
+    let page = offset / limit;
+
+    let paginator = messages::Entity::find()
+      .filter(messages::Column::ConversationId.eq(chat_id))
+      .filter(messages::Column::Deleted.eq(false))
+      .order_by(
+        messages::Column::CreatedAt,
+        if query.ascending.unwrap_or(true) {
+            sea_orm::Order::Asc
+        } else {
+            sea_orm::Order::Desc
+        },
+       )
+       .paginate(&app_state.database, limit);
+
+    let message_count = paginator.num_items()
+      .await
+      .map_err(|e|{
+        eprintln!("{}",e);
+        AppError::ServiceTemporarilyUnavailable})?;
+
     let mut conversation_response = ConversationResponse{
         id: conversation_model.id,
         title: conversation_model.title,
@@ -129,30 +159,22 @@ pub async fn get_chat_by_id(
         messages:Some(Vec::new()),
         message_count 
     };
-    let mut message_filter = messages::Entity::find()
-      .filter(messages::Column::ConversationId.eq(chat_id))
-      .limit(query.limit.unwrap_or(30))
-      .offset(query.offset.unwrap_or(0));
-    if query.ascending.unwrap_or(true){
-      message_filter = message_filter.order_by_asc(messages::Column::CreatedAt)
-    }else{
-      message_filter = message_filter.order_by_desc(messages::Column::CreatedAt)
-    }
-    let messages_models = message_filter
-      .all(&app_state.database)
-      .await
-      .map_err(|e|{
+
+    let messages_models = paginator.fetch_page(page)
+     .await
+     .map_err(|e|{
         eprintln!("{}",e);
         AppError::ServiceTemporarilyUnavailable})?;
     messages_models
       .into_iter()
       .for_each(|message_model|{
-        let model_params = if let Some(metadata) = &message_model.metadata{
+        let metadata = message_model.metadata.as_ref();
+        let model_params = if let Some(metadata) = metadata{
           metadata.get("params").cloned()
         }else{
             None
         };
-        let files:Option<Vec<File>> = if let Some(metadata) = &message_model.metadata{
+        let files:Option<Vec<File>> = if let Some(metadata) = metadata{
           metadata.get("files")
            .cloned()
            .map(|value| serde_json::from_value::<Vec<File>>(value).unwrap_or(Vec::new()))
@@ -178,7 +200,7 @@ pub async fn get_chat_by_id(
           .unwrap()
           .push(message);
       });
- Ok((StatusCode::OK,Json(conversation_response)))
+  Ok((StatusCode::OK,Json(conversation_response)))
 }
 
 #[utoipa::path(
@@ -202,14 +224,14 @@ pub async fn update_chat_by_id(
 ) -> Result<(StatusCode,Json<ConversationResponse>),AppError> {
     let utc_now = Utc::now();
     let conversation_model = conversations::Entity::find_by_id(chat_id)
-      .filter(conversations::Column::UserId.eq(claims.user_id))
-      .one(&app_state.database)
-      .await
-      .map_err(|e|{
+       .filter(conversations::Column::UserId.eq(claims.user_id))
+       .one(&app_state.database)
+       .await
+       .map_err(|e|{
         eprintln!("{}",e);
         AppError::ServiceTemporarilyUnavailable})?
       .ok_or(AppError::ResourceNotFound)?;
-     let message_count = messages::Entity::find()
+    let message_count = messages::Entity::find()
        .filter(messages::Column::ConversationId.eq(conversation_model.id.clone()))
        .count(&app_state.database)
        .await
@@ -218,8 +240,8 @@ pub async fn update_chat_by_id(
           AppError::ServiceTemporarilyUnavailable}
        )?;
     let mut active_model = conversation_model
-     .clone()
-     .into_active_model();
+       .clone()
+       .into_active_model();
     active_model.archived_at = if req.archived{
       Set(Some(utc_now))
     }else {
@@ -227,10 +249,10 @@ pub async fn update_chat_by_id(
     };
     active_model.title = Set(Some(req.title));
     active_model.update(&app_state.database)
-      .await
-      .map_err(|e|{
-        eprintln!("{}",e);
-        AppError::ServiceTemporarilyUnavailable})?;
+       .await
+       .map_err(|e|{
+          eprintln!("{}",e);
+          AppError::ServiceTemporarilyUnavailable})?;
     let response = ConversationResponse{
         id: conversation_model.id,
         title: conversation_model.title,

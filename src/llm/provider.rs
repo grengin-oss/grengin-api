@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use reqwest_eventsource::EventSource;
 use serde::{Deserialize, Serialize};
 use utoipa::{ToSchema};
-use crate::{config::setting::OpenaiSettings, dto::files::{Attachment, File}, llm::prompt::Prompt};
+use crate::{config::setting::OpenaiSettings, dto::files::{Attachment}, llm::prompt::Prompt};
 
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]

@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sea_orm::entity::prelude::*;
+use sea_orm::FromQueryResult;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "conversations", rename_all="camelCase")]
@@ -23,6 +24,35 @@ pub struct Model{
    pub total_cost: Decimal,
     #[sea_orm(column_type = "JsonBinary", nullable)]
    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, FromQueryResult, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationWithCount {
+    #[sea_orm(from_alias = "id")]
+    pub id: Uuid,
+    #[sea_orm(from_alias = "userId")]
+    pub user_id: Uuid,
+    #[sea_orm(from_alias = "title")]
+    pub title: Option<String>,
+    #[sea_orm(from_alias = "modelProvider")]
+    pub model_provider: String,
+    #[sea_orm(from_alias = "modelName")]
+    pub model_name: String,
+    #[sea_orm(from_alias = "createdAt")]
+    pub created_at: DateTime<Utc>,
+    #[sea_orm(from_alias = "updatedAt")]
+    pub updated_at: DateTime<Utc>,
+    #[sea_orm(from_alias = "lastMessageAt")]
+    pub last_message_at: Option<DateTime<Utc>>,
+    #[sea_orm(from_alias = "archivedAt")]
+    pub archived_at: Option<DateTime<Utc>>,
+    #[sea_orm(from_alias = "messageCount")]
+    pub message_count: i64,
+    #[sea_orm(from_alias = "totalTokens")]
+    pub total_tokens: i64,
+    #[sea_orm(from_alias = "totalCost")]
+    pub total_cost: Decimal,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

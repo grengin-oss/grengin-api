@@ -62,12 +62,18 @@ pub async fn handle_chat_stream(
     chat_id = Some(Path(conversation_id));
  }
  let (conversation_id,mut previous_prompts) = if let Some(Path(conversation_id)) = chat_id {
-    let mut conversation = conversations::Entity::find_by_id(conversation_id.clone())
-       .one(&app_state.database)
+    let (mut conversation, previous_messages) = conversations::Entity::find_by_id(conversation_id.clone())
+       .filter(conversations::Column::ArchivedAt.is_null())
+       .find_with_related(messages::Entity)
+       .order_by_desc(messages::Column::CreatedAt)
+       .filter(messages::Column::Deleted.eq(false))
+       .all(&app_state.database)
        .await
        .map_err(|e| {
-          eprintln!("{:?}", e);
+          eprintln!("DB get one with many error {:?}", e);
           AppError::ServiceTemporarilyUnavailable})?
+       .into_iter()
+       .next()
        .ok_or(AppError::ResourceNotFound)?;
     if !selected_tools.is_empty(){
       if let Some(json) = conversation.metadata.as_mut() {
@@ -78,6 +84,7 @@ pub async fn handle_chat_stream(
         .as_mut()
         .or(Some(&mut metadata));
       conversation.updated_at = Utc::now();
+      conversation.message_count += req.messages.len() as i32;
     }
     conversation.last_message_at = Some(Utc::now());
     conversation
@@ -85,15 +92,7 @@ pub async fn handle_chat_stream(
       .update(&app_state.database)
       .await
       .map_err(|e| {
-          eprintln!("{:?}", e);
-          AppError::ServiceTemporarilyUnavailable})?;
-   let previous_messages = messages::Entity::find()
-      .filter(messages::Column::ConversationId.eq(conversation_id.clone()))
-      .order_by_desc(messages::Column::CreatedAt)
-      .all(&app_state.database)
-      .await
-      .map_err(|e| {
-          eprintln!("{:?}", e);
+          eprintln!("Db update one error {:?}", e);
           AppError::ServiceTemporarilyUnavailable})?;
    let previous_prompts = previous_messages
      .into_iter()
@@ -118,7 +117,7 @@ pub async fn handle_chat_stream(
      .openai_get_title(&llm_provider_settings,first_prompt)
      .await
      .map_err(|e| {
-        eprintln!("{:?}", e);
+        eprintln!("event source loading error {:?}", e);
         AppError::ServiceTemporarilyUnavailable})?;
   let new_conversation = conversations::ActiveModel{ 
     id:Set(new_conversation_id.clone()),
@@ -130,7 +129,7 @@ pub async fn handle_chat_stream(
     updated_at: Set(Utc::now()),
     last_message_at:Set(Some(Utc::now())),
     archived_at:Set(None),
-    message_count:Set(1),
+    message_count:Set(req.messages.len() as i32),
     total_tokens: Set(0),
     total_cost:Set(Decimal::from(0)),
     metadata:Set(Some(metadata.clone()))
@@ -139,7 +138,7 @@ pub async fn handle_chat_stream(
     .insert(&app_state.database)
     .await
     .map_err(|e| {
-       eprintln!("{:?}", e);
+       eprintln!("Db insert one error {:?}", e);
        AppError::ServiceTemporarilyUnavailable})?;
     (new_conversation_id,Vec::new())
  };
@@ -154,6 +153,7 @@ pub async fn handle_chat_stream(
      conversation_id:Set(conversation_id),
      previous_message_id:Set(previous_message_id),
      role:Set(message.role),
+     deleted:Set(false),
      message_content:Set(message.content.clone()),
      model_provider:Set(provider.clone()),
      model_name:Set(model_name.clone()),
@@ -175,7 +175,7 @@ pub async fn handle_chat_stream(
    .insert(&app_state.database)
    .await
    .map_err(|e| {
-        eprintln!("{:?}", e);
+        eprintln!("Db one insert error {:?}", e);
         AppError::ServiceTemporarilyUnavailable})?;
  }
  let mut current_prompts:Vec<Prompt> = req.messages
@@ -219,6 +219,7 @@ pub async fn handle_chat_stream(
                        id:Set(Uuid::new_v4()),
                        conversation_id:Set(conversation_id.clone()),
                        previous_message_id:Set(previous_message_id),
+                       deleted:Set(false),
                        role:Set(ChatRole::Assistant),
                        message_content:Set(message_content),
                        model_provider:Set(provider.clone()),
