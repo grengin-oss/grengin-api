@@ -3,6 +3,7 @@ use crate::auth::claims::Claims;
 use crate::dto::chat::{ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse, TokenUsage};
 use crate::dto::chat_stream::{ChatInitRequest, ChatStream};
 use crate::dto::files::{File,Attachment};
+use crate::dto::oauth::OAuthCallback;
 use crate::error::{ErrorResponse, ErrorDetail, ErrorDetailVariant};
 use crate::docs::security::ApiSecurityAddon;
 use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, LoginResponse, TokenType, User};
