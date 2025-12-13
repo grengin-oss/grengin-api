@@ -44,7 +44,6 @@ pub async fn oidc_login_start(
             Nonce::new_random,
         )
         .set_redirect_uri(Cow::Owned(redirect_uri))
-        .add_scope(Scope::new("openid".to_string()))
         .add_scope(Scope::new("email".to_string()))
         .add_scope(Scope::new("profile".to_string()))
         .set_pkce_challenge(pkce_challenge)
@@ -87,10 +86,18 @@ pub async fn oidc_login_start(
         (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
     )
 )]
-pub async fn oidc_oauth_callback(
+pub async fn oidc_oauth_callback_get(
     Path(provider): Path<AuthProvider>,
     Query(cb): Query<OAuthCallback>,
     State(app_state): State<SharedState>
+) -> Result<(StatusCode, Json<AuthTokenResponse>), AuthError> {
+    oidc_oauth_callback(provider, cb, app_state).await
+}
+
+async fn oidc_oauth_callback(
+    provider: AuthProvider,
+    cb: OAuthCallback,
+    app_state: SharedState,
 ) -> Result<(StatusCode, Json<AuthTokenResponse>), AuthError> {
     // Check for OAuth error responses
     if let Some(error) = cb.error {
@@ -294,4 +301,28 @@ pub async fn oidc_oauth_callback(
     };
 
     Ok((StatusCode::OK, Json(resp)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/auth/{provider}/callback",
+    tag = "auth",
+    operation_id = "authCallbackPost",
+    params(
+        ("provider" = String, Path, description = "Auth provider identifier (e.g., google, azure, keycloak)"),
+    ),
+    request_body(content = OAuthCallback, description = "OAuth callback parameters"),
+    responses(
+        (status = 200, body = AuthTokenResponse, description = "Successfully authenticated"),
+        (status = 400, body = ErrorResponse, description = "Invalid callback parameters"),
+        (status = 401, body = ErrorResponse, description = "Unauthorized"),
+        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+    )
+)]
+pub async fn oidc_oauth_callback_post(
+    Path(provider): Path<AuthProvider>,
+    State(app_state): State<SharedState>,
+    Json(cb): Json<OAuthCallback>,
+) -> Result<(StatusCode, Json<AuthTokenResponse>), AuthError> {
+    oidc_oauth_callback(provider, cb, app_state).await
 }

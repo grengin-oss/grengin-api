@@ -43,7 +43,10 @@ pub async fn handle_chat_stream(
   State(app_state): State<SharedState>,
   Json(req):Json<ChatInitRequest>
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>,AppError>{
- let llm_provider_settings = match req.provider.to_lowercase().as_str() {
+ let provider = req.provider.clone().unwrap_or_else(|| "openai".to_string());
+ let model_name = req.model_name.clone().unwrap_or_else(|| "gpt-5.2".to_string());
+ let selected_tools = req.selected_tools.clone().unwrap_or_default();
+ let llm_provider_settings = match provider.to_lowercase().as_str() {
      "openai" => app_state
                    .settings
                    .openai
@@ -52,9 +55,8 @@ pub async fn handle_chat_stream(
        _ => return Err(AppError::InvalidLlmProvider)
  };
  let mut metadata = json!({
-  "temperature":req.temperature,
   "webSearch":req.web_search,
-  "selectedTools":req.selected_tools,
+  "selectedTools":selected_tools.clone(),
  });
  if let Some(conversation_id) = req.conversation_id{
     chat_id = Some(Path(conversation_id));
@@ -73,7 +75,7 @@ pub async fn handle_chat_stream(
        .into_iter()
        .next()
        .ok_or(AppError::ResourceNotFound)?;
-    if !req.selected_tools.is_empty(){
+    if !selected_tools.is_empty(){
       if let Some(json) = conversation.metadata.as_mut() {
           // Update metadata TODO
        }
@@ -121,8 +123,8 @@ pub async fn handle_chat_stream(
     id:Set(new_conversation_id.clone()),
     user_id:Set(claims.user_id),
     title: Set(Some(title)),
-    model_provider:Set(req.provider.clone()),
-    model_name:Set(req.model_name.clone()),
+    model_provider:Set(provider.clone()),
+    model_name:Set(model_name.clone()),
     created_at:Set(Utc::now()),
     updated_at: Set(Utc::now()),
     last_message_at:Set(Some(Utc::now())),
@@ -153,8 +155,8 @@ pub async fn handle_chat_stream(
      role:Set(message.role),
      deleted:Set(false),
      message_content:Set(message.content.clone()),
-     model_provider:Set(req.provider.clone()),
-     model_name:Set(req.model_name.clone()),
+     model_provider:Set(provider.clone()),
+     model_name:Set(model_name.clone()),
      request_id:Set(None),
      request_tokens:Set(0),
      response_tokens:Set(0),
@@ -184,10 +186,10 @@ pub async fn handle_chat_stream(
  println!("{:?}",current_prompts);
  let mut event_source = app_state
    .req_client
-   .openai_chat_stream(&llm_provider_settings,req.model_name.clone(),req.temperature,previous_prompts)
+   .openai_chat_stream(&llm_provider_settings,model_name.clone(),None,previous_prompts)
    .await
    .map_err(|e|{
-      eprintln!("event source loding error {} for llm provider {}",e,&req.provider);
+      eprintln!("event source loding error {} for llm provider {}",e,&provider);
       AppError::ServiceTemporarilyUnavailable})?;
  let sse_stream = async_stream::try_stream! {
     let mut message_content = String::new();
@@ -220,8 +222,8 @@ pub async fn handle_chat_stream(
                        deleted:Set(false),
                        role:Set(ChatRole::Assistant),
                        message_content:Set(message_content),
-                       model_provider:Set(req.provider.clone()),
-                       model_name:Set(req.model_name.clone()),
+                       model_provider:Set(provider.clone()),
+                       model_name:Set(model_name.clone()),
                        request_id:Set(request_id),
                        request_tokens:Set(0),
                        response_tokens:Set(0),

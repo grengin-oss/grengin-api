@@ -14,7 +14,8 @@ use crate::models::users::{UserRole, UserStatus};
 #[openapi(
     paths(
         oidc::oidc_login_start,
-        oidc::oidc_oauth_callback,
+        oidc::oidc_oauth_callback_get,
+        oidc::oidc_oauth_callback_post,
         chat::get_chat_by_id,
         chat::get_chats,
         chat::delete_chat_by_id,
@@ -48,6 +49,7 @@ use crate::models::users::{UserRole, UserStatus};
             ChatStream,
             ChatInitRequest,
             Attachment,
+            OAuthCallback,
         )
     ),
     tags(

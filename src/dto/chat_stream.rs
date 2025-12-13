@@ -19,16 +19,15 @@ impl ChatStream {
 }
 
 #[derive(Deserialize, ToSchema, IntoParams)]
-#[serde(rename_all = "camelCase")]
 pub struct ChatInitRequest{
-  pub provider:String,
-  pub model_name:String,
-  pub config:serde_json::Value,
-  pub web_search:bool,
-  pub selected_tools:Vec<String>,
-  pub temperature:Option<f32>,
-  pub conversation_id:Option<Uuid>,
-  pub messages:Vec<MessageRequest>,
+  pub provider: Option<String>,
+  pub model_name: Option<String>,
+  pub config: Option<serde_json::Value>,
+  #[serde(default)]
+  pub web_search: bool,
+  pub selected_tools: Option<Vec<String>>,
+  pub conversation_id: Option<Uuid>,
+  pub messages: Vec<MessageRequest>,
 }
 
 #[derive(Deserialize, ToSchema, IntoParams)]
