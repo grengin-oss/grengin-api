@@ -1,13 +1,15 @@
 use utoipa::OpenApi;
 use crate::auth::claims::Claims;
+use crate::dto::admin::{UserRequest,UserUpdateRequest, UserResponse};
 use crate::dto::chat::{ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse, TokenUsage};
 use crate::dto::chat_stream::{ChatInitRequest, ChatStream};
+use crate::dto::common::{PaginationQuery, SortRule};
 use crate::dto::files::{File,Attachment};
 use crate::dto::oauth::OAuthCallback;
 use crate::error::{ErrorResponse, ErrorDetail, ErrorDetailVariant};
 use crate::docs::security::ApiSecurityAddon;
 use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, LoginResponse, TokenType, User};
-use crate::handlers::{oidc,chat,chat_stream,files,message};
+use crate::handlers::{oidc,chat,chat_stream,files,message,admin};
 use crate::models::messages::ChatRole;
 use crate::models::users::{UserRole, UserStatus};
 
@@ -26,6 +28,10 @@ use crate::models::users::{UserRole, UserStatus};
         files::upload_file,
         message::delete_chat_message_by_id,
         message::edit_chat_message_by_id_and_stream,
+        admin::add_new_user,
+        admin::get_users,
+        admin::update_user,
+        admin::delete_user,
     ),
     components(
         schemas(
@@ -51,6 +57,11 @@ use crate::models::users::{UserRole, UserStatus};
             ChatInitRequest,
             Attachment,
             OAuthCallback,
+            SortRule,
+            PaginationQuery,
+            UserResponse,
+            UserUpdateRequest,
+            UserRequest,
         )
     ),
     tags(

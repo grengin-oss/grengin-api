@@ -266,7 +266,7 @@ async fn oidc_oauth_callback(
     };
     let user = user.ok_or(AuthError::EmailDoesNotExist)?;
 
-    let jwt_claims = Claims::new(user.email.clone(), user.name.clone(), user.id);
+    let jwt_claims = Claims::new(user.email.clone(), user.name.clone(), user.id,user.role);
     let access_token = jsonwebtoken::encode(
         &jsonwebtoken::Header::default(),
         &jwt_claims,
