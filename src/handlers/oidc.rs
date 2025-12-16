@@ -200,6 +200,12 @@ async fn oidc_oauth_callback(
             eprintln!("db error while fetching user: {e:?}");
             AuthError::ServiceTemporarilyUnavailable})?;
     if let Some(u) = &user {
+      match &u.status {
+         UserStatus::InActive |
+         UserStatus::Suspended |
+         UserStatus::Deleted => return Err(AuthError::EmailDoesNotExist),
+         _ => ()
+      }
       let mut active_user:users::ActiveModel = u.clone().into();
       active_user.last_login_at = Set(Utc::now());
       active_user.update(&app_state.database)

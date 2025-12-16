@@ -39,7 +39,7 @@ pub async fn get_org(
             name:"grengin".into(),
             domain: "grengin.com".into(),
             allowed_domains: vec![],
-            sso_providers:vec!["azure".into(),"google".into()],
+            sso_providers:vec![],
             logo_url:None,
             default_engine:"openai".into(),
             default_model:"gpt-5.1".into(),
@@ -103,8 +103,8 @@ pub async fn update_org(
       .one(&app_state.database)
       .await
           .map_err(|e| {
-        eprintln!("insert error: {e}");
-        AuthError::ServiceTemporarilyUnavailable
+           eprintln!("insert error: {e}");
+           AuthError::ServiceTemporarilyUnavailable
        })?
       .ok_or(AuthError::OrgDoesNotExist)?;
     let mut active_model = org_model

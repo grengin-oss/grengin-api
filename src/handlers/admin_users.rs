@@ -1,9 +1,9 @@
 use axum::{Json, extract::{Path, Query, State}};
 use chrono::Utc;
 use reqwest::StatusCode;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, sea_query::OnConflict};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, sea_query::OnConflict};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::AuthError}, dto::{admin_user::{UserRequest, UserResponse, UserUpdateRequest}, auth::User, common::{PaginationQuery, SortRule}}, models::users::{self, UserRole, UserStatus}, state::SharedState};
+use crate::{auth::{claims::Claims, error::AuthError}, dto::{admin_user::{UserDetails, UserRequest, UserResponse, UserUpdateRequest}, common::{PaginationQuery, SortRule}}, models::users::{self, UserRole, UserStatus}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -13,7 +13,7 @@ use crate::{auth::{claims::Claims, error::AuthError}, dto::{admin_user::{UserReq
         ("user_id" = Uuid, Path, description = "User id")
     ),
     responses(
-        (status = 200, body = User),
+        (status = 200, body = UserDetails),
         (status = 204, description = "User deleted"),
         (status = 404, description = "Resource not found"),
         (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
@@ -23,7 +23,7 @@ pub async fn get_user_by_id(
     claims: Claims,
     State(app_state): State<SharedState>,
     Path(user_id): Path<Uuid>,
-) -> Result<(StatusCode,Json<User>), AuthError> {
+) -> Result<(StatusCode,Json<UserDetails>), AuthError> {
     match claims.role {
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
@@ -36,8 +36,9 @@ pub async fn get_user_by_id(
         AuthError::ServiceTemporarilyUnavailable
        })?
        .ok_or(AuthError::EmailDoesNotExist)?;
-     let user_response = User {
+     let user_response = UserDetails {
          id: user.id,
+         org_id: user.org_id,
          sub: user.google_id.unwrap_or(user.azure_id.unwrap_or(user.email.clone())),
          email: user.email,
          name: user.name,
@@ -118,8 +119,9 @@ pub async fn get_users(
      })?;
      response.users = rows
        .into_iter()
-       .map(|user| User {
+       .map(|user| UserDetails {
          id: user.id,
+         org_id:user.org_id,
          sub: user.google_id.unwrap_or(user.azure_id.unwrap_or(user.email.clone())),
          email: user.email,
          name: user.name,
@@ -251,6 +253,9 @@ pub async fn update_user(
     if let Some(dept) = req.department {
         active.department = Set(Some(dept));
     }
+    if let Some(status) = req.status{
+        active.status = Set(status);
+    }
     active.updated_at = Set(Utc::now());
     active
         .update(&app_state.database)
@@ -290,15 +295,25 @@ pub async fn delete_user(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
     }
-    let res = users::Entity::delete_by_id(user_id)
-        .exec(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("db delete error: {e}");
+    
+    let user = users::Entity::find_by_id(user_id)
+      .one(&app_state.database)
+      .await
+      .map_err(|e| {
+            eprintln!("db find error: {e}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?
+      .ok_or(AuthError::EmailDoesNotExist)?;
+     let mut active_model =user
+       .into_active_model();
+     active_model.updated_at = Set(Utc::now());
+     active_model.status = Set(UserStatus::Deleted);
+     active_model
+       .update(&app_state.database)
+       .await
+       .map_err(|e| {
+            eprintln!("db find error: {e}");
             AuthError::ServiceTemporarilyUnavailable
         })?;
-    if res.rows_affected == 0 {
-        return Err(AuthError::EmailDoesNotExist);
-    }
     Ok(StatusCode::NO_CONTENT)
 }

@@ -27,7 +27,6 @@ pub struct OrgResponse {
 }
 
 #[derive(Serialize,Deserialize,ToSchema)]
-
 pub struct OrgSettings {
     pub sso_providers: Vec<String>,
     pub default_engine: String,

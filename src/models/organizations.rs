@@ -25,6 +25,8 @@ pub struct Model {
 pub enum Relation {
     #[sea_orm(has_many = "super::users::Entity")]
     Users,
+    #[sea_orm(has_many = "super::users::Entity")]
+    SsoProviders,
 }
 
 impl Related<super::users::Entity> for Entity {
@@ -33,4 +35,9 @@ impl Related<super::users::Entity> for Entity {
     }
 }
 
+impl Related<super::sso_providers::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::SsoProviders.def()
+    }
+}
 impl ActiveModelBehavior for ActiveModel {}

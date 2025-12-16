@@ -1,7 +1,7 @@
 use utoipa::OpenApi;
 use crate::auth::claims::Claims;
 use crate::dto::admin_org::OrgResponse;
-use crate::dto::admin_user::{UserRequest,UserUpdateRequest, UserResponse};
+use crate::dto::admin_user::{UserDetails, UserRequest, UserResponse, UserUpdateRequest};
 use crate::dto::chat::{ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse, TokenUsage};
 use crate::dto::chat_stream::{ChatInitRequest, ChatStream};
 use crate::dto::common::{PaginationQuery, SortRule};
@@ -67,7 +67,7 @@ use crate::models::users::{UserRole, UserStatus};
             UserUpdateRequest,
             UserRequest,
             OrgResponse,
-            
+            UserDetails
         )
     ),
     tags(
