@@ -7,15 +7,15 @@ use serde_json::json;
 use uuid::Uuid;
 use crate::{
     auth::claims::Claims,
-    config::setting::{OpenaiSettings, AnthropicSettings},
+    config::setting::{OpenaiSettings, AnthropicSettings, GroqSettings},
     dto::{
         chat_stream::{ChatInitRequest, ChatStream},
         files::File,
         llm::anthropic::ANTHROPIC_DEFAULT_MAX_TOKENS,
     },
     error::AppError,
-    handlers::llm::{StreamParser, StreamParseResult, openai::OpenaiStreamParser, anthropic::AnthropicStreamParser},
-    llm::{prompt::Prompt, provider::{OpenaiApis, AnthropicApis}},
+    handlers::llm::{StreamParser, StreamParseResult, openai::OpenaiStreamParser, anthropic::AnthropicStreamParser, groq::GroqStreamParser},
+    llm::{prompt::Prompt, provider::{OpenaiApis, AnthropicApis, GroqApis}},
     models::{conversations, messages::{self, ChatRole}},
     state::SharedState,
 };
@@ -25,6 +25,7 @@ use reqwest_eventsource::Event as ReqwestEvent;
 enum LlmProviderConfig<'a> {
     OpenAI(&'a OpenaiSettings),
     Anthropic(&'a AnthropicSettings),
+    Groq(&'a GroqSettings),
 }
 
 #[utoipa::path(
@@ -85,6 +86,15 @@ pub async fn handle_chat_stream(
              .ok_or(AppError::LlmProviderNotConfigured)?;
          let model = req.model_name.clone().unwrap_or_else(|| "claude-sonnet-4-5".to_string());
          (LlmProviderConfig::Anthropic(settings), model)
+     },
+     "groq" => {
+         let settings = app_state
+             .settings
+             .groq
+             .as_ref()
+             .ok_or(AppError::LlmProviderNotConfigured)?;
+         let model = req.model_name.clone().unwrap_or_else(|| "openai/gpt-oss-120b".to_string());
+         (LlmProviderConfig::Groq(settings), model)
      },
      _ => return Err(AppError::InvalidLlmProvider)
  };
@@ -156,6 +166,11 @@ pub async fn handle_chat_stream(
       LlmProviderConfig::Anthropic(settings) => {
           app_state.req_client
               .anthropic_get_title(settings, first_prompt)
+              .await
+      },
+      LlmProviderConfig::Groq(settings) => {
+          app_state.req_client
+              .groq_get_title(settings, first_prompt)
               .await
       },
   }.map_err(|e| {
@@ -247,6 +262,17 @@ pub async fn handle_chat_stream(
              )
              .await
      },
+     LlmProviderConfig::Groq(settings) => {
+         app_state.req_client
+             .groq_chat_stream(
+                 settings,
+                 model_name.clone(),
+                 None,
+                 None,
+                 previous_prompts,
+             )
+             .await
+     },
  }.map_err(|e| {
      eprintln!("event source loading error {} for llm provider {}", e, &provider);
      AppError::ServiceTemporarilyUnavailable
@@ -255,6 +281,7 @@ pub async fn handle_chat_stream(
  let stream_parser: Box<dyn StreamParser> = match provider_config {
      LlmProviderConfig::OpenAI(_) => Box::new(OpenaiStreamParser::new()),
      LlmProviderConfig::Anthropic(_) => Box::new(AnthropicStreamParser::new()),
+     LlmProviderConfig::Groq(_) => Box::new(GroqStreamParser::new()),
  };
 
  let sse_stream = async_stream::try_stream! {

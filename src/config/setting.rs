@@ -11,6 +11,7 @@ pub struct Settings {
     pub server:ServerSettings,
     pub openai:Option<OpenaiSettings>,
     pub anthropic:Option<AnthropicSettings>,
+    pub groq:Option<GroqSettings>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +51,10 @@ pub struct AnthropicSettings {
     pub api_key: String,
 }
 
+pub struct GroqSettings {
+    pub api_key: String,
+}
+
 impl Settings {
     pub fn from_env() -> Result<Self, ConfigError> {
         Ok(Self {
@@ -59,6 +64,7 @@ impl Settings {
             server:ServerSettings::from_env()?,
             openai:OpenaiSettings::from_env().ok(),
             anthropic:AnthropicSettings::from_env().ok(),
+            groq:GroqSettings::from_env().ok(),
         })
     }
 }
@@ -119,6 +125,13 @@ impl OpenaiSettings {
 impl AnthropicSettings {
     pub fn from_env() -> Result<Self, ConfigError> {
         let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| ConfigError::Missing("ANTHROPIC_API_KEY"))?;
+        Ok(Self { api_key })
+    }
+}
+
+impl GroqSettings {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let api_key = std::env::var("GROQ_API_KEY").map_err(|_| ConfigError::Missing("GROQ_API_KEY"))?;
         Ok(Self { api_key })
     }
 }

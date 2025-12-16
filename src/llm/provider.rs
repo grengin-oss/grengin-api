@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use reqwest_eventsource::EventSource;
 use serde::{Deserialize, Serialize};
 use utoipa::{ToSchema};
-use crate::{config::setting::{OpenaiSettings, AnthropicSettings}, dto::files::Attachment, llm::prompt::Prompt};
+use crate::{config::setting::{OpenaiSettings, AnthropicSettings, GroqSettings}, dto::files::Attachment, llm::prompt::Prompt};
 
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -56,4 +56,35 @@ pub trait AnthropicApis {
 
 pub trait AnthropicHeaders: Send + Sync {
     fn add_anthropic_headers(self, anthropic_settings: &AnthropicSettings) -> Self;
+}
+
+#[async_trait]
+pub trait GroqApis {
+    async fn groq_chat_stream(
+        &self,
+        groq_settings: &GroqSettings,
+        model_name: String,
+        max_tokens: Option<i32>,
+        temperature: Option<f32>,
+        prompts: Vec<Prompt>,
+    ) -> Result<EventSource, Error>;
+
+    async fn groq_chat_stream_text(
+        &self,
+        groq_settings: &GroqSettings,
+        model_name: String,
+        max_tokens: Option<i32>,
+        temperature: Option<f32>,
+        prompt: Vec<String>,
+    ) -> Result<EventSource, Error>;
+
+    async fn groq_get_title(
+        &self,
+        groq_settings: &GroqSettings,
+        prompt: String,
+    ) -> Result<String, Error>;
+}
+
+pub trait GroqHeaders: Send + Sync {
+    fn add_groq_headers(self, groq_settings: &GroqSettings) -> Self;
 }
