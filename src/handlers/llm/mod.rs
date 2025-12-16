@@ -1,6 +1,7 @@
 pub mod openai;
 pub mod anthropic;
 pub mod groq;
+pub mod gemini;
 
 use crate::dto::chat_stream::ChatStream;
 use uuid::Uuid;

@@ -7,15 +7,15 @@ use serde_json::json;
 use uuid::Uuid;
 use crate::{
     auth::claims::Claims,
-    config::setting::{OpenaiSettings, AnthropicSettings, GroqSettings},
+    config::setting::{OpenaiSettings, AnthropicSettings, GroqSettings, GeminiSettings},
     dto::{
         chat_stream::{ChatInitRequest, ChatStream},
         files::File,
         llm::anthropic::ANTHROPIC_DEFAULT_MAX_TOKENS,
     },
     error::AppError,
-    handlers::llm::{StreamParser, StreamParseResult, openai::OpenaiStreamParser, anthropic::AnthropicStreamParser, groq::GroqStreamParser},
-    llm::{prompt::Prompt, provider::{OpenaiApis, AnthropicApis, GroqApis}},
+    handlers::llm::{StreamParser, StreamParseResult, openai::OpenaiStreamParser, anthropic::AnthropicStreamParser, groq::GroqStreamParser, gemini::GeminiStreamParser},
+    llm::{prompt::Prompt, provider::{OpenaiApis, AnthropicApis, GroqApis, GeminiApis}},
     models::{conversations, messages::{self, ChatRole}},
     state::SharedState,
 };
@@ -26,6 +26,7 @@ enum LlmProviderConfig<'a> {
     OpenAI(&'a OpenaiSettings),
     Anthropic(&'a AnthropicSettings),
     Groq(&'a GroqSettings),
+    Gemini(&'a GeminiSettings),
 }
 
 #[utoipa::path(
@@ -95,6 +96,15 @@ pub async fn handle_chat_stream(
              .ok_or(AppError::LlmProviderNotConfigured)?;
          let model = req.model_name.clone().unwrap_or_else(|| "openai/gpt-oss-120b".to_string());
          (LlmProviderConfig::Groq(settings), model)
+     },
+     "gemini" | "google" => {
+         let settings = app_state
+             .settings
+             .gemini
+             .as_ref()
+             .ok_or(AppError::LlmProviderNotConfigured)?;
+         let model = req.model_name.clone().unwrap_or_else(|| "gemini-2.5-flash".to_string());
+         (LlmProviderConfig::Gemini(settings), model)
      },
      _ => return Err(AppError::InvalidLlmProvider)
  };
@@ -171,6 +181,11 @@ pub async fn handle_chat_stream(
       LlmProviderConfig::Groq(settings) => {
           app_state.req_client
               .groq_get_title(settings, first_prompt)
+              .await
+      },
+      LlmProviderConfig::Gemini(settings) => {
+          app_state.req_client
+              .gemini_get_title(settings, first_prompt)
               .await
       },
   }.map_err(|e| {
@@ -273,6 +288,17 @@ pub async fn handle_chat_stream(
              )
              .await
      },
+     LlmProviderConfig::Gemini(settings) => {
+         app_state.req_client
+             .gemini_chat_stream(
+                 settings,
+                 model_name.clone(),
+                 None,
+                 None,
+                 previous_prompts,
+             )
+             .await
+     },
  }.map_err(|e| {
      eprintln!("event source loading error {} for llm provider {}", e, &provider);
      AppError::ServiceTemporarilyUnavailable
@@ -282,6 +308,7 @@ pub async fn handle_chat_stream(
      LlmProviderConfig::OpenAI(_) => Box::new(OpenaiStreamParser::new()),
      LlmProviderConfig::Anthropic(_) => Box::new(AnthropicStreamParser::new()),
      LlmProviderConfig::Groq(_) => Box::new(GroqStreamParser::new()),
+     LlmProviderConfig::Gemini(_) => Box::new(GeminiStreamParser::new()),
  };
 
  let sse_stream = async_stream::try_stream! {

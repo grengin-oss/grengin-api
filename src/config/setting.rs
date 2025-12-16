@@ -12,6 +12,7 @@ pub struct Settings {
     pub openai:Option<OpenaiSettings>,
     pub anthropic:Option<AnthropicSettings>,
     pub groq:Option<GroqSettings>,
+    pub gemini:Option<GeminiSettings>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +56,10 @@ pub struct GroqSettings {
     pub api_key: String,
 }
 
+pub struct GeminiSettings {
+    pub api_key: String,
+}
+
 impl Settings {
     pub fn from_env() -> Result<Self, ConfigError> {
         Ok(Self {
@@ -65,6 +70,7 @@ impl Settings {
             openai:OpenaiSettings::from_env().ok(),
             anthropic:AnthropicSettings::from_env().ok(),
             groq:GroqSettings::from_env().ok(),
+            gemini:GeminiSettings::from_env().ok(),
         })
     }
 }
@@ -132,6 +138,13 @@ impl AnthropicSettings {
 impl GroqSettings {
     pub fn from_env() -> Result<Self, ConfigError> {
         let api_key = std::env::var("GROQ_API_KEY").map_err(|_| ConfigError::Missing("GROQ_API_KEY"))?;
+        Ok(Self { api_key })
+    }
+}
+
+impl GeminiSettings {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| ConfigError::Missing("GEMINI_API_KEY"))?;
         Ok(Self { api_key })
     }
 }

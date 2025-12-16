@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use reqwest_eventsource::EventSource;
 use serde::{Deserialize, Serialize};
 use utoipa::{ToSchema};
-use crate::{config::setting::{OpenaiSettings, AnthropicSettings, GroqSettings}, dto::files::Attachment, llm::prompt::Prompt};
+use crate::{config::setting::{OpenaiSettings, AnthropicSettings, GroqSettings, GeminiSettings}, dto::files::Attachment, llm::prompt::Prompt};
 
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -87,4 +87,35 @@ pub trait GroqApis {
 
 pub trait GroqHeaders: Send + Sync {
     fn add_groq_headers(self, groq_settings: &GroqSettings) -> Self;
+}
+
+#[async_trait]
+pub trait GeminiApis {
+    async fn gemini_chat_stream(
+        &self,
+        gemini_settings: &GeminiSettings,
+        model_name: String,
+        max_tokens: Option<i32>,
+        temperature: Option<f32>,
+        prompts: Vec<Prompt>,
+    ) -> Result<EventSource, Error>;
+
+    async fn gemini_chat_stream_text(
+        &self,
+        gemini_settings: &GeminiSettings,
+        model_name: String,
+        max_tokens: Option<i32>,
+        temperature: Option<f32>,
+        prompt: Vec<String>,
+    ) -> Result<EventSource, Error>;
+
+    async fn gemini_get_title(
+        &self,
+        gemini_settings: &GeminiSettings,
+        prompt: String,
+    ) -> Result<String, Error>;
+}
+
+pub trait GeminiHeaders: Send + Sync {
+    fn add_gemini_headers(self, gemini_settings: &GeminiSettings) -> Self;
 }
