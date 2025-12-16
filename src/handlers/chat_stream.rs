@@ -1,12 +1,31 @@
-use std::{convert::Infallible};
+use std::convert::Infallible;
 use axum::{Json, extract::{Path, State}, response::{Sse, sse::{Event, KeepAlive}}};
 use chrono::Utc;
 use futures_util::StreamExt;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, prelude::Decimal};
 use serde_json::json;
 use uuid::Uuid;
-use crate::{auth::claims::Claims, dto::{chat_stream::{ChatInitRequest, ChatStream}, files::File, openai::{OpenaiResponseStreamEvent}}, error::AppError, llm::{prompt::Prompt, provider::OpenaiApis}, models::{conversations, messages::{self, ChatRole}}, state::SharedState};
-use reqwest_eventsource::{Event as ReqwestEvent};
+use crate::{
+    auth::claims::Claims,
+    config::setting::{OpenaiSettings, AnthropicSettings},
+    dto::{
+        chat_stream::{ChatInitRequest, ChatStream},
+        files::File,
+        llm::anthropic::ANTHROPIC_DEFAULT_MAX_TOKENS,
+    },
+    error::AppError,
+    handlers::llm::{StreamParser, StreamParseResult, openai::OpenaiStreamParser, anthropic::AnthropicStreamParser},
+    llm::{prompt::Prompt, provider::{OpenaiApis, AnthropicApis}},
+    models::{conversations, messages::{self, ChatRole}},
+    state::SharedState,
+};
+use reqwest_eventsource::Event as ReqwestEvent;
+
+/// Provider configuration enum for handling different LLM providers
+enum LlmProviderConfig<'a> {
+    OpenAI(&'a OpenaiSettings),
+    Anthropic(&'a AnthropicSettings),
+}
 
 #[utoipa::path(
     post,
@@ -44,15 +63,30 @@ pub async fn handle_chat_stream(
   Json(req):Json<ChatInitRequest>
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>,AppError>{
  let provider = req.provider.clone().unwrap_or_else(|| "openai".to_string());
- let model_name = req.model_name.clone().unwrap_or_else(|| "gpt-5.2".to_string());
  let selected_tools = req.selected_tools.clone().unwrap_or_default();
- let llm_provider_settings = match provider.to_lowercase().as_str() {
-     "openai" => app_state
-                   .settings
-                   .openai
-                   .as_ref()
-                   .ok_or(AppError::LlmProviderNotConfigured)?,
-       _ => return Err(AppError::InvalidLlmProvider)
+ let web_search = req.web_search;
+
+ // Select provider configuration and set default model
+ let (provider_config, model_name) = match provider.to_lowercase().as_str() {
+     "openai" => {
+         let settings = app_state
+             .settings
+             .openai
+             .as_ref()
+             .ok_or(AppError::LlmProviderNotConfigured)?;
+         let model = req.model_name.clone().unwrap_or_else(|| "gpt-4o".to_string());
+         (LlmProviderConfig::OpenAI(settings), model)
+     },
+     "anthropic" => {
+         let settings = app_state
+             .settings
+             .anthropic
+             .as_ref()
+             .ok_or(AppError::LlmProviderNotConfigured)?;
+         let model = req.model_name.clone().unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+         (LlmProviderConfig::Anthropic(settings), model)
+     },
+     _ => return Err(AppError::InvalidLlmProvider)
  };
  let mut metadata = json!({
   "webSearch":req.web_search,
@@ -113,12 +147,21 @@ pub async fn handle_chat_stream(
     .map(|message| message.content.clone())
     .ok_or(AppError::NoMessageInRequest)?;
   let new_conversation_id = Uuid::new_v4();
-  let title = app_state.req_client
-     .openai_get_title(&llm_provider_settings,first_prompt)
-     .await
-     .map_err(|e| {
-        eprintln!("event source loading error {:?}", e);
-        AppError::ServiceTemporarilyUnavailable})?;
+  let title = match &provider_config {
+      LlmProviderConfig::OpenAI(settings) => {
+          app_state.req_client
+              .openai_get_title(settings, first_prompt)
+              .await
+      },
+      LlmProviderConfig::Anthropic(settings) => {
+          app_state.req_client
+              .anthropic_get_title(settings, first_prompt)
+              .await
+      },
+  }.map_err(|e| {
+      eprintln!("title generation error {:?}", e);
+      AppError::ServiceTemporarilyUnavailable
+  })?;
   let new_conversation = conversations::ActiveModel{ 
     id:Set(new_conversation_id.clone()),
     user_id:Set(claims.user_id),
@@ -184,71 +227,109 @@ pub async fn handle_chat_stream(
    .collect();
  previous_prompts.append(&mut current_prompts);
  println!("{:?}",current_prompts);
- let mut event_source = app_state
-   .req_client
-   .openai_chat_stream(&llm_provider_settings,model_name.clone(),None,previous_prompts)
-   .await
-   .map_err(|e|{
-      eprintln!("event source loding error {} for llm provider {}",e,&provider);
-      AppError::ServiceTemporarilyUnavailable})?;
+
+ // Create event source based on provider
+ let mut event_source = match &provider_config {
+     LlmProviderConfig::OpenAI(settings) => {
+         app_state.req_client
+             .openai_chat_stream(settings, model_name.clone(), None, previous_prompts)
+             .await
+     },
+     LlmProviderConfig::Anthropic(settings) => {
+         app_state.req_client
+             .anthropic_chat_stream(
+                 settings,
+                 model_name.clone(),
+                 ANTHROPIC_DEFAULT_MAX_TOKENS,
+                 None,
+                 previous_prompts,
+                 web_search,
+             )
+             .await
+     },
+ }.map_err(|e| {
+     eprintln!("event source loading error {} for llm provider {}", e, &provider);
+     AppError::ServiceTemporarilyUnavailable
+ })?;
+ // Create stream parser based on provider
+ let stream_parser: Box<dyn StreamParser> = match provider_config {
+     LlmProviderConfig::OpenAI(_) => Box::new(OpenaiStreamParser::new()),
+     LlmProviderConfig::Anthropic(_) => Box::new(AnthropicStreamParser::new()),
+ };
+
  let sse_stream = async_stream::try_stream! {
     let mut message_content = String::new();
-    let mut request_id = None;
-     while let Some(event) = event_source.next().await {
+    let mut request_id: Option<String> = None;
+
+    while let Some(event) = event_source.next().await {
         match event {
             Ok(ReqwestEvent::Open) => {
-                println!("SSE connection open");
+                println!("SSE connection open for provider: {}", &provider);
             }
             Ok(ReqwestEvent::Message(msg)) => {
-                if let Ok(stream_event) = serde_json::from_str::<OpenaiResponseStreamEvent>(&msg.data){
-                  match stream_event{
-                     OpenaiResponseStreamEvent::OutputTextDelta(openai_output_text_delta) => {
-                     message_content = format!("{}{}",message_content,openai_output_text_delta.delta);
-                     let chat_stream = ChatStream{id:conversation_id.clone(),role:None,content:Some(openai_output_text_delta.delta)};
-                     yield Event::default().event("chunk").data(chat_stream.to_string());
-                     request_id = Some(openai_output_text_delta.item_id);
-                    },
-                    OpenaiResponseStreamEvent::Other => (),
-                  }
-               }
-             }
+                let parse_result = stream_parser.parse_event(&msg.data);
+
+                match &parse_result {
+                    StreamParseResult::TextDelta { text, request_id: rid } => {
+                        message_content.push_str(text);
+                        if let Some(id) = rid {
+                            request_id = Some(id.clone());
+                        }
+                        let chat_stream = ChatStream {
+                            id: conversation_id.clone(),
+                            role: None,
+                            content: Some(text.clone()),
+                        };
+                        yield Event::default().event("chunk").data(chat_stream.to_string());
+                    }
+                    StreamParseResult::MessageStart { request_id: rid } => {
+                        request_id = Some(rid.clone());
+                    }
+                    StreamParseResult::ToolInput { .. } => {
+                        // Tool input streaming - accumulate for tool calls (future support)
+                    }
+                    StreamParseResult::Error { error_type, message } => {
+                        eprintln!("Stream error: {} - {}", error_type, message);
+                    }
+                    StreamParseResult::None => {}
+                }
+            }
             Err(e) => {
                 if e.to_string() == "Stream ended" {
-                  println!("{}",e.to_string());
-                  let new_llm_message = messages::ActiveModel{ 
-                       id:Set(Uuid::new_v4()),
-                       conversation_id:Set(conversation_id.clone()),
-                       previous_message_id:Set(previous_message_id),
-                       deleted:Set(false),
-                       role:Set(ChatRole::Assistant),
-                       message_content:Set(message_content),
-                       model_provider:Set(provider.clone()),
-                       model_name:Set(model_name.clone()),
-                       request_id:Set(request_id),
-                       request_tokens:Set(0),
-                       response_tokens:Set(0),
-                       tools_calls:Set(Vec::new()),
-                       tools_results:Set(Vec::new()),
-                       created_at:Set(Utc::now()),
-                       updated_at:Set(Utc::now()),
-                       total_tokens:Set(0),
-                       latency:Set(0),
-                       cost:Set(Decimal::from(0)),
-                       metadata:Set(None),
-                   };
-                 new_llm_message
-                    .insert(&app_state.database)
-                    .await
-                    .expect("failed to insert llm response in table messages");
-                  yield Event::default().event("chunk").data("[DONE]");
-                break;
-              }
-              println!("chat stream error -> {}",e);
+                    println!("Stream ended for provider: {}", &provider);
+                    let new_llm_message = messages::ActiveModel {
+                        id: Set(Uuid::new_v4()),
+                        conversation_id: Set(conversation_id.clone()),
+                        previous_message_id: Set(previous_message_id),
+                        deleted: Set(false),
+                        role: Set(ChatRole::Assistant),
+                        message_content: Set(message_content),
+                        model_provider: Set(provider.clone()),
+                        model_name: Set(model_name.clone()),
+                        request_id: Set(request_id),
+                        request_tokens: Set(0),
+                        response_tokens: Set(0),
+                        tools_calls: Set(Vec::new()),
+                        tools_results: Set(Vec::new()),
+                        created_at: Set(Utc::now()),
+                        updated_at: Set(Utc::now()),
+                        total_tokens: Set(0),
+                        latency: Set(0),
+                        cost: Set(Decimal::from(0)),
+                        metadata: Set(None),
+                    };
+                    new_llm_message
+                        .insert(&app_state.database)
+                        .await
+                        .expect("failed to insert llm response in table messages");
+                    yield Event::default().event("chunk").data("[DONE]");
+                    break;
+                }
+                println!("chat stream error -> {}", e);
             }
         }
-      };
+    }
  };
  let sse_response = Sse::new(sse_stream).keep_alive(KeepAlive::new());
  Ok(sse_response)
 }
-
