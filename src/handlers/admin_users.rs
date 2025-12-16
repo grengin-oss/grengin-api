@@ -3,7 +3,59 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, sea_query::OnConflict};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::AuthError}, dto::{admin::{UserRequest, UserResponse, UserUpdateRequest}, auth::User, common::{PaginationQuery, SortRule}}, models::users::{self, UserRole, UserStatus}, state::SharedState};
+use crate::{auth::{claims::Claims, error::AuthError}, dto::{admin_user::{UserRequest, UserResponse, UserUpdateRequest}, auth::User, common::{PaginationQuery, SortRule}}, models::users::{self, UserRole, UserStatus}, state::SharedState};
+
+#[utoipa::path(
+    get,
+    path = "/admin/users/{user_id}",
+    tag = "admin",
+    params(
+        ("user_id" = Uuid, Path, description = "User id")
+    ),
+    responses(
+        (status = 200, body = User),
+        (status = 204, description = "User deleted"),
+        (status = 404, description = "Resource not found"),
+        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+    )
+)]
+pub async fn get_user_by_id(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Path(user_id): Path<Uuid>,
+) -> Result<(StatusCode,Json<User>), AuthError> {
+    match claims.role {
+        UserRole::SuperAdmin | UserRole::Admin => {}
+        _ => return Err(AuthError::PermissionDenied),
+    }
+    let user = users::Entity::find_by_id(user_id)
+      .one(&app_state.database)
+      .await
+          .map_err(|e| {
+        eprintln!("insert error: {e}");
+        AuthError::ServiceTemporarilyUnavailable
+       })?
+       .ok_or(AuthError::EmailDoesNotExist)?;
+     let user_response = User {
+         id: user.id,
+         sub: user.google_id.unwrap_or(user.azure_id.unwrap_or(user.email.clone())),
+         email: user.email,
+         name: user.name,
+         picture: user.picture,
+         hd: user.hd,
+         role: user.role, // TODO: Map from database if role field exists
+         status: user.status,
+         department: user.department,
+         is_super_admin: user.role == UserRole::SuperAdmin, // Default to false, update based on database field if available
+         has_password: user.password.is_some(), // SSO-only users don't have password
+         mfa_enabled: user.mfa_enabled,
+         last_login_at: Some(user.last_login_at),
+         password_changed_at: None,
+         created_at: user.created_at,
+         updated_at: user.updated_at,
+      };
+    Ok((StatusCode::OK,Json(user_response)))
+}
 
 #[utoipa::path(
     get,
@@ -109,6 +161,7 @@ pub async fn add_new_user(
    }
    let user = users::ActiveModel{ 
      id: Set(Uuid::new_v4()),
+     org_id:Set(claims.org_id),
      status: Set(UserStatus::Active),
      picture: Set(None),
      email: Set(req.email.trim().to_string()),

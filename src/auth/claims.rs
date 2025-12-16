@@ -12,21 +12,24 @@ pub struct Claims {
     pub sub: String, // Email Subject (user identifier)
     pub name:Option<String>,
     pub user_id:Uuid,//user id
+    pub org_id:Option<Uuid>,
     pub role:UserRole,
     pub exp: usize,  // Expiration time
 }
 
 impl Claims {
-    pub fn new<S: Into<String>>(sub:S,name:Option<S>,user_id:Uuid,role:UserRole) -> Self {
-         let exp = std::time::SystemTime::now()
+    pub fn new_access_token<S: Into<String>>(sub:S,name:Option<S>,user_id:Uuid,org_id:Option<Uuid>,role:UserRole) -> Self {
+        let exp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("Time went backwards")
             .as_secs()+ 3600;
-      Self { sub:sub.into(),
-             name:name.map(|v| v.into()),
-             user_id,
-             role,
-             exp:exp as usize 
+        Self { 
+          sub:sub.into(),
+          name:name.map(|v| v.into()),
+          user_id,
+          org_id,
+          role,
+          exp:exp as usize 
         }
     }
 }

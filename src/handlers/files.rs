@@ -1,7 +1,7 @@
 use std::{fs::File, io::Write};
 use axum::{Json, extract::State};
 use reqwest::StatusCode;
-use crate::{dto::files::{FileUploadRequest, File as FileUploadResponse}, error::AppError, llm::provider::OpenaiApis, state::SharedState};
+use crate::{auth::claims::Claims, dto::files::{File as FileUploadResponse, FileUploadRequest}, error::AppError, llm::provider::OpenaiApis, state::SharedState};
 
 pub const LOCAL_FOLDER:&str = "./files";
 
@@ -16,10 +16,11 @@ pub const LOCAL_FOLDER:&str = "./files";
     ),
 )]
 pub async fn upload_file(
+   claims:Claims,
    State(app_state):State<SharedState>,
    Json(req):Json<FileUploadRequest>
 ) -> Result<(StatusCode,Json<FileUploadResponse>),AppError>{
- if let Ok(mut file_path) = File::create(format!("{}/{}",LOCAL_FOLDER,&req.attachment.name)){
+ if let Ok(mut file_path) = File::create(format!("{}/{}/{}",LOCAL_FOLDER,claims.user_id.to_string(),&req.attachment.name)){
       if let Some(buffer) = &req.attachment.file{
          if file_path.write_all(buffer).is_ok(){
           println!("Saved file {} locally",&req.attachment.name)

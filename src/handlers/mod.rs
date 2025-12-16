@@ -4,4 +4,5 @@ pub mod chat;
 pub mod files;
 pub mod chat_stream;
 pub mod message;
-pub mod admin;
+pub mod admin_org;
+pub mod admin_users;
