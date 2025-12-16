@@ -5,3 +5,4 @@ pub mod files;
 pub mod chat_stream;
 pub mod message;
 pub mod llm;
+pub mod models;
