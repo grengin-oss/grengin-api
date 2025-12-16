@@ -65,7 +65,7 @@ pub struct OpenaiChatChoiceResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OpenaiMessageDelta {
-    pub role: Option<String>,      
+    pub role: Option<String>,
     pub content: Option<String>,
 }
 
@@ -155,7 +155,7 @@ impl OpenaiMessage {
          }
          messages.push(Self { role:prompt.role, content});
       }
-    messages   
+    messages
   }
 }
 

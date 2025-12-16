@@ -6,3 +6,4 @@ pub mod chat_stream;
 pub mod message;
 pub mod admin_org;
 pub mod admin_users;
+pub mod llm;
