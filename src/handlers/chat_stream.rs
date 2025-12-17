@@ -2,7 +2,7 @@ use std::{convert::Infallible};
 use axum::{Json, extract::{Path, State}, response::{Sse, sse::{Event, KeepAlive}}};
 use chrono::Utc;
 use futures_util::StreamExt;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, prelude::Decimal};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, prelude::Decimal};
 use serde_json::json;
 use uuid::Uuid;
 use crate::{auth::claims::Claims, dto::{chat_stream::{ChatInitRequest, ChatStream}, files::File, openai::{OpenaiResponseStreamEvent}}, error::AppError, llm::{prompt::Prompt, provider::OpenaiApis}, models::{conversations, messages::{self, ChatRole}}, state::SharedState};
@@ -214,7 +214,6 @@ pub async fn handle_chat_stream(
              }
             Err(e) => {
                 if e.to_string() == "Stream ended" {
-                  println!("{}",e.to_string());
                   let new_llm_message = messages::ActiveModel{ 
                        id:Set(Uuid::new_v4()),
                        conversation_id:Set(conversation_id.clone()),

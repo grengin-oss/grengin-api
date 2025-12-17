@@ -200,6 +200,12 @@ async fn oidc_oauth_callback(
             eprintln!("db error while fetching user: {e:?}");
             AuthError::ServiceTemporarilyUnavailable})?;
     if let Some(u) = &user {
+      match &u.status {
+         UserStatus::InActive |
+         UserStatus::Suspended |
+         UserStatus::Deleted => return Err(AuthError::EmailDoesNotExist),
+         _ => ()
+      }
       let mut active_user:users::ActiveModel = u.clone().into();
       active_user.last_login_at = Set(Utc::now());
       active_user.update(&app_state.database)
@@ -234,6 +240,7 @@ async fn oidc_oauth_callback(
     if user.is_none() {
         let new_user = users::ActiveModel{
             id: Set(Uuid::new_v4()),
+            org_id:Set(None),
             email: Set(email.clone().unwrap_or_else(|| format!("{sub}@users.noreply.oidc"))),
             name: Set(display_name.into()),
             google_id: Set(google_id),
@@ -249,7 +256,7 @@ async fn oidc_oauth_callback(
             mfa_secret:Set(None),
             picture:Set(picture.clone()),
             password:Set(None),
-            role:Set(UserRole::User),
+            role:Set(UserRole::SuperAdmin),
             metadata:Set(None),
             hd:Set(hd),
         };
@@ -266,7 +273,7 @@ async fn oidc_oauth_callback(
     };
     let user = user.ok_or(AuthError::EmailDoesNotExist)?;
 
-    let jwt_claims = Claims::new(user.email.clone(), user.name.clone(), user.id);
+    let jwt_claims = Claims::new_access_token(user.email.clone(), user.name.clone(), user.id,user.org_id,user.role);
     let access_token = jsonwebtoken::encode(
         &jsonwebtoken::Header::default(),
         &jwt_claims,

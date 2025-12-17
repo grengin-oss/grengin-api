@@ -1,7 +1,6 @@
 use axum::{response::{IntoResponse, Response},http::StatusCode, Json};
 use serde::{ Serialize};
 use utoipa::ToSchema;
-
 use crate::error::{ErrorDetail, ErrorDetailVariant, ErrorResponse};
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -13,7 +12,10 @@ pub enum AuthError {
     InvalidToken,
     InvalidProvider,
     InvalidCallbackParameters,
-    InvalidRedirectUri
+    InvalidRedirectUri,
+    PermissionDenied,
+    EmailAlreadyExist,
+    OrgDoesNotExist
 }
 
 impl IntoResponse for AuthError {
@@ -59,6 +61,22 @@ impl IntoResponse for AuthError {
                 "InvalidRedirectUri",
                 "Invalid or not supported redirect uri"
 
+            ),
+            AuthError::PermissionDenied => (
+                StatusCode::BAD_REQUEST,
+                "PermissionDenied",
+                "Admin role required"
+
+            ),
+            AuthError::OrgDoesNotExist =>  (
+                StatusCode::NOT_FOUND,
+                "OrgDoesNotExist",
+                "Organization does not exist"
+            ),
+            AuthError::EmailAlreadyExist => (
+                StatusCode::CONFLICT,
+                "EmailAlreadyExist",
+                "Email already registered"
             ),
         };
 

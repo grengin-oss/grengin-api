@@ -92,7 +92,7 @@ pub async fn edit_chat_message_by_id_and_stream(
        .filter(messages::Column::ConversationId.eq(chat_id))
        .filter(messages::Column::Deleted.eq(false))
        .filter(messages::Column::CreatedAt.gte(message.created_at))
-       .col_expr(messages::Column::Deleted,sea_query::Expr::value(false))
+       .col_expr(messages::Column::Deleted,sea_query::Expr::value(true))
        .exec(&app_state.database)
        .await
           .map_err(|e|{

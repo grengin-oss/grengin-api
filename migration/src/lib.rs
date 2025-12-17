@@ -8,6 +8,8 @@ mod m20251125_000005_create_prompt_templates;
 mod m20250201_000001_make_previous_message_id_nullable;
 mod m20250201_000002_add_request_id_to_messages;
 mod m20251211_000005_add_deleted_to_messages;
+mod m20251216_000001_create_organizations;
+mod m20251216_000002_add_org_id_to_users;
 
 pub struct Migrator;
 
@@ -22,7 +24,9 @@ impl MigratorTrait for Migrator {
           Box::new(m20251125_000005_create_prompt_templates::Migration),
           Box::new(m20250201_000001_make_previous_message_id_nullable::Migration),
           Box::new(m20250201_000002_add_request_id_to_messages::Migration),
-          Box::new(m20251211_000005_add_deleted_to_messages::Migration)
-          ]
+          Box::new(m20251211_000005_add_deleted_to_messages::Migration),
+          Box::new(m20251216_000001_create_organizations::Migration),
+          Box::new(m20251216_000002_add_org_id_to_users::Migration),
+         ]
     }
 }
