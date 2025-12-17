@@ -2,7 +2,7 @@ use anyhow::{Error, Ok,anyhow};
 use async_trait::async_trait;
 use reqwest::{Client as ReqwestClient, RequestBuilder, multipart};
 use reqwest_eventsource::EventSource;
-use crate::{config::setting::OpenaiSettings, dto::{files::{Attachment}, openai::{FileUploadResponse, OpenaiChatCompletionRequest, OpenaiChatCompletionResponse, OpenaiChatRequest, OpenaiMessage}}, llm::{prompt::Prompt, provider::{OpenaiApis, OpenaiHeaders}}};
+use crate::{config::setting::OpenaiSettings, dto::{files::{Attachment}, llm::openai::{FileUploadResponse, OpenaiChatCompletionRequest, OpenaiChatCompletionResponse, OpenaiChatRequest, OpenaiMessage}}, llm::{prompt::Prompt, provider::{OpenaiApis, OpenaiHeaders}}};
 
 pub const OPENAI_API_URL:&str = "https://api.openai.com";
 
