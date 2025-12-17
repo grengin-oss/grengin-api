@@ -3,14 +3,14 @@ use async_trait::async_trait;
 use reqwest_eventsource::EventSource;
 use serde::{Deserialize, Serialize};
 use utoipa::{ToSchema};
-use crate::{config::setting::OpenaiSettings, dto::files::{Attachment}, llm::prompt::Prompt};
+use crate::{config::setting::{OpenaiSettings, AnthropicSettings}, dto::files::Attachment, llm::prompt::Prompt};
 
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum LlmProviders{
     OpenAI,
-    Claude,
-    Gemini,
+    Anthropic,
+    Google,
     Groq
 }
 
@@ -24,4 +24,40 @@ pub trait OpenaiApis {
 
 pub trait OpenaiHeaders: Send + Sync {
     fn add_openai_headers(self,openai_settings:&OpenaiSettings) -> Self;
+}
+
+/// Type alias for file data loader function
+pub type FileDataLoader = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+#[async_trait]
+pub trait AnthropicApis {
+    async fn anthropic_chat_stream(
+        &self,
+        anthropic_settings: &AnthropicSettings,
+        model_name: String,
+        max_tokens: i32,
+        temperature: Option<f32>,
+        prompts: Vec<Prompt>,
+        web_search: bool,
+        file_data_loader: Option<FileDataLoader>,
+    ) -> Result<EventSource, Error>;
+
+    async fn anthropic_chat_stream_text(
+        &self,
+        anthropic_settings: &AnthropicSettings,
+        model_name: String,
+        max_tokens: i32,
+        temperature: Option<f32>,
+        prompt: Vec<String>,
+    ) -> Result<EventSource, Error>;
+
+    async fn anthropic_get_title(
+        &self,
+        anthropic_settings: &AnthropicSettings,
+        prompt: String,
+    ) -> Result<String, Error>;
+}
+
+pub trait AnthropicHeaders: Send + Sync {
+    fn add_anthropic_headers(self, anthropic_settings: &AnthropicSettings) -> Self;
 }

@@ -75,6 +75,10 @@ pub async fn upload_file(
             // Use OpenAI's file ID for API calls, keep local ID for reference
             response.id = Some(file_id);
         }
+        "anthropic" => {
+            // Anthropic uses local file ID - data will be loaded from disk during chat
+            // Local file ID is already set above
+        }
         _ => return Err(AppError::InvalidLlmProvider),
     }
  }

@@ -1,4 +1,5 @@
 pub mod openai;
+pub mod anthropic;
 
 use crate::dto::chat_stream::ChatStream;
 use uuid::Uuid;
