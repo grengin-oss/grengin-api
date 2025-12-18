@@ -28,6 +28,7 @@ pub struct ChatInitRequest{
   pub selected_tools: Option<Vec<String>>,
   pub conversation_id: Option<Uuid>,
   pub messages: Vec<MessageRequest>,
+  pub temperature:Option<f32>,
 }
 
 #[derive(Deserialize, ToSchema, IntoParams)]

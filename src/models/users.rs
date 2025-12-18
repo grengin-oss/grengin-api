@@ -8,7 +8,7 @@ use utoipa::ToSchema;
 #[serde(rename_all = "lowercase")]   
 pub enum UserStatus{
     Active,
-    InActive,
+    Deactivated,
     Deleted,
     Suspended,
 }
@@ -34,7 +34,7 @@ pub struct Model {
   pub org_id:Option<Uuid>,
   pub status:UserStatus,
   pub picture:Option<String>,
-  #[sea_orm(column_type = "Text", unique, indexed)]
+  #[sea_orm(column_type = "Text", indexed)]
   pub email:String,
   pub email_verified:bool,
   pub name:Option<String>,

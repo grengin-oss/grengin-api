@@ -10,6 +10,8 @@ mod m20250201_000002_add_request_id_to_messages;
 mod m20251211_000005_add_deleted_to_messages;
 mod m20251216_000001_create_organizations;
 mod m20251216_000002_add_org_id_to_users;
+mod m20251218_000001_drop_users_email_unique;
+mod m20251218_000001_create_ai_engines;
 
 pub struct Migrator;
 
@@ -27,6 +29,8 @@ impl MigratorTrait for Migrator {
           Box::new(m20251211_000005_add_deleted_to_messages::Migration),
           Box::new(m20251216_000001_create_organizations::Migration),
           Box::new(m20251216_000002_add_org_id_to_users::Migration),
+          Box::new(m20251218_000001_drop_users_email_unique::Migration),
+          Box::new(m20251218_000001_create_ai_engines::Migration),
          ]
     }
 }

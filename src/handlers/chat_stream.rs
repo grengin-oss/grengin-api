@@ -231,7 +231,7 @@ pub async fn handle_chat_stream(
  let mut event_source = match &provider_config {
      LlmProviderConfig::OpenAI(settings) => {
          app_state.req_client
-             .openai_chat_stream(settings, model_name.clone(), None, previous_prompts)
+             .openai_chat_stream(settings, model_name.clone(),req.temperature , previous_prompts)
              .await
      },
      LlmProviderConfig::Anthropic(settings) => {
@@ -245,7 +245,7 @@ pub async fn handle_chat_stream(
                  settings,
                  model_name.clone(),
                  ANTHROPIC_DEFAULT_MAX_TOKENS,
-                 None,
+                 req.temperature,
                  previous_prompts,
                  web_search,
                  Some(file_loader),

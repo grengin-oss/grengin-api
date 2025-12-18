@@ -15,7 +15,8 @@ pub enum AuthError {
     InvalidRedirectUri,
     PermissionDenied,
     EmailAlreadyExist,
-    OrgDoesNotExist
+    OrgDoesNotExist,
+    ResourceNotFound,
 }
 
 impl IntoResponse for AuthError {
@@ -77,6 +78,11 @@ impl IntoResponse for AuthError {
                 StatusCode::CONFLICT,
                 "EmailAlreadyExist",
                 "Email already registered"
+            ),
+            AuthError::ResourceNotFound => (
+                StatusCode::NOT_FOUND,
+                "ResourceNotFound",
+                "Resource not found"
             ),
         };
 

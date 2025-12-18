@@ -1,9 +1,10 @@
 use axum::{Json, extract::{Path, Query, State}};
 use chrono::Utc;
+use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, sea_query::OnConflict};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, sea_query::OnConflict};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::AuthError}, dto::{admin_user::{UserDetails, UserRequest, UserResponse, UserUpdateRequest}, common::{PaginationQuery, SortRule}}, models::users::{self, UserRole, UserStatus}, state::SharedState};
+use crate::{auth::{claims::Claims, error::AuthError}, dto::{admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest}, common::{PaginationQuery, SortRule}}, models::users::{self, UserRole, UserStatus}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -84,19 +85,27 @@ pub async fn get_users(
       UserRole::SuperAdmin | UserRole::Admin => (),
       _ => return Err(AuthError::PermissionDenied)
    }
+   let limit = query.limit.unwrap_or(30);
+   let offset = query.offset.unwrap_or(0);
+   let page = offset / limit;
    let mut response = UserResponse { 
      users:Vec::new(),
-     total:0,limit:query.limit.unwrap_or(20),
-     offset:query.offset.unwrap_or(0) 
+     total:0,
+     limit,
+     offset 
    };
    let mut select = users::Entity::find()
      .offset(query.offset.unwrap_or(0))
      .limit(query.limit.unwrap_or(20));
+
+   if let Some(search) = query.search{
+      select = select.filter(users::Column::Name.into_expr().ilike(format!("%{}%", search)));
+   }
    if let Some(role) = query.role  {
        select = select.filter(users::Column::Role.eq(role));
    }
    if let Some(department) = query.department{
-       select = select.filter(users::Column::Department.contains(department))
+       select = select.filter(users::Column::Department.into_expr().ilike(format!("%{}%", department)))
    }
    if let Some(status) = query.status{
        select = select.filter(users::Column::Status.eq(status))
@@ -110,11 +119,20 @@ pub async fn get_users(
           SortRule::LastLoginAt => select.order_by_asc(users::Column::LastLoginAt),
       };
    }
-   let rows = select
-      .all(&app_state.database)
+   let paginator = select
+    .paginate(&app_state.database, limit);
+   response.total = paginator
+     .num_items()
+     .await
+     .map_err(|e|{
+         eprintln!("db get many error: {}",e);
+         AuthError::ServiceTemporarilyUnavailable
+     })?;
+   let rows = paginator
+      .fetch_page(page)
       .await
       .map_err(|e|{
-         eprintln!("Db get many error: {}",e);
+         eprintln!("db get many error: {}",e);
          AuthError::ServiceTemporarilyUnavailable
      })?;
      response.users = rows
@@ -138,7 +156,6 @@ pub async fn get_users(
          created_at: user.created_at,
          updated_at: user.updated_at,
       }).collect();
-     response.total = response.users.len() as u64;
  Ok((StatusCode::OK,Json(response)))
 }
 
@@ -148,6 +165,7 @@ pub async fn get_users(
     tag = "admin",
     request_body = UserRequest,
     responses(
+        (status = 201),
         (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
         (status = 409, description = "Email already registered"),
     )
@@ -156,7 +174,7 @@ pub async fn add_new_user(
   claims:Claims,
   State(app_state): State<SharedState>,
   Json(req):Json<UserRequest>
-) -> Result<StatusCode,AuthError>{
+) -> Result<(StatusCode,&'static str),AuthError>{
     match claims.role {
       UserRole::SuperAdmin | UserRole::Admin => (),
       _ => return Err(AuthError::PermissionDenied)
@@ -199,7 +217,7 @@ pub async fn add_new_user(
    if affected == 0 {
      return Err(AuthError::EmailAlreadyExist);
    }
- Ok(StatusCode::CREATED)
+ Ok((StatusCode::CREATED,"User added successfully"))
 }
 
 #[utoipa::path(
@@ -253,9 +271,6 @@ pub async fn update_user(
     if let Some(dept) = req.department {
         active.department = Set(Some(dept));
     }
-    if let Some(status) = req.status{
-        active.status = Set(status);
-    }
     active.updated_at = Set(Utc::now());
     active
         .update(&app_state.database)
@@ -271,6 +286,57 @@ pub async fn update_user(
         })?;
 
     Ok(StatusCode::OK)
+}
+
+#[utoipa::path(
+    patch,
+    path = "/admin/users/{user_id}/status",
+    tag = "admin",
+    params(
+        ("user_id" = Uuid, Path, description = "User id")
+    ),
+    request_body = UserPatchRequest,
+    responses(
+        (status = 200, description = "User status updated successfully"),
+        (status = 404, description = "Email does not exist"),
+        (status = 409, description = "Email already registered"),
+        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+    )
+)]
+pub async fn patch_user_status(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Path(user_id): Path<Uuid>,
+    Json(req): Json<UserPatchRequest>,
+) -> Result<(StatusCode,&'static str), AuthError> {
+    match claims.role {
+        UserRole::SuperAdmin | UserRole::Admin => {}
+        _ => return Err(AuthError::PermissionDenied),
+    }
+    match req.status {
+        UserStatus::Active | UserStatus::Deactivated | UserStatus::Suspended => {},
+       _ => return Err(AuthError::PermissionDenied),
+    }
+    let model = users::Entity::find_by_id(user_id)
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db find error: {e}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?
+        .ok_or(AuthError::EmailDoesNotExist)?;
+    let mut active: users::ActiveModel = model.into();
+    active.status = Set(req.status);
+    active.updated_at = Set(Utc::now());
+    active
+        .update(&app_state.database)
+        .await
+        .map_err(|e| {
+              eprintln!("db update error: {e}");
+              AuthError::ServiceTemporarilyUnavailable
+            }
+        )?;
+    Ok((StatusCode::OK,"User status updated successfully"))
 }
 
 #[utoipa::path(

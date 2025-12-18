@@ -7,3 +7,4 @@ pub mod message;
 pub mod admin_org;
 pub mod admin_users;
 pub mod llm;
+pub mod admin_ai;
