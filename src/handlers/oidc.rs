@@ -201,9 +201,8 @@ async fn oidc_oauth_callback(
             AuthError::ServiceTemporarilyUnavailable})?;
     if let Some(u) = &user {
       match &u.status {
-         UserStatus::InActive |
+         UserStatus::Deactivated |
          UserStatus::Suspended |
-         UserStatus::Deleted => return Err(AuthError::EmailDoesNotExist),
          _ => ()
       }
       let mut active_user:users::ActiveModel = u.clone().into();

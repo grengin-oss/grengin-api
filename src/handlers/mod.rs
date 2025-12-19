@@ -1,9 +1,11 @@
 pub mod auth;
 pub mod oidc;
 pub mod chat;
-pub mod files;
+pub mod file;
 pub mod chat_stream;
 pub mod message;
 pub mod admin_org;
 pub mod admin_users;
 pub mod llm;
+pub mod admin_ai;
+pub mod models;
