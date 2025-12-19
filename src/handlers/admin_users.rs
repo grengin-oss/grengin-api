@@ -69,7 +69,7 @@ pub async fn get_user_by_id(
         ("search" = Option<String>, Query, description = "Search by name"),
         ("department" = Option<String>, Query, description = "Search by department"),
         ("status" = Option<UserStatus>, Query, description = "Account status"),
-        ("sort" = Option<SortRule>, Query, description = "Sorting param"),
+        ("sort" = Option<SortRule>, Query, description = "Sort by column example 'name','updated_at','created_at','email','last_login_at'"),
     ),
     responses(
         (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
@@ -116,7 +116,8 @@ pub async fn get_users(
           SortRule::Email => select.order_by_desc(users::Column::Email),
           SortRule::CreatedAt => select.order_by_desc(users::Column::CreatedAt),
           SortRule::UpdatedAt => select.order_by_desc(users::Column::UpdatedAt),
-          SortRule::LastLoginAt => select.order_by_asc(users::Column::LastLoginAt),
+          SortRule::LastLoginAt => select.order_by_desc(users::Column::LastLoginAt),
+          _ => select.order_by_desc(users::Column::CreatedAt),
       };
    }
    let paginator = select
@@ -155,7 +156,8 @@ pub async fn get_users(
          password_changed_at: None,
          created_at: user.created_at,
          updated_at: user.updated_at,
-      }).collect();
+      })
+      .collect::<Vec<_>>();
  Ok((StatusCode::OK,Json(response)))
 }
 
@@ -315,7 +317,7 @@ pub async fn patch_user_status(
     }
     match req.status {
         UserStatus::Active | UserStatus::Deactivated | UserStatus::Suspended => {},
-       _ => return Err(AuthError::PermissionDenied),
+       _ => return Err(AuthError::InvalidUserStatus),
     }
     let model = users::Entity::find_by_id(user_id)
         .one(&app_state.database)

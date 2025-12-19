@@ -96,7 +96,7 @@ impl OpenaiMessage {
           content.push(OpenaiContent {
                 content_type: OpenaiContentType::InputFile,
                 text: None,
-                file_id:file.id,
+                file_id:file.openai_id,
           });
      }
      for prompt in prompts {
@@ -149,7 +149,7 @@ impl OpenaiMessage {
             };
             content.push(OpenaiContent{
                 content_type,
-                file_id:file.id,
+                file_id:file.openai_id,
                 text:None
             })
          }

@@ -7,15 +7,15 @@ use serde_json::json;
 use uuid::Uuid;
 use crate::{
     auth::claims::Claims,
-    config::setting::{OpenaiSettings, AnthropicSettings},
+    config::setting::{AnthropicSettings, OpenaiSettings},
     dto::{
         chat_stream::{ChatInitRequest, ChatStream},
-        files::File,
+        files::{File},
         llm::anthropic::ANTHROPIC_DEFAULT_MAX_TOKENS,
     },
     error::AppError,
-    handlers::llm::{StreamParser, StreamParseResult, openai::OpenaiStreamParser, anthropic::AnthropicStreamParser},
-    llm::{prompt::Prompt, provider::{OpenaiApis, AnthropicApis}},
+    handlers::llm::{StreamParseResult, StreamParser, anthropic::AnthropicStreamParser, openai::OpenaiStreamParser},
+    llm::{prompt::Prompt, provider::{AnthropicApis, OpenaiApis}},
     models::{conversations, messages::{self, ChatRole}},
     state::SharedState,
 };
@@ -221,25 +221,27 @@ pub async fn handle_chat_stream(
         eprintln!("Db one insert error {:?}", e);
         AppError::ServiceTemporarilyUnavailable})?;
  }
+ 
  let current_prompts:Vec<Prompt> = req.messages
    .into_iter()
-   .map(|message| Prompt { text:message.content, role:message.role, files:message.files})
+   .map(|message| 
+      Prompt { text:message.content, role:message.role, files:message.files
+    })
    .collect();
  previous_prompts.extend(current_prompts);
-
  // Create event source based on provider
  let mut event_source = match &provider_config {
      LlmProviderConfig::OpenAI(settings) => {
          app_state.req_client
-             .openai_chat_stream(settings, model_name.clone(),req.temperature , previous_prompts)
+             .openai_chat_stream(
+                settings, model_name.clone(),
+                req.temperature,
+                previous_prompts,
+                &claims.user_id
+              )
              .await
      },
      LlmProviderConfig::Anthropic(settings) => {
-         // Create file data loader closure that reads from local storage
-         let user_id = claims.user_id;
-         let file_loader: crate::llm::provider::FileDataLoader = Box::new(move |file_id: &str| {
-             crate::handlers::files::read_file_as_base64(&user_id, file_id)
-         });
          app_state.req_client
              .anthropic_chat_stream(
                  settings,
@@ -248,9 +250,9 @@ pub async fn handle_chat_stream(
                  req.temperature,
                  previous_prompts,
                  web_search,
-                 Some(file_loader),
-             )
-             .await
+                 &claims.user_id,
+              )
+              .await
      },
  }.map_err(|e| {
      eprintln!("event source loading error {} for llm provider {}", e, &provider);

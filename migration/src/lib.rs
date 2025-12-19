@@ -12,6 +12,7 @@ mod m20251216_000001_create_organizations;
 mod m20251216_000002_add_org_id_to_users;
 mod m20251218_000001_drop_users_email_unique;
 mod m20251218_000001_create_ai_engines;
+mod m20251218_000001_create_files;
 
 pub struct Migrator;
 
@@ -31,6 +32,7 @@ impl MigratorTrait for Migrator {
           Box::new(m20251216_000002_add_org_id_to_users::Migration),
           Box::new(m20251218_000001_drop_users_email_unique::Migration),
           Box::new(m20251218_000001_create_ai_engines::Migration),
+          Box::new(m20251218_000001_create_files::Migration),
          ]
     }
 }

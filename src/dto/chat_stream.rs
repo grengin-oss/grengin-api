@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
-use crate::{dto::files::File, models::messages::ChatRole};
+use crate::{dto::files::{File}, models::messages::ChatRole};
 
 #[derive(Serialize, ToSchema, IntoParams)]
 pub struct ChatStream {
