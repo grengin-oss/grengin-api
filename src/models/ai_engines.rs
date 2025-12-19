@@ -4,8 +4,8 @@ use sea_orm::entity::prelude::*;
 use utoipa::ToSchema;
 
 #[derive(Debug, Clone, PartialEq, Eq,EnumIter, DeriveActiveEnum, Serialize, Deserialize,ToSchema)]
-#[sea_orm(rs_type = "String",db_type = "String(StringLen::None)",rename_all = "lowercase")]
-#[serde(rename_all = "lowercase")]   
+#[sea_orm(rs_type = "String",db_type = "String(StringLen::None)",rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]   
 pub enum ApiKeyStatus{
   Valid,
   InValid,

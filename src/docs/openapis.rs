@@ -7,11 +7,12 @@ use crate::dto::chat::{ArchiveChatRequest, ConversationResponse, MessageParts, M
 use crate::dto::chat_stream::{ChatInitRequest, ChatStream};
 use crate::dto::common::{PaginationQuery, SortRule};
 use crate::dto::files::{Attachment, File, FileResponse, FileUploadRequest};
+use crate::dto::models::{ModelInfo, ProviderInfo};
 use crate::dto::oauth::OAuthCallback;
 use crate::error::{ErrorResponse, ErrorDetail, ErrorDetailVariant};
 use crate::docs::security::ApiSecurityAddon;
 use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, LoginResponse, TokenType, User};
-use crate::handlers::{oidc,chat,chat_stream,file,message,admin_users,admin_org,admin_ai};
+use crate::handlers::{oidc,chat,chat_stream,file,message,admin_users,admin_org,admin_ai,models};
 use crate::models::messages::ChatRole;
 use crate::models::users::{UserRole, UserStatus};
 
@@ -45,6 +46,7 @@ use crate::models::users::{UserRole, UserStatus};
         file::delete_file_by_id,
         file::download_file,
         file::upload_file,
+        models::list_models,
     ),
     components(
         schemas(
@@ -82,6 +84,8 @@ use crate::models::users::{UserRole, UserStatus};
             AiEngineUpdateRequest,
             FileResponse,
             FileUploadRequest,
+            ProviderInfo,
+            ModelInfo,
         )
     ),
     tags(

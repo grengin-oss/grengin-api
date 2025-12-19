@@ -21,5 +21,7 @@ use crate::models::ai_engines::ApiKeyStatus;
      pub api_key_preview:Option<String>,
      pub api_key_last_validated_at:Option<DateTime<Utc>>,
      pub whitelisted_models:Vec<String>,
-     pub default_model:String
+     pub default_model:Option<String>,
+     pub created_at:DateTime<Utc>,
+     pub updated_at:DateTime<Utc>,
   }
