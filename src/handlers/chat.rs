@@ -1,6 +1,5 @@
 use axum::{Json, extract::{Path, Query, State}};
 use chrono::Utc;
-use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, Iterable, PaginatorTrait as _, QueryFilter, QueryOrder, QuerySelect};
 use uuid::Uuid;
@@ -40,7 +39,7 @@ pub async fn get_chats(
         .filter(conversations::Column::UserId.eq(claims.user_id));
 
     if let Some(title) = query.search {
-        select = select.filter(conversations::Column::Title.into_expr().ilike(format!("%{}%",title)));
+        select = select.filter(conversations::Column::Title.contains(title));
     }
     if query.archived.unwrap_or(false){
         select = select.filter(conversations::Column::ArchivedAt.is_not_null());

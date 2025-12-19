@@ -1,13 +1,14 @@
-use anyhow::{Error, anyhow};
+use anyhow::{Error, Ok, anyhow};
 use async_trait::async_trait;
 use reqwest::{Client as ReqwestClient, RequestBuilder};
 use reqwest_eventsource::EventSource;
-use uuid::Uuid;
 use crate::{
-    config::setting::AnthropicSettings, dto::llm::anthropic::{
+    config::setting::AnthropicSettings,
+    dto::llm::anthropic::{
         AnthropicChatRequest, AnthropicChatResponse, AnthropicContentBlockResponse,
         AnthropicMessage, AnthropicRole, AnthropicToolUnion, AnthropicWebSearchTool,
-    }, handlers::file::get_file_binary, llm::{prompt::Prompt, provider::{AnthropicApis, AnthropicHeaders}}
+    },
+    llm::{prompt::Prompt, provider::{AnthropicApis, AnthropicHeaders, FileDataLoader}},
 };
 
 pub const ANTHROPIC_API_URL: &str = "https://api.anthropic.com";
@@ -29,18 +30,13 @@ impl AnthropicApis for ReqwestClient {
         model_name: String,
         max_tokens: i32,
         temperature: Option<f32>,
-        mut prompts: Vec<Prompt>,
+        prompts: Vec<Prompt>,
         web_search: bool,
-        user_id:&Uuid,
+        file_data_loader: Option<FileDataLoader>,
     ) -> Result<EventSource, Error> {
-        for prompt in &mut prompts {
-           for file in &mut prompt.files {
-              if let Ok(attachment) = get_file_binary(&file, user_id){
-                 file.base64 = attachment.get_base64();
-              };
-           }
-        }
-        let (messages, system_prompt) = AnthropicMessage::from_prompts(prompts);    
+        let (messages, system_prompt) = AnthropicMessage::from_prompts(prompts, file_data_loader);
+
+        // Build tools list if web search is enabled
         let tools = if web_search {
             Some(vec![AnthropicToolUnion::WebSearchTool(
                 AnthropicWebSearchTool::new(Some(5)),

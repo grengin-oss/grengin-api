@@ -1,9 +1,8 @@
-use anyhow::{Error,anyhow};
+use anyhow::{Error, Ok,anyhow};
 use async_trait::async_trait;
 use reqwest::{Client as ReqwestClient, RequestBuilder, multipart};
 use reqwest_eventsource::EventSource;
-use uuid::Uuid;
-use crate::{config::setting::OpenaiSettings, dto::{files::Attachment, llm::openai::{FileUploadResponse, OpenaiChatCompletionRequest, OpenaiChatCompletionResponse, OpenaiChatRequest, OpenaiMessage}}, handlers::file::get_file_binary, llm::{prompt::Prompt, provider::{OpenaiApis, OpenaiHeaders}}};
+use crate::{config::setting::OpenaiSettings, dto::{files::{Attachment}, llm::openai::{FileUploadResponse, OpenaiChatCompletionRequest, OpenaiChatCompletionResponse, OpenaiChatRequest, OpenaiMessage}}, llm::{prompt::Prompt, provider::{OpenaiApis, OpenaiHeaders}}};
 
 pub const OPENAI_API_URL:&str = "https://api.openai.com";
 
@@ -47,17 +46,7 @@ impl OpenaiApis for ReqwestClient {
      Ok(res.id)
     }
 
-   async fn openai_chat_stream(&self,openai_settings:&OpenaiSettings,model_name:String,temperature:Option<f32>,mut prompts:Vec<Prompt>,user_id:&Uuid) -> Result<EventSource,Error>{
-       for prompt in &mut prompts {
-         for file in &mut prompt.files {
-            if let Ok(attachment) = get_file_binary(&file, user_id){
-               file.openai_id = self
-                 .openai_upload_file(openai_settings, &attachment)
-                 .await
-                 .ok()
-            }
-         }
-       }
+   async fn openai_chat_stream(&self,openai_sesstings:&OpenaiSettings,model_name:String,temperature:Option<f32>,prompts:Vec<Prompt>) -> Result<EventSource,Error>{
        let body = OpenaiChatRequest {
             model: model_name,
             stream: true,
@@ -66,7 +55,7 @@ impl OpenaiApis for ReqwestClient {
         };
       let request = self
             .post(format!("{OPENAI_API_URL}/v1/responses"))
-            .add_openai_headers(openai_settings)
+            .add_openai_headers(openai_sesstings)
             .json(&body);
      let es = EventSource::new(request)?;
      Ok(es)

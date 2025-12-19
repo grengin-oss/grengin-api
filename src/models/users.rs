@@ -8,7 +8,7 @@ use utoipa::ToSchema;
 #[serde(rename_all = "lowercase")]   
 pub enum UserStatus{
     Active,
-    Deactivated,
+    InActive,
     Deleted,
     Suspended,
 }
@@ -34,7 +34,7 @@ pub struct Model {
   pub org_id:Option<Uuid>,
   pub status:UserStatus,
   pub picture:Option<String>,
-  #[sea_orm(column_type = "Text", indexed)]
+  #[sea_orm(column_type = "Text", unique, indexed)]
   pub email:String,
   pub email_verified:bool,
   pub name:Option<String>,
@@ -60,21 +60,13 @@ pub struct Model {
 pub enum Relation {
     #[sea_orm(has_many = "super::conversations::Entity")]
     Conversations,
-    #[sea_orm(has_many = "super::files::Entity")]
-    Files,
     #[sea_orm(has_one = "super::organizations::Entity", belongs_to = "super::organizations::Entity",from = "Column::OrgId",to = "super::organizations::Column::Id")]
-    Organizations,
+    Organizations
 }
 
 impl Related<super::conversations::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Conversations.def()
-    }
-}
-
-impl Related<super::files::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Files.def()
     }
 }
 

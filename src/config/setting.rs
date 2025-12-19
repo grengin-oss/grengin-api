@@ -1,13 +1,10 @@
 use openidconnect::{core::{CoreClient},EndpointMaybeSet, EndpointNotSet, EndpointSet};
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
 use thiserror::Error;
-use uuid::Uuid;
-use crate::{auth::jwt::{KEYS, Keys}, models::{ai_engines, organizations}};
+use crate::auth::jwt::{KEYS, Keys};
 
 pub type OidcClient = CoreClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointMaybeSet, EndpointMaybeSet>;
 
 pub struct Settings {
-    pub org_id:Option<Uuid>,
     pub auth: AuthSettings,
     pub google:GoogleSettings,
     pub azure:AzureSettings,
@@ -54,42 +51,8 @@ pub struct AnthropicSettings {
 }
 
 impl Settings {
-    pub async fn load_ai_engines_from_db(&mut self,database:&DatabaseConnection) -> Result<(), ConfigError> {
-      let org = organizations::Entity::find()
-         .one(database)
-         .await
-         .map_err(|e| ConfigError::DbError(e.to_string()))?
-         .ok_or(ConfigError::NotConfigured("organization not configured error"))?;
-      let ai_engines = ai_engines::Entity::find()
-         .filter(ai_engines::Column::OrgId.eq(org.id))
-         .order_by_desc(ai_engines::Column::CreatedAt)
-         .all(database)
-         .await
-         .map_err(|e| ConfigError::DbError(e.to_string()))?;
-      self.org_id = Some(org.id);
-      for engine in ai_engines {
-            let Some(api_key) = engine.api_key else { continue };
-            match engine.engine_key.as_str() {
-              "openai" => {
-              self.openai = Some(OpenaiSettings {
-                api_key,
-                org_id: None,
-                project_id: None,
-                timeout_ms: 10_000,
-                max_retries: 10,
-              });
-             }
-             "anthropic"  => {
-             self.anthropic = Some(AnthropicSettings { api_key });
-            }
-           _ => {}
-          }
-        }
-        Ok(())
-    }
     pub fn from_env() -> Result<Self, ConfigError> {
         Ok(Self {
-            org_id:None,
             auth:AuthSettings::from_env()?,
             google:GoogleSettings::from_env()?,
             azure:AzureSettings::from_env()?,
@@ -167,10 +130,6 @@ pub enum ConfigError {
     #[error("already initilized env variable: {0}")]
     AlreadyInitilized(&'static str),
     #[error("parsing error env variable: {0}")]
-    ParseError(&'static str),
-    #[error("db fetch error {0}")]
-    DbError(String),
-    #[error("{0}")]
-    NotConfigured(&'static str)
+    ParseError(&'static str)
 }
 

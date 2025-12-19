@@ -57,9 +57,5 @@ pub struct UserUpdateRequest{
    pub name:Option<String>,
    pub role:Option<UserRole>,
    pub department:Option<String>,
-}
-
-#[derive(Deserialize,ToSchema)]
-pub struct UserPatchRequest{
-   pub status:UserStatus,
+   pub status:Option<UserStatus>,
 }

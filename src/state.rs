@@ -19,10 +19,6 @@ impl AppState {
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
          let database = Database::connect(&settings.auth.database_url).await?;
-        //  let _ = settings
-        //    .load_ai_engines_from_db(&database)
-        //    .await
-        //    .map_err(|e|eprintln!("Load ai engines from db error {e}"));
          let google_client = RwLock::new(build_google_client(&req_client,&settings.google.client_id, &settings.google.client_secret, &settings.google.redirect_url).await?);
          let azure_client = RwLock::new(build_azure_client(&req_client,&settings.azure.client_id, &settings.azure.client_secret, &settings.azure.redirect_url,&settings.azure.tenant_id).await?);
          let state =  Self { database, google_client,azure_client,req_client,settings };

@@ -32,17 +32,6 @@ impl Claims {
           exp:exp as usize 
         }
     }
-
-    pub fn default() -> Self {
-       Self { 
-           sub:String::default(), 
-           name:None,
-           user_id:Uuid::new_v4(),
-           org_id:None,
-           role:UserRole::SuperAdmin, 
-           exp:0
-          }
-    }
 }
 
 impl<S> FromRequestParts<S> for Claims

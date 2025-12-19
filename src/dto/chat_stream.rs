@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
-use crate::{dto::files::{File}, models::messages::ChatRole};
+use crate::{dto::files::File, models::messages::ChatRole};
 
 #[derive(Serialize, ToSchema, IntoParams)]
 pub struct ChatStream {
@@ -28,7 +28,6 @@ pub struct ChatInitRequest{
   pub selected_tools: Option<Vec<String>>,
   pub conversation_id: Option<Uuid>,
   pub messages: Vec<MessageRequest>,
-  pub temperature:Option<f32>,
 }
 
 #[derive(Deserialize, ToSchema, IntoParams)]

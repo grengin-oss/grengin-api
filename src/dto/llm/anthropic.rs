@@ -281,31 +281,52 @@ pub struct AnthropicChatResponse {
     pub usage: AnthropicUsage,
 }
 
+// ============== Conversion Methods ==============
+
 impl AnthropicMessage {
-    pub fn from_prompts(prompts: Vec<Prompt>) -> (Vec<Self>, Option<String>){
+    /// Convert from internal Prompt format to Anthropic message format
+    ///
+    /// `file_data_loader` is an optional function that loads file data given a file ID.
+    /// This allows loading files from disk without coupling the DTO to file storage.
+    pub fn from_prompts<F>(prompts: Vec<Prompt>, file_data_loader: Option<F>) -> (Vec<Self>, Option<String>)
+    where
+        F: Fn(&str) -> Option<String>,
+    {
         let mut messages = Vec::new();
         let mut system_prompt = None;
 
         for prompt in prompts {
+            // Handle system messages separately
             if prompt.role == ChatRole::System {
                 system_prompt = Some(prompt.text.clone());
                 continue;
             }
+
             let role = match prompt.role {
                 ChatRole::User => AnthropicRole::User,
                 ChatRole::Assistant => AnthropicRole::Assistant,
                 ChatRole::Tool => AnthropicRole::User,
                 ChatRole::System => continue, // Already handled above
             };
+
+            // Build content blocks
             let mut blocks = Vec::new();
+
+            // Add text content
             if !prompt.text.is_empty() {
                 blocks.push(AnthropicContentBlock::Text {
                     text: prompt.text.clone(),
                 });
             }
+
+            // Add files as image or document blocks
             for file in &prompt.files {
-                 
-                if let Some(data) = file.base64.clone() {
+                // Load file data using the provided loader if we have a file ID
+                let data = file.id.as_ref().and_then(|id| {
+                    file_data_loader.as_ref().and_then(|loader| loader(id))
+                });
+
+                if let Some(data) = data {
                     if file.content_type.starts_with("image/") {
                         blocks.push(AnthropicContentBlock::Image {
                             source: AnthropicImageSource::base64(&file.content_type, data),

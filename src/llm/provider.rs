@@ -3,7 +3,6 @@ use async_trait::async_trait;
 use reqwest_eventsource::EventSource;
 use serde::{Deserialize, Serialize};
 use utoipa::{ToSchema};
-use uuid::Uuid;
 use crate::{config::setting::{OpenaiSettings, AnthropicSettings}, dto::files::Attachment, llm::prompt::Prompt};
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -17,8 +16,8 @@ pub enum LlmProviders{
 
 #[async_trait]
 pub trait OpenaiApis {
-    async fn openai_chat_stream(&self,openai_settings:&OpenaiSettings,model_name:String,temperature:Option<f32>,mut prompts:Vec<Prompt>,user_id:&Uuid) -> Result<EventSource,Error>;
-    async fn openai_chat_stream_text(&self,openai_settings:&OpenaiSettings,model_name:String,temperature:Option<f32>,prompt:Vec<String>) -> Result<EventSource,Error>;
+    async fn openai_chat_stream(&self,openai_sesstings:&OpenaiSettings,model_name:String,temperature:Option<f32>,prompts:Vec<Prompt>) -> Result<EventSource,Error>;
+    async fn openai_chat_stream_text(&self,openai_sesstings:&OpenaiSettings,model_name:String,temperature:Option<f32>,prompt:Vec<String>) -> Result<EventSource,Error>;
     async fn openai_upload_file(&self,openai_settings:&OpenaiSettings,attachment:&Attachment) -> Result<String,Error>;
     async fn openai_get_title(&self,openai_settings:&OpenaiSettings,prompt:String) -> Result<String,Error>;
 } 
@@ -40,7 +39,7 @@ pub trait AnthropicApis {
         temperature: Option<f32>,
         prompts: Vec<Prompt>,
         web_search: bool,
-        user_id:&Uuid,
+        file_data_loader: Option<FileDataLoader>,
     ) -> Result<EventSource, Error>;
 
     async fn anthropic_chat_stream_text(
