@@ -6,7 +6,7 @@ RUN apk add --no-cache build-base curl pkgconfig perl clang lld musl-dev ca-cert
 # install rustup + musl target
 ENV CARGO_HOME=/root/.cargo RUSTUP_HOME=/root/.rustup PATH=/root/.cargo/bin:$PATH
 RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
- && rustup target add aarch64-unknown-linux-musl
+ && rustup target add x86_64-unknown-linux-musl
 
 WORKDIR /usr/src/grengin-api
 
@@ -26,12 +26,12 @@ ENV SWAGGER_UI_OVERWRITE_FOLDER=/swagger-overrides
 
 # build (fully static by default on musl)
 ENV RUSTFLAGS="-C target-feature=+crt-static"
-RUN cargo build --release --target aarch64-unknown-linux-musl
+RUN cargo build --release --target x86_64-unknown-linux-musl
 
 # runtime: static binary; only certs if your app makes HTTPS requests
 FROM scratch
 # for HTTPS/TLS trust store:
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /usr/src/grengin-api/target/aarch64-unknown-linux-musl/release/grengin-api /usr/local/bin/app
+COPY --from=builder /usr/src/grengin-api/target/x86_64-unknown-linux-musl/release/grengin-api /usr/local/bin/app
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/app"]

@@ -2,7 +2,8 @@ use axum::{Json, extract::{Path, State}};
 use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, TryIntoModel};
-use crate::{auth::{claims::Claims, error::AuthError}, dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest}, models::{ai_engines, users::UserRole}, state::SharedState};
+use uuid::Uuid;
+use crate::{auth::{claims::Claims, error::AuthError}, dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest}, handlers::{admin_org::get_org, models::list_models}, models::{ai_engines::{self, ApiKeyStatus}, users::UserRole}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -26,12 +27,77 @@ pub async fn get_ai_engines(
       .all(&app_state.database)
       .await
       .map_err(|e|{
-        eprintln!("db error get all {e}");
-        AuthError::ServiceTemporarilyUnavailable
+         eprintln!("db error get all {e}");
+         AuthError::ServiceTemporarilyUnavailable
       })?;
-   let response = ai_engines
-     .into_iter()
-     .map(|model|{
+    if ai_engines.is_empty() {
+       let (_,Json(models)) = list_models()
+         .await;
+       let (_,Json(org)) = get_org(claims,State(app_state.clone()))
+         .await
+         .map_err(|e|{
+           eprintln!("db error get one {:?}",e);
+           AuthError::ServiceTemporarilyUnavailable
+        })?;
+       let ai_engines_active_models:Vec<ai_engines::ActiveModel> = models
+        .providers
+        .iter()
+        .map(|provider|{
+           ai_engines::ActiveModel {
+             id:Set(Uuid::new_v4()),
+             org_id:Set(org.id),
+             display_name:Set(provider.name.clone()),
+             is_enabled:Set(false),
+             engine_key:Set(provider.key.clone()),
+             api_key_status:Set(ApiKeyStatus::NotValidated),
+             api_key:Set(None),
+             whitelist_models:Set(provider
+                .models
+                .iter()
+                .map(|model| model.name.clone())
+                .collect::<Vec<String>>()),
+             default_model:Set(String::from("<empty>")),
+             api_key_validated_at:Set(None),
+             created_at:Set(Utc::now()),
+             updated_at:Set(Utc::now()), 
+            }
+          })
+          .collect();
+       ai_engines::Entity::insert_many(ai_engines_active_models)
+         .exec(&app_state.database)
+         .await
+         .map_err(|e|{
+            eprintln!("db insert many error {:?}",e);
+            AuthError::ServiceTemporarilyUnavailable
+         })?;
+       let response = models
+         .providers
+         .into_iter()
+         .map(|provider|{
+            AiEngineResponse { 
+              engine_key:provider.key,
+              display_name:provider.name,
+              is_enabled:false,
+              api_key_configured:false,
+              api_key_status:ApiKeyStatus::NotValidated,
+              api_key_preview:Some("<empty>".to_string()),
+              api_key_last_validated_at:None,
+              whitelisted_models:provider
+                .models
+                .into_iter()
+                .map(|model| model.name)
+                .collect(),
+              default_model:None,
+              created_at:Utc::now(),
+              updated_at:Utc::now(),
+            }
+          })
+          .collect();
+       return Ok((StatusCode::OK,Json(response)))
+    }
+    let response = ai_engines
+      .into_iter()
+      .map(|model|{
         AiEngineResponse{
             engine_key:model.engine_key,
             display_name:model.display_name,
@@ -57,7 +123,9 @@ pub async fn get_ai_engines(
            }),
             api_key_last_validated_at:model.api_key_validated_at,
             whitelisted_models:model.whitelist_models,
-            default_model:model.default_model,
+            default_model:Some(model.default_model),
+            created_at:model.created_at,
+            updated_at:model.updated_at
         }
      }).collect();
  Ok((StatusCode::OK,Json(response)))
@@ -94,7 +162,7 @@ pub async fn get_ai_engines_by_key(
         AuthError::ServiceTemporarilyUnavailable
       })?
       .ok_or(AuthError::ResourceNotFound)?;
-      let response = AiEngineResponse{
+    let response = AiEngineResponse{
             engine_key:model.engine_key,
             display_name:model.display_name,
             is_enabled:model.is_enabled,
@@ -119,7 +187,9 @@ pub async fn get_ai_engines_by_key(
            }),
             api_key_last_validated_at:model.api_key_validated_at,
             whitelisted_models:model.whitelist_models,
-            default_model:model.default_model,
+            default_model:Some(model.default_model),
+            created_at:model.created_at,
+            updated_at:model.updated_at
         };
  Ok((StatusCode::OK,Json(response)))
 }
@@ -202,7 +272,9 @@ pub async fn update_ai_engines_by_key(
            }),
             api_key_last_validated_at:model.api_key_validated_at,
             whitelisted_models:model.whitelist_models,
-            default_model:model.default_model,
+            default_model:Some(model.default_model),
+            created_at:model.created_at,
+            updated_at:model.updated_at
         };
  Ok((StatusCode::OK,Json(response)))
 }
