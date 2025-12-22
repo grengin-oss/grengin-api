@@ -36,29 +36,30 @@ impl IntoResponse for AppError {
             AppError::ServiceTemporarilyUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "ServiceTemporarilyUnavailable",
-                "Oops! We're experiencing some technical issues. Please try again later."
+                "The service is temporarily unavailable. Please try again in a few minutes.",
             ),
-            AppError::ResourceNotFound =>  (
+            AppError::ResourceNotFound => (
                 StatusCode::NOT_FOUND,
                 "ResourceNotFound",
-                "Resource not found"
+                "The requested resource was not found.",
             ),
-            AppError::InvalidLlmProvider =>  (
+            AppError::InvalidLlmProvider => (
                 StatusCode::BAD_REQUEST,
                 "InvalidLlmProvider",
-                "Invalid llm provider"
+                "The specified LLM provider is invalid. Please check the provider name and try again.",
             ),
-            AppError::LlmProviderNotConfigured =>  (
+            AppError::LlmProviderNotConfigured => (
                 StatusCode::BAD_REQUEST,
                 "LlmProviderNotConfigured",
-                "Not configured llm provider"
+                "The specified LLM provider is not configured. Please configure it before use.",
             ),
-            AppError::NoMessageInRequest =>  (
+            AppError::NoMessageInRequest => (
                 StatusCode::BAD_REQUEST,
                 "NoMessageInRequest",
-                "No Message found in request"
+                "Missing required field: `message`.",
             ),
         };
+
         let error_response = ErrorResponse {
             detail: ErrorDetailVariant::Rich(ErrorDetail {
                 code: code.to_string(),
@@ -66,6 +67,6 @@ impl IntoResponse for AppError {
             }),
         };
 
-        return (status, Json(error_response)).into_response()
+        (status, Json(error_response)).into_response()
     }
 }
