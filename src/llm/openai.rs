@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use reqwest::{Client as ReqwestClient, RequestBuilder, multipart};
 use reqwest_eventsource::EventSource;
 use uuid::Uuid;
-use crate::{config::setting::OpenaiSettings, dto::{files::Attachment, llm::openai::{FileUploadResponse, OpenaiChatCompletionRequest, OpenaiChatCompletionResponse, OpenaiChatRequest, OpenaiMessage}}, handlers::file::get_file_binary, llm::{prompt::Prompt, provider::{OpenaiApis, OpenaiHeaders}}};
+use crate::{config::setting::OpenaiSettings, dto::{files::Attachment, llm::openai::{FileUploadResponse, OpenaiChatCompletionRequest, OpenaiChatCompletionResponse, OpenaiChatRequest, OpenaiListModelsResponse, OpenaiMessage, OpenaiModel}}, handlers::file::get_file_binary, llm::{prompt::Prompt, provider::{OpenaiApis, OpenaiHeaders}}};
 
 pub const OPENAI_API_URL:&str = "https://api.openai.com";
 
@@ -111,6 +111,18 @@ impl OpenaiApis for ReqwestClient {
           .ok_or(anyhow!("openai response choices is empty"))?
           .ok_or(anyhow!("openai choice message content is empty"))?;
       Ok(title)      
+    }
+
+    async fn openai_list_models(&self,openai_settings: &OpenaiSettings) -> Result<Vec<OpenaiModel>, Error> {
+        let res = self
+            .get(format!("{OPENAI_API_URL}/v1/models"))
+            .add_openai_headers(openai_settings)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<OpenaiListModelsResponse>()
+            .await?;
+        Ok(res.data)
     }
 }
 

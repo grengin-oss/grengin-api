@@ -173,3 +173,17 @@ impl OpenaiMessage {
 pub struct FileUploadResponse {
     pub id: String,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenaiModel {
+    pub id: String,
+    pub object: String,
+    pub created: Option<i64>,
+    pub owned_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenaiListModelsResponse {
+    pub object: String,
+    pub data: Vec<OpenaiModel>,
+}

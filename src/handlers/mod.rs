@@ -9,3 +9,4 @@ pub mod admin_users;
 pub mod llm;
 pub mod admin_ai;
 pub mod models;
+pub mod admin_department;

@@ -3,7 +3,7 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::AuthError}, dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest}, handlers::{admin_org::get_org, models::list_models}, models::{ai_engines::{self, ApiKeyStatus}, users::UserRole}, state::SharedState};
+use crate::{auth::{claims::Claims, error::AuthError}, dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse}, handlers::{admin_org::get_org, models::list_models}, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}, users::UserRole}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -136,7 +136,7 @@ pub async fn get_ai_engines(
     path = "/admin/ai-engines/{engine_key}",
     tag = "admin",
     params(
-        ("engine_key" = String, Path, description = "Engine key example 'openai','anathropic'")
+        ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
     ),
     responses(
         (status = 200, body = AiEngineResponse),
@@ -199,7 +199,7 @@ pub async fn get_ai_engines_by_key(
     path = "/admin/ai-engines/{ai_engine_key}",
     tag = "admin",
     params(
-        ("engine_key" = String, Path, description = "Engine key example 'openai','anathropic'")
+        ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
     ),
     responses(
         (status = 200, description = "Updated successfully"),
@@ -276,5 +276,93 @@ pub async fn update_ai_engines_by_key(
             created_at:model.created_at,
             updated_at:model.updated_at
         };
+ Ok((StatusCode::OK,Json(response)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/admin/ai-engines/{ai_engine_key}/validate",
+    tag = "admin",
+    params(
+        ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
+    ),
+    responses(
+        (status = 200, body = AiEngineValidationResponse),
+        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+    )
+)]
+pub async fn validate_ai_engines_by_key(
+    claims:Claims,
+    Path(ai_engine_key):Path<String>,
+    State(app_state): State<SharedState>,
+) -> Result<(StatusCode,Json<AiEngineValidationResponse>),AuthError>{
+   match claims.role {
+        UserRole::SuperAdmin | UserRole::Admin => {}
+        _ => return Err(AuthError::PermissionDenied),
+   }
+   let api_key_status =  match ai_engine_key.as_str() {
+       "openai" => {
+         let openai_settings = &app_state
+           .settings
+           .openai
+           .as_ref()
+           .ok_or(AuthError::ResourceNotFound)?;
+         let models = app_state
+           .req_client
+           .openai_list_models(openai_settings)
+           .await;
+          if models.is_ok(){
+            ApiKeyStatus::Valid
+          }else{
+            ApiKeyStatus::InValid
+          }
+       }
+       "anthropic" => {
+        let anthropic_settings = &app_state
+          .settings
+          .anthropic
+          .as_ref()
+          .ok_or(AuthError::ResourceNotFound)?;
+        let models = app_state
+           .req_client
+           .anthropic_get_models(anthropic_settings)
+           .await;
+          if models.is_ok(){
+            ApiKeyStatus::Valid
+          }else{
+            ApiKeyStatus::InValid
+          }
+        }
+       _ => ApiKeyStatus::NotConfigured,
+   };
+   let ai_engine = ai_engines::Entity::find()
+      .filter(ai_engines::Column::EngineKey.eq(ai_engine_key))
+      .order_by_desc(ai_engines::Column::CreatedAt)
+      .one(&app_state.database)
+      .await
+      .map_err(|e|{
+        eprintln!("db error get all {e}");
+        AuthError::ServiceTemporarilyUnavailable
+      })?
+      .ok_or(AuthError::ResourceNotFound)?;
+    let mut active_model = ai_engine
+      .clone()
+      .into_active_model();
+    active_model.api_key_status = Set(api_key_status.clone());
+    active_model.updated_at = Set(Utc::now());
+    active_model.api_key_validated_at = Set(Some(Utc::now()));
+    active_model
+      .clone()
+      .update(&app_state.database)
+      .await
+      .map_err(|e|{
+         eprintln!("db error update one {e}");
+         AuthError::ServiceTemporarilyUnavailable
+       })?;
+   let response = AiEngineValidationResponse{ 
+      valid:api_key_status == ApiKeyStatus::Valid,
+      message:"API key validated successfully".into(),
+      models_available:ai_engine.whitelist_models.len() as i64,
+    };
  Ok((StatusCode::OK,Json(response)))
 }

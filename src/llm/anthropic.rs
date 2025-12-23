@@ -5,8 +5,7 @@ use reqwest_eventsource::EventSource;
 use uuid::Uuid;
 use crate::{
     config::setting::AnthropicSettings, dto::llm::anthropic::{
-        AnthropicChatRequest, AnthropicChatResponse, AnthropicContentBlockResponse,
-        AnthropicMessage, AnthropicRole, AnthropicToolUnion, AnthropicWebSearchTool,
+        AnthropicChatRequest, AnthropicChatResponse, AnthropicContentBlockResponse, AnthropicListModelsResponse, AnthropicMessage, AnthropicRole, AnthropicToolUnion, AnthropicWebSearchTool
     }, handlers::file::get_file_binary, llm::{prompt::Prompt, provider::{AnthropicApis, AnthropicHeaders}}
 };
 
@@ -145,5 +144,19 @@ impl AnthropicApis for ReqwestClient {
             .ok_or(anyhow!("anthropic response content is empty"))?;
 
         Ok(title)
+    }
+
+    async fn anthropic_get_models(
+        &self,anthropic_settings:
+        &AnthropicSettings) -> Result<AnthropicListModelsResponse, Error> {
+        let models = self
+            .get(format!("{ANTHROPIC_API_URL}/v1/models"))
+            .add_anthropic_headers(anthropic_settings)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<AnthropicListModelsResponse>()
+            .await?;
+        Ok(models)
     }
 }

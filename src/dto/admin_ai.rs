@@ -25,3 +25,10 @@ use crate::models::ai_engines::ApiKeyStatus;
      pub created_at:DateTime<Utc>,
      pub updated_at:DateTime<Utc>,
   }
+
+#[derive(Serialize,ToSchema)]
+ pub struct AiEngineValidationResponse {
+     pub valid:bool,
+     pub message:String,
+     pub models_available:i64,
+}

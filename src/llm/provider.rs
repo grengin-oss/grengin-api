@@ -4,7 +4,7 @@ use reqwest_eventsource::EventSource;
 use serde::{Deserialize, Serialize};
 use utoipa::{ToSchema};
 use uuid::Uuid;
-use crate::{config::setting::{OpenaiSettings, AnthropicSettings}, dto::files::Attachment, llm::prompt::Prompt};
+use crate::{config::setting::{AnthropicSettings, OpenaiSettings}, dto::{files::Attachment, llm::{anthropic::AnthropicListModelsResponse, openai::OpenaiModel}}, llm::prompt::Prompt};
 
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -21,6 +21,7 @@ pub trait OpenaiApis {
     async fn openai_chat_stream_text(&self,openai_settings:&OpenaiSettings,model_name:String,temperature:Option<f32>,prompt:Vec<String>) -> Result<EventSource,Error>;
     async fn openai_upload_file(&self,openai_settings:&OpenaiSettings,attachment:&Attachment) -> Result<String,Error>;
     async fn openai_get_title(&self,openai_settings:&OpenaiSettings,prompt:String) -> Result<String,Error>;
+    async fn openai_list_models(&self,openai_settings: &OpenaiSettings) -> Result<Vec<OpenaiModel>, Error>;
 } 
 
 pub trait OpenaiHeaders: Send + Sync {
@@ -57,6 +58,11 @@ pub trait AnthropicApis {
         anthropic_settings: &AnthropicSettings,
         prompt: String,
     ) -> Result<String, Error>;
+
+    async fn anthropic_get_models(
+        &self,
+        anthropic_settings: &AnthropicSettings
+    ) -> Result<AnthropicListModelsResponse, Error>;
 }
 
 pub trait AnthropicHeaders: Send + Sync {
