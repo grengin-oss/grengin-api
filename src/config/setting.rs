@@ -75,6 +75,7 @@ impl Settings {
               else { continue }; // fall back for default <empty> string
             match engine.engine_key.as_str() {
               "openai" => {
+              println!("openai api key added successfully from ai_engines Table");
               self.openai = Some(OpenaiSettings {
                 api_key,
                 org_id: None,
@@ -84,6 +85,7 @@ impl Settings {
               });
              }
              "anthropic"  => {
+              println!("anthropic api key added successfully from ai_engines Table");
              self.anthropic = Some(AnthropicSettings { api_key });
             }
            _ => {}

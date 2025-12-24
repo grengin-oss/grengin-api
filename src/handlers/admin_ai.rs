@@ -3,7 +3,7 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, encryption::encrypt_key, error::AuthError}, dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse}, handlers::{admin_org::get_org, models::list_models}, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}, users::UserRole}, state::SharedState};
+use crate::{auth::{claims::Claims, encryption::{encrypt_key}, error::AuthError}, dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse}, handlers::{admin_org::get_org, models::list_models}, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}, users::UserRole}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -104,23 +104,7 @@ pub async fn get_ai_engines(
             is_enabled:model.is_enabled,
             api_key_configured:model.api_key.is_some(),
             api_key_status:model.api_key_status,
-            api_key_preview: model.api_key.as_ref().map(|key| {
-             let key = key.trim();
-             if key.is_empty() {
-              "<empty>".to_string()
-             } else {
-              let keep = 4;
-              let chars: Vec<char> = key.chars().collect();
-              let len = chars.len();
-             if len <= keep * 2 {
-              key.to_string()
-              } else {
-              let start: String = chars.iter().take(keep).collect();
-              let end: String = chars.iter().skip(len - keep).collect();
-              format!("{start}...{end}")
-             }
-            }
-           }),
+            api_key_preview:app_state.get_decrypted_api_key_preview(&model.api_key),
             api_key_last_validated_at:model.api_key_validated_at,
             whitelisted_models:model.whitelist_models,
             default_model:Some(model.default_model),
@@ -168,23 +152,7 @@ pub async fn get_ai_engines_by_key(
             is_enabled:model.is_enabled,
             api_key_configured:model.api_key.is_some(),
             api_key_status:model.api_key_status,
-            api_key_preview: model.api_key.as_ref().map(|key| {
-             let key = key.trim();
-             if key.is_empty() {
-              "<empty>".to_string()
-             } else {
-              let keep = 4;
-              let chars: Vec<char> = key.chars().collect();
-              let len = chars.len();
-             if len <= keep * 2 {
-              key.to_string()
-              } else {
-              let start: String = chars.iter().take(keep).collect();
-              let end: String = chars.iter().skip(len - keep).collect();
-              format!("{start}...{end}")
-             }
-            }
-           }),
+            api_key_preview:app_state.get_decrypted_api_key_preview(&model.api_key),
             api_key_last_validated_at:model.api_key_validated_at,
             whitelisted_models:model.whitelist_models,
             default_model:Some(model.default_model),
@@ -258,23 +226,7 @@ pub async fn update_ai_engines_by_key(
             is_enabled:model.is_enabled,
             api_key_configured:model.api_key.is_some(),
             api_key_status:model.api_key_status,
-            api_key_preview: model.api_key.as_ref().map(|key| {
-             let key = key.trim();
-             if key.is_empty() {
-              "<empty>".to_string()
-             } else {
-              let keep = 4;
-              let chars: Vec<char> = key.chars().collect();
-              let len = chars.len();
-             if len <= keep * 2 {
-              key.to_string()
-              } else {
-              let start: String = chars.iter().take(keep).collect();
-              let end: String = chars.iter().skip(len - keep).collect();
-              format!("{start}...{end}")
-             }
-            }
-           }),
+            api_key_preview:app_state.get_decrypted_api_key_preview(&model.api_key),
             api_key_last_validated_at:model.api_key_validated_at,
             whitelisted_models:model.whitelist_models,
             default_model:Some(model.default_model),
