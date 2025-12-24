@@ -5,7 +5,7 @@ use crate::{auth::{claims::Claims, error::AuthError}, dto::{admin_department::{D
 
 #[utoipa::path(
     get,
-    path = "/admin/department",
+    path = "/admin/departments",
     tag = "admin",
     responses(
         (status = 200, body = DepartmentResponse),
