@@ -193,6 +193,7 @@ async fn oidc_oauth_callback(
     }
     let mut user = users::Entity::find()
         .filter(column.eq(Some(sub.clone())))
+        .filter(users::Column::Status.ne(UserStatus::Deleted))
         .order_by_desc(users::Column::CreatedAt)
         .one(&app_state.database)
         .await
@@ -201,8 +202,7 @@ async fn oidc_oauth_callback(
             AuthError::ServiceTemporarilyUnavailable})?;
     if let Some(u) = &user {
       match &u.status {
-         UserStatus::Deactivated |
-         UserStatus::Suspended |
+         UserStatus::Deactivated | UserStatus::Suspended => return Err(AuthError::AccountDeactivated),
          _ => ()
       }
       let mut active_user:users::ActiveModel = u.clone().into();
@@ -217,12 +217,18 @@ async fn oidc_oauth_callback(
         if let Some(ref em) = email {
             user = users::Entity::find()
                 .filter(users::Column::Email.eq(em))
+                .filter(users::Column::Status.ne(UserStatus::Deleted))
                 .one(&app_state.database)
                 .await
                 .map_err(|e|{
                       eprintln!("{:?}",e);
                       AuthError::ServiceTemporarilyUnavailable})?;
+
             if let Some(u) = &user {
+                match &u.status {
+                   UserStatus::Deactivated | UserStatus::Suspended => return Err(AuthError::AccountDeactivated),
+                   _ => ()
+                }
                 let mut active_user:users::ActiveModel = u.clone().into();
                 active_user.google_id = Set(google_id.clone());
                 active_user.azure_id = Set(azure_id.clone());

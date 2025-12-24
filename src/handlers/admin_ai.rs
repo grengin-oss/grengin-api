@@ -3,7 +3,7 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::AuthError}, dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse}, handlers::{admin_org::get_org, models::list_models}, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}, users::UserRole}, state::SharedState};
+use crate::{auth::{claims::Claims, encryption::encrypt_key, error::AuthError}, dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse}, handlers::{admin_org::get_org, models::list_models}, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}, users::UserRole}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -229,7 +229,12 @@ pub async fn update_ai_engines_by_key(
     let mut active_model = ai_engine
       .clone()
       .into_active_model();
-    active_model.api_key = Set(Some(req.api_key));
+    let encrypted_api_key = encrypt_key(&app_state.settings.auth.app_key,req.api_key.as_bytes())
+      .map_err(|e|{
+        eprintln!("Encryption error for api key: {:?}",e);
+        AuthError::ServiceTemporarilyUnavailable
+       })?;
+    active_model.api_key = Set(Some(encrypted_api_key));
     active_model.updated_at = Set(Utc::now());
     active_model.default_model = Set(req.default_model);
     active_model.whitelist_models = Set(req.whitelisted_models);

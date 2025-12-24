@@ -18,6 +18,7 @@ pub enum AuthError {
     OrgDoesNotExist,
     ResourceNotFound,
     InvalidUserStatus,
+    AccountDeactivated,
 }
 
 impl IntoResponse for AuthError {
@@ -87,6 +88,11 @@ impl IntoResponse for AuthError {
                 StatusCode::BAD_REQUEST,
                 "InvalidUserStatus",
                 "The specified user status is invalid.",
+            ),
+            AuthError::AccountDeactivated => (
+                StatusCode::UNAUTHORIZED,
+                "AccountDeactivated",
+                "This account is deactivated by admin.",
             ),
         };
 

@@ -57,6 +57,7 @@ impl AppState {
          *self.azure_client.write().await = azure_client;
          Ok(())
     }
+
 }
 
 pub type SharedState = Arc<AppState>;

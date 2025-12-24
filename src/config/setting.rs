@@ -2,7 +2,7 @@ use openidconnect::{core::{CoreClient},EndpointMaybeSet, EndpointNotSet, Endpoin
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
 use thiserror::Error;
 use uuid::Uuid;
-use crate::{auth::jwt::{KEYS, Keys}, models::{ai_engines, organizations}};
+use crate::{auth::{encryption::{decrypt_key, key_from_b64}, jwt::{KEYS, Keys}}, models::{ai_engines, organizations}};
 
 pub type OidcClient = CoreClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointMaybeSet, EndpointMaybeSet>;
 
@@ -24,6 +24,7 @@ pub struct ServerSettings {
 
 pub struct AuthSettings {
     pub jwt_secret: String,
+    pub app_key:[u8; 32],
     pub redirect_url:String,
     pub database_url:String,
 }
@@ -68,7 +69,10 @@ impl Settings {
          .map_err(|e| ConfigError::DbError(e.to_string()))?;
       self.org_id = Some(org.id);
       for engine in ai_engines {
-            let Some(api_key) = engine.api_key else { continue };
+            let Some(encrypted_api_key) = engine.api_key else { continue };
+            let Some(api_key) = decrypt_key(&self.auth.app_key,&encrypted_api_key)
+               .ok()
+              else { continue }; // fall back for default <empty> string
             match engine.engine_key.as_str() {
               "openai" => {
               self.openai = Some(OpenaiSettings {
@@ -114,10 +118,13 @@ impl ServerSettings {
 impl AuthSettings {
     pub fn from_env() -> Result<Self, ConfigError> {
         let jwt_secret = std::env::var("JWT_SECRET").map_err(|_| ConfigError::Missing("JWT_SECRET"))?;
+        let app_key = key_from_b64(std::env::var("APP_KEY").map_err(|_| ConfigError::Missing("APP_KEY"))?.as_str()).map_err(|e|{
+            ConfigError::Custom(e.to_string())
+        })?;
         KEYS.set(Keys::new(jwt_secret.as_bytes())).map_err(|_| ConfigError::AlreadyInitilized("KEYS"))?;
         let redirect_url = std::env::var("REDIRECT_URL").map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
         let database_url = std::env::var("DATABASE_URL").map_err(|_| ConfigError::Missing("DATABASE_URL"))?;
-        Ok(Self { jwt_secret,redirect_url,database_url })
+        Ok(Self { jwt_secret,redirect_url,database_url,app_key})
     }
 }
 
@@ -170,7 +177,9 @@ pub enum ConfigError {
     ParseError(&'static str),
     #[error("db fetch error {0}")]
     DbError(String),
+    #[error("DB error {0}")]
+    NotConfigured(&'static str),
     #[error("{0}")]
-    NotConfigured(&'static str)
+    Custom(String),
 }
 
