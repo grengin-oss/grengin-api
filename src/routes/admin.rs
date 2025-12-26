@@ -12,5 +12,5 @@ pub fn admin_routes() -> Router<SharedState> {
      .route("/admin/departments", get(get_departments))
      .route("/admin/ai-engines/{engine-key}/validate",post(validate_ai_engines_by_key))
      .route("/admin/ai-engines/{engine-key}/api-key",delete(delete_ai_engines_api_key_key))
-     .route("/admin/ai-engines/{engine-key}/models",delete(get_ai_engine_models_by_key))
+     .route("/admin/ai-engines/{engine-key}/models",get(get_ai_engine_models_by_key))
 }
