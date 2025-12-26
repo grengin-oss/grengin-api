@@ -1,6 +1,6 @@
 [package]
 name = "grengin-api"
-version = "0.1.86"
+version = "0.1.90"
 edition = "2024"
 
 [workspace]
@@ -33,3 +33,4 @@ futures-util = "0.3.31"
 reqwest-eventsource = "0.6.0"
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 utoipa = { version = "5.4.0", features = ["axum_extras", "chrono", "url", "uuid"] }
+aes-gcm = "0.10.3"

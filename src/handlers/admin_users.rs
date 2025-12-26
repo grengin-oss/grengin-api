@@ -2,7 +2,7 @@ use axum::{Json, extract::{Path, Query, State}};
 use chrono::Utc;
 use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, sea_query::OnConflict};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, sea_query::OnConflict};
 use uuid::Uuid;
 use crate::{auth::{claims::Claims, error::AuthError}, dto::{admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest}, common::{PaginationQuery, SortRule}}, models::users::{self, UserRole, UserStatus}, state::SharedState};
 
@@ -69,6 +69,7 @@ pub async fn get_user_by_id(
         ("search" = Option<String>, Query, description = "Search by name"),
         ("department" = Option<String>, Query, description = "Search by department"),
         ("status" = Option<UserStatus>, Query, description = "Account status"),
+        ("ascending" = Option<bool>, Query, description = "Order of users list default false"),
         ("sort" = Option<SortRule>, Query, description = "Sort by column example 'name','updated_at','created_at','email','last_login_at'"),
     ),
     responses(
@@ -110,14 +111,19 @@ pub async fn get_users(
    if let Some(status) = query.status{
        select = select.filter(users::Column::Status.eq(status))
    }
+   let sort_type = if query.ascending.unwrap_or(false){
+     Order::Asc
+   }else{
+    Order::Desc
+   };
    if let Some(sort) = query.sort{
        select = match sort {
-          SortRule::Name => select.order_by_desc(users::Column::Name),
-          SortRule::Email => select.order_by_desc(users::Column::Email),
-          SortRule::CreatedAt => select.order_by_desc(users::Column::CreatedAt),
-          SortRule::UpdatedAt => select.order_by_desc(users::Column::UpdatedAt),
-          SortRule::LastLoginAt => select.order_by_desc(users::Column::LastLoginAt),
-          _ => select.order_by_desc(users::Column::CreatedAt),
+          SortRule::Name => select.order_by(users::Column::Name,sort_type),
+          SortRule::Email => select.order_by(users::Column::Email,sort_type),
+          SortRule::CreatedAt => select.order_by(users::Column::CreatedAt,sort_type),
+          SortRule::UpdatedAt => select.order_by(users::Column::UpdatedAt,sort_type),
+          SortRule::LastLoginAt => select.order_by(users::Column::LastLoginAt,sort_type),
+          _ => select.order_by(users::Column::CreatedAt,sort_type),
       };
    }
    let paginator = select

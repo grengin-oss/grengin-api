@@ -3,7 +3,7 @@ use sea_orm::{Database, DatabaseConnection};
 use tokio::sync::RwLock;
 use std::sync::Arc;
 use reqwest::Client as ReqwestClient;
-use crate::{auth::{azure::build_azure_client, google::build_google_client}, config::setting::{OidcClient, Settings}, dto::oauth::AuthProvider, models::users};
+use crate::{auth::{azure::build_azure_client, encryption::decrypt_key, google::build_google_client}, config::setting::{OidcClient, Settings}, dto::oauth::AuthProvider, models::users};
 
 pub struct AppState {
     pub database:DatabaseConnection,
@@ -14,15 +14,15 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn from_settings(settings:Settings) -> Result<SharedState,Error> {
+    pub async fn from_settings(mut settings:Settings) -> Result<SharedState,Error> {
          let req_client =  reqwest::ClientBuilder::new()
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
          let database = Database::connect(&settings.auth.database_url).await?;
-        //  let _ = settings
-        //    .load_ai_engines_from_db(&database)
-        //    .await
-        //    .map_err(|e|eprintln!("Load ai engines from db error {e}"));
+         let _ = settings
+           .load_ai_engines_from_db(&database)
+           .await
+           .map_err(|e|eprintln!("Load ai engines from db error {e}"));
          let google_client = RwLock::new(build_google_client(&req_client,&settings.google.client_id, &settings.google.client_secret, &settings.google.redirect_url).await?);
          let azure_client = RwLock::new(build_azure_client(&req_client,&settings.azure.client_id, &settings.azure.client_secret, &settings.azure.redirect_url,&settings.azure.tenant_id).await?);
          let state =  Self { database, google_client,azure_client,req_client,settings };
@@ -57,6 +57,33 @@ impl AppState {
          *self.azure_client.write().await = azure_client;
          Ok(())
     }
+
+    pub fn get_decrypted_api_key_preview(&self,api_key:&Option<String>) -> Option<String> {
+      let api_key_preview =  if let Some(api_key_encrypted) = api_key{
+         let key = decrypt_key(&self.settings.auth.app_key,api_key_encrypted)
+          .ok()
+          .unwrap_or(String::new());
+          if key.is_empty() {
+              Some("<empty>".to_string())
+          } else {
+          let keep = 4;
+          let chars: Vec<char> = key.chars().collect();
+          let len = chars.len();
+          if len <= keep * 2 {
+            Some(key.to_string())
+          } else {
+            let start: String = chars.iter().take(keep).collect();
+            let end: String = chars.iter().skip(len - keep).collect();
+           Some(format!("{start}...{end}"))
+          }
+       }
+    }else{
+       Some("<empty>".to_string())
+    };
+ return api_key_preview
+}
+
+
 }
 
 pub type SharedState = Arc<AppState>;

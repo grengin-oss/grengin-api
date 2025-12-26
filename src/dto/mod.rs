@@ -10,3 +10,4 @@ pub mod admin_org;
 pub mod admin_sso_providers;
 pub mod admin_ai;
 pub mod models;
+pub mod admin_department;

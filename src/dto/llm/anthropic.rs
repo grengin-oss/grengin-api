@@ -8,6 +8,27 @@ pub const ANTHROPIC_DEFAULT_MAX_TOKENS: i32 = 4096;
 
 // ============== Request Structures ==============
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AnthropicModelInfo {
+    pub id: String,
+    /// RFC 3339 datetime string.
+    pub created_at: String,
+    pub display_name: String,
+    /// Always "model"
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AnthropicListModelsResponse {
+    pub data: Vec<AnthropicModelInfo>,
+
+    pub first_id: Option<String>,
+    pub last_id: Option<String>,
+    pub has_more: bool,
+}
+
+
 #[derive(Serialize, Deserialize)]
 pub struct AnthropicChatRequest {
     pub model: String,

@@ -10,6 +10,7 @@ pub enum ApiKeyStatus{
   Valid,
   InValid,
   NotValidated,
+  NotConfigured,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]

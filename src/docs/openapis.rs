@@ -1,6 +1,7 @@
 use utoipa::OpenApi;
 use crate::auth::claims::Claims;
-use crate::dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest};
+use crate::dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel,AiEngineModelsResponse, AiModelCapabilities};
+use crate::dto::admin_department::{Department, DepartmentResponse};
 use crate::dto::admin_org::OrgResponse;
 use crate::dto::admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest};
 use crate::dto::chat::{ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse, TokenUsage};
@@ -12,7 +13,7 @@ use crate::dto::oauth::OAuthCallback;
 use crate::error::{ErrorResponse, ErrorDetail, ErrorDetailVariant};
 use crate::docs::security::ApiSecurityAddon;
 use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, LoginResponse, TokenType, User};
-use crate::handlers::{oidc,chat,chat_stream,file,message,admin_users,admin_org,admin_ai,models};
+use crate::handlers::{oidc,chat,chat_stream,file,message,admin_users,admin_org,admin_ai,models,admin_department};
 use crate::models::messages::ChatRole;
 use crate::models::users::{UserRole, UserStatus};
 
@@ -41,6 +42,10 @@ use crate::models::users::{UserRole, UserStatus};
         admin_ai::get_ai_engines,
         admin_ai::update_ai_engines_by_key,
         admin_ai::get_ai_engines_by_key,
+        admin_ai::validate_ai_engines_by_key,
+        admin_ai::delete_ai_engines_api_key_key,
+        admin_ai::get_ai_engine_models_by_key,
+        admin_department::get_departments,
         file::get_file_by_id,
         file::get_files,
         file::delete_file_by_id,
@@ -86,6 +91,12 @@ use crate::models::users::{UserRole, UserStatus};
             FileUploadRequest,
             ProviderInfo,
             ModelInfo,
+            Department,
+            DepartmentResponse,
+            AiEngineValidationResponse,
+            AiEngineModelsResponse,
+            AiModel,
+            AiModelCapabilities,
         )
     ),
     tags(

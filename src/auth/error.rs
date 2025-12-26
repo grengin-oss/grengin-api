@@ -18,6 +18,7 @@ pub enum AuthError {
     OrgDoesNotExist,
     ResourceNotFound,
     InvalidUserStatus,
+    AccountDeactivated,
 }
 
 impl IntoResponse for AuthError {
@@ -26,69 +27,72 @@ impl IntoResponse for AuthError {
             AuthError::ServiceTemporarilyUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "ServiceTemporarilyUnavailable",
-                "Oops! We're experiencing some technical issues. Please try again later."
+                "The authentication service is temporarily unavailable. Please try again in a few minutes.",
             ),
             AuthError::InvalidCredentials => (
                 StatusCode::UNAUTHORIZED,
                 "InvalidCredentials",
-                "The email or password you entered is incorrect. Please try again."
+                "Invalid email or password.",
             ),
             AuthError::EmailDoesNotExist => (
                 StatusCode::NOT_FOUND,
                 "EmailDoesNotExist",
-                "The email address you entered isn't registered with us. Please try again or sign up for a new account."
+                "No account found for the provided email address.",
             ),
             AuthError::MissingCredentials => (
                 StatusCode::BAD_REQUEST,
                 "MissingCredentials",
-                "Missing credentials. Please provide all required fields."
+                "Missing required credentials.",
             ),
             AuthError::InvalidToken => (
                 StatusCode::UNAUTHORIZED,
                 "InvalidToken",
-                "Invalid token. Please login again."
+                "The access token is invalid or expired. Please sign in again.",
             ),
             AuthError::InvalidProvider => (
                 StatusCode::BAD_REQUEST,
                 "InvalidProvider",
-                "Invalid or unsupported authentication provider."
+                "The specified authentication provider is invalid or unsupported.",
             ),
             AuthError::InvalidCallbackParameters => (
                 StatusCode::BAD_REQUEST,
                 "InvalidCallbackParameters",
-                "Invalid callback parameters. The authentication flow may have been interrupted."
+                "Invalid callback parameters. Please restart the authentication flow.",
             ),
             AuthError::InvalidRedirectUri => (
                 StatusCode::BAD_REQUEST,
                 "InvalidRedirectUri",
-                "Invalid or not supported redirect uri"
-
+                "The redirect URI is invalid or not allowed.",
             ),
             AuthError::PermissionDenied => (
                 StatusCode::BAD_REQUEST,
                 "PermissionDenied",
-                "Admin role required"
-
+                "Permission denied. Admin role is required.",
             ),
-            AuthError::OrgDoesNotExist =>  (
+            AuthError::OrgDoesNotExist => (
                 StatusCode::NOT_FOUND,
                 "OrgDoesNotExist",
-                "Organization does not exist"
+                "The specified organization was not found.",
             ),
             AuthError::EmailAlreadyExist => (
                 StatusCode::CONFLICT,
                 "EmailAlreadyExist",
-                "Email already registered"
+                "An account with this email address already exists.",
             ),
             AuthError::ResourceNotFound => (
                 StatusCode::NOT_FOUND,
                 "ResourceNotFound",
-                "Resource not found"
+                "The requested resource was not found.",
             ),
             AuthError::InvalidUserStatus => (
                 StatusCode::BAD_REQUEST,
                 "InvalidUserStatus",
-                "Deleted status not supported"
+                "The specified user status is invalid.",
+            ),
+            AuthError::AccountDeactivated => (
+                StatusCode::UNAUTHORIZED,
+                "AccountDeactivated",
+                "This account is deactivated by admin.",
             ),
         };
 
@@ -99,6 +103,6 @@ impl IntoResponse for AuthError {
             }),
         };
 
-        return (status, Json(error_response)).into_response()
+        (status, Json(error_response)).into_response()
     }
 }
