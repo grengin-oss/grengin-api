@@ -255,12 +255,22 @@ pub async fn update_ai_engines_by_key(
     let mut active_model = ai_engine
       .clone()
       .into_active_model();
-    let encrypted_api_key = encrypt_key(&app_state.settings.auth.app_key,req.api_key.as_bytes())
-      .map_err(|e|{
-        eprintln!("Encryption error for api key: {:?}",e);
-        AuthError::ServiceTemporarilyUnavailable
+    if let Some(api_key) = req.api_key {
+      let encrypted_api_key = encrypt_key(&app_state.settings.auth.app_key,api_key.as_bytes())
+       .map_err(|e|{
+         eprintln!("Encryption error for api key: {:?}",e);
+         AuthError::ServiceTemporarilyUnavailable
        })?;
-    active_model.api_key = Set(Some(encrypted_api_key));
+      active_model.api_key = Set(Some(encrypted_api_key));
+      app_state
+       .settings
+       .load_ai_engine_in_state(&ai_engine_key,&api_key)
+       .await
+       .map_err(|e|{
+         eprintln!("Ai engine loading error in state {e}");
+         AuthError::ServiceTemporarilyUnavailable
+     })?;
+    }
     active_model.updated_at = Set(Utc::now());
     active_model.default_model = Set(req.default_model);
     active_model.whitelist_models = Set(req.whitelisted_models);
@@ -278,14 +288,6 @@ pub async fn update_ai_engines_by_key(
         eprintln!("db error model parse error {e}");
         AuthError::ServiceTemporarilyUnavailable
       })?;
-   app_state
-     .settings
-     .load_ai_engine_in_state(&ai_engine_key,&req.api_key)
-     .await
-     .map_err(|e|{
-       eprintln!("Ai engine loading error in state {e}");
-       AuthError::ServiceTemporarilyUnavailable
-     })?;
     let response = AiEngineResponse{
             engine_key:model.engine_key,
             display_name:model.display_name,
