@@ -3,7 +3,7 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, encryption::{encrypt_key}, error::AuthError}, dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse}, handlers::{admin_org::get_org, models::list_models}, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}, users::UserRole}, state::SharedState};
+use crate::{auth::{claims::Claims, encryption::encrypt_key, error::AuthError}, dto::admin_ai::{AiEngineModelsResponse, AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel, AiModelCapabilities}, handlers::{admin_org::get_org, models::list_models}, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}, users::UserRole}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -117,7 +117,7 @@ pub async fn get_ai_engines(
 
 #[utoipa::path(
     get,
-    path = "/admin/ai-engines/{engine_key}",
+    path = "/admin/ai-engines/{ai_engine_key}",
     tag = "admin",
     params(
         ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
@@ -159,6 +159,64 @@ pub async fn get_ai_engines_by_key(
             created_at:model.created_at,
             updated_at:model.updated_at
         };
+ Ok((StatusCode::OK,Json(response)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/admin/ai-engines/{ai_engine_key}/models",
+    tag = "admin",
+    params(
+        ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
+    ),
+    responses(
+        (status = 200, body = AiEngineModelsResponse),
+        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+    )
+)]
+pub async fn get_ai_engine_models_by_key(
+    claims:Claims,
+    Path(ai_engine_key):Path<String>,
+    State(app_state): State<SharedState>,
+) -> Result<(StatusCode,Json<AiEngineModelsResponse>),AuthError>{
+   match claims.role {
+        UserRole::SuperAdmin | UserRole::Admin => {}
+        _ => return Err(AuthError::PermissionDenied),
+   }
+   let ai_engine = ai_engines::Entity::find()
+      .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
+      .order_by_desc(ai_engines::Column::CreatedAt)
+      .one(&app_state.database)
+      .await
+      .map_err(|e|{
+        eprintln!("db error get all {e}");
+        AuthError::ServiceTemporarilyUnavailable
+      })?
+      .ok_or(AuthError::ResourceNotFound)?;
+    let mut response = AiEngineModelsResponse{ 
+      models:Vec::new()
+    };
+   let (_,Json(ai_models)) = list_models()
+     .await;
+   for provider in ai_models.providers{
+       if provider.key != ai_engine_key {
+         continue;
+       }
+       for model in provider.models {
+          response.models.push(AiModel{
+            model_id:model.key,
+            display_name:model.engine,
+            is_whitelisted:ai_engine.whitelist_models.contains(&model.name),
+            capabilities:AiModelCapabilities{ 
+               vision:model.supports_vision,
+               function_calling:model.supports_tools,
+               streaming:model.supports_streaming 
+            } 
+          }
+         )
+       }
+    }
+
  Ok((StatusCode::OK,Json(response)))
 }
 

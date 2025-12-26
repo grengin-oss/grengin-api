@@ -1,6 +1,6 @@
 use utoipa::OpenApi;
 use crate::auth::claims::Claims;
-use crate::dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse};
+use crate::dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel,AiEngineModelsResponse, AiModelCapabilities};
 use crate::dto::admin_department::{Department, DepartmentResponse};
 use crate::dto::admin_org::OrgResponse;
 use crate::dto::admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest};
@@ -44,13 +44,14 @@ use crate::models::users::{UserRole, UserStatus};
         admin_ai::get_ai_engines_by_key,
         admin_ai::validate_ai_engines_by_key,
         admin_ai::delete_ai_engines_api_key_key,
+        admin_ai::get_ai_engine_models_by_key,
+        admin_department::get_departments,
         file::get_file_by_id,
         file::get_files,
         file::delete_file_by_id,
         file::download_file,
         file::upload_file,
         models::list_models,
-        admin_department::get_departments,
     ),
     components(
         schemas(
@@ -93,6 +94,9 @@ use crate::models::users::{UserRole, UserStatus};
             Department,
             DepartmentResponse,
             AiEngineValidationResponse,
+            AiEngineModelsResponse,
+            AiModel,
+            AiModelCapabilities,
         )
     ),
     tags(

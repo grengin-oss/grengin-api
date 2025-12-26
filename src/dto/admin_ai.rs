@@ -32,3 +32,24 @@ use crate::models::ai_engines::ApiKeyStatus;
      pub message:String,
      pub models_available:i64,
 }
+
+
+#[derive(Serialize,ToSchema)]
+pub struct AiEngineModelsResponse {
+    pub models: Vec<AiModel>,
+}
+
+#[derive(Serialize,ToSchema)]
+pub struct AiModel {
+    pub model_id: String,
+    pub display_name: String,
+    pub is_whitelisted: bool,
+    pub capabilities: AiModelCapabilities,
+}
+
+#[derive(Serialize,ToSchema)]
+pub struct AiModelCapabilities {
+    pub vision: bool,
+    pub function_calling: bool,
+    pub streaming: bool,
+}
