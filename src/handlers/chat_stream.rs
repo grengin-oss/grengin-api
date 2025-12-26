@@ -65,26 +65,33 @@ pub async fn handle_chat_stream(
  let provider = req.provider.clone().unwrap_or_else(|| "openai".to_string());
  let selected_tools = req.selected_tools.clone().unwrap_or_default();
  let web_search = req.web_search;
-
+ let openai_settings = app_state
+    .settings
+    .openai
+    .read()
+    .await
+    .clone();
+ let anthropic_settings = app_state
+    .settings
+    .anthropic
+    .read()
+    .await
+    .clone();
  // Select provider configuration and set default model
  let (provider_config, model_name) = match provider.to_lowercase().as_str() {
      "openai" => {
-         let settings = app_state
-             .settings
-             .openai
+         let settings = openai_settings
              .as_ref()
              .ok_or(AppError::LlmProviderNotConfigured)?;
          let model = req.model_name.clone().unwrap_or_else(|| "gpt-5.2".to_string());
-         (LlmProviderConfig::OpenAI(settings), model)
+         (LlmProviderConfig::OpenAI(&settings), model)
      },
      "anthropic" => {
-         let settings = app_state
-             .settings
-             .anthropic
-             .as_ref()
-             .ok_or(AppError::LlmProviderNotConfigured)?;
+         let settings = anthropic_settings
+           .as_ref()
+           .ok_or(AppError::LlmProviderNotConfigured)?;
          let model = req.model_name.clone().unwrap_or_else(|| "claude-sonnet-4-5".to_string());
-         (LlmProviderConfig::Anthropic(settings), model)
+         (LlmProviderConfig::Anthropic(&settings), model)
      },
      _ => return Err(AppError::InvalidLlmProvider)
  };

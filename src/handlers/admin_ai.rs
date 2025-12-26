@@ -185,7 +185,7 @@ pub async fn update_ai_engines_by_key(
         _ => return Err(AuthError::PermissionDenied),
    }
    let ai_engine = ai_engines::Entity::find()
-      .filter(ai_engines::Column::EngineKey.eq(ai_engine_key))
+      .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
       .order_by_desc(ai_engines::Column::CreatedAt)
       .one(&app_state.database)
       .await
@@ -220,7 +220,15 @@ pub async fn update_ai_engines_by_key(
         eprintln!("db error model parse error {e}");
         AuthError::ServiceTemporarilyUnavailable
       })?;
-      let response = AiEngineResponse{
+   app_state
+     .settings
+     .load_ai_engine_in_state(&ai_engine_key,&req.api_key)
+     .await
+     .map_err(|e|{
+       eprintln!("Ai engine loading error in state {e}");
+       AuthError::ServiceTemporarilyUnavailable
+     })?;
+    let response = AiEngineResponse{
             engine_key:model.engine_key,
             display_name:model.display_name,
             is_enabled:model.is_enabled,
@@ -244,7 +252,7 @@ pub async fn update_ai_engines_by_key(
         ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
     ),
     responses(
-        (status = 200, description = "Updated successfully"),
+        (status = 200, body = AiEngineResponse),
         (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
     )
 )]
@@ -329,7 +337,9 @@ pub async fn validate_ai_engines_by_key(
          let openai_settings = &app_state
            .settings
            .openai
-           .as_ref()
+           .read()
+           .await
+           .clone()
            .ok_or(AuthError::ResourceNotFound)?;
          let models = app_state
            .req_client
@@ -345,7 +355,9 @@ pub async fn validate_ai_engines_by_key(
         let anthropic_settings = &app_state
           .settings
           .anthropic
-          .as_ref()
+          .write()
+          .await
+          .clone()
           .ok_or(AuthError::ResourceNotFound)?;
         let models = app_state
            .req_client

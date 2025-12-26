@@ -1,6 +1,7 @@
 use openidconnect::{core::{CoreClient},EndpointMaybeSet, EndpointNotSet, EndpointSet};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
 use thiserror::Error;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 use crate::{auth::{encryption::{decrypt_key, key_from_b64}, jwt::{KEYS, Keys}}, models::{ai_engines, organizations}};
 
@@ -12,11 +13,10 @@ pub struct Settings {
     pub google:GoogleSettings,
     pub azure:AzureSettings,
     pub server:ServerSettings,
-    pub openai:Option<OpenaiSettings>,
-    pub anthropic:Option<AnthropicSettings>,
+    pub openai:RwLock<Option<OpenaiSettings>>,
+    pub anthropic:RwLock<Option<AnthropicSettings>>,
 }
 
-#[derive(Debug, Clone)]
 pub struct ServerSettings {
     pub host: String,
     pub port: u16,
@@ -29,12 +29,14 @@ pub struct AuthSettings {
     pub database_url:String,
 }
 
+#[derive(Clone)]
 pub struct GoogleSettings {
     pub client_id:String,
     pub client_secret:String,
     pub redirect_url:String
 }
 
+#[derive(Clone)]
 pub struct AzureSettings {
     pub client_id:String,
     pub client_secret:String,
@@ -42,6 +44,7 @@ pub struct AzureSettings {
     pub redirect_url:String
 }
 
+#[derive(Clone)]
 pub struct OpenaiSettings {
     pub api_key:String,
     pub org_id:Option<String>,
@@ -50,6 +53,7 @@ pub struct OpenaiSettings {
     pub max_retries:i32,
 }
 
+#[derive(Clone)]
 pub struct AnthropicSettings {
     pub api_key: String,
 }
@@ -73,11 +77,18 @@ impl Settings {
             let Some(api_key) = decrypt_key(&self.auth.app_key,&encrypted_api_key)
                .ok()
               else { continue }; // fall back for default <empty> string
-            match engine.engine_key.as_str() {
+           self.load_ai_engine_in_state(engine.engine_key, api_key)
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn load_ai_engine_in_state<S: Into<String>>(&self,engine_key:S,api_key:S) -> Result<(),ConfigError> {
+       match engine_key.into().as_str() {
               "openai" => {
               println!("openai api key added successfully from ai_engines Table");
-              self.openai = Some(OpenaiSettings {
-                api_key,
+              *self.openai.write().await = Some(OpenaiSettings {
+                api_key:api_key.into(),
                 org_id: None,
                 project_id: None,
                 timeout_ms: 10_000,
@@ -86,13 +97,13 @@ impl Settings {
              }
              "anthropic"  => {
               println!("anthropic api key added successfully from ai_engines Table");
-             self.anthropic = Some(AnthropicSettings { api_key });
+             *self.anthropic.write().await = Some(AnthropicSettings { api_key:api_key.into() });
             }
            _ => {}
           }
-        }
-        Ok(())
+      Ok(())
     }
+
     pub fn from_env() -> Result<Self, ConfigError> {
         Ok(Self {
             org_id:None,
@@ -100,8 +111,8 @@ impl Settings {
             google:GoogleSettings::from_env()?,
             azure:AzureSettings::from_env()?,
             server:ServerSettings::from_env()?,
-            openai:OpenaiSettings::from_env().ok(),
-            anthropic:AnthropicSettings::from_env().ok(),
+            openai:RwLock::new(OpenaiSettings::from_env().ok()),
+            anthropic:RwLock::new(AnthropicSettings::from_env().ok()),
         })
     }
 }

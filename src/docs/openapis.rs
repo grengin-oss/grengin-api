@@ -43,6 +43,7 @@ use crate::models::users::{UserRole, UserStatus};
         admin_ai::update_ai_engines_by_key,
         admin_ai::get_ai_engines_by_key,
         admin_ai::validate_ai_engines_by_key,
+        admin_ai::delete_ai_engines_api_key_key,
         file::get_file_by_id,
         file::get_files,
         file::delete_file_by_id,
