@@ -5,10 +5,10 @@ use crate::models::ai_engines::ApiKeyStatus;
 
 #[derive(Deserialize,ToSchema)]
  pub struct AiEngineUpdateRequest{
-    pub is_enabled:bool,
+    pub is_enabled:Option<bool>,
     pub api_key:Option<String>,
-    pub whitelisted_models:Vec<String>,
-    pub default_model:String,
+    pub whitelisted_models:Option<Vec<String>>,
+    pub default_model:Option<String>,
 }
 
 #[derive(Serialize,ToSchema)]

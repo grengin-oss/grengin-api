@@ -205,7 +205,7 @@ pub async fn get_ai_engine_models_by_key(
        for model in provider.models {
           response.models.push(AiModel{
             model_id:model.key,
-            display_name:model.engine,
+            display_name:model.name.clone(),
             is_whitelisted:ai_engine.whitelist_models.contains(&model.name),
             capabilities:AiModelCapabilities{ 
                vision:model.supports_vision,
@@ -272,8 +272,15 @@ pub async fn update_ai_engines_by_key(
      })?;
     }
     active_model.updated_at = Set(Utc::now());
-    active_model.default_model = Set(req.default_model);
-    active_model.whitelist_models = Set(req.whitelisted_models);
+    if let Some(default_model) = req.default_model{
+      active_model.default_model = Set(default_model);
+    }
+    if let Some(whitelist_models) = req.whitelisted_models{
+      active_model.whitelist_models = Set(whitelist_models);
+    }
+    if let Some(is_enabled) = req.is_enabled {
+      active_model.is_enabled = Set(is_enabled);
+    }
     active_model
      .clone()
      .update(&app_state.database)
