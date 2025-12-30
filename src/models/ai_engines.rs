@@ -8,7 +8,7 @@ use utoipa::ToSchema;
 #[serde(rename_all = "snake_case")]   
 pub enum ApiKeyStatus{
   Valid,
-  InValid,
+  Invalid,
   NotValidated,
   NotConfigured,
 }

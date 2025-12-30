@@ -22,7 +22,11 @@ pub async fn get_ai_engines(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
     }
-    let ai_engines = ai_engines::Entity::find()
+    let mut selector = ai_engines::Entity::find();
+    if let Some(org_id) = claims.org_id {
+      selector = selector.filter(ai_engines::Column::OrgId.eq(org_id));
+    }
+    let ai_engines = selector
       .order_by_desc(ai_engines::Column::CreatedAt)
       .all(&app_state.database)
       .await
@@ -136,7 +140,11 @@ pub async fn get_ai_engines_by_key(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
    }
-   let model = ai_engines::Entity::find()
+   let mut selector = ai_engines::Entity::find();
+   if let Some(org_id) = claims.org_id {
+     selector = selector.filter(ai_engines::Column::OrgId.eq(org_id));
+   }
+   let model = selector
       .filter(ai_engines::Column::EngineKey.eq(ai_engine_key))
       .order_by_desc(ai_engines::Column::CreatedAt)
       .one(&app_state.database)
@@ -183,7 +191,11 @@ pub async fn get_ai_engine_models_by_key(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
    }
-   let ai_engine = ai_engines::Entity::find()
+   let mut selector = ai_engines::Entity::find();
+   if let Some(org_id) = claims.org_id {
+     selector = selector.filter(ai_engines::Column::OrgId.eq(org_id));
+   }
+   let ai_engine = selector
       .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
       .order_by_desc(ai_engines::Column::CreatedAt)
       .one(&app_state.database)
@@ -242,7 +254,11 @@ pub async fn update_ai_engines_by_key(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
    }
-   let ai_engine = ai_engines::Entity::find()
+   let mut selector = ai_engines::Entity::find();
+   if let Some(org_id) = claims.org_id {
+     selector = selector.filter(ai_engines::Column::OrgId.eq(org_id));
+   }
+   let ai_engine = selector
       .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
       .order_by_desc(ai_engines::Column::CreatedAt)
       .one(&app_state.database)
@@ -332,7 +348,11 @@ pub async fn delete_ai_engines_api_key_key(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
    }
-   let ai_engine = ai_engines::Entity::find()
+   let mut selector = ai_engines::Entity::find();
+   if let Some(org_id) = claims.org_id {
+     selector = selector.filter(ai_engines::Column::OrgId.eq(org_id));
+   }
+   let ai_engine = selector
       .filter(ai_engines::Column::EngineKey.eq(ai_engine_key))
       .order_by_desc(ai_engines::Column::CreatedAt)
       .one(&app_state.database)
@@ -399,6 +419,10 @@ pub async fn validate_ai_engines_by_key(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
    }
+   let mut selector = ai_engines::Entity::find();
+   if let Some(org_id) = claims.org_id {
+     selector = selector.filter(ai_engines::Column::OrgId.eq(org_id));
+   }
    let api_key_status =  match ai_engine_key.as_ref() {
        "openai" => {
          let openai_settings = &app_state
@@ -415,7 +439,7 @@ pub async fn validate_ai_engines_by_key(
           if models.is_ok(){
             ApiKeyStatus::Valid
           }else{
-            ApiKeyStatus::InValid
+            ApiKeyStatus::Invalid
           }
        }
        "anthropic" => {
@@ -433,12 +457,12 @@ pub async fn validate_ai_engines_by_key(
           if models.is_ok(){
             ApiKeyStatus::Valid
           }else{
-            ApiKeyStatus::InValid
+            ApiKeyStatus::Invalid
           }
         }
        _ => ApiKeyStatus::NotConfigured,
    };
-   let ai_engine = ai_engines::Entity::find()
+   let ai_engine = selector
       .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
       .order_by_desc(ai_engines::Column::CreatedAt)
       .one(&app_state.database)
