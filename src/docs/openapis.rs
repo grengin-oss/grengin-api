@@ -57,7 +57,7 @@ use crate::models::users::{UserRole, UserStatus};
         file::delete_file_by_id,
         file::download_file,
         file::upload_file,
-        models::list_models,
+        models::get_list_models,
     ),
     components(
         schemas(

@@ -69,6 +69,32 @@ impl AppState {
         }
     }
 
+    pub async fn check_ai_engine_is_enabled(&self,ai_engine_key:&str) -> Option<bool> {
+           match ai_engine_key.to_lowercase().as_str() {
+            "openai" => {
+                let is_enabled = self
+                   .settings
+                   .openai
+                   .read()
+                   .await
+                   .as_ref()
+                   .map(|setting| setting.is_enabled);
+                is_enabled
+            },
+            "anthropic" => {
+                let is_enabled = self
+                   .settings
+                   .anthropic
+                   .read()
+                   .await
+                   .as_ref()
+                   .map(|setting| setting.is_enabled);
+                is_enabled
+            },
+            _ => None
+        }
+    }
+
     pub async fn get_oidc_client_and_column_and_redirect_uri(&self, provider: &AuthProvider) -> Result<(&RwLock<Option<OidcClient>>, users::Column,Option<String>), ConfigError> {
         match provider.to_lowercase().as_str() {
             "azure" => {
@@ -77,8 +103,8 @@ impl AppState {
                    .azure
                    .read()
                    .await
-                   .clone()
-                   .map(|setting| setting.redirect_url);
+                   .as_ref()
+                   .map(|setting| setting.redirect_url.clone());
                 return Ok((&self.azure_client, users::Column::AzureId,redirect_url))
             },
             "google" => {
@@ -87,8 +113,8 @@ impl AppState {
                    .google
                    .read()
                    .await
-                   .clone()
-                   .map(|setting| setting.redirect_url);
+                   .as_ref()
+                   .map(|setting| setting.redirect_url.clone());
                 return Ok((&self.google_client, users::Column::GoogleId,redirect_url))
             },
             _ => Err(ConfigError::InvalidSSoProvider(provider.into())),

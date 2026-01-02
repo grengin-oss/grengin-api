@@ -1,17 +1,9 @@
-use axum::Json;
+use axum::{Json, extract::State};
 use reqwest::StatusCode;
-use crate::dto::models::{ModelInfo, ModelsResponse, ProviderInfo};
+use crate::{dto::models::{ModelInfo, ModelsResponse, ProviderInfo}, state::SharedState};
 
-#[utoipa::path(
-    get,
-    path = "/models",
-    tag = "models",
-    responses(
-        (status = 200, body = ModelsResponse, description = "List of providers and models"),
-    )
-)]
-pub async fn list_models() -> (StatusCode, Json<ModelsResponse>) {
-    let providers = vec![
+pub fn list_models() -> Vec<ProviderInfo> {
+   vec![
         ProviderInfo {
             key: "openai".to_string(),
             name: "OpenAI".to_string(),
@@ -176,7 +168,29 @@ pub async fn list_models() -> (StatusCode, Json<ModelsResponse>) {
         //         },
         //     ],
         // },
-    ];
+      ]
+}
 
-    (StatusCode::OK, Json(ModelsResponse { providers }))
+#[utoipa::path(
+    get,
+    path = "/models",
+    tag = "models",
+    responses(
+        (status = 200, body = ModelsResponse, description = "List of providers and models"),
+    )
+)]
+pub async fn get_list_models(
+    State(app_state):State<SharedState>,
+) -> (StatusCode, Json<ModelsResponse>) {
+      let mut filtered_providers = Vec::new();
+      for provider in list_models(){
+        let is_enabled = app_state
+          .check_ai_engine_is_enabled(&provider.key)
+          .await
+          .unwrap_or(false);
+        if is_enabled{
+            filtered_providers.push(provider);
+        }
+      }
+ (StatusCode::OK, Json(ModelsResponse {providers:filtered_providers}))
 }

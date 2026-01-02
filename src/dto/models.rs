@@ -1,6 +1,8 @@
 use serde::Serialize;
 use utoipa::ToSchema;
 
+use crate::handlers::models::list_models;
+
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelsResponse {
@@ -15,6 +17,10 @@ impl ModelsResponse {
        .find(|provider | provider.key == provider_key)
        .map(|provider| provider.icon.clone());
       icon
+    }
+
+    pub fn default() -> Self {
+      ModelsResponse{providers:list_models()}
     }
 }
 

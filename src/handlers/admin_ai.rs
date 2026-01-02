@@ -3,7 +3,7 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::AuthError}, dto::admin_ai::{AiEngineModelsResponse, AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel, AiModelCapabilities}, handlers::{admin_org::get_org, models::list_models}, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}, users::UserRole}, state::SharedState};
+use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::AuthError}, dto::{admin_ai::{AiEngineModelsResponse, AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel, AiModelCapabilities}, models::ModelsResponse}, handlers::{admin_org::get_org}, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}, users::UserRole}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -26,8 +26,7 @@ pub async fn get_ai_engines(
     if let Some(org_id) = claims.org_id {
       selector = selector.filter(ai_engines::Column::OrgId.eq(org_id));
     }
-    let (_,Json(ai_models)) = list_models()
-      .await;
+    let ai_models = ModelsResponse::default();
     let ai_engines = selector
       .order_by_desc(ai_engines::Column::CreatedAt)
       .all(&app_state.database)
@@ -143,8 +142,7 @@ pub async fn get_ai_engines_by_key(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
    }
-   let (_,Json(ai_models)) = list_models()
-      .await;
+   let ai_models = ModelsResponse::default();
    let mut selector = ai_engines::Entity::find();
    if let Some(org_id) = claims.org_id {
      selector = selector.filter(ai_engines::Column::OrgId.eq(org_id));
@@ -214,8 +212,7 @@ pub async fn get_ai_engine_models_by_key(
     let mut response = AiEngineModelsResponse{ 
       models:Vec::new()
     };
-   let (_,Json(ai_models)) = list_models()
-     .await;
+   let ai_models = ModelsResponse::default();
    for provider in ai_models.providers{
        if provider.key != ai_engine_key {
          continue;
@@ -233,8 +230,7 @@ pub async fn get_ai_engine_models_by_key(
           }
          )
        }
-    }
-
+    };
  Ok((StatusCode::OK,Json(response)))
 }
 
@@ -260,8 +256,7 @@ pub async fn update_ai_engines_by_key(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
    }
-   let (_,Json(ai_models)) = list_models()
-       .await;
+   let ai_models = ModelsResponse::default();
    let mut selector = ai_engines::Entity::find();
    if let Some(org_id) = claims.org_id {
      selector = selector.filter(ai_engines::Column::OrgId.eq(org_id));
@@ -365,8 +360,7 @@ pub async fn delete_ai_engines_api_key_key(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
    }
-   let (_,Json(ai_models)) = list_models()
-      .await;
+   let ai_models = ModelsResponse::default();
    let mut selector = ai_engines::Entity::find();
    if let Some(org_id) = claims.org_id {
      selector = selector.filter(ai_engines::Column::OrgId.eq(org_id));
