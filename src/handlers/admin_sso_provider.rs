@@ -276,6 +276,9 @@ pub async fn update_sso_provider_by_id(
         .settings
         .load_sso_provider_in_state(&updated_model.provider,&updated_model.client_id,&client_secret,&updated_model.redirect_url, updated_model.tenant_id.as_ref(), updated_model.is_enabled,allowed_domains)
         .await;
+      let _ = app_state
+        .refresh_oidc_client(&updated_model.provider)
+        .await;
      }
      let response = SsoProviderResponse { 
         id:updated_model.id,
