@@ -160,7 +160,7 @@ impl AppState {
         }
     }
 
-    pub async fn refresh_oidc_clinet(&self, provider: &AuthProvider) -> Result<(), Error> {
+    pub async fn refresh_oidc_client(&self, provider: &AuthProvider) -> Result<(), Error> {
         match provider.to_lowercase().as_str() {
             "azure" => self.refresh_azure_client().await?,
             "google" => self.refresh_google_client().await?,

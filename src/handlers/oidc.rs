@@ -180,7 +180,7 @@ async fn oidc_oauth_callback(
             return Err(AuthError::InvalidToken);
         }
         app_state
-            .refresh_oidc_clinet(&provider)
+            .refresh_oidc_client(&provider)
             .await
             .map_err(|err| {
                 eprintln!("oidc client refresh error: {err:?}");
