@@ -209,22 +209,13 @@ pub async fn add_new_user(
      department:Set(Some(req.department)),
      metadata:Set(None), 
     };
-   let affected: u64 = users::Entity::insert(user)
-    .on_conflict(
-        OnConflict::column(users::Column::Email)
-            .do_nothing()
-            .to_owned(),
-    )
-    .exec_without_returning(&app_state.database)
-    .await
-    .map_err(|e| {
+   user
+     .insert(&app_state.database)
+     .await
+     .map_err(|e| {
         eprintln!("insert error: {e}");
         AuthError::ServiceTemporarilyUnavailable
     })?;
-
-   if affected == 0 {
-     return Err(AuthError::EmailAlreadyExist);
-   }
  Ok((StatusCode::CREATED,"User added successfully"))
 }
 

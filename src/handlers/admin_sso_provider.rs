@@ -56,6 +56,7 @@ pub async fn get_sso_providers(
                 client_id:"<empty>".to_string(),
                 client_secret:"<empty>".to_string(),
                 issuer_url:"<empty>".to_string(),
+                redirect_url:"<empty>".to_string(),
                 allowed_domains:Vec::new(),
                 is_enabled: false,
                 is_default: false,
@@ -82,7 +83,8 @@ pub async fn get_sso_providers(
             let decrypted_client_secret = decrypt_key(&app_state.settings.auth.app_key,&model.client_secret)
               .ok();
            SsoProviderResponse{
-             id:model.id, 
+             id:model.id,
+             redirect_url:model.redirect_url, 
              provider:model.provider,
              name:model.name,
              client_id:model.client_id,
@@ -135,6 +137,7 @@ pub async fn get_sso_provider_by_id(
               id:model.id, 
               provider:model.provider,
               name:model.name,
+              redirect_url:model.redirect_url,
               client_id:model.client_id,
               client_secret:app_state.get_decrypted_api_key_preview(&decrypted_client_secret),
               issuer_url: model.issuer_url,
@@ -246,6 +249,9 @@ pub async fn update_sso_provider_by_id(
      if let Some(issuer_url) = req.issuer_url  {
          active_model.issuer_url = Set(issuer_url);
      }
+     if let Some(redirect_url) = req.redirect_url  {
+        active_model.redirect_url = Set(redirect_url);
+     }
      active_model.tenant_id = Set(req.tenant_id);
      if let Some(client_secret) = req.client_secret {
         active_model.client_secret = Set(encrypt_key(&app_state.settings.auth.app_key,client_secret.as_bytes())
@@ -262,6 +268,12 @@ pub async fn update_sso_provider_by_id(
             eprintln!("Db update error {:?}",e);
             AuthError::ServiceTemporarilyUnavailable
      })?;
+     if let Ok(client_secret) = decrypt_key(&app_state.settings.auth.app_key,&updated_model.client_secret)  {
+      let _ = app_state
+        .settings
+        .load_sso_provider_in_state(&updated_model.provider,&updated_model.client_id,&client_secret,&updated_model.redirect_url, updated_model.tenant_id.as_ref(), updated_model.is_enabled)
+        .await;
+     }
      let response = SsoProviderResponse { 
         id:updated_model.id,
         provider:updated_model.provider,
@@ -269,6 +281,7 @@ pub async fn update_sso_provider_by_id(
         client_id:updated_model.client_id,
         client_secret:app_state.get_decrypted_api_key_preview(&Some(updated_model.client_secret)),
         issuer_url:updated_model.issuer_url,
+        redirect_url:updated_model.redirect_url,
         allowed_domains:updated_model.allowed_domains,
         is_enabled:updated_model.is_enabled,
         created_at:updated_model.created_at,

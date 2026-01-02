@@ -13,6 +13,7 @@ pub struct SsoProviderResponse {
    #[schema(value_type = String, rename = "client_secret_preview")]
    pub client_secret:Option<String>,
    pub issuer_url:String,
+   pub redirect_url:String,
    pub allowed_domains:Vec<String>,
    pub is_enabled:bool,
    pub created_at:DateTime<Utc>,
@@ -27,6 +28,7 @@ pub struct SsoProviderUpdateRequest {
    pub client_id:Option<String>,
    pub client_secret:Option<String>,
    pub issuer_url:Option<String>,
+   pub redirect_url:Option<String>,
    pub allowed_domains:Option<Vec<String>>,
    pub is_enabled:Option<bool>,
 }

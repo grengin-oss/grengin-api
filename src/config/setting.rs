@@ -3,15 +3,15 @@ use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOr
 use thiserror::Error;
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use crate::{auth::{encryption::{decrypt_key, key_from_b64}, jwt::{KEYS, Keys}}, models::{ai_engines, organizations}};
+use crate::{auth::{encryption::{decrypt_key, key_from_b64}, jwt::{KEYS, Keys}}, models::{ai_engines, organizations, sso_providers}};
 
 pub type OidcClient = CoreClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointMaybeSet, EndpointMaybeSet>;
 
 pub struct Settings {
     pub org_id:Option<Uuid>,
     pub auth: AuthSettings,
-    pub google:GoogleSettings,
-    pub azure:AzureSettings,
+    pub google:RwLock<Option<GoogleSettings>>,
+    pub azure:RwLock<Option<AzureSettings>>,
     pub server:ServerSettings,
     pub openai:RwLock<Option<OpenaiSettings>>,
     pub anthropic:RwLock<Option<AnthropicSettings>>,
@@ -33,7 +33,8 @@ pub struct AuthSettings {
 pub struct GoogleSettings {
     pub client_id:String,
     pub client_secret:String,
-    pub redirect_url:String
+    pub redirect_url:String,
+    pub is_enabled:bool,
 }
 
 #[derive(Clone)]
@@ -41,7 +42,8 @@ pub struct AzureSettings {
     pub client_id:String,
     pub client_secret:String,
     pub tenant_id:String,
-    pub redirect_url:String
+    pub redirect_url:String,
+    pub is_enabled:bool,
 }
 
 #[derive(Clone)]
@@ -51,11 +53,13 @@ pub struct OpenaiSettings {
     pub project_id:Option<String>,
     pub timeout_ms:i32,
     pub max_retries:i32,
+    pub is_enabled:bool,
 }
 
 #[derive(Clone)]
 pub struct AnthropicSettings {
     pub api_key: String,
+    pub is_enabled:bool,
 }
 
 impl Settings {
@@ -73,17 +77,40 @@ impl Settings {
          .map_err(|e| ConfigError::DbError(e.to_string()))?;
       self.org_id = Some(org.id);
       for engine in ai_engines {
-            let Some(encrypted_api_key) = engine.api_key else { continue };
+            if engine.is_enabled {continue;}
+            let Some(encrypted_api_key) = engine.api_key else {continue};
             let Some(api_key) = decrypt_key(&self.auth.app_key,&encrypted_api_key)
                .ok()
               else { continue }; // fall back for default <empty> string
-           self.load_ai_engine_in_state(engine.engine_key, api_key)
+           self.load_ai_engine_in_state(engine.engine_key, api_key,true)
             .await?;
         }
-        Ok(())
+     Ok(())
     }
 
-    pub async fn load_ai_engine_in_state<S: Into<String>>(&self,engine_key:S,api_key:S) -> Result<(),ConfigError> {
+    pub async fn get_ai_engine_api_key<S: Into<String>>(&self,provider:S) -> Option<String> {
+       match provider.into().as_str() {
+           "openai" => {
+              let api_key = self.openai
+                .read()
+                .await
+                .clone()
+                .map(|openai| openai.api_key);
+              return api_key;
+           },
+           "anthropic" => {
+              let api_key = self.anthropic
+                .read()
+                .await
+                .clone()
+                .map(|anthropic| anthropic.api_key);
+              return api_key;
+           }
+           _ => return  None,
+       }
+    }
+
+    pub async fn load_ai_engine_in_state<S: Into<String>>(&self,engine_key:S,api_key:S,is_enabled:bool) -> Result<(),ConfigError> {
        match engine_key.into().as_str() {
               "openai" => {
               println!("openai api key added successfully from ai_engines Table");
@@ -93,11 +120,61 @@ impl Settings {
                 project_id: None,
                 timeout_ms: 10_000,
                 max_retries: 10,
+                is_enabled,
               });
              }
              "anthropic"  => {
               println!("anthropic api key added successfully from ai_engines Table");
-             *self.anthropic.write().await = Some(AnthropicSettings { api_key:api_key.into() });
+             *self.anthropic.write().await = Some(AnthropicSettings { api_key:api_key.into(),is_enabled });
+            }
+           _ => {}
+          }
+      Ok(())
+    }
+
+    pub async fn load_sso_providers_from_db(&mut self,database:&DatabaseConnection) -> Result<(), ConfigError> {
+      let org = organizations::Entity::find()
+         .one(database)
+         .await
+         .map_err(|e| ConfigError::DbError(e.to_string()))?
+         .ok_or(ConfigError::NotConfigured("organization not configured error"))?;
+      let sso_providers = sso_providers::Entity::find()
+         .filter(sso_providers::Column::OrgId.eq(org.id))
+         .order_by_desc(sso_providers::Column::CreatedAt)
+         .all(database)
+         .await
+         .map_err(|e| ConfigError::DbError(e.to_string()))?;
+       for provider in sso_providers {
+            let Some(client_secret) = decrypt_key(&self.auth.app_key,&provider.client_secret)
+               .ok()
+            else { continue }; // fall back for default <empty> string
+            self.load_sso_provider_in_state(provider.name, client_secret, provider.client_id, provider.redirect_url, provider.tenant_id,true)
+              .await?;
+       }
+       Ok(())
+    }
+
+    pub async fn load_sso_provider_in_state<S: Into<String>>(&self,provider:S,client_secret:S,client_id:S,redirect_url:S,tenant_id:Option<S>,is_enabled:bool) -> Result<(),ConfigError> {
+       match provider.into().as_str() {
+              "azure" => {
+              println!("openai api key added successfully from ai_engines Table");
+              *self.azure.write().await = Some(AzureSettings {
+                client_id:client_id.into(),
+                client_secret:client_secret.into(),
+                tenant_id:tenant_id.map(|t| t.into()).unwrap_or("common".into()),
+                redirect_url:redirect_url.into(),
+                is_enabled 
+            });
+             }
+             "google"  => {
+              println!("anthropic api key added successfully from ai_engines Table");
+             *self.google.write().await = Some(GoogleSettings { 
+                 client_id:client_id.into(),
+                 client_secret:client_secret.into(),
+                 redirect_url:redirect_url.into(),
+                 is_enabled 
+                }
+             );
             }
            _ => {}
           }
@@ -108,8 +185,8 @@ impl Settings {
         Ok(Self {
             org_id:None,
             auth:AuthSettings::from_env()?,
-            google:GoogleSettings::from_env()?,
-            azure:AzureSettings::from_env()?,
+            google:RwLock::new(GoogleSettings::from_env().ok()),
+            azure:RwLock::new(AzureSettings::from_env().ok()),
             server:ServerSettings::from_env()?,
             openai:RwLock::new(OpenaiSettings::from_env().ok()),
             anthropic:RwLock::new(AnthropicSettings::from_env().ok()),
@@ -147,7 +224,7 @@ impl GoogleSettings {
         let client_secret = std::env::var("GOOGLE_CLIENT_SECRET").map_err(|_| ConfigError::Missing("GOOGLE_CLIENT_SECRET"))?;
         let app_redirect_url = std::env::var("REDIRECT_URL").map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
         let redirect_url = format!("{}/auth/google/callback",app_redirect_url);
-      Ok(Self {client_id,client_secret,redirect_url })
+      Ok(Self {client_id,client_secret,redirect_url,is_enabled:true })
     }
 }
 
@@ -158,7 +235,7 @@ impl AzureSettings {
         let tenant_id = std::env::var("AZURE_TENANT_ID").map_err(|_| ConfigError::Missing("AZURE_TENANT_ID"))?;
         let app_redirect_url = std::env::var("REDIRECT_URL").map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
         let redirect_url = format!("{}/auth/azure/callback",app_redirect_url);
-      Ok(Self {client_id,client_secret,redirect_url,tenant_id })
+      Ok(Self {client_id,client_secret,redirect_url,tenant_id,is_enabled:true })
     }
 }
 
@@ -169,14 +246,14 @@ impl OpenaiSettings {
         let project_id = std::env::var("OPENAI_PROJECT_ID").ok();
         let timeout_ms = std::env::var("OPENAI_TIMEOUT_MS").unwrap_or("60000".to_string()).parse::<i32>().map_err(|_| ConfigError::ParseError("OPENAI_TIMEOUT_MS"))?;
         let max_retries = std::env::var("OPENAI_MAX_TRIES").unwrap_or("1".to_string()).parse::<i32>().map_err(|_| ConfigError::ParseError("OPENAI_MAX_RETRIES"))?;
-      Ok(Self { api_key, org_id, project_id, timeout_ms, max_retries })
+      Ok(Self { api_key, org_id, project_id, timeout_ms, max_retries,is_enabled:true })
     }
 }
 
 impl AnthropicSettings {
     pub fn from_env() -> Result<Self, ConfigError> {
         let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| ConfigError::Missing("ANTHROPIC_API_KEY"))?;
-        Ok(Self { api_key })
+        Ok(Self { api_key,is_enabled:true })
     }
 }
 
@@ -192,6 +269,12 @@ pub enum ConfigError {
     DbError(String),
     #[error("DB error {0}")]
     NotConfigured(&'static str),
+    #[error("{0}")]
+    InvalidSSoProvider(String),
+    #[error("{0}")]
+    SsoClientBuildError(String),
+    #[error("{0}")]
+    ReqwestClientBuildError(String),
     #[error("{0}")]
     Custom(String),
 }

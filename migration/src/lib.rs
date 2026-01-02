@@ -14,6 +14,7 @@ mod m20251218_000001_drop_users_email_unique;
 mod m20251218_000001_create_ai_engines;
 mod m20251218_000001_create_files;
 mod m20251229_000001_create_sso_providers;
+mod m20250102_000001_add_redirect_url_to_sso_providers;
 
 pub struct Migrator;
 
@@ -35,6 +36,7 @@ impl MigratorTrait for Migrator {
           Box::new(m20251218_000001_create_ai_engines::Migration),
           Box::new(m20251218_000001_create_files::Migration),
           Box::new(m20251229_000001_create_sso_providers::Migration),
+          Box::new(m20250102_000001_add_redirect_url_to_sso_providers::Migration),
          ]
     }
 }

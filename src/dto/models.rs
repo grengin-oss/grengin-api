@@ -7,6 +7,17 @@ pub struct ModelsResponse {
     pub providers: Vec<ProviderInfo>,
 }
 
+impl ModelsResponse {
+    pub fn get_icon<S: Into<String>>(&self,provider:S) -> Option<String>{
+      let provider_key = provider.into();
+      let icon = self.providers
+       .iter()
+       .find(|provider | provider.key == provider_key)
+       .map(|provider| provider.icon.clone());
+      icon
+    }
+}
+
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderInfo {

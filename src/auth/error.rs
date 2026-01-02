@@ -19,7 +19,8 @@ pub enum AuthError {
     ResourceNotFound,
     InvalidUserStatus,
     AccountDeactivated,
-    SsoProviderNameAlreadyExist,
+    SsoProviderNotConfigured,
+    SsoProviderDisabledByAdmin,
 }
 
 impl IntoResponse for AuthError {
@@ -95,10 +96,15 @@ impl IntoResponse for AuthError {
                 "AccountDeactivated",
                 "This account is deactivated by admin.",
             ),
-            AuthError::SsoProviderNameAlreadyExist => (
-                StatusCode::CONFLICT,
-                "SsoProviderNameAlreadyExist",
-                "Sso provider's name already exist",
+            AuthError::SsoProviderNotConfigured => (
+              StatusCode::CONFLICT,
+                "SsoProviderNotConfigured",
+                "Sso provider not configured correctly",
+            ),
+            AuthError::SsoProviderDisabledByAdmin => (
+              StatusCode::FORBIDDEN,
+                "SsoProviderDisabledByAdmin",
+                "The Sso provider has been disabled by Admin",
             ),
         };
 
