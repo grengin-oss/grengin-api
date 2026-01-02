@@ -3,9 +3,7 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::AuthError}, dto::admin_sso_providers::{SsoProviderResponse, SsoProviderUpdateRequest}, handlers::admin_org::get_org, models::{sso_providers, users::UserRole}, state::SharedState};
-
-pub const SUPPORTED_SSO_PROVIDERS:[(&str,&str);2] = [("google","Google"),("azure","Azure")];
+use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::AuthError, sso_provider::sso_providers_list}, dto::admin_sso_providers::{SsoProviderResponse, SsoProviderUpdateRequest}, handlers::admin_org::get_org, models::{sso_providers, users::UserRole}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -46,17 +44,17 @@ pub async fn get_sso_providers(
        })?;
       if models.is_empty(){
          let mut insert_models = Vec::new();
-         for (provider,name) in SUPPORTED_SSO_PROVIDERS {
+         for sso_provider in sso_providers_list() {
             insert_models.push(sso_providers::Model{ 
                 id:Uuid::new_v4(),
                 org_id:org_id,
-                provider:provider.to_string(),
-                name:name.to_string(),
+                provider:sso_provider.provider,
+                name:sso_provider.name,
                 tenant_id:None,
                 client_id:"<empty>".to_string(),
                 client_secret:"<empty>".to_string(),
-                issuer_url:"<empty>".to_string(),
-                redirect_url:"<empty>".to_string(),
+                issuer_url:sso_provider.issuer_url,
+                redirect_url:sso_provider.redirect_url,
                 allowed_domains:Vec::new(),
                 is_enabled: false,
                 is_default: false,
@@ -269,9 +267,14 @@ pub async fn update_sso_provider_by_id(
             AuthError::ServiceTemporarilyUnavailable
      })?;
      if let Ok(client_secret) = decrypt_key(&app_state.settings.auth.app_key,&updated_model.client_secret)  {
+      let allowed_domains = updated_model
+        .allowed_domains
+        .iter()
+        .map(|d| d.into())
+        .collect();
       let _ = app_state
         .settings
-        .load_sso_provider_in_state(&updated_model.provider,&updated_model.client_id,&client_secret,&updated_model.redirect_url, updated_model.tenant_id.as_ref(), updated_model.is_enabled)
+        .load_sso_provider_in_state(&updated_model.provider,&updated_model.client_id,&client_secret,&updated_model.redirect_url, updated_model.tenant_id.as_ref(), updated_model.is_enabled,allowed_domains)
         .await;
      }
      let response = SsoProviderResponse { 

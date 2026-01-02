@@ -11,3 +11,4 @@ pub mod admin_sso_providers;
 pub mod admin_ai;
 pub mod models;
 pub mod admin_department;
+pub mod sso_providers;

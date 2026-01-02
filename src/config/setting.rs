@@ -35,6 +35,7 @@ pub struct GoogleSettings {
     pub client_secret:String,
     pub redirect_url:String,
     pub is_enabled:bool,
+    pub allowed_domains:Vec<String>,
 }
 
 #[derive(Clone)]
@@ -44,6 +45,7 @@ pub struct AzureSettings {
     pub tenant_id:String,
     pub redirect_url:String,
     pub is_enabled:bool,
+    pub allowed_domains:Vec<String>,
 }
 
 #[derive(Clone)]
@@ -82,8 +84,8 @@ impl Settings {
             let Some(api_key) = decrypt_key(&self.auth.app_key,&encrypted_api_key)
                .ok()
               else { continue }; // fall back for default <empty> string
-           self.load_ai_engine_in_state(engine.engine_key, api_key,true)
-            .await?;
+            self.load_ai_engine_in_state(engine.engine_key, api_key,true)
+             .await?;
         }
      Ok(())
     }
@@ -144,35 +146,45 @@ impl Settings {
          .all(database)
          .await
          .map_err(|e| ConfigError::DbError(e.to_string()))?;
-       for provider in sso_providers {
-            let Some(client_secret) = decrypt_key(&self.auth.app_key,&provider.client_secret)
-               .ok()
-            else { continue }; // fall back for default <empty> string
-            self.load_sso_provider_in_state(provider.name, client_secret, provider.client_id, provider.redirect_url, provider.tenant_id,true)
+       for sso_provider in sso_providers {
+            let Ok(client_secret) = decrypt_key(&self.auth.app_key,&sso_provider.client_secret)
+            else {
+                println!("Decryption failed skiping provider {}",&sso_provider.name); 
+                continue
+             }; // fall back for default <empty> string
+            self.load_sso_provider_in_state(sso_provider.provider, client_secret, sso_provider.client_id, sso_provider.redirect_url, sso_provider.tenant_id,true,sso_provider.allowed_domains)
               .await?;
        }
        Ok(())
     }
 
-    pub async fn load_sso_provider_in_state<S: Into<String>>(&self,provider:S,client_secret:S,client_id:S,redirect_url:S,tenant_id:Option<S>,is_enabled:bool) -> Result<(),ConfigError> {
+    pub async fn load_sso_provider_in_state<S: Into<String>>(&self,provider:S,client_secret:S,client_id:S,redirect_url:S,tenant_id:Option<S>,is_enabled:bool,allowed_domains:Vec<S>) -> Result<(),ConfigError> {
        match provider.into().as_str() {
               "azure" => {
-              println!("openai api key added successfully from ai_engines Table");
+              println!("azure sso provider added from sso_provider table");
               *self.azure.write().await = Some(AzureSettings {
                 client_id:client_id.into(),
                 client_secret:client_secret.into(),
                 tenant_id:tenant_id.map(|t| t.into()).unwrap_or("common".into()),
                 redirect_url:redirect_url.into(),
-                is_enabled 
-            });
+                is_enabled,
+                allowed_domains:allowed_domains
+                 .into_iter()
+                 .map(|d| d.into())
+                 .collect(),
+              });
              }
              "google"  => {
-              println!("anthropic api key added successfully from ai_engines Table");
+              println!("google sso provider added from sso_provider table");
              *self.google.write().await = Some(GoogleSettings { 
                  client_id:client_id.into(),
                  client_secret:client_secret.into(),
                  redirect_url:redirect_url.into(),
-                 is_enabled 
+                 is_enabled,
+                 allowed_domains:allowed_domains
+                  .into_iter()
+                  .map(|d| d.into())
+                  .collect()
                 }
              );
             }
@@ -224,7 +236,7 @@ impl GoogleSettings {
         let client_secret = std::env::var("GOOGLE_CLIENT_SECRET").map_err(|_| ConfigError::Missing("GOOGLE_CLIENT_SECRET"))?;
         let app_redirect_url = std::env::var("REDIRECT_URL").map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
         let redirect_url = format!("{}/auth/google/callback",app_redirect_url);
-      Ok(Self {client_id,client_secret,redirect_url,is_enabled:true })
+      Ok(Self {client_id,client_secret,redirect_url,is_enabled:true,allowed_domains:Vec::new() })
     }
 }
 
@@ -235,7 +247,7 @@ impl AzureSettings {
         let tenant_id = std::env::var("AZURE_TENANT_ID").map_err(|_| ConfigError::Missing("AZURE_TENANT_ID"))?;
         let app_redirect_url = std::env::var("REDIRECT_URL").map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
         let redirect_url = format!("{}/auth/azure/callback",app_redirect_url);
-      Ok(Self {client_id,client_secret,redirect_url,tenant_id,is_enabled:true })
+      Ok(Self {client_id,client_secret,redirect_url,tenant_id,is_enabled:true,allowed_domains:Vec::new() })
     }
 }
 

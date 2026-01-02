@@ -232,6 +232,11 @@ async fn oidc_oauth_callback(
             .name()
             .and_then(|n| n.get(None).map(|s| s.to_string()));
     }
+    if let Some(email) = email.as_ref() {
+       if !app_state.is_email_domain_allowed(email, &provider).await{
+          return Err(AuthError::EmailDomainNotAllowed);
+       }
+    }
     let mut user = users::Entity::find()
         .filter(column.eq(Some(sub.clone())))
         .filter(users::Column::Status.ne(UserStatus::Deleted))

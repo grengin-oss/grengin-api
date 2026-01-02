@@ -69,6 +69,45 @@ impl AppState {
         }
     }
 
+    pub async fn is_email_domain_allowed(&self,email:&str,provider:&AuthProvider) -> bool {
+     if let Some((_, domain)) = email.split_once('@') {
+         match provider.to_lowercase().as_str() {
+            "azure" => {
+                let allowed_domains = self
+                   .settings
+                   .azure
+                   .read()
+                   .await
+                   .as_ref()
+                   .map(|setting| setting.allowed_domains.clone())
+                   .unwrap_or(Vec::new());
+                if allowed_domains.is_empty(){
+                    return true;
+                }else {
+                    return allowed_domains.contains(&domain.to_string());
+                }
+            },
+            "google" => {
+                let allowed_domains = self
+                   .settings
+                   .google
+                   .read()
+                   .await
+                   .as_ref()
+                   .map(|setting| setting.allowed_domains.clone())
+                   .unwrap_or(Vec::new());
+                if allowed_domains.is_empty(){
+                    return true;
+                }else {
+                    return allowed_domains.contains(&domain.to_string());
+                }
+            },
+            _ => return false,
+         }
+      } 
+      false
+    }
+
     pub async fn check_ai_engine_is_enabled(&self,ai_engine_key:&str) -> Option<bool> {
            match ai_engine_key.to_lowercase().as_str() {
             "openai" => {

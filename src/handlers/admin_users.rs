@@ -205,7 +205,7 @@ pub async fn add_new_user(
      last_login_at: Set(Utc::now()),
      password_changed_at: Set(None),
      role: Set(req.role),
-     hd:Set(req.email.trim().split("@").collect::<Vec<_>>().last().map(|t| t.to_string())),
+     hd:Set(req.email.trim().split_once("@").map(|splited| splited.1.to_string())),
      department:Set(Some(req.department)),
      metadata:Set(None), 
     };

@@ -21,6 +21,7 @@ pub enum AuthError {
     AccountDeactivated,
     SsoProviderNotConfigured,
     SsoProviderDisabledByAdmin,
+    EmailDomainNotAllowed,
 }
 
 impl IntoResponse for AuthError {
@@ -105,6 +106,12 @@ impl IntoResponse for AuthError {
               StatusCode::FORBIDDEN,
                 "SsoProviderDisabledByAdmin",
                 "The Sso provider has been disabled by Admin",
+            ),
+
+            AuthError::EmailDomainNotAllowed => (
+              StatusCode::UNAUTHORIZED,
+                "EmailDomainNotAllowed",
+                "This email's domain is not allowed by Admin",
             ),
         };
 
