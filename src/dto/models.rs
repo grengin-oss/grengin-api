@@ -1,10 +1,27 @@
 use serde::Serialize;
 use utoipa::ToSchema;
 
+use crate::handlers::models::list_models;
+
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelsResponse {
     pub providers: Vec<ProviderInfo>,
+}
+
+impl ModelsResponse {
+    pub fn get_icon<S: Into<String>>(&self,provider:S) -> Option<String>{
+      let provider_key = provider.into();
+      let icon = self.providers
+       .iter()
+       .find(|provider | provider.key == provider_key)
+       .map(|provider| provider.icon.clone());
+      icon
+    }
+
+    pub fn default() -> Self {
+      ModelsResponse{providers:list_models()}
+    }
 }
 
 #[derive(Serialize, ToSchema)]

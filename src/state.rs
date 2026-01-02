@@ -3,37 +3,160 @@ use sea_orm::{Database, DatabaseConnection};
 use tokio::sync::RwLock;
 use std::sync::Arc;
 use reqwest::Client as ReqwestClient;
-use crate::{auth::{azure::build_azure_client, encryption::decrypt_key, google::build_google_client}, config::setting::{OidcClient, Settings}, dto::oauth::AuthProvider, models::users};
+use crate::{auth::{azure::build_azure_client, encryption::decrypt_key, google::build_google_client}, config::setting::{ConfigError, OidcClient, Settings}, dto::oauth::AuthProvider, models::users};
 
 pub struct AppState {
     pub database:DatabaseConnection,
-    pub google_client:RwLock<OidcClient>,
-    pub azure_client:RwLock<OidcClient>,
+    pub google_client:RwLock<Option<OidcClient>>,
+    pub azure_client:RwLock<Option<OidcClient>>,
     pub req_client:ReqwestClient,
     pub settings:Settings,
 }
 
 impl AppState {
-    pub async fn from_settings(mut settings:Settings) -> Result<SharedState,Error> {
+    pub async fn from_settings(mut settings:Settings) -> Result<SharedState,ConfigError> {
          let req_client =  reqwest::ClientBuilder::new()
             .redirect(reqwest::redirect::Policy::none())
-            .build()?;
-         let database = Database::connect(&settings.auth.database_url).await?;
+            .build()
+            .map_err(|e| ConfigError::ReqwestClientBuildError(e.to_string()))?;
+         let database = Database::connect(&settings.auth.database_url)
+           .await
+           .map_err(|e| ConfigError::DbError(e.to_string()))?;
          let _ = settings
            .load_ai_engines_from_db(&database)
            .await
-           .map_err(|e|eprintln!("Load ai engines from db error {e}"));
-         let google_client = RwLock::new(build_google_client(&req_client,&settings.google.client_id, &settings.google.client_secret, &settings.google.redirect_url).await?);
-         let azure_client = RwLock::new(build_azure_client(&req_client,&settings.azure.client_id, &settings.azure.client_secret, &settings.azure.redirect_url,&settings.azure.tenant_id).await?);
-         let state =  Self { database, google_client,azure_client,req_client,settings };
+           .map_err(|e|eprintln!("Loading ai engines from db error: {e}"));
+        let _ = settings
+           .load_sso_providers_from_db(&database)
+           .await
+           .map_err(|e|eprintln!("Loading sso providers from db error: {e}"));
+         let state =  Self { 
+            database,
+            google_client:RwLock::new(None),
+            azure_client:RwLock::new(None),
+            req_client,settings
+         };
+         state.refresh_azure_client()
+          .await?;
+         state.refresh_google_client()
+          .await?;
         Ok(Arc::new(state))
     }
 
-    pub fn get_oidc_client_and_column_and_redirect_uri(&self, provider: &AuthProvider) -> Result<(&RwLock<OidcClient>, users::Column,&str), Error> {
+    pub async fn check_sso_provider_is_enabled(&self,provider:&AuthProvider) -> Option<bool> {
+           match provider.to_lowercase().as_str() {
+            "azure" => {
+                let is_enabled = self
+                   .settings
+                   .google
+                   .read()
+                   .await
+                   .as_ref()
+                   .map(|setting| setting.is_enabled);
+                is_enabled
+            },
+            "google" => {
+                let is_enabled = self
+                   .settings
+                   .google
+                   .read()
+                   .await
+                   .as_ref()
+                   .map(|setting| setting.is_enabled);
+                is_enabled
+            },
+            _ => None
+        }
+    }
+
+    pub async fn is_email_domain_allowed(&self,email:&str,provider:&AuthProvider) -> bool {
+     if let Some((_, domain)) = email.split_once('@') {
+         match provider.to_lowercase().as_str() {
+            "azure" => {
+                let allowed_domains = self
+                   .settings
+                   .azure
+                   .read()
+                   .await
+                   .as_ref()
+                   .map(|setting| setting.allowed_domains.clone())
+                   .unwrap_or(Vec::new());
+                if allowed_domains.is_empty(){
+                    return true;
+                }else {
+                    return allowed_domains.contains(&domain.to_string());
+                }
+            },
+            "google" => {
+                let allowed_domains = self
+                   .settings
+                   .google
+                   .read()
+                   .await
+                   .as_ref()
+                   .map(|setting| setting.allowed_domains.clone())
+                   .unwrap_or(Vec::new());
+                if allowed_domains.is_empty(){
+                    return true;
+                }else {
+                    return allowed_domains.contains(&domain.to_string());
+                }
+            },
+            _ => return false,
+         }
+      } 
+      false
+    }
+
+    pub async fn check_ai_engine_is_enabled(&self,ai_engine_key:&str) -> Option<bool> {
+           match ai_engine_key.to_lowercase().as_str() {
+            "openai" => {
+                let is_enabled = self
+                   .settings
+                   .openai
+                   .read()
+                   .await
+                   .as_ref()
+                   .map(|setting| setting.is_enabled);
+                is_enabled
+            },
+            "anthropic" => {
+                let is_enabled = self
+                   .settings
+                   .anthropic
+                   .read()
+                   .await
+                   .as_ref()
+                   .map(|setting| setting.is_enabled);
+                is_enabled
+            },
+            _ => None
+        }
+    }
+
+    pub async fn get_oidc_client_and_column_and_redirect_uri(&self, provider: &AuthProvider) -> Result<(&RwLock<Option<OidcClient>>, users::Column,Option<String>), ConfigError> {
         match provider.to_lowercase().as_str() {
-            "azure" => Ok((&self.azure_client, users::Column::AzureId,&self.settings.azure.redirect_url)),
-            "google" => Ok((&self.google_client, users::Column::GoogleId,&self.settings.google.redirect_url)),
-            _ => Err(anyhow::anyhow!("Unknown provider: {}", provider)),
+            "azure" => {
+                let redirect_url = self
+                   .settings
+                   .azure
+                   .read()
+                   .await
+                   .as_ref()
+                   .map(|setting| setting.redirect_url.clone());
+                return Ok((&self.azure_client, users::Column::AzureId,redirect_url))
+            },
+            "google" => {
+                let redirect_url = self
+                   .settings
+                   .google
+                   .read()
+                   .await
+                   .as_ref()
+                   .map(|setting| setting.redirect_url.clone());
+                return Ok((&self.google_client, users::Column::GoogleId,redirect_url))
+            },
+            _ => Err(ConfigError::InvalidSSoProvider(provider.into())),
         }
     }
 
@@ -46,15 +169,33 @@ impl AppState {
         Ok(())
     } 
  
-    async fn refresh_google_client(&self) -> Result<(),Error> {
-         let google_client = build_google_client(&self.req_client,&self.settings.google.client_id, &self.settings.google.client_secret, &self.settings.google.redirect_url).await?;
-         *self.google_client.write().await = google_client;
+    async fn refresh_google_client(&self) -> Result<(),ConfigError> {
+          let google = self
+             .settings
+             .google
+             .read()
+             .await
+             .clone()
+             .ok_or(ConfigError::NotConfigured("google settings not configured in App State"))?;
+           let google_client = build_google_client(&self.req_client,google.client_id,google.client_secret,google.redirect_url)
+             .await
+             .map_err(|e| ConfigError::SsoClientBuildError(e.to_string()))?;
+           *self.google_client.write().await = Some(google_client);
          Ok(())
     }
 
-    async fn refresh_azure_client(&self) -> Result<(),Error> {
-         let azure_client = build_azure_client(&self.req_client,&self.settings.azure.client_id, &self.settings.azure.client_secret, &self.settings.azure.redirect_url,&self.settings.azure.tenant_id).await?;
-         *self.azure_client.write().await = azure_client;
+    async fn refresh_azure_client(&self) -> Result<(),ConfigError> {
+          let azure = self
+             .settings
+             .azure
+             .read()
+             .await
+             .clone()
+             .ok_or(ConfigError::NotConfigured("Azure settings not configured in App State"))?;
+           let azure_client = build_azure_client(&self.req_client,azure.client_id,azure.client_secret,azure.redirect_url,azure.tenant_id)
+             .await
+             .map_err(|e| ConfigError::SsoClientBuildError(e.to_string()))?;
+           *self.azure_client.write().await = Some(azure_client);
          Ok(())
     }
 

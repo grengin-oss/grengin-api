@@ -19,6 +19,9 @@ pub enum AuthError {
     ResourceNotFound,
     InvalidUserStatus,
     AccountDeactivated,
+    SsoProviderNotConfigured,
+    SsoProviderDisabledByAdmin,
+    EmailDomainNotAllowed,
 }
 
 impl IntoResponse for AuthError {
@@ -93,6 +96,22 @@ impl IntoResponse for AuthError {
                 StatusCode::UNAUTHORIZED,
                 "AccountDeactivated",
                 "This account is deactivated by admin.",
+            ),
+            AuthError::SsoProviderNotConfigured => (
+              StatusCode::CONFLICT,
+                "SsoProviderNotConfigured",
+                "Sso provider not configured correctly",
+            ),
+            AuthError::SsoProviderDisabledByAdmin => (
+              StatusCode::FORBIDDEN,
+                "SsoProviderDisabledByAdmin",
+                "The Sso provider has been disabled by Admin",
+            ),
+
+            AuthError::EmailDomainNotAllowed => (
+              StatusCode::UNAUTHORIZED,
+                "EmailDomainNotAllowed",
+                "This email's domain is not allowed by Admin",
             ),
         };
 

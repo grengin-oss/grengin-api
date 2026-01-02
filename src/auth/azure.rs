@@ -17,7 +17,7 @@ pub async fn build_azure_client<S: Into<String>>(req_client:&ReqwestClient,clien
     let client_id = ClientId::new(client_id.into());
     let client_secret = ClientSecret::new(client_secret.into());
     let tenant_id = tenant_id.into();
-    let redirect_uri = RedirectUrl::new(format!("{}/auth/microsoft/login", redirect_url.into()))?;
+    let redirect_uri = RedirectUrl::new(format!("{}/auth/azure/login", redirect_url.into()))?;
     let client = match tenant_id.as_str() {
         "common" | "organizations" | "consumers" => {
             let (issuer, auth, token, jwks, userinfo) = mk_urls(&tenant_id)?;

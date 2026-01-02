@@ -25,7 +25,7 @@ pub struct PaginationQuery {
    pub department:Option<String>,
    pub sort:Option<SortRule>,
    #[serde(rename = "type")]
-   pub content_type:Option<String>,
+   pub content_type:Option<String>
 }
 
 #[derive(Serialize,ToSchema)]

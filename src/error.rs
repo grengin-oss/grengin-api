@@ -10,6 +10,7 @@ pub enum AppError {
     InvalidLlmProvider,
     LlmProviderNotConfigured,
     NoMessageInRequest,
+    LlmProviderDisabledByAdmin,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -56,6 +57,12 @@ impl IntoResponse for AppError {
             AppError::NoMessageInRequest => (
                 StatusCode::BAD_REQUEST,
                 "NoMessageInRequest",
+                "Missing required field: `message`.",
+            ),
+
+            AppError::LlmProviderDisabledByAdmin => (
+                StatusCode::FORBIDDEN,
+                "LlmProviderDisabledByAdmin",
                 "Missing required field: `message`.",
             ),
         };

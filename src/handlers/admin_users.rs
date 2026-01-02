@@ -2,7 +2,7 @@ use axum::{Json, extract::{Path, Query, State}};
 use chrono::Utc;
 use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, sea_query::OnConflict};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 use uuid::Uuid;
 use crate::{auth::{claims::Claims, error::AuthError}, dto::{admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest}, common::{PaginationQuery, SortRule}}, models::users::{self, UserRole, UserStatus}, state::SharedState};
 
@@ -205,26 +205,17 @@ pub async fn add_new_user(
      last_login_at: Set(Utc::now()),
      password_changed_at: Set(None),
      role: Set(req.role),
-     hd:Set(req.email.trim().split("@").collect::<Vec<_>>().last().map(|t| t.to_string())),
+     hd:Set(req.email.trim().split_once("@").map(|splited| splited.1.to_string())),
      department:Set(Some(req.department)),
      metadata:Set(None), 
     };
-   let affected: u64 = users::Entity::insert(user)
-    .on_conflict(
-        OnConflict::column(users::Column::Email)
-            .do_nothing()
-            .to_owned(),
-    )
-    .exec_without_returning(&app_state.database)
-    .await
-    .map_err(|e| {
+   user
+     .insert(&app_state.database)
+     .await
+     .map_err(|e| {
         eprintln!("insert error: {e}");
         AuthError::ServiceTemporarilyUnavailable
     })?;
-
-   if affected == 0 {
-     return Err(AuthError::EmailAlreadyExist);
-   }
  Ok((StatusCode::CREATED,"User added successfully"))
 }
 

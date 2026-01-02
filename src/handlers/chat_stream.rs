@@ -83,6 +83,9 @@ pub async fn handle_chat_stream(
          let settings = openai_settings
              .as_ref()
              .ok_or(AppError::LlmProviderNotConfigured)?;
+         if !settings.is_enabled{
+            return Err(AppError::LlmProviderDisabledByAdmin);
+         }
          let model = req.model_name.clone().unwrap_or_else(|| "gpt-5.2".to_string());
          (LlmProviderConfig::OpenAI(&settings), model)
      },
@@ -90,6 +93,9 @@ pub async fn handle_chat_stream(
          let settings = anthropic_settings
            .as_ref()
            .ok_or(AppError::LlmProviderNotConfigured)?;
+         if !settings.is_enabled{
+            return Err(AppError::LlmProviderDisabledByAdmin);
+         }
          let model = req.model_name.clone().unwrap_or_else(|| "claude-sonnet-4-5".to_string());
          (LlmProviderConfig::Anthropic(&settings), model)
      },
