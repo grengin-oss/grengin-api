@@ -1,4 +1,5 @@
 use openidconnect::{core::{CoreClient},EndpointMaybeSet, EndpointNotSet, EndpointSet};
+use reqwest::Url;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -149,9 +150,14 @@ impl Settings {
        for sso_provider in sso_providers {
             let Ok(client_secret) = decrypt_key(&self.auth.app_key,&sso_provider.client_secret)
             else {
-                println!("Decryption failed skiping provider {}",&sso_provider.name); 
                 continue
              }; // fall back for default <empty> string
+            let Ok(_) = Url::parse(&sso_provider.redirect_url)else{
+                continue;
+            };
+            let Ok(_) = Url::parse(&sso_provider.issuer_url)else{
+                continue;
+            };
             self.load_sso_provider_in_state(sso_provider.provider, client_secret, sso_provider.client_id, sso_provider.redirect_url, sso_provider.tenant_id,true,sso_provider.allowed_domains)
               .await?;
        }
