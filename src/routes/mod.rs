@@ -5,3 +5,4 @@ pub mod file;
 pub mod message;
 pub mod admin;
 pub mod models;
+pub mod auth;

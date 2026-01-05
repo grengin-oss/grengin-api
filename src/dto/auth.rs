@@ -19,6 +19,11 @@ pub struct LoginResponse {
     pub token: String,
 }
 
+#[derive(Serialize, IntoParams, ToSchema)]
+pub struct RefreshTokenRequest {
+    pub refresh_token: String,
+}
+
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthTokenResponse {

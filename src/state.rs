@@ -178,9 +178,8 @@ impl AppState {
              .clone()
              .ok_or(ConfigError::NotConfigured("google settings not configured in App State"))?;
            let google_client = build_google_client(&self.req_client,google.client_id,google.client_secret,google.redirect_url)
-             .await
-             .map_err(|e| ConfigError::SsoClientBuildError(e.to_string()))?;
-           *self.google_client.write().await = Some(google_client);
+             .await;
+           *self.google_client.write().await = google_client.ok();
          Ok(())
     }
 
@@ -193,9 +192,8 @@ impl AppState {
              .clone()
              .ok_or(ConfigError::NotConfigured("Azure settings not configured in App State"))?;
            let azure_client = build_azure_client(&self.req_client,azure.client_id,azure.client_secret,azure.redirect_url,azure.tenant_id)
-             .await
-             .map_err(|e| ConfigError::SsoClientBuildError(e.to_string()))?;
-           *self.azure_client.write().await = Some(azure_client);
+             .await;
+           *self.azure_client.write().await = azure_client.ok();
          Ok(())
     }
 

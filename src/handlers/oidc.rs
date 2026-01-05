@@ -6,7 +6,7 @@ use openidconnect::{TokenResponse as OidcTokenResponse};
 use axum::http::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, jwt::KEYS}, dto::oauth::AuthProvider, error::ErrorResponse, models::{oauth_sessions, users::{self, UserRole, UserStatus}}};
+use crate::{auth::{claims::{Claiming as _, Claims, RefreshClaims}}, dto::oauth::AuthProvider, error::ErrorResponse, models::{oauth_sessions, users::{self, UserRole, UserStatus}}};
 use crate::{auth::error::{AuthError}, dto::{auth::{AuthTokenResponse, TokenType, User}, oauth::{OAuthCallback, StartParams}}, state::SharedState};
 
 #[utoipa::path(
@@ -322,15 +322,11 @@ async fn oidc_oauth_callback(
              eprintln!("db error while parsing user {:?}",e);
              AuthError::ServiceTemporarilyUnavailable})?);
     };
-    let user = user.ok_or(AuthError::EmailDoesNotExist)?;
+    let user = user
+      .ok_or(AuthError::EmailDoesNotExist)?;
 
-    let jwt_claims = Claims::new_access_token(user.email.clone(), user.name.clone(), user.id,user.org_id,user.role);
-    let access_token = jsonwebtoken::encode(
-        &jsonwebtoken::Header::default(),
-        &jwt_claims,
-        &KEYS.get().unwrap().encoding
-    ).unwrap();
-
+    let access_token_claims = Claims::new_access_token(user.email.clone(), user.name.clone(), user.id,user.org_id,user.role);
+    let refresh_token_claims = RefreshClaims::new_refresh_token(user.email.clone(), user.id);
     let user_response = User {
         id: user.id,
         sub: sub.clone(),
@@ -351,10 +347,10 @@ async fn oidc_oauth_callback(
     };
 
     let resp = AuthTokenResponse {
-        access_token,
+        access_token:access_token_claims.get_token_string(),
         token_type: TokenType::Bearer,
         expires_in: 3600, // 1 hour - match your JWT expiry
-        refresh_token: None, // TODO: Implement refresh token logic if needed
+        refresh_token: Some(refresh_token_claims.get_token_string()), // TODO: Implement refresh token logic if needed
         user: Some(user_response),
     };
   Ok((StatusCode::OK, Json(resp)))
