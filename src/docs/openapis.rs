@@ -14,7 +14,7 @@ use crate::dto::models::{ModelInfo, ProviderInfo};
 use crate::dto::oauth::OAuthCallback;
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::docs::security::ApiSecurityAddon;
-use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, LoginResponse, RefreshTokenRequest, TokenType, User};
+use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, RefreshTokenRequest, TokenType, User};
 use crate::handlers::{auth,oidc,chat,chat_stream,file,message,admin_users,admin_sso_provider,admin_org,admin_ai,models,admin_department};
 use crate::models::messages::ChatRole;
 use crate::models::users::{UserRole, UserStatus};
@@ -62,7 +62,6 @@ use crate::models::users::{UserRole, UserStatus};
     ),
     components(
         schemas(
-            LoginResponse,
             AuthInitResponse,
             AuthTokenResponse,
             TokenType,

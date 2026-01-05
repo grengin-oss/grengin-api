@@ -4,7 +4,7 @@ use sea_orm::EntityTrait;
 use crate::{auth::{claims::{Claiming, Claims, RefreshClaims}, error::AuthError}, dto::auth::{AuthTokenResponse, RefreshTokenRequest, TokenType, User}, models::users::{self, UserRole, UserStatus}, state::SharedState};
 
 #[utoipa::path(
-    get,
+    post,
     path = "/auth/refresh",
     tag = "admin",
     request_body = RefreshTokenRequest,

@@ -1,4 +1,4 @@
-use serde::{Serialize};
+use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
@@ -13,13 +13,7 @@ pub struct AuthInitResponse {
     pub state: String,
 }
 
-#[derive(Serialize, IntoParams, ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct LoginResponse {
-    pub token: String,
-}
-
-#[derive(Serialize, IntoParams, ToSchema)]
+#[derive(Serialize,Deserialize, IntoParams, ToSchema)]
 pub struct RefreshTokenRequest {
     pub refresh_token: String,
 }
