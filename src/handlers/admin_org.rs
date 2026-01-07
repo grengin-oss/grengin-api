@@ -3,16 +3,18 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, IntoActiveModel, TryIntoModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::AuthError}, dto::admin_org::{OrgRequest, OrgResponse, OrgSettings}, models::{organizations, users::UserRole}, state::SharedState};
+use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}}, dto::admin_org::{OrgRequest, OrgResponse, OrgSettings}, models::{organizations, users::UserRole}, state::SharedState};
 
 #[utoipa::path(
     get,
     path = "/admin/organization",
     tag = "admin",
     responses(
-        (status = 204, description = "User deleted"),
-        (status = 404, description = "Resource not found"),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+       (status = 200, body = OrgResponse),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Organization not found (code=6301)"),
+       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Organization not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
     )
 )]
 pub async fn get_org(
@@ -28,7 +30,7 @@ pub async fn get_org(
       .await
       .map_err(|e| {
          eprintln!("insert error: {e}");
-         AuthError::ServiceTemporarilyUnavailable
+         AuthError::DbTimeout
         })?;
 
     let org = if let Some(model) = org_model{
@@ -55,7 +57,7 @@ pub async fn get_org(
           .await
           .map_err(|e| {
             eprintln!("insert error: {e}");
-            AuthError::ServiceTemporarilyUnavailable
+            AuthError::DbTimeout
         })?;
         default_org
     };
@@ -85,9 +87,11 @@ pub async fn get_org(
     tag = "admin",
     request_body = OrgRequest,
     responses(
-        (status = 204, description = "User deleted"),
-        (status = 404, description = "Resource not found"),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+       (status = 200, body = OrgResponse),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Organization not found (code=6301)"),
+       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Organization not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
     )
 )]
 pub async fn update_org(
@@ -104,9 +108,9 @@ pub async fn update_org(
       .await
           .map_err(|e| {
            eprintln!("insert error: {e}");
-           AuthError::ServiceTemporarilyUnavailable
+           AuthError::DbTimeout
        })?
-      .ok_or(AuthError::OrgDoesNotExist)?;
+      .ok_or(AuthError::OrgDoesNotExist { org_id:claims.org_id })?;
     let mut active_model = org_model
        .into_active_model();
     active_model.allowed_domains = Set(req.allowed_domains);
@@ -124,13 +128,13 @@ pub async fn update_org(
       .await
       .map_err(|e| {
           eprintln!("update error: {e}");
-          AuthError::ServiceTemporarilyUnavailable
+          AuthError::DbTimeout
         })?;
     let org = active_model
       .try_into_model()
       .map_err(|e| {
           eprintln!("model parse error: {e}");
-          AuthError::ServiceTemporarilyUnavailable
+          AuthError::DbTimeout
        })?;
     let org_response = OrgResponse { 
         id: org.id,

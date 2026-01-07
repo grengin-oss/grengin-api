@@ -6,7 +6,7 @@ use openidconnect::{TokenResponse as OidcTokenResponse};
 use axum::http::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
-use crate::{auth::{claims::{Claiming as _, Claims, RefreshClaims}}, dto::oauth::AuthProvider, error::ErrorResponse, models::{oauth_sessions, users::{self, UserRole, UserStatus}}};
+use crate::{auth::{claims::{Claiming as _, Claims, RefreshClaims}, error::AuthErrorResponse}, dto::oauth::AuthProvider, models::{oauth_sessions, users::{self, UserRole, UserStatus}}};
 use crate::{auth::error::{AuthError}, dto::{auth::{AuthTokenResponse, TokenType, User}, oauth::{OAuthCallback, StartParams}}, state::SharedState};
 
 #[utoipa::path(
@@ -18,9 +18,16 @@ use crate::{auth::error::{AuthError}, dto::{auth::{AuthTokenResponse, TokenType,
         ("provider" = String, Path, description = "Auth provider identifier (e.g., google, azure, keycloak)"),
         ("redirect_uri" = Option<String>, Query, description = "Optional post-login redirect target", format = "uri")),
     responses(
-        (status = 303, description = "Redirects the user to provider's login page"),
-        (status = 400, body = ErrorResponse, description = "Invalid provider or configuration"),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Invalid auth provider (code=6200)"),
+        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Invalid redirect URI (code=6202)"),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Account deactivated (code=6105)"),
+        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "SSO provider disabled by admin (code=6401)"),
+        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Email does not exist (code=6101)"),
+        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Organization not found (code=6301)"),
+        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
+        (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "SSO provider not configured (code=6400)"),
+        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
+        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn oidc_login_start(
@@ -31,26 +38,26 @@ pub async fn oidc_login_start(
     let is_enabled = app_state
       .check_sso_provider_is_enabled(&provider)
       .await
-      .ok_or(AuthError::InvalidProvider)?;
+      .ok_or(AuthError::InvalidProvider{provider:Some(provider.clone())})?;
     if !is_enabled {
-        return Err(AuthError::SsoProviderDisabledByAdmin);
+        return Err(AuthError::SsoProviderDisabledByAdmin{provider:Some(provider.clone())});
     }   
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     let (oidc_client, _,default_redirect_uri) = app_state
         .get_oidc_client_and_column_and_redirect_uri(&provider)
         .await
-        .map_err(|_| AuthError::InvalidProvider)?;
+        .map_err(|_| AuthError::InvalidProvider{provider:Some(provider.clone())})?;
     let redirect_uri = RedirectUrl::new(query.redirect_uri
         .clone()
         .unwrap_or(default_redirect_uri
-            .ok_or(AuthError::SsoProviderNotConfigured)?
+            .ok_or(AuthError::SsoProviderNotConfigured{provider:Some(provider.clone())})?
           )
-        ).map_err(|_| AuthError::InvalidRedirectUri)?;
+        ).map_err(|_| AuthError::InvalidRedirectUri{redirect_uri:query.redirect_uri.clone()})?;
     let (auth_url, csrf_state, nonce) = oidc_client
         .read()
         .await
         .as_ref()
-        .ok_or(AuthError::SsoProviderNotConfigured)?
+        .ok_or(AuthError::SsoProviderNotConfigured{provider:Some(provider.clone())})?
         .authorize_url(
             CoreAuthenticationFlow::AuthorizationCode,
             CsrfToken::new_random,
@@ -92,11 +99,20 @@ pub async fn oidc_login_start(
         ("error_description" = Option<String>, Query, description = "Error description from provider")
     ),
     responses(
-        (status = 200, body = AuthTokenResponse, description = "Successfully authenticated"),
-        (status = 302, description = "Redirect to application with tokens"),
-        (status = 400, body = ErrorResponse, description = "Invalid callback parameters"),
-        (status = 401, body = ErrorResponse, description = "Unauthorized"),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Missing credentials (code=6102)"),
+        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Invalid auth provider (code=6200)"),
+        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Invalid callback parameters (code=6201)"),
+        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Invalid redirect URI (code=6202)"),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid credentials (code=6100)"),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Account deactivated (code=6105)"),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Email domain not allowed (code=6303)"),
+        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "SSO provider disabled by admin (code=6401)"),
+        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Email does not exist (code=6101)"),
+        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
+        (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "Email already exists (code=6106)"),
+        (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "SSO provider not configured (code=6400)"),
+        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
+        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn oidc_oauth_callback_get(
@@ -123,12 +139,12 @@ async fn oidc_oauth_callback(
     let (oidc_client_configured, column,default_redirect_uri) = app_state
         .get_oidc_client_and_column_and_redirect_uri(&provider)
         .await
-        .map_err(|_| AuthError::InvalidProvider)?;
+        .map_err(|_| AuthError::InvalidProvider{provider:Some(provider.clone())})?;
     let mut oidc_client = oidc_client_configured
         .read()
         .await
         .clone()
-        .ok_or(AuthError::SsoProviderNotConfigured)?;
+        .ok_or(AuthError::SsoProviderNotConfigured{provider:Some(provider.clone())})?;
     let sess = oauth_sessions::Entity::find()
         .filter(oauth_sessions::Column::State.eq(Some(cb.state.to_owned())))
         .order_by_desc(oauth_sessions::Column::CreatedAt)
@@ -141,9 +157,9 @@ async fn oidc_oauth_callback(
     let redirect_uri = RedirectUrl::new(sess.redirect_uri
          .clone()
          .unwrap_or(default_redirect_uri
-            .ok_or(AuthError::SsoProviderNotConfigured)?
+            .ok_or(AuthError::SsoProviderNotConfigured{provider:Some(provider.clone())})?
          ))
-        .map_err(|_| AuthError::InvalidRedirectUri)?;
+        .map_err(|_| AuthError::InvalidRedirectUri{redirect_uri:sess.redirect_uri.clone()})?;
     let active: oauth_sessions::ActiveModel = sess.clone().into();
     active.delete(&app_state.database)
         .await
@@ -191,7 +207,7 @@ async fn oidc_oauth_callback(
             .read()
             .await
             .clone()
-            .ok_or(AuthError::SsoProviderNotConfigured)?;
+            .ok_or(AuthError::SsoProviderNotConfigured{provider:Some(provider.clone())})?;
 
         let verifier2 = oidc_client.id_token_verifier();
         id_token
@@ -233,9 +249,10 @@ async fn oidc_oauth_callback(
             .and_then(|n| n.get(None).map(|s| s.to_string()));
     }
     if let Some(email) = email.as_ref() {
-       if !app_state.is_email_domain_allowed(email, &provider).await{
-          return Err(AuthError::EmailDomainNotAllowed);
-       }
+        let (is_allowed,domain) = app_state.is_email_domain_allowed(email, &provider).await;
+       if !is_allowed {
+          return Err(AuthError::EmailDomainNotAllowed{domain});
+       } 
     }
     let mut user = users::Entity::find()
         .filter(column.eq(Some(sub.clone())))
@@ -366,10 +383,20 @@ async fn oidc_oauth_callback(
     ),
     request_body(content = OAuthCallback, description = "OAuth callback parameters"),
     responses(
-        (status = 200, body = AuthTokenResponse, description = "Successfully authenticated"),
-        (status = 400, body = ErrorResponse, description = "Invalid callback parameters"),
-        (status = 401, body = ErrorResponse, description = "Unauthorized"),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Missing credentials (code=6102)"),
+        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Invalid auth provider (code=6200)"),
+        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Invalid callback parameters (code=6201)"),
+        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Invalid redirect URI (code=6202)"),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid credentials (code=6100)"),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Account deactivated (code=6105)"),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Email domain not allowed (code=6303)"),
+        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "SSO provider disabled by admin (code=6401)"),
+        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Email does not exist (code=6101)"),
+        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
+        (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "Email already exists (code=6106)"),
+        (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "SSO provider not configured (code=6400)"),
+        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
+        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn oidc_oauth_callback_post(

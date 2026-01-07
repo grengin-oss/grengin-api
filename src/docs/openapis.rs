@@ -1,6 +1,6 @@
 use utoipa::OpenApi;
 use crate::auth::claims::Claims;
-use crate::auth::error::AuthError;
+use crate::auth::error::{AuthError,AuthErrorCode,AuthErrorDetailVariant,AuthErrorResponse};
 use crate::dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel,AiEngineModelsResponse, AiModelCapabilities};
 use crate::dto::admin_department::{Department, DepartmentResponse};
 use crate::dto::admin_org::OrgResponse;
@@ -107,6 +107,9 @@ use crate::models::users::{UserRole, UserStatus};
             SsoProviderUpdateRequest,
             AuthError,
             AppError,
+            AuthErrorCode,
+            AuthErrorDetailVariant,
+            AuthErrorResponse,
             RefreshTokenRequest,
         )
     ),

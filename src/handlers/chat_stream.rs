@@ -6,14 +6,14 @@ use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, Into
 use serde_json::json;
 use uuid::Uuid;
 use crate::{
-    auth::claims::Claims,
+    auth::{claims::Claims, error::AuthErrorResponse},
     config::setting::{AnthropicSettings, OpenaiSettings},
     dto::{
         chat_stream::{ChatInitRequest, ChatStream},
-        files::{File},
+        files::File,
         llm::anthropic::ANTHROPIC_DEFAULT_MAX_TOKENS,
     },
-    error::AppError,
+    error::{AppError, ErrorResponse},
     handlers::llm::{StreamParseResult, StreamParser, anthropic::AnthropicStreamParser, openai::OpenaiStreamParser},
     llm::{prompt::Prompt, provider::{AnthropicApis, OpenaiApis}},
     models::{conversations, messages::{self, ChatRole}},
@@ -36,9 +36,13 @@ enum LlmProviderConfig<'a> {
     ),
     request_body = ChatInitRequest,
     responses(
-        (status = 200, content_type = "text/event-stream", body = ChatStream),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
-        (status = 404, description = "Resource not found"),
+    (status = 200, content_type = "text/event-stream", body = ChatStream),
+    (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+    (status = 400, content_type = "application/json", body = ErrorResponse, description = "Validation error (code=2002 empty messages)"),
+    (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003)"),
+    (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found / DB not found (code=5003)"),
+    (status = 503, content_type = "application/json", body = ErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+
     ),
 )]
 pub async fn handle_chat_stream_path_doc(){}
@@ -49,9 +53,12 @@ pub async fn handle_chat_stream_path_doc(){}
     tag = "chat",
     request_body = ChatInitRequest,
     responses(
-        (status = 200, content_type = "text/event-stream", body = ChatStream),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
-        (status = 404, description = "Resource not found"),
+    (status = 200, content_type = "text/event-stream", body = ChatStream),
+    (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+    (status = 400, content_type = "application/json", body = ErrorResponse, description = "Validation error (code=2002 empty messages)"),
+    (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003)"),
+    (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found / DB not found (code=5003)"),
+    (status = 503, content_type = "application/json", body = ErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     ),
 )]
 pub async fn handle_chat_stream_doc(){}
@@ -82,9 +89,9 @@ pub async fn handle_chat_stream(
      "openai" => {
          let settings = openai_settings
              .as_ref()
-             .ok_or(AppError::LlmProviderNotConfigured)?;
+             .ok_or(AppError::LlmProviderNotConfigured { provider:provider.clone() })?;
          if !settings.is_enabled{
-            return Err(AppError::LlmProviderDisabledByAdmin);
+            return Err(AppError::LlmProviderDisabledByAdmin {provider:provider.clone()});
          }
          let model = req.model_name.clone().unwrap_or_else(|| "gpt-5.2".to_string());
          (LlmProviderConfig::OpenAI(&settings), model)
@@ -92,14 +99,14 @@ pub async fn handle_chat_stream(
      "anthropic" => {
          let settings = anthropic_settings
            .as_ref()
-           .ok_or(AppError::LlmProviderNotConfigured)?;
+           .ok_or(AppError::LlmProviderNotConfigured { provider:provider.clone() })?;
          if !settings.is_enabled{
-            return Err(AppError::LlmProviderDisabledByAdmin);
+            return Err(AppError::LlmProviderDisabledByAdmin {provider:provider.clone()});
          }
          let model = req.model_name.clone().unwrap_or_else(|| "claude-sonnet-4-5".to_string());
          (LlmProviderConfig::Anthropic(&settings), model)
      },
-     _ => return Err(AppError::InvalidLlmProvider)
+     _ => return Err(AppError::InvalidLlmProvider{provider:provider.clone()})
  };
  let mut metadata = json!({
   "webSearch":req.web_search,
@@ -118,10 +125,10 @@ pub async fn handle_chat_stream(
        .await
        .map_err(|e| {
           eprintln!("DB get one with many error {:?}", e);
-          AppError::ServiceTemporarilyUnavailable})?
+          AppError::DbTimeout})?
        .into_iter()
        .next()
-       .ok_or(AppError::ResourceNotFound)?;
+       .ok_or(AppError::DbNotFound)?;
     if !selected_tools.is_empty(){
       if let Some(json) = conversation.metadata.as_mut() {
           // Update metadata TODO
@@ -140,7 +147,7 @@ pub async fn handle_chat_stream(
       .await
       .map_err(|e| {
           eprintln!("Db update one error {:?}", e);
-          AppError::ServiceTemporarilyUnavailable})?;
+          AppError::DbTimeout})?;
    let previous_prompts = previous_messages
      .into_iter()
      .map(|message| Prompt {
@@ -158,7 +165,7 @@ pub async fn handle_chat_stream(
   let first_prompt = req.messages
     .first()
     .map(|message| message.content.clone())
-    .ok_or(AppError::NoMessageInRequest)?;
+    .ok_or(AppError::ValidationEmptyField { field: "messages" })?;
   let new_conversation_id = Uuid::new_v4();
   let title = match &provider_config {
       LlmProviderConfig::OpenAI(settings) => {
@@ -173,7 +180,7 @@ pub async fn handle_chat_stream(
       },
   }.map_err(|e| {
       eprintln!("title generation error {:?}", e);
-      AppError::ServiceTemporarilyUnavailable
+      AppError::DbTimeout
   })?;
   let new_conversation = conversations::ActiveModel{ 
     id:Set(new_conversation_id.clone()),
@@ -195,7 +202,7 @@ pub async fn handle_chat_stream(
     .await
     .map_err(|e| {
        eprintln!("Db insert one error {:?}", e);
-       AppError::ServiceTemporarilyUnavailable})?;
+       AppError::DbTimeout})?;
     (new_conversation_id,Vec::new())
  };
  let mut previous_message_id = None;
@@ -232,7 +239,7 @@ pub async fn handle_chat_stream(
    .await
    .map_err(|e| {
         eprintln!("Db one insert error {:?}", e);
-        AppError::ServiceTemporarilyUnavailable})?;
+        AppError::DbTimeout})?;
  }
  
  let current_prompts:Vec<Prompt> = req.messages

@@ -4,7 +4,7 @@ use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::AuthError}, dto::{admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest}, common::{PaginationQuery, SortRule}}, models::users::{self, UserRole, UserStatus}, state::SharedState};
+use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}}, dto::{admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest}, common::{PaginationQuery, SortRule}}, models::users::{self, UserRole, UserStatus}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -14,10 +14,10 @@ use crate::{auth::{claims::Claims, error::AuthError}, dto::{admin_user::{UserDet
         ("user_id" = Uuid, Path, description = "User id")
     ),
     responses(
-        (status = 200, body = UserDetails),
-        (status = 204, description = "User deleted"),
-        (status = 404, description = "Resource not found"),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+       (status = 200, body = UserDetails),
+       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
     )
 )]
 pub async fn get_user_by_id(
@@ -34,7 +34,7 @@ pub async fn get_user_by_id(
       .await
           .map_err(|e| {
         eprintln!("insert error: {e}");
-        AuthError::ServiceTemporarilyUnavailable
+        AuthError::DbTimeout
        })?
        .ok_or(AuthError::EmailDoesNotExist)?;
      let user_response = UserDetails {
@@ -73,8 +73,10 @@ pub async fn get_user_by_id(
         ("sort" = Option<SortRule>, Query, description = "Sort by column example 'name','updated_at','created_at','email','last_login_at'"),
     ),
     responses(
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
-        (status = 404, description = "Resource not found"),
+       (status = 200, body = UserResponse),
+       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),     
     )
 )]
 pub async fn get_users(
@@ -133,14 +135,14 @@ pub async fn get_users(
      .await
      .map_err(|e|{
          eprintln!("db get many error: {}",e);
-         AuthError::ServiceTemporarilyUnavailable
+         AuthError::DbTimeout
      })?;
    let rows = paginator
       .fetch_page(page)
       .await
       .map_err(|e|{
          eprintln!("db get many error: {}",e);
-         AuthError::ServiceTemporarilyUnavailable
+         AuthError::DbTimeout
      })?;
      response.users = rows
        .into_iter()
@@ -173,9 +175,11 @@ pub async fn get_users(
     tag = "admin",
     request_body = UserRequest,
     responses(
-        (status = 201),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
-        (status = 409, description = "Email already registered"),
+       (status = 201, description = "User added successfully"),
+       (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "Email already exists (code=6106)"),
+       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),     
     )
 )]
 pub async fn add_new_user(
@@ -214,7 +218,7 @@ pub async fn add_new_user(
      .await
      .map_err(|e| {
         eprintln!("insert error: {e}");
-        AuthError::ServiceTemporarilyUnavailable
+        AuthError::DbTimeout
     })?;
  Ok((StatusCode::CREATED,"User added successfully"))
 }
@@ -228,10 +232,11 @@ pub async fn add_new_user(
     ),
     request_body = UserUpdateRequest,
     responses(
-        (status = 200, description = "User updated"),
-        (status = 404, description = "Email does not exist"),
-        (status = 409, description = "Email already registered"),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+       (status = 200, description = "User updated"),
+       (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "Email already exists (code=6106)"),
+       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
     )
 )]
 pub async fn update_user(
@@ -249,7 +254,7 @@ pub async fn update_user(
         .await
         .map_err(|e| {
             eprintln!("db find error: {e}");
-            AuthError::ServiceTemporarilyUnavailable
+            AuthError::DbTimeout
         })?
         .ok_or(AuthError::EmailDoesNotExist)?;
 
@@ -280,7 +285,7 @@ pub async fn update_user(
                 AuthError::EmailAlreadyExist
             } else {
                 eprintln!("db update error: {e}");
-                AuthError::ServiceTemporarilyUnavailable
+                AuthError::DbTimeout
             }
         })?;
 
@@ -296,10 +301,10 @@ pub async fn update_user(
     ),
     request_body = UserPatchRequest,
     responses(
-        (status = 200, description = "User status updated successfully"),
-        (status = 404, description = "Email does not exist"),
-        (status = 409, description = "Email already registered"),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+       (status = 200, description = "User status updated successfully"),
+       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
     )
 )]
 pub async fn patch_user_status(
@@ -321,7 +326,7 @@ pub async fn patch_user_status(
         .await
         .map_err(|e| {
             eprintln!("db find error: {e}");
-            AuthError::ServiceTemporarilyUnavailable
+            AuthError::DbTimeout
         })?
         .ok_or(AuthError::EmailDoesNotExist)?;
     let mut active: users::ActiveModel = model.into();
@@ -332,7 +337,7 @@ pub async fn patch_user_status(
         .await
         .map_err(|e| {
               eprintln!("db update error: {e}");
-              AuthError::ServiceTemporarilyUnavailable
+              AuthError::DbTimeout
             }
         )?;
     Ok((StatusCode::OK,"User status updated successfully"))
@@ -347,8 +352,9 @@ pub async fn patch_user_status(
     ),
     responses(
         (status = 204, description = "User deleted"),
-        (status = 404, description = "Resource not found"),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "User not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
     )
 )]
 pub async fn delete_user(
@@ -366,7 +372,7 @@ pub async fn delete_user(
       .await
       .map_err(|e| {
             eprintln!("db find error: {e}");
-            AuthError::ServiceTemporarilyUnavailable
+            AuthError::DbTimeout
         })?
       .ok_or(AuthError::EmailDoesNotExist)?;
      let mut active_model =user
@@ -378,7 +384,7 @@ pub async fn delete_user(
        .await
        .map_err(|e| {
             eprintln!("db find error: {e}");
-            AuthError::ServiceTemporarilyUnavailable
+            AuthError::DbTimeout
         })?;
     Ok(StatusCode::NO_CONTENT)
 }
