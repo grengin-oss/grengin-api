@@ -11,3 +11,4 @@ pub mod admin_ai;
 pub mod models;
 pub mod admin_department;
 pub mod admin_sso_provider;
+pub mod open_error;

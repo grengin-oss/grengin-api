@@ -139,7 +139,7 @@ impl AuthError {
         out
     }
 
-    fn to_detail(&self) -> (StatusCode, ErrorDetail) {
+    pub fn to_detail(&self) -> (StatusCode, ErrorDetail) {
         match self {
             // ---------- infra ----------
             AuthError::ServiceTemporarilyUnavailable => {

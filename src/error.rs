@@ -137,7 +137,7 @@ impl AppError {
         out
     }
 
-    fn to_detail(&self) -> (StatusCode, ErrorDetail) {
+    pub fn to_detail(&self) -> (StatusCode, ErrorDetail) {
         match self {
             // -------- generic/platform --------
             AppError::ServiceTemporarilyUnavailable => {

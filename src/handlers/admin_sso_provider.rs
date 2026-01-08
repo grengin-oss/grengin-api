@@ -13,8 +13,9 @@ use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error
        (status = 200, body = Vec<SsoProviderResponse>),
        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Email does not exist (code=6101)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Sso Provider not found (code=5003)"),
+        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+
     )
 )]
 pub async fn get_sso_providers(
@@ -108,8 +109,8 @@ pub async fn get_sso_providers(
     responses(
        (status = 200, body = SsoProviderResponse),
        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Sso Provider not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn get_sso_provider_by_id(
@@ -160,8 +161,8 @@ pub async fn get_sso_provider_by_id(
     responses(
        (status = 200, body = SsoProviderResponse),
        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Sso Provider not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn delete_sso_provider_by_id(
@@ -210,8 +211,9 @@ pub async fn delete_sso_provider_by_id(
     responses(
        (status = 200, body = SsoProviderResponse),
        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Sso Provider not found (code=5003)"),
+        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+
     )
 )]
 pub async fn update_sso_provider_by_id(

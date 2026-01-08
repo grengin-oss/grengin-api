@@ -11,10 +11,9 @@ use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}}, dto::
     tag = "admin",
     responses(
        (status = 200, body = OrgResponse),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Organization not found (code=6301)"),
        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Organization not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn get_org(
@@ -88,10 +87,9 @@ pub async fn get_org(
     request_body = OrgRequest,
     responses(
        (status = 200, body = OrgResponse),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Organization not found (code=6301)"),
        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Organization not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn update_org(
