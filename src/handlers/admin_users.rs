@@ -16,8 +16,8 @@ use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}}, dto::
     responses(
        (status = 200, body = UserDetails),
        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "User not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn get_user_by_id(
@@ -75,8 +75,9 @@ pub async fn get_user_by_id(
     responses(
        (status = 200, body = UserResponse),
        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),     
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "User not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+     
     )
 )]
 pub async fn get_users(
@@ -178,8 +179,9 @@ pub async fn get_users(
        (status = 201, description = "User added successfully"),
        (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "Email already exists (code=6106)"),
        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),     
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "User not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+     
     )
 )]
 pub async fn add_new_user(
@@ -235,8 +237,8 @@ pub async fn add_new_user(
        (status = 200, description = "User updated"),
        (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "Email already exists (code=6106)"),
        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "User not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn update_user(
@@ -303,8 +305,9 @@ pub async fn update_user(
     responses(
        (status = 200, description = "User status updated successfully"),
        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "User not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+
     )
 )]
 pub async fn patch_user_status(
@@ -354,7 +357,7 @@ pub async fn patch_user_status(
         (status = 204, description = "User deleted"),
        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "User not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn delete_user(

@@ -17,7 +17,7 @@ pub struct Model {
     pub client_id: String,
     pub client_secret: String,
     pub issuer_url: String,
-    pub redirect_url:String, // new field
+    pub redirect_url:String, // new field add
     pub allowed_domains: Vec<String>,
     pub is_enabled: bool,
     pub is_default: bool,

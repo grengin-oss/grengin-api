@@ -243,7 +243,7 @@ pub async fn delete_file_by_id(
     ),
     responses(
         (status = 200, description = "file binary with content_type"),
-               (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
         (status = 503, content_type = "application/json", body = ErrorResponse, description = "Database timeout/unavailable (code=5001/5000)"),
     ),
 )]

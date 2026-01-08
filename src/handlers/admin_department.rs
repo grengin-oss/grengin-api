@@ -1,6 +1,5 @@
 use axum::{Json, extract::State};
 use reqwest::StatusCode;
-
 use crate::{auth::{claims::Claims, error::AuthError}, dto::{admin_department::{DepartmentResponse}}, models::users::UserRole, state::SharedState};
 
 #[utoipa::path(

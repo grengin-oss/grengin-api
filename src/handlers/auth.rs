@@ -12,8 +12,7 @@ use crate::{auth::{claims::{Claiming, Claims, RefreshClaims}, error::{AuthError,
        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Missing credentials (code=6102)"),
        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired refresh token (code=6103)"),
        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Email does not exist (code=6101)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "User not found (code=5003)"),
        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]

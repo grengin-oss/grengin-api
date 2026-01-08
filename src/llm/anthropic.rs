@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{
     config::setting::AnthropicSettings, dto::llm::anthropic::{
         AnthropicChatRequest, AnthropicChatResponse, AnthropicContentBlockResponse, AnthropicListModelsResponse, AnthropicMessage, AnthropicRole, AnthropicToolUnion, AnthropicWebSearchTool
-    }, handlers::file::get_file_binary, llm::{prompt::Prompt, provider::{AnthropicApis, AnthropicHeaders}}
+    }, handlers::file::get_file_binary, llm::{prompt::{Prompt, PromptTitleResponse}, provider::{AnthropicApis, AnthropicHeaders}}
 };
 
 pub const ANTHROPIC_API_URL: &str = "https://api.anthropic.com";
@@ -105,7 +105,7 @@ impl AnthropicApis for ReqwestClient {
         &self,
         anthropic_settings: &AnthropicSettings,
         prompt: String,
-    ) -> Result<String, Error> {
+    ) -> Result<PromptTitleResponse, Error> {
         let title_prompt = format!(
             "Write a short title for the given prompt respond only in title name: {prompt}"
         );
@@ -122,9 +122,9 @@ impl AnthropicApis for ReqwestClient {
             system: None,
             tools: None,
             stop_sequences: None,
-        };
+         };
 
-        let response: AnthropicChatResponse = self
+         let response: AnthropicChatResponse = self
             .post(format!("{ANTHROPIC_API_URL}/v1/messages"))
             .add_anthropic_headers(anthropic_settings)
             .json(&body)
@@ -134,7 +134,7 @@ impl AnthropicApis for ReqwestClient {
             .json()
             .await?;
 
-        let title = response
+         let title = response
             .content
             .first()
             .and_then(|block| match block {
@@ -142,8 +142,13 @@ impl AnthropicApis for ReqwestClient {
                 _ => None,
             })
             .ok_or(anyhow!("anthropic response content is empty"))?;
-
-        Ok(title)
+         let input_tokens = response
+            .usage
+            .input_tokens;
+         let output_tokens = response
+            .usage
+            .output_tokens;
+        Ok(PromptTitleResponse { title, input_tokens, output_tokens })
     }
 
     async fn anthropic_get_models(
