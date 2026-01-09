@@ -7,3 +7,5 @@ pub mod organizations;
 pub mod ai_engines;
 pub mod sso_providers;
 pub mod files;
+pub mod usage_logs;
+pub mod usage_summary_daily;
