@@ -3,15 +3,18 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::AuthError, sso_provider::sso_providers_list}, dto::admin_sso_providers::{SsoProviderResponse, SsoProviderUpdateRequest}, handlers::admin_org::get_org, models::{sso_providers, users::UserRole}, state::SharedState};
+use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}, sso_provider::sso_providers_list}, dto::admin_sso_providers::{SsoProviderResponse, SsoProviderUpdateRequest}, handlers::admin_org::get_org, models::{sso_providers, users::UserRole}, state::SharedState};
 
 #[utoipa::path(
     get,
     path = "/admin/sso-providers",
     tag = "admin",
     responses(
-        (status = 200, body = Vec<SsoProviderResponse>),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+       (status = 200, body = Vec<SsoProviderResponse>),
+       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Email does not exist (code=6101)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Sso Provider not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn get_sso_providers(
@@ -31,7 +34,7 @@ pub async fn get_sso_providers(
          .await
          .map_err(|e|{
            eprintln!("org fetch error: {:?}",e);
-           AuthError::ServiceTemporarilyUnavailable
+           AuthError::DbTimeout
        })?;
        org.id
      };
@@ -40,7 +43,7 @@ pub async fn get_sso_providers(
        .await
        .map_err(|e|{
           eprintln!("Db get all error: {:?}",e);
-          AuthError::ServiceTemporarilyUnavailable
+          AuthError::DbTimeout
        })?;
       if models.is_empty(){
          let mut insert_models = Vec::new();
@@ -72,7 +75,7 @@ pub async fn get_sso_providers(
            .await
            .map_err(|e|{
              eprintln!("DB insert many error {:?}",e);
-             AuthError::ServiceTemporarilyUnavailable
+             AuthError::DbTimeout
            })?;
       }
       let response = models
@@ -103,8 +106,10 @@ pub async fn get_sso_providers(
     path = "/admin/sso-providers/{provider_id}",
     tag = "admin",
     responses(
-        (status = 200, body = SsoProviderResponse),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+       (status = 200, body = SsoProviderResponse),
+       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Sso Provider not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn get_sso_provider_by_id(
@@ -125,7 +130,7 @@ pub async fn get_sso_provider_by_id(
        .await
        .map_err(|e|{
           eprintln!("Db get all error: {}",e);
-          AuthError::ServiceTemporarilyUnavailable
+          AuthError::DbTimeout
        })?;
       let response = model
         .map(|model|{
@@ -153,8 +158,10 @@ pub async fn get_sso_provider_by_id(
     path = "/admin/sso-providers/{provider_id}",
     tag = "admin",
     responses(
-        (status = 200, body = SsoProviderResponse),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+       (status = 200, body = SsoProviderResponse),
+       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Sso Provider not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn delete_sso_provider_by_id(
@@ -175,7 +182,7 @@ pub async fn delete_sso_provider_by_id(
        .await
        .map_err(|e|{
           eprintln!("Db get one error: {}",e);
-          AuthError::ServiceTemporarilyUnavailable
+          AuthError::DbTimeout
        })?
       .ok_or(AuthError::ResourceNotFound)?;
       let mut active_model = model
@@ -191,7 +198,7 @@ pub async fn delete_sso_provider_by_id(
         .await
         .map_err(|e|{
            eprintln!("Db get one error: {}",e);
-           AuthError::ServiceTemporarilyUnavailable
+           AuthError::DbTimeout
        })?;
   Ok((StatusCode::OK,"Deleted successfully"))
 }
@@ -201,8 +208,10 @@ pub async fn delete_sso_provider_by_id(
     path = "/admin/sso-providers/{provider_id}",
     tag = "admin",
     responses(
-        (status = 200, body = SsoProviderResponse),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+       (status = 200, body = SsoProviderResponse),
+       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Sso Provider not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn update_sso_provider_by_id(
@@ -224,9 +233,9 @@ pub async fn update_sso_provider_by_id(
        .await
        .map_err(|e|{
           eprintln!("Db get one error: {}",e);
-          AuthError::ServiceTemporarilyUnavailable
+          AuthError::DbTimeout
        })?
-      .ok_or(AuthError::ResourceNotFound)?;
+      .ok_or(AuthError::DbNotFound)?;
      let mut active_model = model
        .into_active_model();
      if let Some(provider) = req.provider {
@@ -255,7 +264,7 @@ pub async fn update_sso_provider_by_id(
         active_model.client_secret = Set(encrypt_key(&app_state.settings.auth.app_key,client_secret.as_bytes())
          .map_err(|e|{
              eprintln!("Sso key encryption error {:?}",e);
-             AuthError::ServiceTemporarilyUnavailable
+             AuthError::DbTimeout
          })?);
      }
      active_model.updated_at = Set(Utc::now());
@@ -264,7 +273,7 @@ pub async fn update_sso_provider_by_id(
         .await
         .map_err(|e|{
             eprintln!("Db update error {:?}",e);
-            AuthError::ServiceTemporarilyUnavailable
+            AuthError::DbTimeout
      })?;
      if let Ok(client_secret) = decrypt_key(&app_state.settings.auth.app_key,&updated_model.client_secret)  {
       let allowed_domains = updated_model

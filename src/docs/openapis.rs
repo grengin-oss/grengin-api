@@ -1,6 +1,6 @@
 use utoipa::OpenApi;
 use crate::auth::claims::Claims;
-use crate::auth::error::AuthError;
+use crate::auth::error::{AuthError,AuthErrorCode,AuthErrorDetailVariant,AuthErrorResponse};
 use crate::dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel,AiEngineModelsResponse, AiModelCapabilities};
 use crate::dto::admin_department::{Department, DepartmentResponse};
 use crate::dto::admin_org::OrgResponse;
@@ -13,9 +13,9 @@ use crate::dto::files::{Attachment, File, FileResponse, FileUploadRequest};
 use crate::dto::models::{ModelInfo, ProviderInfo};
 use crate::dto::oauth::OAuthCallback;
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
-use crate::docs::security::ApiSecurityAddon;
+use crate::docs::{security::ApiSecurityAddon,app_error_catlog::AppErrorCatalogItem};
 use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, RefreshTokenRequest, TokenType, User};
-use crate::handlers::{auth,oidc,chat,chat_stream,file,message,admin_users,admin_sso_provider,admin_org,admin_ai,models,admin_department};
+use crate::handlers::{auth,oidc,open_error,chat,chat_stream,file,message,admin_users,admin_sso_provider,admin_org,admin_ai,models,admin_department};
 use crate::models::messages::ChatRole;
 use crate::models::users::{UserRole, UserStatus};
 
@@ -59,6 +59,8 @@ use crate::models::users::{UserRole, UserStatus};
         file::download_file,
         file::upload_file,
         models::get_list_models,
+        open_error::get_app_error_catalog,
+        open_error::get_auth_error_catalog,
     ),
     components(
         schemas(
@@ -107,7 +109,11 @@ use crate::models::users::{UserRole, UserStatus};
             SsoProviderUpdateRequest,
             AuthError,
             AppError,
+            AuthErrorCode,
+            AuthErrorDetailVariant,
+            AuthErrorResponse,
             RefreshTokenRequest,
+            AppErrorCatalogItem,
         )
     ),
     tags(

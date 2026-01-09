@@ -6,3 +6,10 @@ pub struct Prompt {
    pub role:ChatRole,
    pub files:Vec<File>,
 }
+
+#[derive(Debug)]
+pub struct PromptTitleResponse {
+   pub title:String,
+   pub input_tokens:i32,
+   pub output_tokens:i32,
+}

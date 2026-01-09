@@ -5,17 +5,38 @@ use crate::dto::chat_stream::ChatStream;
 use uuid::Uuid;
 
 /// Result of parsing a streaming event
+#[derive(Debug, Clone)]
 pub enum StreamParseResult {
-    /// Text content received
-    TextDelta { text: String, request_id: Option<String> },
-    /// Message started (with optional request id)
-    MessageStart { request_id: String },
-    /// Tool input streaming (for future support)
-    ToolInput { partial_json: String },
-    /// Error occurred
-    Error { error_type: String, message: String },
-    /// Nothing to yield (ping, ignored event, etc.)
     None,
+
+    // PATCH: include optional usage on start (useful for Anthropic message_start)
+    MessageStart {
+        request_id: String,
+        input_tokens: Option<u32>,
+        output_tokens: Option<u32>,
+    },
+
+    TextDelta {
+        text: String,
+        request_id: Option<String>,
+    },
+
+    ToolInput {
+        partial_json: String,
+    },
+
+    // NEW: token usage updates mid/final stream
+    TokenUsage {
+        request_id: Option<String>,
+        input_tokens: Option<u32>,
+        output_tokens: Option<u32>,
+        total_tokens: Option<u32>,
+    },
+
+    Error {
+        error_type: String,
+        message: String,
+    },
 }
 
 /// Trait for parsing provider-specific streaming events
@@ -41,7 +62,7 @@ impl StreamParseResult {
     pub fn request_id(&self) -> Option<String> {
         match self {
             StreamParseResult::TextDelta { request_id, .. } => request_id.clone(),
-            StreamParseResult::MessageStart { request_id } => Some(request_id.clone()),
+            StreamParseResult::MessageStart { request_id,input_tokens:_,output_tokens:_ } => Some(request_id.clone()),
             _ => None,
         }
     }

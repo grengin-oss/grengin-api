@@ -4,7 +4,7 @@ use reqwest_eventsource::EventSource;
 use serde::{Deserialize, Serialize};
 use utoipa::{ToSchema};
 use uuid::Uuid;
-use crate::{config::setting::{AnthropicSettings, OpenaiSettings}, dto::{files::Attachment, llm::{anthropic::AnthropicListModelsResponse, openai::OpenaiModel}}, llm::prompt::Prompt};
+use crate::{config::setting::{AnthropicSettings, OpenaiSettings}, dto::{files::Attachment, llm::{anthropic::AnthropicListModelsResponse, openai::OpenaiModel}}, llm::prompt::{Prompt, PromptTitleResponse}};
 
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -15,12 +15,20 @@ pub enum LlmProviders{
     Groq
 }
 
+pub fn get_title_generation_model(provider:&str) -> Option<&str>{
+    match provider {
+        "openai" => "o3-mini".into(),
+        "anthropic" => "claude-haiku-4-5".into(),
+         _ => None
+    }
+}
+
 #[async_trait]
 pub trait OpenaiApis {
-    async fn openai_chat_stream(&self,openai_settings:&OpenaiSettings,model_name:String,temperature:Option<f32>,mut prompts:Vec<Prompt>,user_id:&Uuid) -> Result<EventSource,Error>;
+    async fn openai_chat_stream(&self,openai_settings:&OpenaiSettings,model_name:String,temperature:Option<f32>,mut prompts:Vec<Prompt>,user_id:&Uuid,web_search:bool) -> Result<EventSource,Error>;
     async fn openai_chat_stream_text(&self,openai_settings:&OpenaiSettings,model_name:String,temperature:Option<f32>,prompt:Vec<String>) -> Result<EventSource,Error>;
     async fn openai_upload_file(&self,openai_settings:&OpenaiSettings,attachment:&Attachment) -> Result<String,Error>;
-    async fn openai_get_title(&self,openai_settings:&OpenaiSettings,prompt:String) -> Result<String,Error>;
+    async fn openai_get_title(&self,openai_settings:&OpenaiSettings,prompt:String) -> Result<PromptTitleResponse,Error>;
     async fn openai_list_models(&self,openai_settings: &OpenaiSettings) -> Result<Vec<OpenaiModel>, Error>;
 } 
 
@@ -57,7 +65,7 @@ pub trait AnthropicApis {
         &self,
         anthropic_settings: &AnthropicSettings,
         prompt: String,
-    ) -> Result<String, Error>;
+    ) -> Result<PromptTitleResponse, Error>;
 
     async fn anthropic_get_models(
         &self,

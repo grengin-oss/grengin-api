@@ -6,16 +6,16 @@ use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, Into
 use serde_json::json;
 use uuid::Uuid;
 use crate::{
-    auth::claims::Claims,
+    auth::{claims::Claims, error::AuthErrorResponse},
     config::setting::{AnthropicSettings, OpenaiSettings},
     dto::{
         chat_stream::{ChatInitRequest, ChatStream},
-        files::{File},
+        files::File,
         llm::anthropic::ANTHROPIC_DEFAULT_MAX_TOKENS,
     },
-    error::AppError,
+    error::{AppError, ErrorResponse},
     handlers::llm::{StreamParseResult, StreamParser, anthropic::AnthropicStreamParser, openai::OpenaiStreamParser},
-    llm::{prompt::Prompt, provider::{AnthropicApis, OpenaiApis}},
+    llm::{prompt::Prompt, provider::{AnthropicApis, OpenaiApis, get_title_generation_model}},
     models::{conversations, messages::{self, ChatRole}},
     state::SharedState,
 };
@@ -36,9 +36,13 @@ enum LlmProviderConfig<'a> {
     ),
     request_body = ChatInitRequest,
     responses(
-        (status = 200, content_type = "text/event-stream", body = ChatStream),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
-        (status = 404, description = "Resource not found"),
+    (status = 200, content_type = "text/event-stream", body = ChatStream),
+    (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+    (status = 400, content_type = "application/json", body = ErrorResponse, description = "Validation error (code=2002 empty messages)"),
+    (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003)"),
+    (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found / DB not found (code=5003)"),
+    (status = 503, content_type = "application/json", body = ErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+
     ),
 )]
 pub async fn handle_chat_stream_path_doc(){}
@@ -49,9 +53,12 @@ pub async fn handle_chat_stream_path_doc(){}
     tag = "chat",
     request_body = ChatInitRequest,
     responses(
-        (status = 200, content_type = "text/event-stream", body = ChatStream),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
-        (status = 404, description = "Resource not found"),
+    (status = 200, content_type = "text/event-stream", body = ChatStream),
+    (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+    (status = 400, content_type = "application/json", body = ErrorResponse, description = "Validation error (code=2002 empty messages)"),
+    (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003)"),
+    (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found / DB not found (code=5003)"),
+    (status = 503, content_type = "application/json", body = ErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     ),
 )]
 pub async fn handle_chat_stream_doc(){}
@@ -82,9 +89,9 @@ pub async fn handle_chat_stream(
      "openai" => {
          let settings = openai_settings
              .as_ref()
-             .ok_or(AppError::LlmProviderNotConfigured)?;
+             .ok_or(AppError::LlmProviderNotConfigured { provider:provider.clone() })?;
          if !settings.is_enabled{
-            return Err(AppError::LlmProviderDisabledByAdmin);
+            return Err(AppError::LlmProviderDisabledByAdmin {provider:provider.clone()});
          }
          let model = req.model_name.clone().unwrap_or_else(|| "gpt-5.2".to_string());
          (LlmProviderConfig::OpenAI(&settings), model)
@@ -92,22 +99,22 @@ pub async fn handle_chat_stream(
      "anthropic" => {
          let settings = anthropic_settings
            .as_ref()
-           .ok_or(AppError::LlmProviderNotConfigured)?;
+           .ok_or(AppError::LlmProviderNotConfigured { provider:provider.clone() })?;
          if !settings.is_enabled{
-            return Err(AppError::LlmProviderDisabledByAdmin);
+            return Err(AppError::LlmProviderDisabledByAdmin {provider:provider.clone()});
          }
          let model = req.model_name.clone().unwrap_or_else(|| "claude-sonnet-4-5".to_string());
          (LlmProviderConfig::Anthropic(&settings), model)
      },
-     _ => return Err(AppError::InvalidLlmProvider)
+     _ => return Err(AppError::InvalidLlmProvider{provider:provider.clone()})
  };
- let mut metadata = json!({
-  "webSearch":req.web_search,
-  "selectedTools":selected_tools.clone(),
- });
  if let Some(conversation_id) = req.conversation_id{
     chat_id = Some(Path(conversation_id));
  }
+ let mut metadata = json!({
+    "webSearch":req.web_search,
+    "selectedTools":selected_tools.clone()
+ });
  let (conversation_id,mut previous_prompts) = if let Some(Path(conversation_id)) = chat_id {
     let (mut conversation, previous_messages) = conversations::Entity::find_by_id(conversation_id.clone())
        .filter(conversations::Column::ArchivedAt.is_null())
@@ -118,12 +125,12 @@ pub async fn handle_chat_stream(
        .await
        .map_err(|e| {
           eprintln!("DB get one with many error {:?}", e);
-          AppError::ServiceTemporarilyUnavailable})?
+          AppError::DbTimeout})?
        .into_iter()
        .next()
-       .ok_or(AppError::ResourceNotFound)?;
+       .ok_or(AppError::DbNotFound)?;
     if !selected_tools.is_empty(){
-      if let Some(json) = conversation.metadata.as_mut() {
+      if let Some(json) =  conversation.metadata.as_mut() {
           // Update metadata TODO
        }
       conversation
@@ -140,7 +147,7 @@ pub async fn handle_chat_stream(
       .await
       .map_err(|e| {
           eprintln!("Db update one error {:?}", e);
-          AppError::ServiceTemporarilyUnavailable})?;
+          AppError::DbTimeout})?;
    let previous_prompts = previous_messages
      .into_iter()
      .map(|message| Prompt {
@@ -158,9 +165,9 @@ pub async fn handle_chat_stream(
   let first_prompt = req.messages
     .first()
     .map(|message| message.content.clone())
-    .ok_or(AppError::NoMessageInRequest)?;
+    .ok_or(AppError::ValidationEmptyField { field: "messages" })?;
   let new_conversation_id = Uuid::new_v4();
-  let title = match &provider_config {
+  let prompt_title_response = match &provider_config {
       LlmProviderConfig::OpenAI(settings) => {
           app_state.req_client
               .openai_get_title(settings, first_prompt)
@@ -173,12 +180,19 @@ pub async fn handle_chat_stream(
       },
   }.map_err(|e| {
       eprintln!("title generation error {:?}", e);
-      AppError::ServiceTemporarilyUnavailable
+      AppError::DbTimeout
   })?;
+   let title_generation_usage  = json!({
+       "model":get_title_generation_model(&provider),
+       "inputTokens":prompt_title_response.input_tokens,
+       "outputTokens":prompt_title_response.output_tokens,
+  });
+  let mut new_metadata = metadata.clone();
+  new_metadata["titleGenerationUsage"] = title_generation_usage;
   let new_conversation = conversations::ActiveModel{ 
     id:Set(new_conversation_id.clone()),
     user_id:Set(claims.user_id),
-    title: Set(Some(title)),
+    title: Set(Some(prompt_title_response.title)),
     model_provider:Set(provider.clone()),
     model_name:Set(model_name.clone()),
     created_at:Set(Utc::now()),
@@ -188,14 +202,14 @@ pub async fn handle_chat_stream(
     message_count:Set(req.messages.len() as i32),
     total_tokens: Set(0),
     total_cost:Set(Decimal::from(0)),
-    metadata:Set(Some(metadata.clone()))
+    metadata:Set(Some(new_metadata))
    };
   new_conversation
     .insert(&app_state.database)
     .await
     .map_err(|e| {
        eprintln!("Db insert one error {:?}", e);
-       AppError::ServiceTemporarilyUnavailable})?;
+       AppError::DbTimeout})?;
     (new_conversation_id,Vec::new())
  };
  let mut previous_message_id = None;
@@ -232,7 +246,7 @@ pub async fn handle_chat_stream(
    .await
    .map_err(|e| {
         eprintln!("Db one insert error {:?}", e);
-        AppError::ServiceTemporarilyUnavailable})?;
+        AppError::DbTimeout})?;
  }
  
  let current_prompts:Vec<Prompt> = req.messages
@@ -250,7 +264,8 @@ pub async fn handle_chat_stream(
                 settings, model_name.clone(),
                 req.temperature,
                 previous_prompts,
-                &claims.user_id
+                &claims.user_id,
+                req.web_search
               )
              .await
      },
@@ -279,6 +294,9 @@ pub async fn handle_chat_stream(
 
  let sse_stream = async_stream::try_stream! {
     let mut message_content = String::new();
+    let mut request_tokens = 0;
+    let mut response_tokens = 0;
+    let mut total_tokens = 0;
     let mut request_id: Option<String> = None;
 
     while let Some(event) = event_source.next().await {
@@ -302,8 +320,26 @@ pub async fn handle_chat_stream(
                         };
                         yield Event::default().event("chunk").data(chat_stream.to_string());
                     }
-                    StreamParseResult::MessageStart { request_id: rid } => {
-                        request_id = Some(rid.clone());
+                    StreamParseResult::TokenUsage{ request_id:req_id,input_tokens, output_tokens, total_tokens:t_tokens} => {
+                       if let Some(tokens) = input_tokens {
+                         request_tokens = tokens.clone() as i32;
+                       }
+                       if let Some(tokens) = output_tokens {
+                         response_tokens = tokens.clone() as i32;
+                       }
+                       if let Some(tokens) = t_tokens{
+                         total_tokens = tokens.clone() as i32;
+                       }
+                       request_id = req_id.clone();
+                    }
+                    StreamParseResult::MessageStart { request_id:req_id,input_tokens,output_tokens} => {
+                       if let Some(tokens) = input_tokens {
+                         request_tokens = tokens.clone() as i32;
+                       }
+                       if let Some(tokens) = output_tokens {
+                         response_tokens = tokens.clone() as i32;
+                       }
+                      request_id = Some(req_id.clone());
                     }
                     StreamParseResult::ToolInput { .. } => {
                         // Tool input streaming - accumulate for tool calls (future support)
@@ -315,28 +351,32 @@ pub async fn handle_chat_stream(
                 }
             }
             Err(e) => {
-                if e.to_string() == "Stream ended" {
-                    println!("Stream ended for provider: {}", &provider);
-                    let new_llm_message = messages::ActiveModel {
-                        id: Set(Uuid::new_v4()),
-                        conversation_id: Set(conversation_id.clone()),
-                        previous_message_id: Set(previous_message_id),
-                        deleted: Set(false),
-                        role: Set(ChatRole::Assistant),
-                        message_content: Set(message_content),
-                        model_provider: Set(provider.clone()),
-                        model_name: Set(model_name.clone()),
-                        request_id: Set(request_id),
-                        request_tokens: Set(0),
-                        response_tokens: Set(0),
-                        tools_calls: Set(Vec::new()),
-                        tools_results: Set(Vec::new()),
-                        created_at: Set(Utc::now()),
-                        updated_at: Set(Utc::now()),
-                        total_tokens: Set(0),
-                        latency: Set(0),
-                        cost: Set(Decimal::from(0)),
-                        metadata: Set(None),
+                match e {
+                  reqwest_eventsource::Error::StreamEnded => {
+                      if total_tokens == 0 {
+                        total_tokens = request_tokens + response_tokens;
+                      }
+                      println!("Stream ended for provider: {} input tokens: {} output_tokens: {} total_tokens: {}", &provider,request_tokens,response_tokens,total_tokens);
+                      let new_llm_message = messages::ActiveModel {
+                         id: Set(Uuid::new_v4()),
+                         conversation_id: Set(conversation_id.clone()),
+                         previous_message_id: Set(previous_message_id),
+                         deleted: Set(false),
+                         role: Set(ChatRole::Assistant),
+                         message_content: Set(message_content),
+                         model_provider: Set(provider.clone()),
+                         model_name: Set(model_name.clone()),
+                         request_id: Set(request_id),
+                         request_tokens: Set(request_tokens),
+                         response_tokens: Set(response_tokens),
+                         tools_calls: Set(Vec::new()),
+                         tools_results: Set(Vec::new()),
+                         created_at: Set(Utc::now()),
+                         updated_at: Set(Utc::now()),
+                         total_tokens: Set(total_tokens),
+                         latency: Set(0),
+                         cost: Set(Decimal::from(0)),
+                         metadata: Set(None),
                     };
                     new_llm_message
                         .insert(&app_state.database)
@@ -344,8 +384,12 @@ pub async fn handle_chat_stream(
                         .expect("failed to insert llm response in table messages");
                     yield Event::default().event("chunk").data("[DONE]");
                     break;
-                }
-                println!("chat stream error -> {}", e);
+                    },
+                    _ => {
+                        println!("Streaming error for provider:{} error:{}",provider,e.to_string());
+                        break;
+                    }
+                };
             }
         }
     }

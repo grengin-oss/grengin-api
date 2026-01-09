@@ -4,7 +4,7 @@ use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, Iterable, PaginatorTrait as _, QueryFilter, QueryOrder, QuerySelect};
 use uuid::Uuid;
-use crate::{auth::claims::Claims, dto::{chat::{ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse, TokenUsage}, common::PaginationQuery, files::File}, error::AppError, models::{conversations::{self, ConversationWithCount}, messages::{self}}, state::SharedState};
+use crate::{auth::{claims::Claims, error::AuthErrorResponse}, dto::{chat::{ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse, TokenUsage}, common::PaginationQuery, files::File}, error::{AppError, ErrorResponse}, models::{conversations::{self, ConversationWithCount}, messages::{self}}, state::SharedState};
 use num_traits::cast::ToPrimitive;
 
 #[utoipa::path(
@@ -19,8 +19,7 @@ use num_traits::cast::ToPrimitive;
     ),
     responses(
         (status = 200, body = Vec<ConversationResponse>),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
-        (status = 404, description = "Resource not found"),
+        (status = 503, content_type = "application/json", body = ErrorResponse, description = "Database timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn get_chats(
@@ -61,7 +60,7 @@ pub async fn get_chats(
         .await
         .map_err(|e| {
             eprintln!("conversation in count query error -> {e}");
-            AppError::ServiceTemporarilyUnavailable
+            AppError::DbTimeout
         })?;
     for conversation_with_count in rows {
       let message_count = messages::Entity::find()
@@ -70,7 +69,7 @@ pub async fn get_chats(
         .await
         .map_err(|e|{
           eprintln!("conversation in count error {}",e);
-          AppError::ServiceTemporarilyUnavailable}
+          AppError::DbTimeout}
        )?;
        let conversation_response = ConversationResponse{ 
             id: conversation_with_count.id,
@@ -104,8 +103,9 @@ pub async fn get_chats(
     ),
     responses(
         (status = 200, body = ConversationResponse),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
-        (status = 404, description = "Resource not found"),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+        (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found (code=1001)"),
+        (status = 503, content_type = "application/json", body = ErrorResponse, description = "Database timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn get_chat_by_id(
@@ -120,8 +120,8 @@ pub async fn get_chat_by_id(
       .await
       .map_err(|e|{
         eprintln!("{}",e);
-        AppError::ServiceTemporarilyUnavailable})?
-      .ok_or(AppError::ResourceNotFound)?; 
+        AppError::DbTimeout})?
+      .ok_or(AppError::DbNotFound)?; 
 
     let limit = query.limit.unwrap_or(30);
     let offset = query.offset.unwrap_or(0);
@@ -144,7 +144,7 @@ pub async fn get_chat_by_id(
       .await
       .map_err(|e|{
         eprintln!("{}",e);
-        AppError::ServiceTemporarilyUnavailable})?;
+        AppError::DbTimeout})?;
 
     let mut conversation_response = ConversationResponse{
         id: conversation_model.id,
@@ -165,7 +165,7 @@ pub async fn get_chat_by_id(
      .await
      .map_err(|e|{
         eprintln!("{}",e);
-        AppError::ServiceTemporarilyUnavailable})?;
+        AppError::DbTimeout})?;
     messages_models
       .into_iter()
       .for_each(|message_model|{
@@ -213,8 +213,9 @@ pub async fn get_chat_by_id(
     ),
     responses(
         (status = 200, body = ConversationResponse),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
-        (status = 404, description = "Resource not found"),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+        (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found in database (code=5003)"),
+        (status = 503, content_type = "application/json", body = ErrorResponse, description = "Database timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn update_chat_by_id(
@@ -230,15 +231,15 @@ pub async fn update_chat_by_id(
        .await
        .map_err(|e|{
         eprintln!("{}",e);
-        AppError::ServiceTemporarilyUnavailable})?
-      .ok_or(AppError::ResourceNotFound)?;
+        AppError::DbTimeout})?
+      .ok_or(AppError::DbNotFound)?;
     let message_count = messages::Entity::find()
        .filter(messages::Column::ConversationId.eq(conversation_model.id.clone()))
        .count(&app_state.database)
        .await
        .map_err(|e|{
           eprintln!("{}",e);
-          AppError::ServiceTemporarilyUnavailable}
+          AppError::DbTimeout}
        )?;
     let mut active_model = conversation_model
        .clone()
@@ -253,7 +254,7 @@ pub async fn update_chat_by_id(
        .await
        .map_err(|e|{
           eprintln!("{}",e);
-          AppError::ServiceTemporarilyUnavailable})?;
+          AppError::DbTimeout})?;
     let response = ConversationResponse{
         id: conversation_model.id,
         title: conversation_model.title,
@@ -279,9 +280,10 @@ pub async fn update_chat_by_id(
         ("chat_id" = Uuid, Path, description = "Unique identifier for the conversation"),
     ),
     responses(
-        (status = 204, description = "Deleted successfully"),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
-        (status = 404, description = "Resource not found"),
+       (status = 204, description = "Deleted successfully"),
+       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found in database (code=5003)"),
+       (status = 503, content_type = "application/json", body = ErrorResponse, description = "Database timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn delete_chat_by_id(
@@ -295,14 +297,14 @@ pub async fn delete_chat_by_id(
       .await
       .map_err(|e|{
         eprintln!("{}",e);
-        AppError::ServiceTemporarilyUnavailable})?
-      .ok_or(AppError::ResourceNotFound)?;
+        AppError::DbTimeout})?
+      .ok_or(AppError::DbNotFound)?;
     conversation_model
       .into_active_model()
       .delete(&app_state.database)
       .await
       .map_err(|e|{
         eprintln!("{}",e);
-        AppError::ServiceTemporarilyUnavailable})?;
+        AppError::DbTimeout})?;
  Ok(StatusCode::NO_CONTENT)
 }

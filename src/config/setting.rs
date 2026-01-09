@@ -149,13 +149,15 @@ impl Settings {
          .map_err(|e| ConfigError::DbError(e.to_string()))?;
        for sso_provider in sso_providers {
             let Ok(client_secret) = decrypt_key(&self.auth.app_key,&sso_provider.client_secret)
-            else {
+             else {
                 continue
              }; // fall back for default <empty> string
-            let Ok(_) = Url::parse(&sso_provider.redirect_url)else{
+            let Ok(_) = Url::parse(&sso_provider.redirect_url)
+             else{
                 continue;
             };
-            let Ok(_) = Url::parse(&sso_provider.issuer_url)else{
+            let Ok(_) = Url::parse(&sso_provider.issuer_url)
+             else{
                 continue;
             };
             self.load_sso_provider_in_state(sso_provider.provider, client_secret, sso_provider.client_id, sso_provider.redirect_url, sso_provider.tenant_id,true,sso_provider.allowed_domains)

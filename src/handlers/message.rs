@@ -34,7 +34,7 @@ pub async fn delete_chat_message_by_id(
     .await
     .map_err(|e|{
       eprintln!("db error :{}",e);
-      AppError::ServiceTemporarilyUnavailable
+      AppError::DbTimeout
      })?
     .ok_or(AppError::ResourceNotFound)?;
   let mut active_model = message
@@ -47,7 +47,7 @@ pub async fn delete_chat_message_by_id(
     .await
     .map_err(|e|{
       eprintln!("db error :{}",e);
-      AppError::ServiceTemporarilyUnavailable
+      AppError::DbTimeout
     })?;
  Ok(StatusCode::NO_CONTENT)
 }
@@ -83,7 +83,7 @@ pub async fn edit_chat_message_by_id_and_stream(
        .await
        .map_err(|e|{
           eprintln!("db error :{}",e);
-          AppError::ServiceTemporarilyUnavailable
+          AppError::DbTimeout
         })?
        .ok_or(AppError::ResourceNotFound)?
        .1
@@ -97,7 +97,7 @@ pub async fn edit_chat_message_by_id_and_stream(
        .await
           .map_err(|e|{
            eprintln!("db update many error :{}",e);
-            AppError::ServiceTemporarilyUnavailable
+            AppError::DbTimeout
         })?;
  Ok(handle_chat_stream(claims, Some(Path(chat_id)), State(app_state), Json(req)).await?)
 }

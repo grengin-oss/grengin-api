@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use reqwest::{Client as ReqwestClient, RequestBuilder, multipart};
 use reqwest_eventsource::EventSource;
 use uuid::Uuid;
-use crate::{config::setting::OpenaiSettings, dto::{files::Attachment, llm::openai::{FileUploadResponse, OpenaiChatCompletionRequest, OpenaiChatCompletionResponse, OpenaiChatRequest, OpenaiListModelsResponse, OpenaiMessage, OpenaiModel}}, handlers::file::get_file_binary, llm::{prompt::Prompt, provider::{OpenaiApis, OpenaiHeaders}}};
+use crate::{config::setting::OpenaiSettings, dto::{files::Attachment, llm::openai::{FileUploadResponse, OpenaiChatCompletionRequest, OpenaiChatCompletionResponse, OpenaiChatRequest, OpenaiListModelsResponse, OpenaiMessage, OpenaiModel, OpenaiTool}}, handlers::file::get_file_binary, llm::{prompt::{Prompt, PromptTitleResponse}, provider::{OpenaiApis, OpenaiHeaders}}};
 
 pub const OPENAI_API_URL:&str = "https://api.openai.com";
 
@@ -47,7 +47,7 @@ impl OpenaiApis for ReqwestClient {
      Ok(res.id)
     }
 
-   async fn openai_chat_stream(&self,openai_settings:&OpenaiSettings,model_name:String,temperature:Option<f32>,mut prompts:Vec<Prompt>,user_id:&Uuid) -> Result<EventSource,Error>{
+   async fn openai_chat_stream(&self,openai_settings:&OpenaiSettings,model_name:String,temperature:Option<f32>,mut prompts:Vec<Prompt>,user_id:&Uuid,web_search:bool) -> Result<EventSource,Error>{
        for prompt in &mut prompts {
          for file in &mut prompt.files {
             if let Ok(attachment) = get_file_binary(&file, user_id){
@@ -58,11 +58,19 @@ impl OpenaiApis for ReqwestClient {
             }
          }
        }
+       let tools = if web_search {
+         Some(vec![OpenaiTool::web_search()])
+       }else{
+         None
+       };
        let body = OpenaiChatRequest {
             model: model_name,
             stream: true,
             temperature,
             input:OpenaiMessage::from_prompts(prompts),
+            tool_choice:None,
+            tools:tools,
+            include:None,
         };
       let request = self
             .post(format!("{OPENAI_API_URL}/v1/responses"))
@@ -87,7 +95,7 @@ impl OpenaiApis for ReqwestClient {
      Ok(es)
    }
 
-    async fn openai_get_title(&self,openai_settings:&OpenaiSettings,prompt:String) -> Result<String,Error>{
+    async fn openai_get_title(&self,openai_settings:&OpenaiSettings,prompt:String) -> Result<PromptTitleResponse,Error>{
       let title_prompt = format!("Write a short title for the given prompt respond only in title name: {prompt}");
         let body = OpenaiChatCompletionRequest {
             model: "o4-mini".to_string(),
@@ -110,7 +118,11 @@ impl OpenaiApis for ReqwestClient {
           .map(|choice| choice.message.content.clone())
           .ok_or(anyhow!("openai response choices is empty"))?
           .ok_or(anyhow!("openai choice message content is empty"))?;
-      Ok(title)      
+     let (input_tokens,output_tokens) = response
+          .usage
+          .map(|usage| (usage.prompt_tokens as i32,usage.completion_tokens as i32))
+          .unwrap_or((0,0)); 
+     Ok(PromptTitleResponse{title,input_tokens,output_tokens})      
     }
 
     async fn openai_list_models(&self,openai_settings: &OpenaiSettings) -> Result<Vec<OpenaiModel>, Error> {

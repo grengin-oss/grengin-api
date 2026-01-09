@@ -3,15 +3,16 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::AuthError}, dto::{admin_ai::{AiEngineModelsResponse, AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel, AiModelCapabilities}, models::ModelsResponse}, handlers::{admin_org::get_org}, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}, users::UserRole}, state::SharedState};
+use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}}, dto::{admin_ai::{AiEngineModelsResponse, AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel, AiModelCapabilities}, models::ModelsResponse}, handlers::admin_org::get_org, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}, users::UserRole}, state::SharedState};
 
 #[utoipa::path(
     get,
     path = "/admin/ai-engines",
     tag = "admin",
     responses(
-        (status = 200, body = Vec<AiEngineResponse>),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+       (status = 200, body = Vec<AiEngineResponse>),
+       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn get_ai_engines(
@@ -33,14 +34,14 @@ pub async fn get_ai_engines(
       .await
       .map_err(|e|{
          eprintln!("db error get all {e}");
-         AuthError::ServiceTemporarilyUnavailable
+         AuthError::DbTimeout
       })?;
     if ai_engines.is_empty() {
        let (_,Json(org)) = get_org(claims,State(app_state.clone()))
          .await
          .map_err(|e|{
            eprintln!("db error get one {:?}",e);
-           AuthError::ServiceTemporarilyUnavailable
+           AuthError::DbTimeout
         })?;
        let mut ai_engines_active_models:Vec<ai_engines::ActiveModel> = Vec::new();
        for provider in &ai_models.providers {
@@ -72,7 +73,7 @@ pub async fn get_ai_engines(
          .await
          .map_err(|e|{
             eprintln!("db insert many error {:?}",e);
-            AuthError::ServiceTemporarilyUnavailable
+            AuthError::DbTimeout
          })?;
        let response = ai_models
          .providers
@@ -129,8 +130,10 @@ pub async fn get_ai_engines(
         ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
     ),
     responses(
-        (status = 200, body = AiEngineResponse),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+       (status = 200, body = AiEngineResponse),
+       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Ai Engine not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn get_ai_engines_by_key(
@@ -154,7 +157,7 @@ pub async fn get_ai_engines_by_key(
       .await
       .map_err(|e|{
         eprintln!("db error get all {e}");
-        AuthError::ServiceTemporarilyUnavailable
+        AuthError::DbTimeout
       })?
       .ok_or(AuthError::ResourceNotFound)?;
     let response = AiEngineResponse{
@@ -182,8 +185,11 @@ pub async fn get_ai_engines_by_key(
         ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
     ),
     responses(
-        (status = 200, body = AiEngineModelsResponse),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+       (status = 200, body = AiEngineModelsResponse),
+       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Ai Engine not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+
     )
 )]
 pub async fn get_ai_engine_models_by_key(
@@ -206,7 +212,7 @@ pub async fn get_ai_engine_models_by_key(
       .await
       .map_err(|e|{
         eprintln!("db error get all {e}");
-        AuthError::ServiceTemporarilyUnavailable
+        AuthError::DbTimeout
       })?
       .ok_or(AuthError::ResourceNotFound)?;
     let mut response = AiEngineModelsResponse{ 
@@ -242,8 +248,11 @@ pub async fn get_ai_engine_models_by_key(
         ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
     ),
     responses(
-        (status = 200, description = "Updated successfully"),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+        (status = 200, body = AiEngineResponse),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Ai Engine not found (code=5003)"),
+        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+
     )
 )]
 pub async fn update_ai_engines_by_key(
@@ -268,7 +277,7 @@ pub async fn update_ai_engines_by_key(
       .await
       .map_err(|e|{
         eprintln!("db error get all {e}");
-        AuthError::ServiceTemporarilyUnavailable
+        AuthError::DbTimeout
       })?
       .ok_or(AuthError::ResourceNotFound)?;
     let mut active_model = ai_engine
@@ -278,7 +287,7 @@ pub async fn update_ai_engines_by_key(
       let encrypted_api_key = encrypt_key(&app_state.settings.auth.app_key,api_key.as_bytes())
        .map_err(|e|{
          eprintln!("Encryption error for api key: {:?}",e);
-         AuthError::ServiceTemporarilyUnavailable
+         AuthError::DbTimeout
        })?;
       active_model.api_key = Set(Some(encrypted_api_key));
     }
@@ -298,19 +307,19 @@ pub async fn update_ai_engines_by_key(
      .await
      .map_err(|e|{
         eprintln!("db error update one {e}");
-        AuthError::ServiceTemporarilyUnavailable
+        AuthError::DbTimeout
       })?;
     let model = active_model
       .try_into_model()
       .map_err(|e|{
         eprintln!("db error model parse error {e}");
-        AuthError::ServiceTemporarilyUnavailable
+        AuthError::DbTimeout
       })?;
      if let Some(api_key) = &model.api_key  {
         let decrypted_api_key = decrypt_key(&app_state.settings.auth.app_key,&api_key)
            .map_err(|e|{
              eprintln!("Decryption api key error {:?}",e);
-             AuthError::ServiceTemporarilyUnavailable
+             AuthError::DbTimeout
            }
           )?;
         app_state
@@ -319,7 +328,7 @@ pub async fn update_ai_engines_by_key(
           .await
           .map_err(|e|{
             eprintln!("Ai engine loading error in state {e}");
-            AuthError::ServiceTemporarilyUnavailable
+            AuthError::DbTimeout
       })?;
     }
     let response = AiEngineResponse{
@@ -347,8 +356,10 @@ pub async fn update_ai_engines_by_key(
         ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
     ),
     responses(
-        (status = 200, body = AiEngineResponse),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+       (status = 200, body = AiEngineResponse),
+       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Ai Engine not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn delete_ai_engines_api_key_key(
@@ -372,7 +383,7 @@ pub async fn delete_ai_engines_api_key_key(
       .await
       .map_err(|e|{
         eprintln!("db error get all {e}");
-        AuthError::ServiceTemporarilyUnavailable
+        AuthError::DbTimeout
       })?
       .ok_or(AuthError::ResourceNotFound)?;
     let mut active_model = ai_engine
@@ -387,13 +398,13 @@ pub async fn delete_ai_engines_api_key_key(
      .await
      .map_err(|e|{
         eprintln!("db error update one {e}");
-        AuthError::ServiceTemporarilyUnavailable
+        AuthError::DbTimeout
       })?;
     let model = active_model
       .try_into_model()
       .map_err(|e|{
         eprintln!("db error model parse error {e}");
-        AuthError::ServiceTemporarilyUnavailable
+        AuthError::DbTimeout
       })?;
       let response = AiEngineResponse{
             icon:ai_models.get_icon(&model.engine_key),
@@ -483,7 +494,7 @@ pub async fn validate_ai_engines_by_key(
       .await
       .map_err(|e|{
         eprintln!("db error get all {e}");
-        AuthError::ServiceTemporarilyUnavailable
+        AuthError::DbTimeout
       })?
       .ok_or(AuthError::ResourceNotFound)?;
     let mut active_model = ai_engine
@@ -498,7 +509,7 @@ pub async fn validate_ai_engines_by_key(
       .await
       .map_err(|e|{
          eprintln!("db error update one {e}");
-         AuthError::ServiceTemporarilyUnavailable
+         AuthError::DbTimeout
        })?;
    let (valid,message) = if api_key_status == ApiKeyStatus::Valid {
      (true,"API key validated successfully".to_string())

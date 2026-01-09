@@ -69,7 +69,7 @@ impl AppState {
         }
     }
 
-    pub async fn is_email_domain_allowed(&self,email:&str,provider:&AuthProvider) -> bool {
+    pub async fn is_email_domain_allowed(&self,email:&str,provider:&AuthProvider) -> (bool,Option<String>) {
      if let Some((_, domain)) = email.split_once('@') {
          match provider.to_lowercase().as_str() {
             "azure" => {
@@ -82,9 +82,9 @@ impl AppState {
                    .map(|setting| setting.allowed_domains.clone())
                    .unwrap_or(Vec::new());
                 if allowed_domains.is_empty(){
-                    return true;
+                    return (true,None);
                 }else {
-                    return allowed_domains.contains(&domain.to_string());
+                    return (allowed_domains.contains(&domain.to_string()),Some(domain.to_string()));
                 }
             },
             "google" => {
@@ -97,15 +97,15 @@ impl AppState {
                    .map(|setting| setting.allowed_domains.clone())
                    .unwrap_or(Vec::new());
                 if allowed_domains.is_empty(){
-                    return true;
+                    return (true,None);
                 }else {
-                    return allowed_domains.contains(&domain.to_string());
+                    return (allowed_domains.contains(&domain.to_string()),Some(domain.to_string()));
                 }
             },
-            _ => return false,
+            _ => return (false,Some(domain.to_string())),
          }
       } 
-      false
+      (false,None)
     }
 
     pub async fn check_ai_engine_is_enabled(&self,ai_engine_key:&str) -> Option<bool> {

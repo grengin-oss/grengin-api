@@ -6,7 +6,7 @@ use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TryIntoModel};
 use uuid::Uuid;
-use crate::{auth::claims::Claims, dto::{common::{PaginationQuery, SortRule}, files::{Attachment, FilePaginatedResponse,File as FileLocal, FileResponse, FileUploadRequest}}, error::AppError, models::files::{self, FileUploadStatus}, state::SharedState};
+use crate::{auth::{claims::Claims, error::AuthErrorResponse}, dto::{common::{PaginationQuery, SortRule}, files::{Attachment, File as FileLocal, FilePaginatedResponse, FileResponse, FileUploadRequest}}, error::{AppError, ErrorResponse}, models::files::{self, FileUploadStatus}, state::SharedState};
 
 pub const LOCAL_FOLDER:&str = "/data/files";
 
@@ -33,7 +33,8 @@ pub fn get_file_binary(file:&FileLocal,user_id: &Uuid) -> Result<Attachment,Erro
     request_body = FileUploadRequest,
     responses(
         (status = 200, body = FileResponse),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+        (status = 503, content_type = "application/json", body = ErrorResponse, description = "Database timeout/unavailable (code=5001/5000)"),
     ),
 )]
 pub async fn upload_file(
@@ -80,13 +81,13 @@ pub async fn upload_file(
    .await
    .map_err(|e|{
       eprintln!("db insert one error: {e}");
-      AppError::ServiceTemporarilyUnavailable
+      AppError::DbTimeout
     })?;
  let file_model = new_file
    .try_into_model()
    .map_err(|e|{
        eprintln!("file model parse error : {e}");
-       AppError::ServiceTemporarilyUnavailable
+       AppError::DbTimeout
     })?;  
  let response = FileResponse { 
         id:file_model.id,
@@ -109,7 +110,9 @@ pub async fn upload_file(
     tag = "files",
     responses(
         (status = 200, description = "file binary with content_type"),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+        (status = 404, content_type = "application/json", body = ErrorResponse, description = "File not found in database (code=5003)"),
+        (status = 503, content_type = "application/json", body = ErrorResponse, description = "Database timeout/unavailable (code=5001/5000)"),
     ),
 )]
 pub async fn download_file(
@@ -124,13 +127,13 @@ pub async fn download_file(
        .await
        .map_err(|e|{
           eprintln!("db get one error: {e}");
-          AppError::ServiceTemporarilyUnavailable
+          AppError::DbTimeout
        })?
        .ok_or(AppError::ResourceNotFound)?;
     let file_binary =  fs::read(file_model.local_path)
         .map_err(|e|{
            eprintln!("local storage error : {e}");
-           AppError::ServiceTemporarilyUnavailable
+           AppError::DbTimeout
        })?;
     let response = Response::builder()
       .status(StatusCode::OK)
@@ -138,7 +141,7 @@ pub async fn download_file(
       .body(Body::from(file_binary))
       .map_err(|e|{
           eprintln!("Response builder error: {e}");
-          AppError::ServiceTemporarilyUnavailable
+          AppError::DbTimeout
        })?
       .into_response();
  Ok(response)
@@ -150,8 +153,9 @@ pub async fn download_file(
     tag = "files",
     responses(
         (status = 200, body = FileResponse),
-        (status = 404, description = "Resource not found"),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+        (status = 404, content_type = "application/json", body = ErrorResponse, description = "File not found in database (code=5003)"),
+        (status = 503, content_type = "application/json", body = ErrorResponse, description = "Database timeout/unavailable (code=5001/5000)"),
     ),
 )]
 pub async fn get_file_by_id(
@@ -166,7 +170,7 @@ pub async fn get_file_by_id(
        .await
        .map_err(|e|{
           eprintln!("db get one error: {e}");
-          AppError::ServiceTemporarilyUnavailable
+          AppError::DbTimeout
        })?
        .ok_or(AppError::ResourceNotFound)?;
     let response = FileResponse { 
@@ -190,8 +194,9 @@ pub async fn get_file_by_id(
     tag = "files",
     responses(
         (status = 200, description = "Deleted successfully"),
-        (status = 404, description = "Resource not found"),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+        (status = 404, content_type = "application/json", body = ErrorResponse, description = "File not found in database (code=5003)"),
+        (status = 503, content_type = "application/json", body = ErrorResponse, description = "Database timeout/unavailable (code=5001/5000)"),
     ),
 )]
 pub async fn delete_file_by_id(
@@ -206,7 +211,7 @@ pub async fn delete_file_by_id(
        .await
        .map_err(|e|{
           eprintln!("db get one error: {e}");
-          AppError::ServiceTemporarilyUnavailable
+          AppError::DbTimeout
         })?
        .ok_or(AppError::ResourceNotFound)?;
     let mut active_model = file_model
@@ -218,7 +223,7 @@ pub async fn delete_file_by_id(
        .await
        .map_err(|e|{
           eprintln!("db get one error: {e}");
-          AppError::ServiceTemporarilyUnavailable
+          AppError::DbTimeout
         })?;
  Ok((StatusCode::OK,"Delete successfully"))
 }
@@ -238,7 +243,8 @@ pub async fn delete_file_by_id(
     ),
     responses(
         (status = 200, description = "file binary with content_type"),
-        (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+        (status = 503, content_type = "application/json", body = ErrorResponse, description = "Database timeout/unavailable (code=5001/5000)"),
     ),
 )]
 pub async fn get_files(
@@ -285,13 +291,13 @@ pub async fn get_files(
       .await
       .map_err(|e|{
           eprintln!("db get one error: {e}");
-          AppError::ServiceTemporarilyUnavailable
+          AppError::DbTimeout
        })?;
    let file_models = paginator.fetch_page(page)
       .await
       .map_err(|e|{
           eprintln!("db get one error: {e}");
-          AppError::ServiceTemporarilyUnavailable
+          AppError::DbTimeout
        })?;
     response.files = file_models
        .into_iter()
