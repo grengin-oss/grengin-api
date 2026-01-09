@@ -62,7 +62,7 @@ impl StreamParseResult {
     pub fn request_id(&self) -> Option<String> {
         match self {
             StreamParseResult::TextDelta { request_id, .. } => request_id.clone(),
-            StreamParseResult::MessageStart { request_id,input_tokens,output_tokens } => Some(request_id.clone()),
+            StreamParseResult::MessageStart { request_id,input_tokens:_,output_tokens:_ } => Some(request_id.clone()),
             _ => None,
         }
     }

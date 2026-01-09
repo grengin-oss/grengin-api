@@ -1,6 +1,6 @@
-use axum::{Json, extract::State};
+use axum::{Json};
 use reqwest::StatusCode;
-use crate::{auth::{claims::Claims, error::AuthError}, dto::{admin_department::{DepartmentResponse}}, models::users::UserRole, state::SharedState};
+use crate::{auth::{claims::Claims, error::AuthError}, dto::{admin_department::{DepartmentResponse}}, models::users::UserRole};
 
 #[utoipa::path(
     get,
@@ -13,7 +13,7 @@ use crate::{auth::{claims::Claims, error::AuthError}, dto::{admin_department::{D
 )]
 pub async fn get_departments(
     claims: Claims,
-     State(app_state): State<SharedState>,
+    // State(app_state): State<SharedState>,
 ) -> Result<(StatusCode,Json<DepartmentResponse>), AuthError> {
      match claims.role {
         UserRole::SuperAdmin | UserRole::Admin => {}
