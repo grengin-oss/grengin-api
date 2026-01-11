@@ -7,3 +7,4 @@ pub mod admin;
 pub mod models;
 pub mod auth;
 pub mod open_error;
+pub mod branding;

@@ -7,8 +7,6 @@ use crate::{models::users::{UserRole, UserStatus}};
 #[derive(Serialize, ToSchema)]
 pub struct UserDetails {
     pub id: Uuid,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub org_id:Option<Uuid>,
     pub sub: String,
     #[schema(format = "email")]
     pub email: String,

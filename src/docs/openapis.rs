@@ -3,7 +3,7 @@ use crate::auth::claims::Claims;
 use crate::auth::error::{AuthError,AuthErrorCode,AuthErrorDetailVariant,AuthErrorResponse};
 use crate::dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel,AiEngineModelsResponse, AiModelCapabilities};
 use crate::dto::admin_department::{Department, DepartmentResponse};
-use crate::dto::admin_org::OrgResponse;
+use crate::dto::branding::{BrandingResponse, BrandingUpdate};
 use crate::dto::admin_sso_providers::{SsoProviderResponse, SsoProviderUpdateRequest};
 use crate::dto::admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest};
 use crate::dto::chat::{ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse, TokenUsage};
@@ -15,7 +15,7 @@ use crate::dto::oauth::OAuthCallback;
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::docs::{security::ApiSecurityAddon,app_error_catlog::AppErrorCatalogItem};
 use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, RefreshTokenRequest, TokenType, User};
-use crate::handlers::{auth,oidc,open_error,chat,chat_stream,file,message,admin_users,admin_sso_provider,admin_org,admin_ai,models,admin_department};
+use crate::handlers::{auth,oidc,open_error,chat,chat_stream,file,message,admin_users,admin_sso_provider,branding,admin_ai,models,admin_department};
 use crate::models::messages::ChatRole;
 use crate::models::users::{UserRole, UserStatus};
 
@@ -40,8 +40,9 @@ use crate::models::users::{UserRole, UserStatus};
         admin_users::delete_user,
         admin_users::get_user_by_id,
         admin_users::patch_user_status,
-        admin_org::get_org,
-        admin_org::update_org,
+        branding::get_branding,
+        branding::get_admin_branding,
+        branding::update_branding,
         admin_ai::get_ai_engines,
         admin_ai::update_ai_engines_by_key,
         admin_ai::get_ai_engines_by_key,
@@ -90,7 +91,8 @@ use crate::models::users::{UserRole, UserStatus};
             UserResponse,
             UserUpdateRequest,
             UserRequest,
-            OrgResponse,
+            BrandingResponse,
+            BrandingUpdate,
             UserDetails,
             UserPatchRequest,
             AiEngineResponse,
@@ -118,6 +120,8 @@ use crate::models::users::{UserRole, UserStatus};
     ),
     tags(
         (name = "auth", description = "Authentication & user endpoints"),
+        (name = "branding", description = "Branding configuration endpoints"),
+        (name = "admin", description = "Admin endpoints"),
         (name = "root", description = "Root / health"),
     ),
     modifiers(
