@@ -14,8 +14,12 @@ pub async fn init_app() -> Result<(),Error>{
     tracing_subscriber::fmt::init();
     let settings = Settings::from_env()?;
     let address = format!("{}:{}",settings.server.host,settings.server.port);
+    // Run migrations BEFORE creating app state (which loads data from DB)
+    let database = sea_orm::Database::connect(&settings.auth.database_url).await?;
+    migration::Migrator::up(&database, None).await?;
+    drop(database); // Close this connection, AppState will create its own
+
     let app_state = AppState::from_settings(settings).await?;
-    migration::Migrator::up(&app_state.database, None).await?; // Auto migration
     let cors = CorsLayer::new()
       .allow_methods(Any)
       .allow_origin(Any)
