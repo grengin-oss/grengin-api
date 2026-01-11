@@ -8,8 +8,6 @@ use serde::{Deserialize, Serialize};
 pub struct Model {
     #[sea_orm(primary_key,indexed, column_type = "Uuid")]
     pub id: Uuid,
-    #[sea_orm(indexed)]
-    pub org_id:Uuid,
     #[sea_orm(indexed,unique)]
     pub provider: String,
     pub name: String,
@@ -26,15 +24,6 @@ pub struct Model {
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(has_one = "super::organizations::Entity", belongs_to = "super::organizations::Entity",from = "Column::OrgId",to = "super::organizations::Column::Id")]
-    Organizations
-}
-
-impl Related<super::organizations::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Organizations.def()
-    }
-}
+pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}

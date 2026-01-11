@@ -39,7 +39,6 @@ pub async fn get_user_by_id(
        .ok_or(AuthError::EmailDoesNotExist)?;
      let user_response = UserDetails {
          id: user.id,
-         org_id: user.org_id,
          sub: user.google_id.unwrap_or(user.azure_id.unwrap_or(user.email.clone())),
          email: user.email,
          name: user.name,
@@ -149,7 +148,6 @@ pub async fn get_users(
        .into_iter()
        .map(|user| UserDetails {
          id: user.id,
-         org_id:user.org_id,
          sub: user.google_id.unwrap_or(user.azure_id.unwrap_or(user.email.clone())),
          email: user.email,
          name: user.name,
@@ -193,9 +191,8 @@ pub async fn add_new_user(
       UserRole::SuperAdmin | UserRole::Admin => (),
       _ => return Err(AuthError::PermissionDenied)
    }
-   let user = users::ActiveModel{ 
+   let user = users::ActiveModel{
      id: Set(Uuid::new_v4()),
-     org_id:Set(claims.org_id),
      status: Set(UserStatus::Active),
      picture: Set(None),
      email: Set(req.email.trim().to_string()),

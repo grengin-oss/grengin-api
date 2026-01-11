@@ -4,7 +4,7 @@ use serde_json::json;
 use anyhow::Error;
 use migration::MigratorTrait;
 use tower_http::cors::{Any, CorsLayer};
-use crate::{config::setting::Settings, routes::{admin::admin_routes, auth::auth_routes, chat::chat_routes, open_error::errors_routes, file::files_routes, message::message_routes, models::models_routes, oidc::oidc_routes, swagger_ui::swagger_ui_routes}, state::AppState};
+use crate::{config::setting::Settings, routes::{admin::admin_routes, auth::auth_routes, branding::branding_routes, chat::chat_routes, open_error::errors_routes, file::files_routes, message::message_routes, models::models_routes, oidc::oidc_routes, swagger_ui::swagger_ui_routes}, state::AppState};
 
 async fn sample_root() -> (StatusCode,Json<serde_json::Value>){
     (StatusCode::OK,Json(json!({"status":"Okay","version":env!("CARGO_PKG_VERSION")})))
@@ -14,6 +14,7 @@ pub async fn init_app() -> Result<(),Error>{
     tracing_subscriber::fmt::init();
     let settings = Settings::from_env()?;
     let address = format!("{}:{}",settings.server.host,settings.server.port);
+
     // Run migrations BEFORE creating app state (which loads data from DB)
     let database = sea_orm::Database::connect(&settings.auth.database_url).await?;
     migration::Migrator::up(&database, None).await?;
@@ -33,6 +34,7 @@ pub async fn init_app() -> Result<(),Error>{
       .merge(files_routes())
       .merge(message_routes())
       .merge(admin_routes())
+      .merge(branding_routes())
       .merge(models_routes())
       .merge(auth_routes())
       .merge(errors_routes())
