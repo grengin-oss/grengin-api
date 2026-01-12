@@ -99,7 +99,7 @@ pub async fn get_chats(
         ("offset" = Option<u64>, Query, description = "Default value : 0"),
         ("archived" = Option<bool>, Query, description = "Default value : false"),
         ("search" = Option<String>, Query, description = "Search in conversation titles"),
-        ("ascending" = Option<bool>, Query, description = "Order of message list default true"),
+        ("ascending" = Option<bool>, Query, description = "Order of message list default false"),
     ),
     responses(
         (status = 200, body = ConversationResponse),
@@ -132,7 +132,7 @@ pub async fn get_chat_by_id(
       .filter(messages::Column::Deleted.eq(false))
       .order_by(
         messages::Column::CreatedAt,
-        if query.ascending.unwrap_or(true) {
+        if query.ascending.unwrap_or(false) {
             sea_orm::Order::Asc
         } else {
             sea_orm::Order::Desc

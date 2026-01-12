@@ -15,7 +15,7 @@ use crate::dto::oauth::OAuthCallback;
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::docs::{security::ApiSecurityAddon,app_error_catlog::AppErrorCatalogItem};
 use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, RefreshTokenRequest, TokenType, User};
-use crate::handlers::{auth,oidc,open_error,chat,chat_stream,file,message,admin_users,admin_sso_provider,branding,admin_ai,models,admin_department};
+use crate::handlers::{auth,admin_analytics,oidc,open_error,chat,chat_stream,file,message,admin_users,admin_sso_provider,branding,admin_ai,models,admin_department};
 use crate::models::messages::ChatRole;
 use crate::models::users::{UserRole, UserStatus};
 
@@ -62,6 +62,10 @@ use crate::models::users::{UserRole, UserStatus};
         models::get_list_models,
         open_error::get_app_error_catalog,
         open_error::get_auth_error_catalog,
+        admin_analytics::get_analytics_overview,
+        admin_analytics::get_user_analytics,
+        admin_analytics::get_department_analytics,
+        admin_analytics::trigger_aggregation_job,
     ),
     components(
         schemas(

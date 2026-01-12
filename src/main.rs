@@ -14,6 +14,7 @@ pub mod auth;
 pub mod handlers;
 pub mod database;
 pub mod llm;
+pub mod services;
 
 #[tokio::main]
 async fn main() -> Result<(),Error> {

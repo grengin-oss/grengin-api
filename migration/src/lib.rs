@@ -15,6 +15,8 @@ mod m20251218_000001_create_ai_engines;
 mod m20251218_000001_create_files;
 mod m20251229_000001_create_sso_providers;
 mod m20250102_000001_add_redirect_url_to_sso_providers;
+mod m20250107_000001_create_usage_logs;
+mod m20250107_000002_create_usage_summary_daily;
 mod m20260111_000001_replace_org_with_branding;
 
 pub struct Migrator;
@@ -38,6 +40,8 @@ impl MigratorTrait for Migrator {
           Box::new(m20251218_000001_create_files::Migration),
           Box::new(m20251229_000001_create_sso_providers::Migration),
           Box::new(m20250102_000001_add_redirect_url_to_sso_providers::Migration),
+          Box::new(m20250107_000001_create_usage_logs::Migration),
+          Box::new(m20250107_000002_create_usage_summary_daily::Migration),
           Box::new(m20260111_000001_replace_org_with_branding::Migration),
          ]
     }
