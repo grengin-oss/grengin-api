@@ -308,7 +308,6 @@ async fn oidc_oauth_callback(
     if user.is_none() {
         let new_user = users::ActiveModel{
             id: Set(Uuid::new_v4()),
-            org_id:Set(None),
             email: Set(email.clone().unwrap_or_else(|| format!("{sub}@users.noreply.oidc"))),
             name: Set(display_name.into()),
             google_id: Set(google_id),
@@ -342,7 +341,7 @@ async fn oidc_oauth_callback(
     let user = user
       .ok_or(AuthError::EmailDoesNotExist)?;
 
-    let access_token_claims = Claims::new_access_token(user.email.clone(), user.name.clone(), user.id,user.org_id,user.role);
+    let access_token_claims = Claims::new_access_token(user.email.clone(), user.name.clone(), user.id, user.role);
     let refresh_token_claims = RefreshClaims::new_refresh_token(user.email.clone(), user.id);
     let user_response = User {
         id: user.id,

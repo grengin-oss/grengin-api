@@ -1,9 +1,9 @@
 use axum::{Json, extract::{Path, State}};
 use chrono::Utc;
 use reqwest::StatusCode;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, IntoActiveModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}, sso_provider::sso_providers_list}, dto::admin_sso_providers::{SsoProviderResponse, SsoProviderUpdateRequest}, handlers::admin_org::get_org, models::{sso_providers, users::UserRole}, state::SharedState};
+use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}, sso_provider::sso_providers_list}, dto::admin_sso_providers::{SsoProviderResponse, SsoProviderUpdateRequest}, models::{sso_providers, users::UserRole}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -25,20 +25,7 @@ pub async fn get_sso_providers(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
      }
-     let mut select = sso_providers::Entity::find();
-     let org_id = if let Some(org_id) = claims.org_id {
-        select = select.filter(sso_providers::Column::OrgId.eq(org_id));
-        org_id
-     }else{
-        let (_,Json(org)) = get_org(claims,State(app_state.clone()))
-         .await
-         .map_err(|e|{
-           eprintln!("org fetch error: {:?}",e);
-           AuthError::DbTimeout
-       })?;
-       org.id
-     };
-     let mut models = select
+     let mut models = sso_providers::Entity::find()
        .all(&app_state.database)
        .await
        .map_err(|e|{
@@ -48,9 +35,8 @@ pub async fn get_sso_providers(
       if models.is_empty(){
          let mut insert_models = Vec::new();
          for sso_provider in sso_providers_list() {
-            insert_models.push(sso_providers::Model{ 
+            insert_models.push(sso_providers::Model{
                 id:Uuid::new_v4(),
-                org_id:org_id,
                 provider:sso_provider.provider,
                 name:sso_provider.name,
                 tenant_id:None,
@@ -62,7 +48,7 @@ pub async fn get_sso_providers(
                 is_enabled: false,
                 is_default: false,
                 created_at: Utc::now(),
-                updated_at: Utc::now() 
+                updated_at: Utc::now()
             });
          }
          models = insert_models.clone();
@@ -121,11 +107,7 @@ pub async fn get_sso_provider_by_id(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
      }
-     let mut select = sso_providers::Entity::find_by_id(provider_id);
-     if let Some(org_id) = claims.org_id {
-        select = select.filter(sso_providers::Column::OrgId.eq(org_id));
-     }
-     let model = select
+     let model = sso_providers::Entity::find_by_id(provider_id)
        .one(&app_state.database)
        .await
        .map_err(|e|{
@@ -173,11 +155,7 @@ pub async fn delete_sso_provider_by_id(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
      }
-     let mut select = sso_providers::Entity::find_by_id(provider_id);
-     if let Some(org_id) = claims.org_id {
-        select = select.filter(sso_providers::Column::OrgId.eq(org_id));
-     }
-     let model = select
+     let model = sso_providers::Entity::find_by_id(provider_id)
        .one(&app_state.database)
        .await
        .map_err(|e|{
@@ -224,11 +202,7 @@ pub async fn update_sso_provider_by_id(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
      }
-     let mut select = sso_providers::Entity::find_by_id(provider_id);
-     if let Some(org_id) = claims.org_id {
-        select = select.filter(sso_providers::Column::OrgId.eq(org_id));
-     }
-     let model = select
+     let model = sso_providers::Entity::find_by_id(provider_id)
        .one(&app_state.database)
        .await
        .map_err(|e|{

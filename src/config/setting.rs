@@ -1,15 +1,13 @@
 use openidconnect::{core::{CoreClient},EndpointMaybeSet, EndpointNotSet, EndpointSet};
 use reqwest::Url;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{DatabaseConnection, EntityTrait, QueryOrder};
 use thiserror::Error;
 use tokio::sync::RwLock;
-use uuid::Uuid;
-use crate::{auth::{encryption::{decrypt_key, key_from_b64}, jwt::{KEYS, Keys}}, models::{ai_engines, organizations, sso_providers}};
+use crate::{auth::{encryption::{decrypt_key, key_from_b64}, jwt::{KEYS, Keys}}, models::{ai_engines, sso_providers}};
 
 pub type OidcClient = CoreClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointMaybeSet, EndpointMaybeSet>;
 
 pub struct Settings {
-    pub org_id:Option<Uuid>,
     pub auth: AuthSettings,
     pub google:RwLock<Option<GoogleSettings>>,
     pub azure:RwLock<Option<AzureSettings>>,
@@ -67,18 +65,11 @@ pub struct AnthropicSettings {
 
 impl Settings {
     pub async fn load_ai_engines_from_db(&mut self,database:&DatabaseConnection) -> Result<(), ConfigError> {
-      let org = organizations::Entity::find()
-         .one(database)
-         .await
-         .map_err(|e| ConfigError::DbError(e.to_string()))?
-         .ok_or(ConfigError::NotConfigured("organization not configured error"))?;
       let ai_engines = ai_engines::Entity::find()
-         .filter(ai_engines::Column::OrgId.eq(org.id))
          .order_by_desc(ai_engines::Column::CreatedAt)
          .all(database)
          .await
          .map_err(|e| ConfigError::DbError(e.to_string()))?;
-      self.org_id = Some(org.id);
       for engine in ai_engines {
             if engine.is_enabled {continue;}
             let Some(encrypted_api_key) = engine.api_key else {continue};
@@ -136,13 +127,7 @@ impl Settings {
     }
 
     pub async fn load_sso_providers_from_db(&mut self,database:&DatabaseConnection) -> Result<(), ConfigError> {
-      let org = organizations::Entity::find()
-         .one(database)
-         .await
-         .map_err(|e| ConfigError::DbError(e.to_string()))?
-         .ok_or(ConfigError::NotConfigured("organization not configured error"))?;
       let sso_providers = sso_providers::Entity::find()
-         .filter(sso_providers::Column::OrgId.eq(org.id))
          .order_by_desc(sso_providers::Column::CreatedAt)
          .all(database)
          .await
@@ -203,7 +188,6 @@ impl Settings {
 
     pub fn from_env() -> Result<Self, ConfigError> {
         Ok(Self {
-            org_id:None,
             auth:AuthSettings::from_env()?,
             google:RwLock::new(GoogleSettings::from_env().ok()),
             azure:RwLock::new(AzureSettings::from_env().ok()),

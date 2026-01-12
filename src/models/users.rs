@@ -30,8 +30,6 @@ pub enum UserRole {
 pub struct Model {
  #[sea_orm(primary_key, unique, indexed)]
   pub id:Uuid,
- #[sea_orm(nullable, indexed)]
-  pub org_id:Option<Uuid>,
   pub status:UserStatus,
   pub picture:Option<String>,
   #[sea_orm(column_type = "Text", indexed)]
@@ -62,8 +60,6 @@ pub enum Relation {
     Conversations,
     #[sea_orm(has_many = "super::files::Entity")]
     Files,
-    #[sea_orm(has_one = "super::organizations::Entity", belongs_to = "super::organizations::Entity",from = "Column::OrgId",to = "super::organizations::Column::Id")]
-    Organizations,
 }
 
 impl Related<super::conversations::Entity> for Entity {
@@ -75,12 +71,6 @@ impl Related<super::conversations::Entity> for Entity {
 impl Related<super::files::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Files.def()
-    }
-}
-
-impl Related<super::organizations::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Organizations.def()
     }
 }
 

@@ -38,7 +38,7 @@ pub async fn handle_refresh_token(
         UserStatus::Deactivated | UserStatus::Suspended => return Err(AuthError::AccountDeactivated),
         _ => ()
     }
-    let access_token_claims = Claims::new_access_token(user.email.clone(), user.name.clone(), user.id,user.org_id,user.role);
+    let access_token_claims = Claims::new_access_token(user.email.clone(), user.name.clone(), user.id, user.role);
     let user_response = User {
         id: user.id,
         sub: user.azure_id.unwrap_or(user.google_id.unwrap_or(user.email.clone())),
