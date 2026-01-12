@@ -1,15 +1,20 @@
-use axum::{extract::State, Json, extract::Query};
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use reqwest::StatusCode;
 
 use crate::{
-    auth::{claims::Claims, error::AuthError},
+    auth::{
+        claims::Claims,
+        error::{AuthError, AuthErrorResponse},
+    },
     dto::analytics::{
         AnalyticsQuery, DepartmentAnalyticsResponse, OverviewResponse, TimeSeriesQuery,
         TimeSeriesResponse, UserAnalyticsQuery, UserAnalyticsResponse,
     },
-    error::{AppError, ErrorDetail, ErrorResponse, ErrorDetailVariant},
     models::users::UserRole,
-    services::{analytics, aggregation},
+    services::{aggregation, analytics},
     state::SharedState,
 };
 
@@ -23,28 +28,21 @@ use crate::{
     ),
     responses(
         (status = 200, description = "Dashboard overview statistics", body = OverviewResponse),
-        (status = 403, description = "Permission denied"),
-        (status = 500, description = "Internal server error"),
+
+        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Missing credentials (code=6102)"),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired access token (code=6103)"),
+        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Permission denied (code=6300)"),
+        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn get_analytics_overview(
     claims: Claims,
     Query(query): Query<AnalyticsQuery>,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode, Json<OverviewResponse>), (StatusCode, Json<ErrorResponse>)> {
+) -> Result<(StatusCode, Json<OverviewResponse>), AuthError> {
     match claims.role {
         UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse {
-                    detail: ErrorDetailVariant::Rich(ErrorDetail {
-                        code: "ANALYTICS_PERMISSION_DENIED".to_string(),
-                        message: "You do not have permission to access analytics data".to_string(),
-                    }),
-                }),
-            ))
-        }
+        _ => return Err(AuthError::PermissionDenied),
     }
 
     let result = analytics::get_overview_analytics(
@@ -55,15 +53,7 @@ pub async fn get_analytics_overview(
     .await
     .map_err(|e| {
         eprintln!("Analytics overview error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                detail: ErrorDetailVariant::Rich(ErrorDetail {
-                    code: "ANALYTICS_QUERY_FAILED".to_string(),
-                    message: "Failed to retrieve analytics overview".to_string(),
-                }),
-            }),
-        )
+        AuthError::DbTimeout
     })?;
 
     Ok((StatusCode::OK, Json(result)))
@@ -83,28 +73,21 @@ pub async fn get_analytics_overview(
     ),
     responses(
         (status = 200, description = "User analytics with pagination", body = UserAnalyticsResponse),
-        (status = 403, description = "Permission denied"),
-        (status = 500, description = "Internal server error"),
+
+        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Missing credentials (code=6102)"),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired access token (code=6103)"),
+        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Permission denied (code=6300)"),
+        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn get_user_analytics(
     claims: Claims,
     Query(query): Query<UserAnalyticsQuery>,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode, Json<UserAnalyticsResponse>), (StatusCode, Json<ErrorResponse>)> {
+) -> Result<(StatusCode, Json<UserAnalyticsResponse>), AuthError> {
     match claims.role {
         UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse {
-                    detail: ErrorDetailVariant::Rich(ErrorDetail {
-                        code: "ANALYTICS_PERMISSION_DENIED".to_string(),
-                        message: "You do not have permission to access analytics data".to_string(),
-                    }),
-                }),
-            ))
-        }
+        _ => return Err(AuthError::PermissionDenied),
     }
 
     let page = query.page.unwrap_or(0);
@@ -122,15 +105,7 @@ pub async fn get_user_analytics(
     .await
     .map_err(|e| {
         eprintln!("User analytics error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                detail: ErrorDetailVariant::Rich(ErrorDetail {
-                    code: "ANALYTICS_QUERY_FAILED".to_string(),
-                    message: "Failed to retrieve user analytics".to_string(),
-                }),
-            }),
-        )
+        AuthError::DbTimeout
     })?;
 
     Ok((StatusCode::OK, Json(result)))
@@ -146,28 +121,21 @@ pub async fn get_user_analytics(
     ),
     responses(
         (status = 200, description = "Department analytics", body = DepartmentAnalyticsResponse),
-        (status = 403, description = "Permission denied"),
-        (status = 500, description = "Internal server error"),
+
+        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Missing credentials (code=6102)"),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired access token (code=6103)"),
+        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Permission denied (code=6300)"),
+        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn get_department_analytics(
     claims: Claims,
     Query(query): Query<AnalyticsQuery>,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode, Json<DepartmentAnalyticsResponse>), (StatusCode, Json<ErrorResponse>)> {
+) -> Result<(StatusCode, Json<DepartmentAnalyticsResponse>), AuthError> {
     match claims.role {
         UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse {
-                    detail: ErrorDetailVariant::Rich(ErrorDetail {
-                        code: "ANALYTICS_PERMISSION_DENIED".to_string(),
-                        message: "You do not have permission to access analytics data".to_string(),
-                    }),
-                }),
-            ))
-        }
+        _ => return Err(AuthError::PermissionDenied),
     }
 
     let result = analytics::get_department_analytics(
@@ -178,15 +146,7 @@ pub async fn get_department_analytics(
     .await
     .map_err(|e| {
         eprintln!("Department analytics error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                detail: ErrorDetailVariant::Rich(ErrorDetail {
-                    code: "ANALYTICS_QUERY_FAILED".to_string(),
-                    message: "Failed to retrieve department analytics".to_string(),
-                }),
-            }),
-        )
+        AuthError::DbTimeout
     })?;
 
     Ok((StatusCode::OK, Json(result)))
@@ -204,28 +164,21 @@ pub async fn get_department_analytics(
     ),
     responses(
         (status = 200, description = "Time series analytics data", body = TimeSeriesResponse),
-        (status = 403, description = "Permission denied"),
-        (status = 500, description = "Internal server error"),
+
+        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Missing credentials (code=6102)"),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired access token (code=6103)"),
+        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Permission denied (code=6300)"),
+        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn get_timeseries_analytics(
     claims: Claims,
     Query(query): Query<TimeSeriesQuery>,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode, Json<TimeSeriesResponse>), (StatusCode, Json<ErrorResponse>)> {
+) -> Result<(StatusCode, Json<TimeSeriesResponse>), AuthError> {
     match claims.role {
         UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse {
-                    detail: ErrorDetailVariant::Rich(ErrorDetail {
-                        code: "ANALYTICS_PERMISSION_DENIED".to_string(),
-                        message: "You do not have permission to access analytics data".to_string(),
-                    }),
-                }),
-            ))
-        }
+        _ => return Err(AuthError::PermissionDenied),
     }
 
     let granularity = query.granularity.unwrap_or_else(|| "day".to_string());
@@ -239,15 +192,7 @@ pub async fn get_timeseries_analytics(
     .await
     .map_err(|e| {
         eprintln!("Timeseries analytics error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                detail: ErrorDetailVariant::Rich(ErrorDetail {
-                    code: "ANALYTICS_QUERY_FAILED".to_string(),
-                    message: "Failed to retrieve timeseries analytics".to_string(),
-                }),
-            }),
-        )
+        AuthError::DbTimeout
     })?;
 
     Ok((StatusCode::OK, Json(result)))
@@ -258,43 +203,28 @@ pub async fn get_timeseries_analytics(
     path = "/admin/analytics/aggregate",
     tag = "analytics",
     responses(
-        (status = 200, description = "Aggregation job completed successfully"),
-        (status = 403, description = "Permission denied"),
-        (status = 500, description = "Internal server error"),
+        (status = 200, description = "Aggregation job completed successfully", body = serde_json::Value),
+
+        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Missing credentials (code=6102)"),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired access token (code=6103)"),
+        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Permission denied (code=6300)"),
+        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn trigger_aggregation_job(
     claims: Claims,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+) -> Result<(StatusCode, Json<serde_json::Value>), AuthError> {
     match claims.role {
         UserRole::SuperAdmin => {}
-        _ => {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse {
-                    detail: ErrorDetailVariant::Rich(ErrorDetail {
-                        code: "AGGREGATION_PERMISSION_DENIED".to_string(),
-                        message: "Only super admins can trigger aggregation jobs".to_string(),
-                    }),
-                }),
-            ))
-        }
+        _ => return Err(AuthError::PermissionDenied),
     }
 
     let result = aggregation::run_daily_aggregation_job(&app_state.database)
         .await
         .map_err(|e| {
             eprintln!("Aggregation job error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    detail: ErrorDetailVariant::Rich(ErrorDetail {
-                        code: "AGGREGATION_JOB_FAILED".to_string(),
-                        message: "Failed to run aggregation job".to_string(),
-                    }),
-                }),
-            )
+            AuthError::DbTimeout
         })?;
 
     Ok((
