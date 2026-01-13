@@ -4,7 +4,6 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct AnalyticsQuery {
     pub start_date: Option<NaiveDate>,
     pub end_date: Option<NaiveDate>,
@@ -14,7 +13,6 @@ pub struct AnalyticsQuery {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct UserAnalyticsQuery {
     pub start_date: Option<NaiveDate>,
     pub end_date: Option<NaiveDate>,
@@ -25,7 +23,6 @@ pub struct UserAnalyticsQuery {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct TimeSeriesQuery {
     pub start_date: Option<NaiveDate>,
     pub end_date: Option<NaiveDate>,
@@ -34,7 +31,6 @@ pub struct TimeSeriesQuery {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct OverviewResponse {
     pub total_users: i64,
     pub active_users: i64,
@@ -49,7 +45,6 @@ pub struct OverviewResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ModelUsage {
     pub model_provider: String,
     pub model_name: String,
@@ -59,7 +54,6 @@ pub struct ModelUsage {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct UserAnalytics {
     pub user_id: Uuid,
     pub user_email: String,
@@ -75,7 +69,6 @@ pub struct UserAnalytics {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct UserAnalyticsResponse {
     pub users: Vec<UserAnalytics>,
     pub total: i64,
@@ -85,7 +78,6 @@ pub struct UserAnalyticsResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct DepartmentAnalytics {
     pub department: String,
     pub total_users: i64,
@@ -98,14 +90,12 @@ pub struct DepartmentAnalytics {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct DepartmentAnalyticsResponse {
     pub departments: Vec<DepartmentAnalytics>,
     pub total: i64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct TimeSeriesDataPoint {
     pub timestamp: String,
     pub total_requests: i64,
@@ -117,7 +107,6 @@ pub struct TimeSeriesDataPoint {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct TimeSeriesResponse {
     pub data: Vec<TimeSeriesDataPoint>,
     pub granularity: String,

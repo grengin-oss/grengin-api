@@ -1,9 +1,10 @@
-use std::convert::Infallible;
+use std::{convert::Infallible};
 use axum::{Json, extract::{Path, State}, response::{Sse, sse::{Event, KeepAlive}}};
 use chrono::Utc;
 use futures_util::StreamExt;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, prelude::Decimal};
 use serde_json::json;
+use tokio::time::Instant;
 use uuid::Uuid;
 use crate::{
     auth::{claims::Claims, error::AuthErrorResponse},
@@ -69,6 +70,7 @@ pub async fn handle_chat_stream(
   State(app_state): State<SharedState>,
   Json(req):Json<ChatInitRequest>
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>,AppError>{
+ let start = Instant::now();
  let provider = req.provider.clone().unwrap_or_else(|| "openai".to_string());
  let selected_tools = req.selected_tools.clone().unwrap_or_default();
  let web_search = req.web_search;
@@ -235,7 +237,7 @@ pub async fn handle_chat_stream(
      created_at:Set(Utc::now()),
      updated_at:Set(Utc::now()),
      total_tokens:Set(0),
-     latency:Set(0),
+     latency:Set(start.elapsed().as_millis() as i32),
      cost:Set(Decimal::from(0)),
      metadata:Set(Some(metadata.clone())),
   };
@@ -284,7 +286,7 @@ pub async fn handle_chat_stream(
      },
  }.map_err(|e| {
      eprintln!("event source loading error {} for llm provider {}", e, &provider);
-     AppError::ServiceTemporarilyUnavailable
+     AppError::LlmProviderNotConfigured { provider:provider.clone() }
  })?;
  // Create stream parser based on provider
  let stream_parser: Box<dyn StreamParser> = match provider_config {
@@ -298,6 +300,9 @@ pub async fn handle_chat_stream(
     let mut response_tokens = 0;
     let mut total_tokens = 0;
     let mut request_id: Option<String> = None;
+    let latency = start
+      .elapsed()
+      .as_millis() as i32;
 
     while let Some(event) = event_source.next().await {
         match event {
@@ -356,7 +361,7 @@ pub async fn handle_chat_stream(
                       if total_tokens == 0 {
                         total_tokens = request_tokens + response_tokens;
                       }
-                      println!("Stream ended for provider: {} input tokens: {} output_tokens: {} total_tokens: {}", &provider,request_tokens,response_tokens,total_tokens);
+                      println!("Stream ended for provider: {} input tokens: {} output_tokens: {} total_tokens: {} latency in ms: {}", &provider,request_tokens,response_tokens,total_tokens,latency);
                       let new_llm_message = messages::ActiveModel {
                          id: Set(Uuid::new_v4()),
                          conversation_id: Set(conversation_id.clone()),
@@ -374,7 +379,7 @@ pub async fn handle_chat_stream(
                          created_at: Set(Utc::now()),
                          updated_at: Set(Utc::now()),
                          total_tokens: Set(total_tokens),
-                         latency: Set(0),
+                         latency: Set(latency),
                          cost: Set(Decimal::from(0)),
                          metadata: Set(None),
                     };

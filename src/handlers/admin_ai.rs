@@ -268,6 +268,7 @@ pub async fn update_ai_engines_by_key(
          AuthError::DbTimeout
        })?;
       active_model.api_key = Set(Some(encrypted_api_key));
+      active_model.api_key_status = Set(ApiKeyStatus::NotValidated)
     }
     active_model.updated_at = Set(Utc::now());
     if let Some(default_model) = req.default_model{
@@ -309,6 +310,7 @@ pub async fn update_ai_engines_by_key(
             AuthError::DbTimeout
       })?;
     }
+    let _ = validate_ai_engines_by_key(claims,Path(ai_engine_key),State(app_state.clone()));
     let response = AiEngineResponse{
             icon:ai_models.get_icon(&model.engine_key),
             engine_key:model.engine_key,
@@ -366,6 +368,10 @@ pub async fn delete_ai_engines_api_key_key(
     active_model.api_key = Set(None);
     active_model.updated_at = Set(Utc::now());
     active_model.api_key_status = Set(ApiKeyStatus::NotConfigured);
+    active_model.is_enabled = Set(false);
+    let _ = app_state
+      .settings
+      .load_ai_engine_in_state(ai_engine.engine_key,String::default(),false);
     active_model
      .clone()
      .update(&app_state.database)
