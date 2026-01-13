@@ -64,8 +64,7 @@ use crate::models::users::{UserRole, UserStatus};
         open_error::get_auth_error_catalog,
         admin_analytics::get_analytics_overview,
         admin_analytics::get_user_analytics,
-        admin_analytics::get_department_analytics,
-        admin_analytics::trigger_aggregation_job,
+        admin_analytics::get_timeseries_analytics,
     ),
     components(
         schemas(

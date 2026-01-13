@@ -3,6 +3,7 @@ use axum::{
     Json,
 };
 use reqwest::StatusCode;
+use sea_orm::DatabaseConnection;
 
 use crate::{
     auth::{
@@ -14,7 +15,7 @@ use crate::{
         TimeSeriesResponse, UserAnalyticsQuery, UserAnalyticsResponse,
     },
     models::users::UserRole,
-    services::{aggregation, analytics},
+    services::{aggregation::{self, calculate_user_analytics}, analytics},
     state::SharedState,
 };
 
@@ -45,7 +46,7 @@ pub async fn get_analytics_overview(
         _ => return Err(AuthError::PermissionDenied),
     }
 
-    let result = analytics::get_overview_analytics(
+    let result = aggregation::get_overview_analytics(
         &app_state.database,
         query.start_date,
         query.end_date,
@@ -84,7 +85,7 @@ pub async fn get_user_analytics(
     claims: Claims,
     Query(query): Query<UserAnalyticsQuery>,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode, Json<UserAnalyticsResponse>), AuthError> {
+) -> Result<(axum::http::StatusCode, Json<UserAnalyticsResponse>), AuthError> {
     match claims.role {
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
@@ -93,20 +94,12 @@ pub async fn get_user_analytics(
     let page = query.page.unwrap_or(0);
     let limit = query.limit.unwrap_or(20);
 
-    let result = analytics::get_user_analytics(
-        &app_state.database,
-        query.start_date,
-        query.end_date,
-        page,
-        limit,
-        query.sort_by,
-        query.order,
-    )
-    .await
-    .map_err(|e| {
-        eprintln!("User analytics error: {}", e);
-        AuthError::DbTimeout
-    })?;
+    let db: &DatabaseConnection = &app_state.database;
+    let result = calculate_user_analytics(db, query, page, limit)
+        .await
+        .map_err(|e| { 
+            eprintln!("{}",e);
+            AuthError::DbTimeout})?;
 
     Ok((StatusCode::OK, Json(result)))
 }
@@ -164,7 +157,6 @@ pub async fn get_department_analytics(
     ),
     responses(
         (status = 200, description = "Time series analytics data", body = TimeSeriesResponse),
-
         (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Missing credentials (code=6102)"),
         (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired access token (code=6103)"),
         (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Permission denied (code=6300)"),
@@ -183,7 +175,7 @@ pub async fn get_timeseries_analytics(
 
     let granularity = query.granularity.unwrap_or_else(|| "day".to_string());
 
-    let result = analytics::get_timeseries_analytics(
+    let result = aggregation::get_timeseries_analytics(
         &app_state.database,
         query.start_date,
         query.end_date,
@@ -196,42 +188,4 @@ pub async fn get_timeseries_analytics(
     })?;
 
     Ok((StatusCode::OK, Json(result)))
-}
-
-#[utoipa::path(
-    post,
-    path = "/admin/analytics/aggregate",
-    tag = "analytics",
-    responses(
-        (status = 200, description = "Aggregation job completed successfully", body = serde_json::Value),
-
-        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Missing credentials (code=6102)"),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired access token (code=6103)"),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Permission denied (code=6300)"),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
-    )
-)]
-pub async fn trigger_aggregation_job(
-    claims: Claims,
-    State(app_state): State<SharedState>,
-) -> Result<(StatusCode, Json<serde_json::Value>), AuthError> {
-    match claims.role {
-        UserRole::SuperAdmin => {}
-        _ => return Err(AuthError::PermissionDenied),
-    }
-
-    let result = aggregation::run_daily_aggregation_job(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("Aggregation job error: {}", e);
-            AuthError::DbTimeout
-        })?;
-
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "message": result,
-            "status": "success"
-        })),
-    ))
 }
