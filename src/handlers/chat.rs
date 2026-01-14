@@ -28,7 +28,7 @@ pub async fn get_chats(
   State(app_state): State<SharedState>
 ) -> Result<(StatusCode,Json<Vec<ConversationResponse>>),AppError>{
     let mut response = Vec::new();
-    let limit = query.limit.unwrap_or(20);
+    let limit = query.limit.unwrap_or(20).min(100); // Cap at 100
     let offset = query.offset.unwrap_or(0);
 
     let mut select = conversations::Entity::find()
