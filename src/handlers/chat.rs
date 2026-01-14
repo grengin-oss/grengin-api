@@ -12,13 +12,14 @@ use num_traits::cast::ToPrimitive;
     path = "/chat",
     tag = "chat",
     params(
-        ("limit" = Option<u64>, Query, description = "Default value : 20"),
-        ("offset" = Option<u64>, Query, description = "Default value : 0"),
-        ("archived" = Option<bool>, Query, description = "Default value : false"),
-        ("search" = Option<String>, Query, description = "Search in conversation titles"),
+        ("limit" = Option<u64>, Query, description = "Number of items per page (default: 20, max: 100)"),
+        ("offset" = Option<u64>, Query, description = "Number of items to skip (default: 0)"),
+        ("archived" = Option<bool>, Query, description = "Filter by archived status. If not provided, returns only non-archived conversations"),
+        ("search" = Option<String>, Query, description = "Search in conversation titles (case-insensitive)"),
     ),
     responses(
         (status = 200, body = Vec<ConversationResponse>),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
         (status = 503, content_type = "application/json", body = ErrorResponse, description = "Database timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
