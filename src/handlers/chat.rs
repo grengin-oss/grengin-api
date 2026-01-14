@@ -12,13 +12,14 @@ use num_traits::cast::ToPrimitive;
     path = "/chat",
     tag = "chat",
     params(
-        ("limit" = Option<u64>, Query, description = "Default value : 20"),
-        ("offset" = Option<u64>, Query, description = "Default value : 0"),
-        ("archived" = Option<bool>, Query, description = "Default value : false"),
-        ("search" = Option<String>, Query, description = "Search in conversation titles"),
+        ("limit" = Option<u64>, Query, description = "Number of items per page (default: 20, max: 100)"),
+        ("offset" = Option<u64>, Query, description = "Number of items to skip (default: 0)"),
+        ("archived" = Option<bool>, Query, description = "Filter by archived status. If not provided, returns only non-archived conversations"),
+        ("search" = Option<String>, Query, description = "Search in conversation titles (case-insensitive)"),
     ),
     responses(
         (status = 200, body = Vec<ConversationResponse>),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
         (status = 503, content_type = "application/json", body = ErrorResponse, description = "Database timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
@@ -28,7 +29,7 @@ pub async fn get_chats(
   State(app_state): State<SharedState>
 ) -> Result<(StatusCode,Json<Vec<ConversationResponse>>),AppError>{
     let mut response = Vec::new();
-    let limit = query.limit.unwrap_or(20);
+    let limit = query.limit.unwrap_or(20).min(100); // Cap at 100
     let offset = query.offset.unwrap_or(0);
 
     let mut select = conversations::Entity::find()
@@ -95,11 +96,7 @@ pub async fn get_chats(
     path = "/chat/{chat_id}",
     tag = "chat",
     params(
-        ("limit" = Option<u64>, Query, description = "Default value : 30"),
-        ("offset" = Option<u64>, Query, description = "Default value : 0"),
-        ("archived" = Option<bool>, Query, description = "Default value : false"),
-        ("search" = Option<String>, Query, description = "Search in conversation titles"),
-        ("ascending" = Option<bool>, Query, description = "Order of message list default false"),
+        ("chat_id" = Uuid, Path, description = "Unique identifier for the conversation"),
     ),
     responses(
         (status = 200, body = ConversationResponse),
@@ -111,7 +108,6 @@ pub async fn get_chats(
 pub async fn get_chat_by_id(
   claims:Claims,
   Path(chat_id):Path<Uuid>,
-  Query(query):Query<PaginationQuery>,
   State(app_state): State<SharedState>
 ) -> Result<(StatusCode,Json<ConversationResponse>),AppError> {
     let conversation_model = conversations::Entity::find_by_id(chat_id)
@@ -121,30 +117,19 @@ pub async fn get_chat_by_id(
       .map_err(|e|{
         eprintln!("{}",e);
         AppError::DbTimeout})?
-      .ok_or(AppError::DbNotFound)?; 
+      .ok_or(AppError::DbNotFound)?;
 
-    let limit = query.limit.unwrap_or(30);
-    let offset = query.offset.unwrap_or(0);
-    let page = offset / limit;
-
-    let paginator = messages::Entity::find()
+    let messages_models = messages::Entity::find()
       .filter(messages::Column::ConversationId.eq(chat_id))
       .filter(messages::Column::Deleted.eq(false))
-      .order_by(
-        messages::Column::CreatedAt,
-        if query.ascending.unwrap_or(false) {
-            sea_orm::Order::Asc
-        } else {
-            sea_orm::Order::Desc
-        },
-       )
-       .paginate(&app_state.database, limit);
-
-    let message_count = paginator.num_items()
+      .order_by_asc(messages::Column::CreatedAt)
+      .all(&app_state.database)
       .await
       .map_err(|e|{
         eprintln!("{}",e);
         AppError::DbTimeout})?;
+
+    let message_count = messages_models.len() as u64;
 
     let mut conversation_response = ConversationResponse{
         id: conversation_model.id,
@@ -161,11 +146,6 @@ pub async fn get_chat_by_id(
         message_count 
     };
 
-    let messages_models = paginator.fetch_page(page)
-     .await
-     .map_err(|e|{
-        eprintln!("{}",e);
-        AppError::DbTimeout})?;
     messages_models
       .into_iter()
       .for_each(|message_model|{
