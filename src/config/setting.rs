@@ -71,7 +71,7 @@ impl Settings {
          .await
          .map_err(|e| ConfigError::DbError(e.to_string()))?;
       for engine in ai_engines {
-            if engine.is_enabled {continue;}
+            if !engine.is_enabled {continue;}
             let Some(encrypted_api_key) = engine.api_key else {continue};
             let Some(api_key) = decrypt_key(&self.auth.app_key,&encrypted_api_key)
                .ok()
