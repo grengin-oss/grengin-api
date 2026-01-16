@@ -2,7 +2,7 @@ use utoipa::OpenApi;
 use crate::auth::claims::Claims;
 use crate::auth::error::{AuthError,AuthErrorCode,AuthErrorDetailVariant,AuthErrorResponse};
 use crate::dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel,AiEngineModelsResponse, AiModelCapabilities};
-use crate::dto::admin_department::{Department, DepartmentResponse};
+use crate::dto::admin_department::{DepartmentListQuery, DepartmentRequest, DepartmentResponse, DepartmentsListResponse};
 use crate::dto::branding::{BrandingResponse, BrandingUpdate};
 use crate::dto::admin_sso_providers::{SsoProviderResponse, SsoProviderUpdateRequest};
 use crate::dto::admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest};
@@ -15,7 +15,7 @@ use crate::dto::oauth::OAuthCallback;
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::docs::{security::ApiSecurityAddon,app_error_catlog::AppErrorCatalogItem};
 use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, RefreshTokenRequest, TokenType, User};
-use crate::handlers::{auth,admin_analytics,oidc,open_error,chat,chat_stream,file,message,admin_users,admin_sso_provider,branding,admin_ai,models,admin_department};
+use crate::handlers::{auth,admin_department,admin_analytics,oidc,open_error,chat,chat_stream,file,message,admin_users,admin_sso_provider,branding,admin_ai,models};
 use crate::models::messages::ChatRole;
 use crate::models::users::{UserRole, UserStatus};
 
@@ -49,7 +49,6 @@ use crate::models::users::{UserRole, UserStatus};
         admin_ai::validate_ai_engines_by_key,
         admin_ai::delete_ai_engines_api_key_key,
         admin_ai::get_ai_engine_models_by_key,
-        admin_department::get_departments,
         admin_sso_provider::get_sso_providers,
         admin_sso_provider::get_sso_provider_by_id,
         admin_sso_provider::update_sso_provider_by_id,
@@ -65,6 +64,11 @@ use crate::models::users::{UserRole, UserStatus};
         admin_analytics::get_analytics_overview,
         admin_analytics::get_user_analytics,
         admin_analytics::get_timeseries_analytics,
+        admin_department::create_department,
+        admin_department::update_department,
+        admin_department::delete_department,
+        admin_department::get_department_by_id,
+        admin_department::list_departments,
     ),
     components(
         schemas(
@@ -104,8 +108,6 @@ use crate::models::users::{UserRole, UserStatus};
             FileUploadRequest,
             ProviderInfo,
             ModelInfo,
-            Department,
-            DepartmentResponse,
             AiEngineValidationResponse,
             AiEngineModelsResponse,
             AiModel,
@@ -119,6 +121,10 @@ use crate::models::users::{UserRole, UserStatus};
             AuthErrorResponse,
             RefreshTokenRequest,
             AppErrorCatalogItem,
+            DepartmentListQuery,
+            DepartmentResponse,
+            DepartmentsListResponse,
+            DepartmentRequest,
         )
     ),
     tags(

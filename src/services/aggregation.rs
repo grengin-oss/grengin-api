@@ -14,7 +14,7 @@ struct UserAnalyticsRow {
     #[sea_orm(from_alias = "user_name")]
     user_name: Option<String>,
     #[sea_orm(from_alias = "department")]
-    department: Option<String>,
+    department_id: Option<Uuid>,
 
     #[sea_orm(from_alias = "total_requests")]
     total_requests: i64,
@@ -123,7 +123,7 @@ pub async fn calculate_user_analytics(
         .column_as(users::Column::Id, "user_id")
         .column_as(users::Column::Email, "user_email")
         .column_as(users::Column::Name, "user_name")
-        .column_as(users::Column::Department, "department")
+        .column_as(users::Column::DepartmentId, "department_id")
         .expr_as(total_requests_expr.clone(), "total_requests")
         .expr_as(total_tokens_expr.clone(), "total_tokens")
         .expr_as(total_cost_expr.clone(), "total_cost")
@@ -136,7 +136,7 @@ pub async fn calculate_user_analytics(
         .group_by(users::Column::Id)
         .group_by(users::Column::Email)
         .group_by(users::Column::Name)
-        .group_by(users::Column::Department);
+        .group_by(users::Column::DepartmentId);
 
     // Sorting: ORDER BY THE EXPRESSION (not alias)
     let sort_by = query.sort_by.as_deref().unwrap_or("lastActivity");
@@ -165,7 +165,7 @@ pub async fn calculate_user_analytics(
             user_id: r.user_id,
             user_email: r.user_email,
             user_name: r.user_name,
-            department: r.department,
+            department_id: r.department_id,
             total_requests: r.total_requests,
             total_tokens: r.total_tokens,
             total_cost: r.total_cost.to_string().parse().unwrap_or(0.0),

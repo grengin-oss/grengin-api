@@ -3,7 +3,7 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, IntoActiveModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}, sso_provider::sso_providers_list}, dto::admin_sso_providers::{SsoProviderResponse, SsoProviderUpdateRequest}, models::{sso_providers, users::UserRole}, state::SharedState};
+use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}, sso_provider::sso_providers_list}, dto::{admin_sso_providers::{SsoProviderResponse, SsoProviderUpdateRequest}}, models::{sso_providers, users::UserRole}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -182,7 +182,7 @@ pub async fn delete_sso_provider_by_id(
 }
 
 #[utoipa::path(
-    delete,
+    put,
     path = "/admin/sso-providers/{provider_id}",
     tag = "admin",
     responses(
@@ -278,3 +278,5 @@ pub async fn update_sso_provider_by_id(
     };
   Ok((StatusCode::OK,Json(response)))
 }
+
+

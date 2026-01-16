@@ -48,7 +48,7 @@ pub async fn handle_refresh_token(
         hd: user.hd,
         role: user.role, // TODO: Map from database if role field exists
         status: user.status,
-        department: user.department,
+        department_id:user.department_id, // TODO
         is_super_admin: user.role == UserRole::SuperAdmin, // Default to false, update based on database field if available
         has_password: user.password.is_some(), // SSO-only users don't have password
         mfa_enabled: user.mfa_enabled,

@@ -10,7 +10,7 @@ use crate::{
     auth::{claims::Claims, error::AuthErrorResponse},
     config::setting::{AnthropicSettings, OpenaiSettings},
     dto::{
-        chat_stream::{ChatInitRequest, ChatStream},
+        chat_stream::{ChatInitRequest, ChatStream, ChatStreamEvents},
         files::File,
         llm::anthropic::ANTHROPIC_DEFAULT_MAX_TOKENS,
     },
@@ -37,7 +37,52 @@ enum LlmProviderConfig<'a> {
     ),
     request_body = ChatInitRequest,
     responses(
-    (status = 200, content_type = "text/event-stream", body = ChatStream),
+    (status = 200, content_type = "text/event-stream", body = ChatStream,
+      examples(
+    ("conversation" = (
+      description = "event:conversation",
+      value = json!({
+        "event": "conversation",
+        "data": { "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "title": "...", "is_new": true }
+      })
+    )),
+    ("message_start" = (
+      description = "event:message_start",
+      value = json!({
+        "event": "message_start",
+        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
+      })
+    )),
+    ("delta_1" = (
+      description = "event:delta",
+      value = json!({
+        "event": "delta",
+        "data": { "text": "Hello" }
+      })
+    )),
+    ("delta_2" = (
+      description = "event:delta",
+      value = json!({
+        "event": "delta",
+        "data": { "text": " world" }
+      })
+    )),
+    ("message_end" = (
+      description = "event:message_end",
+      value = json!({
+        "event": "message_end",
+        "data": { "input_tokens": 100, "output_tokens": 25, "latency_ms": 450 }
+      })
+    )),
+    ("done" = (
+      description = "event:done",
+      value = json!({
+        "event": "done",
+        "data": {}
+      })
+    ))
+   )
+   ),
     (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
     (status = 400, content_type = "application/json", body = ErrorResponse, description = "Validation error (code=2002 empty messages)"),
     (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003)"),
@@ -54,7 +99,52 @@ pub async fn handle_chat_stream_path_doc(){}
     tag = "chat",
     request_body = ChatInitRequest,
     responses(
-    (status = 200, content_type = "text/event-stream", body = ChatStream),
+    (status = 200, content_type = "text/event-stream", body = ChatStream,
+      examples(
+    ("conversation" = (
+      description = "event:conversation",
+      value = json!({
+        "event": "conversation",
+        "data": { "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "title": "...", "is_new": true }
+      })
+    )),
+    ("message_start" = (
+      description = "event:message_start",
+      value = json!({
+        "event": "message_start",
+        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
+      })
+    )),
+    ("delta_1" = (
+      description = "event:delta",
+      value = json!({
+        "event": "delta",
+        "data": { "text": "Hello" }
+      })
+    )),
+    ("delta_2" = (
+      description = "event:delta",
+      value = json!({
+        "event": "delta",
+        "data": { "text": " world" }
+      })
+    )),
+    ("message_end" = (
+      description = "event:message_end",
+      value = json!({
+        "event": "message_end",
+        "data": { "input_tokens": 100, "output_tokens": 25, "latency_ms": 450 }
+      })
+    )),
+    ("done" = (
+      description = "event:done",
+      value = json!({
+        "event": "done",
+        "data": {}
+      })
+    ))
+   )
+   ),
     (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
     (status = 400, content_type = "application/json", body = ErrorResponse, description = "Validation error (code=2002 empty messages)"),
     (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003)"),
@@ -117,7 +207,7 @@ pub async fn handle_chat_stream(
     "webSearch":req.web_search,
     "selectedTools":selected_tools.clone()
  });
- let (conversation_id,mut previous_prompts) = if let Some(Path(conversation_id)) = chat_id {
+ let (conversation_id,mut previous_prompts,title) = if let Some(Path(conversation_id)) = chat_id {
     let (mut conversation, previous_messages) = conversations::Entity::find_by_id(conversation_id.clone())
        .filter(conversations::Column::ArchivedAt.is_null())
        .find_with_related(messages::Entity)
@@ -162,7 +252,7 @@ pub async fn handle_chat_stream(
             .unwrap_or_default(), // Vec::new()
     })
     .collect::<Vec<Prompt>>();
-  (conversation_id,previous_prompts)
+  (conversation_id,previous_prompts,None)
  }else{
   let first_prompt = req.messages
     .first()
@@ -194,7 +284,7 @@ pub async fn handle_chat_stream(
   let new_conversation = conversations::ActiveModel{ 
     id:Set(new_conversation_id.clone()),
     user_id:Set(claims.user_id),
-    title: Set(Some(prompt_title_response.title)),
+    title: Set(Some(prompt_title_response.title.clone())),
     model_provider:Set(provider.clone()),
     model_name:Set(model_name.clone()),
     created_at:Set(Utc::now()),
@@ -212,7 +302,7 @@ pub async fn handle_chat_stream(
     .map_err(|e| {
        eprintln!("Db insert one error {:?}", e);
        AppError::DbTimeout})?;
-    (new_conversation_id,Vec::new())
+    (new_conversation_id,Vec::new(),Some(prompt_title_response.title))
  };
  let mut previous_message_id = None;
  for message in &req.messages {
@@ -303,6 +393,44 @@ pub async fn handle_chat_stream(
     let latency = start
       .elapsed()
       .as_millis() as i32;
+    let first_chat_stream = ChatStream{
+       id: Some(conversation_id.clone()),
+       title:title.clone(),
+       message_id:None,
+       is_new:Some(title.is_some()),
+       content:None,
+       input_tokens:None,
+       output_tokens:None,
+       latency_ms:None,
+     };
+     yield Event::default().event(ChatStreamEvents::Conversation.to_string()).data(first_chat_stream.to_string());
+     let new_message_id = Uuid::new_v4();
+     let mut new_llm_message = messages::ActiveModel {
+        id: Set(new_message_id.clone()),
+        conversation_id: Set(conversation_id.clone()),
+        previous_message_id: Set(previous_message_id),
+        deleted: Set(false),
+        role: Set(ChatRole::Assistant),
+        message_content: Set(message_content.clone()),
+        model_provider: Set(provider.clone()),
+        model_name: Set(model_name.clone()),
+        request_id: Set(request_id.clone()),
+        request_tokens: Set(request_tokens),
+        response_tokens: Set(response_tokens),
+        tools_calls: Set(Vec::new()),
+        tools_results: Set(Vec::new()),
+        created_at: Set(Utc::now()),
+        updated_at: Set(Utc::now()),
+        total_tokens: Set(total_tokens),
+        latency: Set(latency),
+        cost: Set(Decimal::from(0)),
+        metadata: Set(None),
+      };
+     new_llm_message
+          .clone()
+          .insert(&app_state.database)
+          .await
+          .expect("failed to insert llm response in table messages");
 
     while let Some(event) = event_source.next().await {
         match event {
@@ -311,19 +439,32 @@ pub async fn handle_chat_stream(
             }
             Ok(ReqwestEvent::Message(msg)) => {
                 let parse_result = stream_parser.parse_event(&msg.data);
-
                 match &parse_result {
                     StreamParseResult::TextDelta { text, request_id: rid } => {
                         message_content.push_str(text);
-                        if let Some(id) = rid {
-                            request_id = Some(id.clone());
-                        }
+                        request_id = rid.clone();
+                        new_llm_message.request_id = Set(request_id);
+                        new_llm_message.updated_at = Set(Utc::now());
+                        new_llm_message.message_content = Set(message_content.clone());
+                        new_llm_message.request_tokens = Set(request_tokens);
+                        new_llm_message.response_tokens = Set(response_tokens);
+                        new_llm_message.total_tokens = Set(request_tokens + request_tokens);
+                        new_llm_message
+                          .clone()
+                          .update(&app_state.database)
+                          .await
+                          .expect("failed to update in new llm response in table messages");
                         let chat_stream = ChatStream {
-                            id: conversation_id.clone(),
-                            role: None,
+                            id:None,
+                            title:None,
+                            message_id:None,
+                            is_new:None,
                             content: Some(text.clone()),
+                            input_tokens:None,
+                            output_tokens:None,
+                            latency_ms:None,
                         };
-                        yield Event::default().event("chunk").data(chat_stream.to_string());
+                        yield Event::default().event(ChatStreamEvents::Delta.to_string()).data(chat_stream.to_string());
                     }
                     StreamParseResult::TokenUsage{ request_id:req_id,input_tokens, output_tokens, total_tokens:t_tokens} => {
                        if let Some(tokens) = input_tokens {
@@ -336,6 +477,27 @@ pub async fn handle_chat_stream(
                          total_tokens = tokens.clone() as i32;
                        }
                        request_id = req_id.clone();
+                       new_llm_message.request_id = Set(request_id);
+                       new_llm_message.updated_at = Set(Utc::now());
+                       new_llm_message.request_tokens = Set(request_tokens);
+                       new_llm_message.response_tokens = Set(response_tokens);
+                       new_llm_message.total_tokens = Set(request_tokens + request_tokens);
+                       new_llm_message
+                         .clone()
+                         .update(&app_state.database)
+                         .await
+                         .expect("failed to update in new llm response in table messages");
+                       let message_end = ChatStream {
+                            id: None,
+                            title:None,
+                            message_id:None,
+                            is_new:None,
+                            content:None,
+                            input_tokens:Some(request_tokens),
+                            output_tokens:Some(response_tokens),
+                            latency_ms:Some(latency),
+                      };
+                      yield Event::default().event(ChatStreamEvents::MessageEnd.to_string()).data(message_end.to_string());
                     }
                     StreamParseResult::MessageStart { request_id:req_id,input_tokens,output_tokens} => {
                        if let Some(tokens) = input_tokens {
@@ -344,12 +506,41 @@ pub async fn handle_chat_stream(
                        if let Some(tokens) = output_tokens {
                          response_tokens = tokens.clone() as i32;
                        }
-                      request_id = Some(req_id.clone());
+                       let message_start = ChatStream{
+                         id:None,
+                         title:None,
+                         message_id:Some(new_message_id),
+                         is_new:None,
+                         content:None,
+                         input_tokens:Some(request_tokens),
+                         output_tokens:None,
+                         latency_ms:None,
+                       };
+                       yield Event::default().event(ChatStreamEvents::MessageStart.to_string()).data(message_start.to_string());
+                       request_id = Some(req_id.clone());
+                       new_llm_message.request_id = Set(request_id);
+                       new_llm_message.updated_at = Set(Utc::now());
+                       new_llm_message.request_tokens = Set(request_tokens);
+                       new_llm_message.response_tokens = Set(response_tokens);
+                       new_llm_message.total_tokens = Set(request_tokens + request_tokens);
+                       new_llm_message
+                         .clone()
+                         .update(&app_state.database)
+                         .await
+                         .expect("failed to update in new llm response in table messages");
                     }
                     StreamParseResult::ToolInput { .. } => {
                         // Tool input streaming - accumulate for tool calls (future support)
                     }
                     StreamParseResult::Error { error_type, message } => {
+                      new_llm_message.message_content = Set(message.clone());
+                      new_llm_message.role = Set(ChatRole::System);
+                      new_llm_message.updated_at = Set(Utc::now());
+                      new_llm_message
+                        .clone()
+                        .update(&app_state.database)
+                        .await
+                        .expect("failed to update in new llm response in table messages");
                         eprintln!("Stream error: {} - {}", error_type, message);
                     }
                     StreamParseResult::None => {}
@@ -362,32 +553,17 @@ pub async fn handle_chat_stream(
                         total_tokens = request_tokens + response_tokens;
                       }
                       println!("Stream ended for provider: {} input tokens: {} output_tokens: {} total_tokens: {} latency in ms: {}", &provider,request_tokens,response_tokens,total_tokens,latency);
-                      let new_llm_message = messages::ActiveModel {
-                         id: Set(Uuid::new_v4()),
-                         conversation_id: Set(conversation_id.clone()),
-                         previous_message_id: Set(previous_message_id),
-                         deleted: Set(false),
-                         role: Set(ChatRole::Assistant),
-                         message_content: Set(message_content),
-                         model_provider: Set(provider.clone()),
-                         model_name: Set(model_name.clone()),
-                         request_id: Set(request_id),
-                         request_tokens: Set(request_tokens),
-                         response_tokens: Set(response_tokens),
-                         tools_calls: Set(Vec::new()),
-                         tools_results: Set(Vec::new()),
-                         created_at: Set(Utc::now()),
-                         updated_at: Set(Utc::now()),
-                         total_tokens: Set(total_tokens),
-                         latency: Set(latency),
-                         cost: Set(Decimal::from(0)),
-                         metadata: Set(None),
-                    };
+                    new_llm_message.latency = Set(latency);
+                    new_llm_message.request_tokens = Set(request_tokens);
+                    new_llm_message.response_tokens = Set(response_tokens);
+                    new_llm_message.total_tokens = Set(total_tokens);
+                    new_llm_message.updated_at = Set(Utc::now());
                     new_llm_message
-                        .insert(&app_state.database)
-                        .await
-                        .expect("failed to insert llm response in table messages");
-                    yield Event::default().event("chunk").data("[DONE]");
+                      .clone()
+                      .update(&app_state.database)
+                      .await
+                      .expect("failed to update llm response in table messages");
+                    yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
                     break;
                     },
                     _ => {

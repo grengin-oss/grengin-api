@@ -145,6 +145,7 @@ impl Settings {
              else{
                 continue;
             };
+             if !sso_provider.is_enabled {continue;}
             self.load_sso_provider_in_state(sso_provider.provider, client_secret, sso_provider.client_id, sso_provider.redirect_url, sso_provider.tenant_id,true,sso_provider.allowed_domains)
               .await?;
        }

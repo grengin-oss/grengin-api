@@ -44,10 +44,11 @@ pub async fn get_user_by_id(
          name: user.name,
          picture: user.picture,
          hd: user.hd,
-         role: user.role, // TODO: Map from database if role field exists
+         role: user.role, 
          status: user.status,
-         department: user.department,
-         is_super_admin: user.role == UserRole::SuperAdmin, // Default to false, update based on database field if available
+         department_id: user.department_id,
+         department:None, // TODO
+         is_super_admin: user.role == UserRole::SuperAdmin, 
          has_password: user.password.is_some(), // SSO-only users don't have password
          mfa_enabled: user.mfa_enabled,
          last_login_at: Some(user.last_login_at),
@@ -108,7 +109,7 @@ pub async fn get_users(
        select = select.filter(users::Column::Role.eq(role));
    }
    if let Some(department) = query.department{
-       select = select.filter(users::Column::Department.into_expr().ilike(format!("%{}%", department)))
+       select = select.filter(users::Column::DepartmentId.into_expr().ilike(format!("%{}%", department)))
    }
    if let Some(status) = query.status{
        select = select.filter(users::Column::Status.eq(status))
@@ -155,7 +156,8 @@ pub async fn get_users(
          hd: user.hd,
          role: user.role, // TODO: Map from database if role field exists
          status: user.status,
-         department: user.department,
+         department_id: user.department_id,
+         department:None,
          is_super_admin: user.role == UserRole::SuperAdmin, // Default to false, update based on database field if available
          has_password: user.password.is_some(), // SSO-only users don't have password
          mfa_enabled: user.mfa_enabled,
@@ -209,7 +211,7 @@ pub async fn add_new_user(
      password_changed_at: Set(None),
      role: Set(req.role),
      hd:Set(req.email.trim().split_once("@").map(|splited| splited.1.to_string())),
-     department:Set(Some(req.department)),
+     department_id:Set(req.department_id),
      metadata:Set(None), 
     };
    user
@@ -271,8 +273,8 @@ pub async fn update_user(
     if let Some(role) = req.role {
         active.role = Set(role);
     }
-    if let Some(dept) = req.department {
-        active.department = Set(Some(dept));
+    if let Some(dept) = req.department_id {
+        active.department_id = Set(Some(dept));
     }
     active.updated_at = Set(Utc::now());
     active

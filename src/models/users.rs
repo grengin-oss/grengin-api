@@ -49,7 +49,7 @@ pub struct Model {
   pub password_changed_at:Option<DateTime<Utc>>,
   pub role:UserRole,
   pub hd: Option<String>, //hosted domain of user email/website
-  pub department:Option<String>,
+  pub department_id:Option<Uuid>, // previously department Option<String>
   #[sea_orm(column_type = "JsonBinary", nullable)]
   pub metadata:Option<serde_json::Value>,
 }
@@ -60,6 +60,8 @@ pub enum Relation {
     Conversations,
     #[sea_orm(has_many = "super::files::Entity")]
     Files,
+   #[sea_orm(belongs_to = "super::departments::Entity",from = "Column::DepartmentId",to = "super::departments::Column::Id")]
+    Departments,
 }
 
 impl Related<super::conversations::Entity> for Entity {
@@ -73,6 +75,13 @@ impl Related<super::files::Entity> for Entity {
         Relation::Files.def()
     }
 }
+
+impl Related<super::departments::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Departments.def()
+    }
+}
+
 
 impl ActiveModelBehavior for ActiveModel {}
 

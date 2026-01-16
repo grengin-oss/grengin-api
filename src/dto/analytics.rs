@@ -58,7 +58,7 @@ pub struct UserAnalytics {
     pub user_id: Uuid,
     pub user_email: String,
     pub user_name: Option<String>,
-    pub department: Option<String>,
+    pub department_id: Option<Uuid>,
     pub total_requests: i64,
     pub total_tokens: i64,
     pub total_cost: f64,
