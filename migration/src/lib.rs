@@ -18,6 +18,8 @@ mod m20250102_000001_add_redirect_url_to_sso_providers;
 mod m20250107_000001_create_usage_logs;
 mod m20250107_000002_create_usage_summary_daily;
 mod m20260111_000001_replace_org_with_branding;
+mod m20260116_000002_create_departments;
+mod m20260116_000003_users_department_id_fk;
 
 pub struct Migrator;
 
@@ -43,6 +45,8 @@ impl MigratorTrait for Migrator {
           Box::new(m20250107_000001_create_usage_logs::Migration),
           Box::new(m20250107_000002_create_usage_summary_daily::Migration),
           Box::new(m20260111_000001_replace_org_with_branding::Migration),
+          Box::new(m20260116_000002_create_departments::Migration),
+          Box::new(m20260116_000003_users_department_id_fk::Migration),
          ]
     }
 }

@@ -63,7 +63,7 @@ pub struct User {
     pub role:UserRole,
     pub status:UserStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub department: Option<String>,
+    pub department_id: Option<Uuid>,
     /// Super admin has full platform control and cannot be deleted (default: false)
     #[serde(default)]
     pub is_super_admin: bool,

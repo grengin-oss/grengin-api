@@ -3,7 +3,7 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, IntoActiveModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}, sso_provider::sso_providers_list}, dto::admin_sso_providers::{SsoProviderResponse, SsoProviderUpdateRequest}, models::{sso_providers, users::UserRole}, state::SharedState};
+use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}, sso_provider::{is_editable, sso_providers_list}}, dto::admin_sso_providers::{EditableField, SsoProviderEditableResponse, SsoProviderResponse, SsoProviderUpdateRequest}, models::{sso_providers, users::UserRole}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -39,7 +39,7 @@ pub async fn get_sso_providers(
                 id:Uuid::new_v4(),
                 provider:sso_provider.provider,
                 name:sso_provider.name,
-                tenant_id:None,
+                tenant_id:sso_provider.tenant_id,
                 client_id:"<empty>".to_string(),
                 client_secret:"<empty>".to_string(),
                 issuer_url:sso_provider.issuer_url,
@@ -75,8 +75,9 @@ pub async fn get_sso_providers(
              provider:model.provider,
              name:model.name,
              client_id:model.client_id,
-             client_secret:app_state.get_decrypted_api_key_preview(&decrypted_client_secret),
+             client_secret:app_state.get_decrypted_api_key_preview(&decrypted_client_secret).unwrap_or("<empty>".to_string()),
              issuer_url: model.issuer_url,
+             tenant_id:model.tenant_id,
              allowed_domains:model.allowed_domains,
              is_enabled:model.is_enabled,
              created_at:model.created_at,
@@ -92,7 +93,7 @@ pub async fn get_sso_providers(
     path = "/admin/sso-providers/{provider_id}",
     tag = "admin",
     responses(
-       (status = 200, body = SsoProviderResponse),
+       (status = 200, body = SsoProviderEditableResponse),
        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Sso Provider not found (code=5003)"),
        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
@@ -102,7 +103,7 @@ pub async fn get_sso_provider_by_id(
      claims: Claims,
      Path(provider_id):Path<Uuid>,
      State(app_state): State<SharedState>,
-) -> Result<(StatusCode,Json<SsoProviderResponse>), AuthError> {
+) -> Result<(StatusCode,Json<SsoProviderEditableResponse>), AuthError> {
      match claims.role {
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
@@ -118,14 +119,16 @@ pub async fn get_sso_provider_by_id(
         .map(|model|{
            let decrypted_client_secret = decrypt_key(&app_state.settings.auth.app_key,&model.client_secret)
              .ok();
-            SsoProviderResponse{
+            let editable = is_editable(&model.provider);
+            SsoProviderEditableResponse{
               id:model.id, 
-              provider:model.provider,
-              name:model.name,
-              redirect_url:model.redirect_url,
-              client_id:model.client_id,
-              client_secret:app_state.get_decrypted_api_key_preview(&decrypted_client_secret),
-              issuer_url: model.issuer_url,
+              provider:EditableField { editable, value: model.provider },
+              name:EditableField { editable, value:model.name },
+              tenant_id:model.tenant_id.map(|t_id| EditableField { editable: true, value: t_id }),
+              redirect_url:EditableField { editable, value: model.redirect_url },
+              client_id:EditableField { editable:true, value: model.client_id },
+              client_secret:app_state.get_decrypted_api_key_preview(&decrypted_client_secret).map(|preview| EditableField{editable:true,value:preview}),
+              issuer_url:EditableField { editable, value: model.issuer_url},
               allowed_domains:model.allowed_domains,
               is_enabled:model.is_enabled,
               created_at:model.created_at,
@@ -182,7 +185,7 @@ pub async fn delete_sso_provider_by_id(
 }
 
 #[utoipa::path(
-    delete,
+    put,
     path = "/admin/sso-providers/{provider_id}",
     tag = "admin",
     responses(
@@ -268,9 +271,10 @@ pub async fn update_sso_provider_by_id(
         provider:updated_model.provider,
         name:updated_model.name,
         client_id:updated_model.client_id,
-        client_secret:app_state.get_decrypted_api_key_preview(&Some(updated_model.client_secret)),
+        client_secret:app_state.get_decrypted_api_key_preview(&Some(updated_model.client_secret)).unwrap_or("<empty>".to_string()),
         issuer_url:updated_model.issuer_url,
         redirect_url:updated_model.redirect_url,
+        tenant_id:updated_model.tenant_id,
         allowed_domains:updated_model.allowed_domains,
         is_enabled:updated_model.is_enabled,
         created_at:updated_model.created_at,
@@ -278,3 +282,5 @@ pub async fn update_sso_provider_by_id(
     };
   Ok((StatusCode::OK,Json(response)))
 }
+
+

@@ -1,9 +1,6 @@
 pub mod openai;
 pub mod anthropic;
 
-use crate::dto::chat_stream::ChatStream;
-use uuid::Uuid;
-
 /// Result of parsing a streaming event
 #[derive(Debug, Clone)]
 pub enum StreamParseResult {
@@ -46,17 +43,6 @@ pub trait StreamParser: Send + Sync {
 }
 
 impl StreamParseResult {
-    /// Convert to a ChatStream event if this result contains content
-    pub fn to_chat_stream(&self, conversation_id: Uuid) -> Option<ChatStream> {
-        match self {
-            StreamParseResult::TextDelta { text, .. } => Some(ChatStream {
-                id: conversation_id,
-                role: None,
-                content: Some(text.clone()),
-            }),
-            _ => None,
-        }
-    }
 
     /// Extract request_id if available
     pub fn request_id(&self) -> Option<String> {

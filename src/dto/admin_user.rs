@@ -22,6 +22,7 @@ pub struct UserDetails {
     pub status:UserStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub department: Option<String>,
+    pub department_id: Option<Uuid>,
     #[serde(default)]
     pub is_super_admin: bool,
     pub has_password: bool,
@@ -45,7 +46,7 @@ pub struct UserRequest{
    pub email:String,
    pub name:String,
    pub role:UserRole,
-   pub department:String,
+   pub department_id:Option<Uuid>,
 }
 
 
@@ -54,7 +55,7 @@ pub struct UserUpdateRequest{
    pub email:Option<String>,
    pub name:Option<String>,
    pub role:Option<UserRole>,
-   pub department:Option<String>,
+   pub department_id:Option<Uuid>,
 }
 
 #[derive(Deserialize,ToSchema)]

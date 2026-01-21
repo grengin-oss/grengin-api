@@ -317,7 +317,7 @@ async fn oidc_oauth_callback(
             updated_at:Set(Utc::now()),
             last_login_at:Set(Utc::now()),
             password_changed_at:Set(None),
-            department:Set(None),
+            department_id:Set(None),
             status:Set(UserStatus::Active),
             mfa_enabled:Set(false),
             mfa_secret:Set(None),
@@ -352,7 +352,7 @@ async fn oidc_oauth_callback(
         hd: user.hd,
         role: user.role, // TODO: Map from database if role field exists
         status: user.status,
-        department: user.department,
+        department_id:None,
         is_super_admin: user.role == UserRole::SuperAdmin, // Default to false, update based on database field if available
         has_password: user.password.is_some(), // SSO-only users don't have password
         mfa_enabled: user.mfa_enabled,

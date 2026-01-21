@@ -16,13 +16,10 @@ impl Default for OpenaiStreamParser {
     }
 }
 
-fn u64_to_u32(v: Option<u64>) -> Option<u32> {
-    v.and_then(|x| u32::try_from(x).ok())
-}
-
 impl StreamParser for OpenaiStreamParser {
     fn parse_event(&self, data: &str) -> StreamParseResult {
         // 1) Prefer typed Responses-API events (response.output_text.delta etc.)
+        
         if let Ok(stream_event) = serde_json::from_str::<OpenaiResponseStreamEvent>(data) {
             match stream_event {
                 OpenaiResponseStreamEvent::OutputTextDelta(delta) => {
@@ -43,35 +40,26 @@ impl StreamParser for OpenaiStreamParser {
                             total_tokens: Some(usage.total_tokens),
                         };
                     }
+                },
+
+                OpenaiResponseStreamEvent::ResponseCreated(ev) => {
+                        return StreamParseResult::MessageStart {
+                            request_id:ev.response.id,
+                            input_tokens:ev.response.usage.as_ref().map(|usage| usage.input_tokens),
+                            output_tokens:ev.response.usage.as_ref().map(|usage| usage.output_tokens),
+                        };
+                },
+
+                OpenaiResponseStreamEvent::Error(ev) => {
+                     return StreamParseResult::Error {
+                        error_type:ev.error.error_type.unwrap_or("openai_error".into()),
+                        message:ev.error.message.unwrap_or("openai.error.message".into()),
+                    };
                 }
 
                 _ => {}
             }
         }
-
-        // 2) Raw JSON fallback for Responses SSE: response.completed includes usage
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
-            if v.get("type").and_then(|t| t.as_str()) == Some("response.completed") {
-                let request_id = v
-                    .pointer("/response/id")
-                    .and_then(|x| x.as_str())
-                    .map(|s| s.to_string());
-
-                let input_tokens = u64_to_u32(v.pointer("/response/usage/input_tokens").and_then(|x| x.as_u64()));
-                let output_tokens = u64_to_u32(v.pointer("/response/usage/output_tokens").and_then(|x| x.as_u64()));
-                let total_tokens = u64_to_u32(v.pointer("/response/usage/total_tokens").and_then(|x| x.as_u64()));
-
-                if input_tokens.is_some() || output_tokens.is_some() || total_tokens.is_some() {
-                    return StreamParseResult::TokenUsage {
-                        request_id,
-                        input_tokens,
-                        output_tokens,
-                        total_tokens,
-                    };
-                }
-            }
-        }
-
         // 3) Chat Completions streaming: parse chunk (usage shows up on the final chunk if enabled)
         if let Ok(chunk) = serde_json::from_str::<OpenaiChatCompletionChunk>(data) {
             // usage chunk
