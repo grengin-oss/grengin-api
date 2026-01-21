@@ -2,9 +2,9 @@ use utoipa::OpenApi;
 use crate::auth::claims::Claims;
 use crate::auth::error::{AuthError,AuthErrorCode,AuthErrorDetailVariant,AuthErrorResponse};
 use crate::dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel,AiEngineModelsResponse, AiModelCapabilities};
-use crate::dto::admin_department::{DepartmentListQuery, DepartmentRequest, DepartmentResponse, DepartmentsListResponse};
+use crate::dto::admin_department::{DepartmentListQuery, DepartmentMembersResponse, DepartmentRequest, DepartmentResponse, DepartmentsListResponse};
 use crate::dto::branding::{BrandingResponse, BrandingUpdate};
-use crate::dto::admin_sso_providers::{SsoProviderResponse, SsoProviderUpdateRequest};
+use crate::dto::admin_sso_providers::{EditableField, SsoProviderEditableResponse, SsoProviderResponse, SsoProviderUpdateRequest};
 use crate::dto::admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest};
 use crate::dto::chat::{ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse, TokenUsage};
 use crate::dto::chat_stream::{ChatInitRequest, ChatStream};
@@ -69,6 +69,9 @@ use crate::models::users::{UserRole, UserStatus};
         admin_department::delete_department,
         admin_department::get_department_by_id,
         admin_department::list_departments,
+        admin_department::add_users_in_department,
+        admin_department::remove_users_from_department,
+        admin_department::get_users_from_department,
     ),
     components(
         schemas(
@@ -125,6 +128,9 @@ use crate::models::users::{UserRole, UserStatus};
             DepartmentResponse,
             DepartmentsListResponse,
             DepartmentRequest,
+            SsoProviderEditableResponse,
+            EditableField,
+            DepartmentMembersResponse,
         )
     ),
     tags(

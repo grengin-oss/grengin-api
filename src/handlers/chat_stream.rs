@@ -272,7 +272,7 @@ pub async fn handle_chat_stream(
       },
   }.map_err(|e| {
       eprintln!("title generation error {:?}", e);
-      AppError::DbTimeout
+      AppError::LlmProviderNotConfigured { provider:provider.clone() }
   })?;
    let title_generation_usage  = json!({
        "model":get_title_generation_model(&provider),

@@ -9,7 +9,6 @@ pub mod admin_sso_providers;
 pub mod admin_ai;
 pub mod models;
 pub mod files;
-pub mod sso_providers;
 pub mod llm;
 pub mod analytics;
 pub mod admin_department;

@@ -182,7 +182,8 @@ pub struct OpenaiStreamErrorEvent {
 #[derive(Debug, Deserialize)]
 pub struct OpenaiErrorObject {
     pub message: Option<String>,
-    pub r#type: Option<String>,
+    #[serde(rename = "type")]
+    pub error_type: Option<String>,
     pub code: Option<String>,
 }
 

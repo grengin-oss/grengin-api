@@ -2,6 +2,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
+use crate::dto::admin_user::UserDetails;
+
+#[derive(Serialize,IntoParams,ToSchema)]
+pub struct DepartmentMembersResponse{
+    pub total:i32,
+    pub members:Vec<UserDetails>
+}
 
 #[derive(Serialize,IntoParams,ToSchema)]
 pub struct DepartmentsListResponse {
@@ -14,6 +21,13 @@ pub struct DepartmentListQuery {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub include_children: bool,
+}
+
+#[derive(Deserialize,ToSchema)]
+pub struct DepartmentMemeberListQuery {
+    pub force: Option<bool>,
+    #[serde(default)]
+    pub include_sub_department: Option<bool>,
 }
 
 #[derive(Serialize,IntoParams,ToSchema)]
