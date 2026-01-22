@@ -3,6 +3,7 @@ use crate::auth::claims::Claims;
 use crate::auth::error::{AuthError,AuthErrorCode,AuthErrorDetailVariant,AuthErrorResponse};
 use crate::dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel,AiEngineModelsResponse, AiModelCapabilities};
 use crate::dto::admin_department::{DepartmentListQuery, DepartmentMembersResponse, DepartmentRequest, DepartmentResponse, DepartmentsListResponse};
+use crate::dto::analytics::DepartmentAnalyticsResponse;
 use crate::dto::branding::{BrandingResponse, BrandingUpdate};
 use crate::dto::admin_sso_providers::{EditableField, SsoProviderEditableResponse, SsoProviderResponse, SsoProviderUpdateRequest};
 use crate::dto::admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest};
@@ -64,6 +65,7 @@ use crate::models::users::{UserRole, UserStatus};
         admin_analytics::get_analytics_overview,
         admin_analytics::get_user_analytics,
         admin_analytics::get_timeseries_analytics,
+        admin_analytics::get_department_analytics,
         admin_department::create_department,
         admin_department::update_department,
         admin_department::delete_department,
@@ -131,6 +133,7 @@ use crate::models::users::{UserRole, UserStatus};
             SsoProviderEditableResponse,
             EditableField,
             DepartmentMembersResponse,
+            DepartmentAnalyticsResponse
         )
     ),
     tags(

@@ -24,20 +24,6 @@ struct DepartmentRow {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, FromQueryResult)]
-struct DeptCountRow {
-    #[sea_orm(from_alias = "departmentId")]
-    department_id: Uuid,
-    cnt: i64,
-}
-
-#[derive(Debug, FromQueryResult)]
-struct ChildCountRow {
-    #[sea_orm(from_alias = "parentId")]
-    parent_id: Uuid,
-    cnt: i64,
-}
-
 fn ltree_label_from_uuid(id: uuid::Uuid) -> String {
     id.simple().to_string()
 }
@@ -157,6 +143,20 @@ let (sql, values) = insert.build(PostgresQueryBuilder);
     })?;
   get_department_by_id(claims,State(app_state),Path(id))
     .await
+}
+
+#[derive(Debug, FromQueryResult)]
+struct DeptCountRow {
+    #[sea_orm(from_alias = "departmentId")]
+    department_id: Uuid,
+    cnt: i64,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct ChildCountRow {
+    #[sea_orm(from_alias = "parentId")]
+    parent_id: Uuid,
+    cnt: i64,
 }
 
 #[utoipa::path(
