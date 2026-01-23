@@ -2,12 +2,12 @@ use std::collections::HashMap;
 
 use axum::{Json, extract::{Path, Query, State}};
 use chrono::{DateTime, Utc};
-use migration::{Alias, BinOper, Func, SimpleExpr};
-use sea_orm::{EntityName as _, FromQueryResult, PaginatorTrait, QuerySelect, sea_query::{Expr, PostgresQueryBuilder,Query as SqlQuery}};
+use migration::{Alias, BinOper, Func, SimpleExpr, extension::postgres::PgExpr};
+use sea_orm::{Condition, EntityName as _, FromQueryResult, JoinType, Order, PaginatorTrait, QueryOrder, QuerySelect, RelationTrait, sea_query::{Expr, PostgresQueryBuilder,Query as SqlQuery}};
 use reqwest::StatusCode;
 use sea_orm::{ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait as _, QueryFilter, Statement, sqlx::postgres::types::{PgLTree, PgLTreeLabel}};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}}, dto::{admin_department::{BudgetPeriod, DepartmentListQuery, DepartmentMembersResponse, DepartmentMemeberListQuery, DepartmentRequest, DepartmentResponse, DepartmentsListResponse}, admin_user::UserDetails}, models::{departments, users::{self, UserRole, UserStatus}}, state::SharedState};
+use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}}, dto::{admin_department::{BudgetPeriod, DepartmentListQuery, DepartmentMembersResponse, DepartmentMemeberListQuery, DepartmentRequest, DepartmentResponse, DepartmentsListResponse}, admin_user::UserDetails, common::SortRule}, models::{departments, users::{self, UserRole, UserStatus}}, state::SharedState};
 
 #[derive(Debug, Clone, FromQueryResult)]
 struct DepartmentRow {
@@ -709,7 +709,12 @@ app_state
     tag = "admin",
     params(
         ("department_id" = Uuid, Path, description = "department_id Uuid"),
-        ("include_sub_department" = bool, Query, description = "Default value : false")
+        ("include_sub_department" = bool, Query, description = "Default value : false"),
+        ("search" = Option<String>, Query, description = "Search by name,email,department"),
+        ("status" = Option<UserStatus>, Query, description = "Account status"),
+        ("role" = Option<UserRole>, Query, description = "UserRole superadmin,admin,user,observer"),
+        ("sort" = Option<SortRule>, Query, description = "Sort by column example 'name','updated_at','created_at','email','last_login_at'"),
+        ("order" = Option<String>, Query, description = "Sort order (asc/desc)"),
     ),
     responses(
        (status = 200, body = DepartmentMembersResponse),
@@ -755,18 +760,49 @@ pub async fn get_users_from_department(
         .into_iter()
         .map(|(id,)| id)
         .collect();
-     let users_row = if include_sub_department {
-    // subtree_dept_ids logic above...
-     users::Entity::find()
+    let mut select = users::Entity::find()
         .filter(users::Column::Status.ne(UserStatus::Deleted))
+        .join(JoinType::LeftJoin, users::Relation::Departments.def());
+    if let Some(role) = query.role  {
+       select = select.filter(users::Column::Role.eq(role));
+    }
+    if let Some(status) = query.status{
+       select = select.filter(users::Column::Status.eq(status))
+    }
+    let order = query.order.as_deref().unwrap_or("desc");
+    let ord = if order.eq_ignore_ascii_case("asc") {
+        Order::Asc
+    } else {
+        Order::Desc
+    };
+    if let Some(sort) = query.sort{
+       select = match sort {
+          SortRule::Name => select.order_by(users::Column::Name,ord),
+          SortRule::Email => select.order_by(users::Column::Email,ord),
+          SortRule::CreatedAt => select.order_by(users::Column::CreatedAt,ord),
+          SortRule::UpdatedAt => select.order_by(users::Column::UpdatedAt,ord),
+          SortRule::LastLoginAt => select.order_by(users::Column::LastLoginAt,ord),
+          _ => select.order_by(users::Column::CreatedAt,ord),
+      };
+    }
+    if let Some(search) = &query.search{
+       select = select.filter(    
+       Condition::any()
+         .add(users::Column::Name.into_expr().ilike(format!("%{}%", search)))
+         .add(users::Column::Email.into_expr().ilike(format!("%{}%", search)))
+         .add(departments::Column::Name.into_expr().ilike(format!("%{}%", search)))
+     );
+    }
+    let users_row = if include_sub_department {
+    // subtree_dept_ids logic above...
+    select
         .filter(users::Column::DepartmentId.is_in(subtree_dept_ids))
         .all(&app_state.database)
         .await
         .map_err(|e| { eprintln!("db error: {e}"); AuthError::DbTimeout })? 
     } else {
-     users::Entity::find()
+       select
         .filter(users::Column::DepartmentId.eq(department_id))
-        .filter(users::Column::Status.ne(UserStatus::Deleted))
         .all(&app_state.database)
         .await
         .map_err(|e| { eprintln!("db error: {e}"); AuthError::DbTimeout })?

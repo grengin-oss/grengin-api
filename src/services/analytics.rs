@@ -1,7 +1,7 @@
 use chrono::{DateTime, Duration, NaiveDate, Utc};
-use migration::{ExprTrait, SimpleExpr};
+use migration::{ExprTrait, SimpleExpr, extension::postgres::PgExpr};
 use rust_decimal::Decimal;
-use sea_orm::{DatabaseConnection, DbErr, EntityTrait, FromQueryResult, JoinType, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait, sea_query::{Expr, Func}};
+use sea_orm::{ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, FromQueryResult, JoinType, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait, sea_query::{Expr, Func}};
 use uuid::Uuid;
 use crate::{dto::analytics::{DepartmentAnalytics, DepartmentAnalyticsResponse, ModelUsage, OverviewResponse, TimeSeriesDataPoint, TimeSeriesResponse, UserAnalytics, UserAnalyticsQuery, UserAnalyticsResponse}, models::{conversations, departments, messages::{self, ChatRole}, users::{self}}};
 
@@ -13,8 +13,10 @@ struct UserAnalyticsRow {
     user_email: String,
     #[sea_orm(from_alias = "user_name")]
     user_name: Option<String>,
-    #[sea_orm(from_alias = "department")]
+    #[sea_orm(from_alias = "department_id")]
     department_id: Option<Uuid>,
+    #[sea_orm(from_alias = "department_name")]
+    department_name: Option<String>,
 
     #[sea_orm(from_alias = "total_requests")]
     total_requests: i64,
@@ -124,7 +126,7 @@ pub async fn calculate_user_analytics(
     );
 
     // Base query
-    let mut q = users::Entity::find()
+    let mut select = users::Entity::find()
         .select_only()
         .column_as(users::Column::Id, "user_id")
         .column_as(users::Column::Email, "user_email")
@@ -137,14 +139,28 @@ pub async fn calculate_user_analytics(
         .expr_as(last_activity_expr.clone(), "last_activity")
         .expr_as(error_count_expr.clone(), "error_count")
         .expr_as(success_count_expr.clone(), "success_count")
+        .join(JoinType::LeftJoin, users::Relation::Departments.def())
+        .column_as(departments::Column::Name, "department_name")
         .join(JoinType::LeftJoin, users::Relation::Conversations.def())
         .join(JoinType::LeftJoin, conversations::Relation::Messages.def())
         .group_by(users::Column::Id)
         .group_by(users::Column::Email)
         .group_by(users::Column::Name)
-        .group_by(users::Column::DepartmentId);
+        .group_by(users::Column::DepartmentId)
+        .group_by(departments::Column::Name);
 
     // Sorting: ORDER BY THE EXPRESSION (not alias)
+       if let Some(search) = &query.search{
+    select = select.filter(    
+       Condition::any()
+         .add(users::Column::Name.into_expr().ilike(format!("%{}%", search)))
+         .add(users::Column::Email.into_expr().ilike(format!("%{}%", search)))
+         .add(departments::Column::Name.into_expr().ilike(format!("%{}%", search)))
+     );
+    }
+    if query.unassigned_department.unwrap_or(false)  {
+       select = select.filter(users::Column::DepartmentId.is_null())
+    }
     let sort_by = query.sort_by.as_deref().unwrap_or("lastActivity");
     let order = query.order.as_deref().unwrap_or("desc");
     let ord = if order.eq_ignore_ascii_case("asc") {
@@ -153,16 +169,16 @@ pub async fn calculate_user_analytics(
         Order::Desc
     };
 
-  q = match sort_by {
-    "email" => q.order_by(sort_email_expr, ord),
-    "name" => q.order_by(sort_name_expr, ord),
-    "totalRequests" => q.order_by(Expr::expr(total_requests_expr.clone()), ord),
-    "totalTokens" => q.order_by(Expr::expr(total_tokens_expr.clone()), ord),
-    "totalCost" => q.order_by(Expr::expr(total_cost_expr.clone()), ord),
-    "averageLatency" => q.order_by(average_latency_expr.clone(), ord), // this one is already SimpleExpr
-    "lastActivity" | _ => q.order_by(Expr::expr(last_activity_expr.clone()), ord),
+    select = match sort_by {
+      "email" => select.order_by(sort_email_expr, ord),
+      "name" => select.order_by(sort_name_expr, ord),
+      "totalRequests" => select.order_by(Expr::expr(total_requests_expr.clone()), ord),
+      "totalTokens" => select.order_by(Expr::expr(total_tokens_expr.clone()), ord),
+      "totalCost" => select.order_by(Expr::expr(total_cost_expr.clone()), ord),
+      "averageLatency" => select.order_by(average_latency_expr.clone(), ord), // this one is already SimpleExpr
+      "lastActivity" | _ => select.order_by(Expr::expr(last_activity_expr.clone()), ord),
    };
-    let paginator = q.into_model::<UserAnalyticsRow>().paginate(db, limit);
+    let paginator = select.into_model::<UserAnalyticsRow>().paginate(db, limit);
     let stats = paginator.num_items_and_pages().await?;
 
     let rows = paginator.fetch_page(page).await?;
@@ -173,6 +189,7 @@ pub async fn calculate_user_analytics(
             user_id: r.user_id,
             user_email: r.user_email,
             user_name: r.user_name,
+            department:r.department_name,
             department_id: r.department_id,
             total_requests: r.total_requests,
             total_tokens: r.total_tokens,

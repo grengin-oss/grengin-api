@@ -14,8 +14,8 @@ use crate::{
         AnalyticsQuery, DepartmentAnalyticsResponse, OverviewResponse, TimeSeriesQuery,
         TimeSeriesResponse, UserAnalyticsQuery, UserAnalyticsResponse,
     },
-    models::users::UserRole,
-    services::{analytics::{self, calculate_user_analytics}},
+    models::users::{UserRole, UserStatus},
+    services::analytics::{self, calculate_user_analytics},
     state::SharedState,
 };
 
@@ -71,6 +71,10 @@ pub async fn get_analytics_overview(
         ("limit" = Option<u64>, Query, description = "Items per page (default: 20)"),
         ("sort_by" = Option<String>, Query, description = "Sort field by name,email,totalRequests,totalTokens,totalCost,averageLatency,lastActivity"),
         ("order" = Option<String>, Query, description = "Sort order (asc/desc)"),
+        ("search" = Option<String>, Query, description = "Search by name,email or department"),
+        ("status" = Option<UserStatus>, Query, description = "Account status"),
+        ("role" = Option<UserRole>, Query, description = "UserRole superadmin,admin,user,observer"),
+        ("unassigned_department" = Option<bool>, Query, description = "Default false"),
     ),
     responses(
         (status = 200, description = "User analytics with pagination", body = UserAnalyticsResponse),
