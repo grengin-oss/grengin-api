@@ -20,6 +20,7 @@ mod m20250107_000002_create_usage_summary_daily;
 mod m20260111_000001_replace_org_with_branding;
 mod m20260116_000002_create_departments;
 mod m20260116_000003_users_department_id_fk;
+mod m20260127_000003_add_department_budget_columns;
 
 pub struct Migrator;
 
@@ -47,6 +48,7 @@ impl MigratorTrait for Migrator {
           Box::new(m20260111_000001_replace_org_with_branding::Migration),
           Box::new(m20260116_000002_create_departments::Migration),
           Box::new(m20260116_000003_users_department_id_fk::Migration),
+          Box::new(m20260127_000003_add_department_budget_columns::Migration)
          ]
     }
 }

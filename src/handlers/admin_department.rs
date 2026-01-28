@@ -1,16 +1,16 @@
-use std::collections::HashMap;
-
+use std::collections::{HashMap, HashSet};
 use axum::{Json, extract::{Path, Query, State}};
 use chrono::{DateTime, Utc};
-use migration::{Alias, BinOper, Func, SimpleExpr};
-use sea_orm::{EntityName as _, FromQueryResult, PaginatorTrait, QuerySelect, sea_query::{Expr, PostgresQueryBuilder,Query as SqlQuery}};
+use migration::{Alias, BinOper, Func, SimpleExpr, extension::postgres::PgExpr};
+use rust_decimal::Decimal;
+use sea_orm::{Condition, EntityName as _, FromQueryResult, JoinType, Order, PaginatorTrait, QueryOrder, QuerySelect, RelationTrait, sea_query::{Expr, PostgresQueryBuilder,Query as SqlQuery}};
 use reqwest::StatusCode;
 use sea_orm::{ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait as _, QueryFilter, Statement, sqlx::postgres::types::{PgLTree, PgLTreeLabel}};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}}, dto::{admin_department::{BudgetPeriod, DepartmentListQuery, DepartmentMembersResponse, DepartmentMemeberListQuery, DepartmentRequest, DepartmentResponse, DepartmentsListResponse}, admin_user::UserDetails}, models::{departments, users::{self, UserRole, UserStatus}}, state::SharedState};
+use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}}, dto::{admin_department::{DepartmentListQuery, DepartmentMembersResponse, DepartmentMemeberListQuery, DepartmentRequest, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery, DepartmentTreeResponse, DepartmentsListResponse, MoveDepartmentRequest}, admin_user::UserDetails, common::SortRule}, models::{departments::{self, BudgetPeriod}, users::{self, UserRole, UserStatus}}, state::SharedState};
 
 #[derive(Debug, Clone, FromQueryResult)]
-struct DepartmentRow {
+pub struct DepartmentRow {
     pub id: Uuid,
     pub name: String,
     pub description: String,
@@ -24,18 +24,23 @@ struct DepartmentRow {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, FromQueryResult)]
-struct DeptCountRow {
-    #[sea_orm(from_alias = "departmentId")]
-    department_id: Uuid,
-    cnt: i64,
-}
-
-#[derive(Debug, FromQueryResult)]
-struct ChildCountRow {
+#[derive(Debug, Clone, FromQueryResult)]
+pub struct DepartmentTreeRow {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
     #[sea_orm(from_alias = "parentId")]
-    parent_id: Uuid,
-    cnt: i64,
+    pub parent_id: Option<Uuid>,
+    pub depth: i32,
+    pub path: String,
+    #[sea_orm(from_alias = "budgetAllocated")]
+    pub budget_allocated: Decimal,
+    #[sea_orm(from_alias = "budgetPeriod")]
+    pub budget_period: BudgetPeriod,
+    #[sea_orm(from_alias = "createdAt")]
+    pub created_at: DateTime<Utc>,
+    #[sea_orm(from_alias = "updatedAt")]
+    pub updated_at: DateTime<Utc>,
 }
 
 fn ltree_label_from_uuid(id: uuid::Uuid) -> String {
@@ -58,7 +63,7 @@ fn build_ltree_path(parent_path: Option<&str>, id: uuid::Uuid) -> Result<String,
 }
 
 // Selects all columns but casts path -> text so decoding works
-fn departments_base_select() -> sea_orm::Select<departments::Entity> {
+pub fn departments_base_select() -> sea_orm::Select<departments::Entity> {
     departments::Entity::find()
         .select_only()
         .column(departments::Column::Id)
@@ -67,6 +72,21 @@ fn departments_base_select() -> sea_orm::Select<departments::Entity> {
         .column(departments::Column::ParentId)
         .column(departments::Column::Depth)
         .expr_as(Expr::cust("path::text"), "path")
+        .column(departments::Column::CreatedAt)
+        .column(departments::Column::UpdatedAt)
+}
+
+fn departments_tree_select() -> sea_orm::Select<departments::Entity> {
+    departments::Entity::find()
+        .select_only()
+        .column(departments::Column::Id)
+        .column(departments::Column::Name)
+        .column(departments::Column::Description)
+        .column(departments::Column::ParentId)
+        .column(departments::Column::Depth)
+        .expr_as(Expr::cust("path::text"), "path")
+        .column(departments::Column::BudgetAllocated)
+        .column(departments::Column::BudgetPeriod)
         .column(departments::Column::CreatedAt)
         .column(departments::Column::UpdatedAt)
 }
@@ -157,6 +177,20 @@ let (sql, values) = insert.build(PostgresQueryBuilder);
     })?;
   get_department_by_id(claims,State(app_state),Path(id))
     .await
+}
+
+#[derive(Debug, FromQueryResult)]
+struct DeptCountRow {
+    #[sea_orm(from_alias = "departmentId")]
+    department_id: Uuid,
+    cnt: i64,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct ChildCountRow {
+    #[sea_orm(from_alias = "parentId")]
+    parent_id: Uuid,
+    cnt: i64,
 }
 
 #[utoipa::path(
@@ -310,6 +344,189 @@ pub async fn list_departments(
         .collect();
 
     Ok((StatusCode::OK, Json(DepartmentsListResponse { departments, total })))
+}
+
+#[utoipa::path(
+    get,
+    path = "/admin/departments/tree",
+    tag = "admin",
+    params(
+        ("root_id" = Option<Uuid>, Query, description = "Start from this department (default: entire org)"),
+        ("max_depth" = Option<i32>, Query, description = "Default value : 10")
+    ),
+    responses(
+       (status = 200, body = DepartmentTreeResponse, description = "Department tree"),
+       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Unauthorized"),
+       (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Forbidden - Admin role required"),
+       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Resource not found"),
+       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable")
+    )
+)]
+pub async fn get_departments_tree(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Query(q): Query<DepartmentTreeQuery>,
+) -> Result<(StatusCode, Json<DepartmentTreeResponse>), AuthError> {
+    match claims.role {
+        UserRole::SuperAdmin | UserRole::Admin => {}
+        _ => return Err(AuthError::PermissionDenied),
+    }
+
+    let max_depth = q.max_depth.unwrap_or(10).max(0);
+
+    let root = if let Some(root_id) = q.root_id {
+        Some(
+            departments_base_select()
+                .filter(departments::Column::Id.eq(root_id))
+                .into_model::<DepartmentRow>()
+                .one(&app_state.database)
+                .await
+                .map_err(|e| {
+                    eprintln!("db error: {e}");
+                    AuthError::DbTimeout
+                })?
+                .ok_or(AuthError::DbNotFound)?,
+        )
+    } else {
+        None
+    };
+
+    let mut query = departments_tree_select();
+
+    if let Some(root_dept) = &root {
+        query = query.filter(
+            Expr::col(departments::Column::Path).binary(
+                BinOper::Custom("<@".into()),
+                Expr::val(root_dept.path.clone()).cast_as(Alias::new("ltree")),
+            ),
+        );
+        query = query.filter(departments::Column::Depth.lte(root_dept.depth + max_depth));
+    } else {
+        query = query.filter(departments::Column::Depth.lte(max_depth));
+    }
+
+    let rows = query
+        .into_model::<DepartmentTreeRow>()
+        .all(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    if rows.is_empty() {
+        return Ok((StatusCode::OK, Json(DepartmentTreeResponse { tree: vec![] })));
+    }
+
+    let dept_ids: Vec<Uuid> = rows.iter().map(|d| d.id).collect();
+
+    let direct_counts: Vec<DeptCountRow> = users::Entity::find()
+        .select_only()
+        .column(users::Column::DepartmentId)
+        .expr_as(Func::count(Expr::col(users::Column::Id)), "cnt")
+        .filter(users::Column::DepartmentId.is_in(dept_ids.clone()))
+        .filter(users::Column::Status.ne(UserStatus::Deleted))
+        .group_by(users::Column::DepartmentId)
+        .into_model::<DeptCountRow>()
+        .all(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("direct member count error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    let direct_map: HashMap<Uuid, i64> = direct_counts
+        .into_iter()
+        .map(|r| (r.department_id, r.cnt))
+        .collect();
+
+    let mut nodes: HashMap<Uuid, DepartmentTreeNode> = HashMap::with_capacity(rows.len());
+    let mut children_map: HashMap<Uuid, Vec<Uuid>> = HashMap::with_capacity(rows.len());
+
+    for d in rows {
+        let member_count = *direct_map.get(&d.id).unwrap_or(&0) as i32;
+
+        if let Some(pid) = d.parent_id {
+            children_map.entry(pid).or_default().push(d.id);
+        }
+
+        nodes.insert(
+            d.id,
+            DepartmentTreeNode {
+                id: d.id,
+                name: d.name,
+                description: d.description,
+                parent_id: d.parent_id,
+                path: d.path,
+                depth: d.depth,
+                leader_ids: vec![],
+                member_count,
+                total_member_count: member_count,
+                child_count: 0,
+                budget_allocated: d.budget_allocated.to_string().parse().unwrap_or(0.0),
+                budget_distributed: 0.0,
+                budget_available: 0.0,
+                budget_used: 0.0,
+                budget_period: d.budget_period,
+                created_at: d.created_at,
+                updated_at: d.updated_at,
+                children: vec![],
+            },
+        );
+    }
+
+    let root_ids: Vec<Uuid> = if let Some(root_dept) = &root {
+        vec![root_dept.id]
+    } else {
+        nodes
+            .values()
+            .filter_map(|n| match n.parent_id {
+                None => Some(n.id),
+                Some(pid) => (!nodes.contains_key(&pid)).then_some(n.id),
+            })
+            .collect()
+    };
+
+    fn attach(
+        id: Uuid,
+        nodes: &mut HashMap<Uuid, DepartmentTreeNode>,
+        children_map: &mut HashMap<Uuid, Vec<Uuid>>,
+        visiting: &mut HashSet<Uuid>,
+    ) -> Option<DepartmentTreeNode> {
+        // Guard against accidental cycles in the hierarchy to avoid infinite recursion.
+        if !visiting.insert(id) {
+            eprintln!("cycle detected while building department tree at: {id}");
+            return None;
+        }
+        let mut node = nodes.remove(&id)?;
+        let child_ids = children_map.remove(&id).unwrap_or_default();
+
+        let mut total = node.member_count;
+        let mut children = Vec::with_capacity(child_ids.len());
+
+        for cid in child_ids {
+            if let Some(child) = attach(cid, nodes, children_map, visiting) {
+                total += child.total_member_count;
+                children.push(child);
+            }
+        }
+
+        node.child_count = children.len() as i32;
+        node.total_member_count = total;
+        node.children = children;
+        visiting.remove(&id);
+        Some(node)
+    }
+
+    let mut tree = Vec::with_capacity(root_ids.len());
+    let mut visiting = HashSet::with_capacity(root_ids.len());
+    for id in root_ids {
+        if let Some(node) = attach(id, &mut nodes, &mut children_map, &mut visiting) {
+            tree.push(node);
+        }
+    }
+
+    Ok((StatusCode::OK, Json(DepartmentTreeResponse { tree })))
 }
 
 #[utoipa::path(
@@ -551,6 +768,136 @@ pub async fn update_department(
 }
 
 #[utoipa::path(
+    post,
+    path = "/admin/departments/{department_id}/move",
+    tag = "admin",
+    params(
+        ("department_id" = Uuid, Path, description = "Department id")
+    ),
+    request_body = MoveDepartmentRequest,
+    responses(
+        (status = 200, body = DepartmentResponse, description = "Department moved successfully"),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse),
+        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Forbidden - Admin role required"),
+        (status = 404, content_type = "application/json", body = AuthErrorResponse),
+        (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "Invalid move target"),
+        (status = 503, content_type = "application/json", body = AuthErrorResponse),
+    )
+)]
+pub async fn move_department(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Path(department_id): Path<Uuid>,
+    Json(req): Json<MoveDepartmentRequest>,
+) -> Result<(StatusCode, Json<DepartmentResponse>), AuthError> {
+    match claims.role {
+        UserRole::SuperAdmin | UserRole::Admin => {}
+        _ => return Err(AuthError::PermissionDenied),
+    }
+
+    let dept = departments_base_select()
+        .filter(departments::Column::Id.eq(department_id))
+        .into_model::<DepartmentRow>()
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db error: {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::DbNotFound)?;
+
+    let new_parent = departments_base_select()
+        .filter(departments::Column::Id.eq(req.new_parent_id))
+        .into_model::<DepartmentRow>()
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db error: {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::DbNotFound)?;
+
+    // Prevent moving under itself or one of its descendants.
+    if req.new_parent_id == department_id || new_parent.path.starts_with(&dept.path) {
+        return Err(AuthError::DbConflict);
+    }
+
+    let label = ltree_label_from_uuid(department_id);
+    let new_path = format!("{}.{}", new_parent.path, label);
+    let new_depth = new_parent.depth + 1;
+    let depth_delta = new_depth - dept.depth;
+    let updated_at = Utc::now();
+
+    // Update the root department's parent reference.
+    let parent_stmt = SqlQuery::update()
+        .table(departments::Entity)
+        .values([
+            (departments::Column::ParentId, req.new_parent_id.into()),
+            (departments::Column::UpdatedAt, updated_at.into()),
+        ])
+        .and_where(Expr::col(departments::Column::Id).eq(department_id))
+        .to_owned();
+
+    let (parent_sql, parent_values) = parent_stmt.build(PostgresQueryBuilder);
+    app_state
+        .database
+        .execute(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            parent_sql,
+            parent_values,
+        ))
+        .await
+        .map_err(|e| {
+            eprintln!("db update error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    // Update the entire subtree's path + depth using a prefix replace.
+    let subtree_stmt = SqlQuery::update()
+        .table(departments::Entity)
+        .values([
+            (
+                departments::Column::Depth,
+                Expr::col(departments::Column::Depth)
+                    .add(depth_delta)
+                    .into(),
+            ),
+            (
+                departments::Column::Path,
+                Expr::cust(format!(
+                    "replace(path::text, '{}', '{}')::ltree",
+                    dept.path, new_path
+                ))
+                .into(),
+            ),
+            (departments::Column::UpdatedAt, updated_at.into()),
+        ])
+        .and_where(
+            Expr::col(departments::Column::Path).binary(
+                BinOper::Custom("<@".into()),
+                Expr::val(dept.path.clone()).cast_as(Alias::new("ltree")),
+            ),
+        )
+        .to_owned();
+
+    let (subtree_sql, subtree_values) = subtree_stmt.build(PostgresQueryBuilder);
+    app_state
+        .database
+        .execute(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            subtree_sql,
+            subtree_values,
+        ))
+        .await
+        .map_err(|e| {
+            eprintln!("db subtree update error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    get_department_by_id(claims, State(app_state), Path(department_id)).await
+}
+
+#[utoipa::path(
     delete,
     path = "/admin/departments/{department_id}",
     tag = "admin",
@@ -709,7 +1056,12 @@ app_state
     tag = "admin",
     params(
         ("department_id" = Uuid, Path, description = "department_id Uuid"),
-        ("include_sub_department" = bool, Query, description = "Default value : false")
+        ("include_sub_department" = bool, Query, description = "Default value : false"),
+        ("search" = Option<String>, Query, description = "Search by name,email,department"),
+        ("status" = Option<UserStatus>, Query, description = "Account status"),
+        ("role" = Option<UserRole>, Query, description = "UserRole superadmin,admin,user,observer"),
+        ("sort" = Option<SortRule>, Query, description = "Sort by column example 'name','updated_at','created_at','email','last_login_at'"),
+        ("order" = Option<String>, Query, description = "Sort order (asc/desc)"),
     ),
     responses(
        (status = 200, body = DepartmentMembersResponse),
@@ -755,18 +1107,49 @@ pub async fn get_users_from_department(
         .into_iter()
         .map(|(id,)| id)
         .collect();
-     let users_row = if include_sub_department {
-    // subtree_dept_ids logic above...
-     users::Entity::find()
+    let mut select = users::Entity::find()
         .filter(users::Column::Status.ne(UserStatus::Deleted))
+        .join(JoinType::LeftJoin, users::Relation::Departments.def());
+    if let Some(role) = query.role  {
+       select = select.filter(users::Column::Role.eq(role));
+    }
+    if let Some(status) = query.status{
+       select = select.filter(users::Column::Status.eq(status))
+    }
+    let order = query.order.as_deref().unwrap_or("desc");
+    let ord = if order.eq_ignore_ascii_case("asc") {
+        Order::Asc
+    } else {
+        Order::Desc
+    };
+    if let Some(sort) = query.sort{
+       select = match sort {
+          SortRule::Name => select.order_by(users::Column::Name,ord),
+          SortRule::Email => select.order_by(users::Column::Email,ord),
+          SortRule::CreatedAt => select.order_by(users::Column::CreatedAt,ord),
+          SortRule::UpdatedAt => select.order_by(users::Column::UpdatedAt,ord),
+          SortRule::LastLoginAt => select.order_by(users::Column::LastLoginAt,ord),
+          _ => select.order_by(users::Column::CreatedAt,ord),
+      };
+    }
+    if let Some(search) = &query.search{
+       select = select.filter(    
+       Condition::any()
+         .add(users::Column::Name.into_expr().ilike(format!("%{}%", search)))
+         .add(users::Column::Email.into_expr().ilike(format!("%{}%", search)))
+         .add(departments::Column::Name.into_expr().ilike(format!("%{}%", search)))
+     );
+    }
+    let users_row = if include_sub_department {
+    // subtree_dept_ids logic above...
+    select
         .filter(users::Column::DepartmentId.is_in(subtree_dept_ids))
         .all(&app_state.database)
         .await
         .map_err(|e| { eprintln!("db error: {e}"); AuthError::DbTimeout })? 
     } else {
-     users::Entity::find()
+       select
         .filter(users::Column::DepartmentId.eq(department_id))
-        .filter(users::Column::Status.ne(UserStatus::Deleted))
         .all(&app_state.database)
         .await
         .map_err(|e| { eprintln!("db error: {e}"); AuthError::DbTimeout })?

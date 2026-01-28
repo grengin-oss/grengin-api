@@ -11,11 +11,11 @@ use crate::{
         error::{AuthError, AuthErrorResponse},
     },
     dto::analytics::{
-        AnalyticsQuery, DepartmentAnalyticsResponse, OverviewResponse, TimeSeriesQuery,
-        TimeSeriesResponse, UserAnalyticsQuery, UserAnalyticsResponse,
+        AnalyticsQuery, DepartmentAnalyticsQuery, DepartmentAnalyticsResponse, OverviewResponse,
+        TimeSeriesQuery, TimeSeriesResponse, UserAnalyticsQuery, UserAnalyticsResponse,
     },
-    models::users::UserRole,
-    services::{aggregation::{self, calculate_user_analytics}, analytics},
+    models::users::{UserRole, UserStatus},
+    services::analytics::{self, calculate_user_analytics},
     state::SharedState,
 };
 
@@ -46,7 +46,7 @@ pub async fn get_analytics_overview(
         _ => return Err(AuthError::PermissionDenied),
     }
 
-    let result = aggregation::get_overview_analytics(
+    let result = analytics::get_overview_analytics(
         &app_state.database,
         query.start_date,
         query.end_date,
@@ -69,12 +69,15 @@ pub async fn get_analytics_overview(
         ("end_date" = Option<String>, Query, description = "End date (YYYY-MM-DD)"),
         ("page" = Option<u64>, Query, description = "Page number (default: 0)"),
         ("limit" = Option<u64>, Query, description = "Items per page (default: 20)"),
-        ("sort_by" = Option<String>, Query, description = "Sort field"),
+        ("sort_by" = Option<String>, Query, description = "Sort field by name,email,totalRequests,totalTokens,totalCost,averageLatency,lastActivity"),
         ("order" = Option<String>, Query, description = "Sort order (asc/desc)"),
+        ("search" = Option<String>, Query, description = "Search by name,email or department"),
+        ("status" = Option<UserStatus>, Query, description = "Account status"),
+        ("role" = Option<UserRole>, Query, description = "UserRole superadmin,admin,user,observer"),
+        ("unassigned_department" = Option<bool>, Query, description = "Default false"),
     ),
     responses(
         (status = 200, description = "User analytics with pagination", body = UserAnalyticsResponse),
-
         (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Missing credentials (code=6102)"),
         (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired access token (code=6103)"),
         (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Permission denied (code=6300)"),
@@ -111,6 +114,9 @@ pub async fn get_user_analytics(
     params(
         ("start_date" = Option<String>, Query, description = "Start date (YYYY-MM-DD)"),
         ("end_date" = Option<String>, Query, description = "End date (YYYY-MM-DD)"),
+        ("offset" = Option<u64>, Query, description = "Number of items to skip (default: 0)"),
+        ("limit" = Option<u64>, Query, description = "Items per page (default: 20)"),
+        ("search" = Option<String>, Query, description = "Search by department name"),
     ),
     responses(
         (status = 200, description = "Department analytics", body = DepartmentAnalyticsResponse),
@@ -123,7 +129,7 @@ pub async fn get_user_analytics(
 )]
 pub async fn get_department_analytics(
     claims: Claims,
-    Query(query): Query<AnalyticsQuery>,
+    Query(query): Query<DepartmentAnalyticsQuery>,
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode, Json<DepartmentAnalyticsResponse>), AuthError> {
     match claims.role {
@@ -135,6 +141,9 @@ pub async fn get_department_analytics(
         &app_state.database,
         query.start_date,
         query.end_date,
+        query.limit,
+        query.offset,
+        query.search,
     )
     .await
     .map_err(|e| {
@@ -175,7 +184,7 @@ pub async fn get_timeseries_analytics(
 
     let granularity = query.granularity.unwrap_or_else(|| "day".to_string());
 
-    let result = aggregation::get_timeseries_analytics(
+    let result = analytics::get_timeseries_analytics(
         &app_state.database,
         query.start_date,
         query.end_date,

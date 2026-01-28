@@ -1,6 +1,31 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sea_orm::{entity::prelude::*};
+use utoipa::ToSchema;
+
+#[derive(Debug, Clone,Copy, PartialEq, Eq,EnumIter, DeriveActiveEnum, Serialize, Deserialize, ToSchema)]
+#[sea_orm(rs_type = "String",db_type = "String(StringLen::None)",rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]  
+pub enum BudgetPeriod {
+    #[sea_orm(string_value = "daily")]
+    Daily,
+    #[sea_orm(string_value = "weekly")]
+    Weekly,
+    #[sea_orm(string_value = "monthly")]
+    Monthly,
+    #[sea_orm(string_value = "yearly")]
+    Yearly,
+}
+
+#[derive(Debug, Clone,Copy, PartialEq, Eq,EnumIter, DeriveActiveEnum, Serialize, Deserialize, ToSchema)]
+#[sea_orm(rs_type = "String",db_type = "String(StringLen::None)",rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]  
+pub enum ActionOnExceed {
+    #[sea_orm(string_value = "warn")]
+    Warn,
+    #[sea_orm(string_value = "block")]
+    Block,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "departments", rename_all = "camelCase")]
@@ -14,6 +39,11 @@ pub struct Model {
     pub depth:i32,
      #[sea_orm(column_type = "LTree")]
     pub path:String, //Ltree for postgress
+    
+    pub budget_allocated: Decimal,
+    pub budget_period: BudgetPeriod,
+    pub action_on_exceed: ActionOnExceed,
+    
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

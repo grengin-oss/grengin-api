@@ -2,7 +2,9 @@ use utoipa::OpenApi;
 use crate::auth::claims::Claims;
 use crate::auth::error::{AuthError,AuthErrorCode,AuthErrorDetailVariant,AuthErrorResponse};
 use crate::dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel,AiEngineModelsResponse, AiModelCapabilities};
-use crate::dto::admin_department::{DepartmentListQuery, DepartmentMembersResponse, DepartmentRequest, DepartmentResponse, DepartmentsListResponse};
+use crate::dto::admin_department_budget::{DepartmentBudgetStatusDto, DepartmentBudgetUpdatedDto, SetDepartmentBudgetRequest, SubDepartmentBudgetDto};
+use crate::dto::admin_department::{DepartmentListQuery, DepartmentMembersResponse, DepartmentRequest, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery, DepartmentTreeResponse, DepartmentsListResponse, MoveDepartmentRequest};
+use crate::dto::analytics::DepartmentAnalyticsResponse;
 use crate::dto::branding::{BrandingResponse, BrandingUpdate};
 use crate::dto::admin_sso_providers::{EditableField, SsoProviderEditableResponse, SsoProviderResponse, SsoProviderUpdateRequest};
 use crate::dto::admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest};
@@ -15,8 +17,9 @@ use crate::dto::oauth::OAuthCallback;
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::docs::{security::ApiSecurityAddon,app_error_catlog::AppErrorCatalogItem};
 use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, RefreshTokenRequest, TokenType, User};
-use crate::handlers::{auth,admin_department,admin_analytics,oidc,open_error,chat,chat_stream,file,message,admin_users,admin_sso_provider,branding,admin_ai,models};
+use crate::handlers::{auth,admin_department,admin_department_budgets,admin_analytics,oidc,open_error,chat,chat_stream,file,message,admin_users,admin_sso_provider,branding,admin_ai,models};
 use crate::models::messages::ChatRole;
+use crate::models::departments::{ActionOnExceed, BudgetPeriod};
 use crate::models::users::{UserRole, UserStatus};
 
 #[derive(OpenApi)]
@@ -64,14 +67,19 @@ use crate::models::users::{UserRole, UserStatus};
         admin_analytics::get_analytics_overview,
         admin_analytics::get_user_analytics,
         admin_analytics::get_timeseries_analytics,
+        admin_analytics::get_department_analytics,
         admin_department::create_department,
         admin_department::update_department,
         admin_department::delete_department,
         admin_department::get_department_by_id,
         admin_department::list_departments,
+        admin_department::get_departments_tree,
+        admin_department::move_department,
         admin_department::add_users_in_department,
         admin_department::remove_users_from_department,
         admin_department::get_users_from_department,
+        admin_department_budgets::get_department_budget,
+        admin_department_budgets::set_department_budget,
     ),
     components(
         schemas(
@@ -131,6 +139,17 @@ use crate::models::users::{UserRole, UserStatus};
             SsoProviderEditableResponse,
             EditableField,
             DepartmentMembersResponse,
+            DepartmentAnalyticsResponse,
+            BudgetPeriod,
+            ActionOnExceed,
+            DepartmentTreeQuery,
+            DepartmentTreeNode,
+            DepartmentTreeResponse,
+            MoveDepartmentRequest,
+            SubDepartmentBudgetDto,
+            DepartmentBudgetStatusDto,
+            SetDepartmentBudgetRequest,
+            DepartmentBudgetUpdatedDto
         )
     ),
     tags(

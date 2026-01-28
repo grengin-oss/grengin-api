@@ -1,2 +1,2 @@
 pub mod analytics;
-pub mod aggregation;
+pub mod budget_allocation;

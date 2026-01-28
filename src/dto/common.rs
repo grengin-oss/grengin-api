@@ -22,7 +22,7 @@ pub struct PaginationQuery {
    pub ascending:Option<bool>,
    pub role:Option<UserRole>,
    pub status:Option<UserStatus>,
-   pub department:Option<String>,
+   pub unassigned_department:Option<bool>,
    pub sort:Option<SortRule>,
    #[serde(rename = "type")]
    pub content_type:Option<String>

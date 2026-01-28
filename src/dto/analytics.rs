@@ -2,6 +2,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
+use crate::models::users::{UserRole, UserStatus};
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AnalyticsQuery {
@@ -20,6 +21,19 @@ pub struct UserAnalyticsQuery {
     pub limit: Option<u64>,
     pub sort_by: Option<String>,
     pub order: Option<String>,
+    pub search:Option<String>,
+    pub role:Option<UserRole>,
+    pub status:Option<UserStatus>,
+    pub unassigned_department:Option<bool>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DepartmentAnalyticsQuery {
+    pub start_date: Option<NaiveDate>,
+    pub end_date: Option<NaiveDate>,
+    pub offset: Option<u64>,
+    pub limit: Option<u64>,
+    pub search: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -65,6 +79,7 @@ pub struct UserAnalytics {
     pub average_latency: f64,
     pub success_count: i64,
     pub error_count: i64,
+    pub department:Option<String>,
     pub last_activity: Option<DateTime<Utc>>,
 }
 
@@ -93,6 +108,9 @@ pub struct DepartmentAnalytics {
 pub struct DepartmentAnalyticsResponse {
     pub departments: Vec<DepartmentAnalytics>,
     pub total: i64,
+    pub limit: u64,
+    pub offset: u64,
+    pub total_pages: u64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

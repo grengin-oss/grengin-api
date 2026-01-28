@@ -1,10 +1,10 @@
 use axum::{Json, extract::{Path, Query, State}};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, EntityTrait, FromQueryResult, IntoActiveModel, JoinType, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}}, dto::{admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest}, common::{PaginationQuery, SortRule}}, models::users::{self, UserRole, UserStatus}, state::SharedState};
+use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}}, dto::{admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest}, common::{PaginationQuery, SortRule}}, models::{departments, users::{self, UserRole, UserStatus}}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -59,6 +59,26 @@ pub async fn get_user_by_id(
     Ok((StatusCode::OK,Json(user_response)))
 }
 
+#[derive(Debug, Clone, FromQueryResult)]
+pub struct UserDepartmentRow {
+    pub id: Uuid,
+    pub email: String,
+    pub name: Option<String>,
+    pub role: users::UserRole,
+    pub status: users::UserStatus,
+    pub department_id: Option<Uuid>,
+    pub google_id:Option<String>,
+    pub azure_id:Option<String>,
+    pub picture:Option<String>,
+    pub password:Option<String>,
+    pub mfa_enabled: bool,
+    // from departments table (must be Option because LEFT JOIN)
+    pub department_name: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_login_at: DateTime<Utc>,
+}
+
 #[utoipa::path(
     get,
     path = "/admin/users",
@@ -66,10 +86,11 @@ pub async fn get_user_by_id(
     params(
         ("limit" = Option<u64>, Query, description = "Default value : 20"),
         ("offset" = Option<u64>, Query, description = "Default value : 0"),
-        ("search" = Option<String>, Query, description = "Search by name"),
-        ("department" = Option<String>, Query, description = "Search by department"),
+        ("search" = Option<String>, Query, description = "Search by name,email,department"),
         ("status" = Option<UserStatus>, Query, description = "Account status"),
+        ("role" = Option<UserRole>, Query, description = "UserRole superadmin,admin,user,observer"),
         ("ascending" = Option<bool>, Query, description = "Order of users list default false"),
+        ("unassigned_department" = Option<bool>, Query, description = "Default false"),
         ("sort" = Option<SortRule>, Query, description = "Sort by column example 'name','updated_at','created_at','email','last_login_at'"),
     ),
     responses(
@@ -98,18 +119,35 @@ pub async fn get_users(
      limit,
      offset 
    };
-   let mut select = users::Entity::find()
-     .offset(query.offset.unwrap_or(0))
-     .limit(query.limit.unwrap_or(20));
-
-   if let Some(search) = query.search{
-      select = select.filter(users::Column::Name.into_expr().ilike(format!("%{}%", search)));
+  let mut select = users::Entity::find()
+    .select_only()
+    .column(users::Column::Id)
+    .column(users::Column::Email)
+    .column(users::Column::Name)
+    .column(users::Column::Role)
+    .column(users::Column::Status)
+    .column_as(users::Column::AzureId, "azure_id")
+    .column_as(users::Column::GoogleId, "google_id")
+    .column_as(users::Column::MfaEnabled, "mfa_enabled")
+    .column_as(users::Column::DepartmentId, "department_id")
+    .column_as(users::Column::CreatedAt, "created_at")
+    .column_as(users::Column::UpdatedAt, "updated_at")
+    .column_as(users::Column::LastLoginAt, "last_login_at")
+    .join(JoinType::LeftJoin, users::Relation::Departments.def())
+    .column_as(departments::Column::Name, "department_name");
+   if let Some(search) = &query.search{
+     select = select.filter(    
+       Condition::any()
+         .add(users::Column::Name.into_expr().ilike(format!("%{}%", search)))
+         .add(users::Column::Email.into_expr().ilike(format!("%{}%", search)))
+         .add(departments::Column::Name.into_expr().ilike(format!("%{}%", search)))
+     );
+   }
+   if query.unassigned_department.unwrap_or(false)  {
+       select = select.filter(users::Column::DepartmentId.is_null())
    }
    if let Some(role) = query.role  {
        select = select.filter(users::Column::Role.eq(role));
-   }
-   if let Some(department) = query.department{
-       select = select.filter(users::Column::DepartmentId.into_expr().ilike(format!("%{}%", department)))
    }
    if let Some(status) = query.status{
        select = select.filter(users::Column::Status.eq(status))
@@ -117,7 +155,7 @@ pub async fn get_users(
    let sort_type = if query.ascending.unwrap_or(false){
      Order::Asc
    }else{
-    Order::Desc
+     Order::Desc
    };
    if let Some(sort) = query.sort{
        select = match sort {
@@ -129,8 +167,9 @@ pub async fn get_users(
           _ => select.order_by(users::Column::CreatedAt,sort_type),
       };
    }
+  let select = select.into_model::<UserDepartmentRow>();
    let paginator = select
-    .paginate(&app_state.database, limit);
+     .paginate(&app_state.database, limit);
    response.total = paginator
      .num_items()
      .await
@@ -153,11 +192,11 @@ pub async fn get_users(
          email: user.email,
          name: user.name,
          picture: user.picture,
-         hd: user.hd,
+         hd:None,
          role: user.role, // TODO: Map from database if role field exists
          status: user.status,
          department_id: user.department_id,
-         department:None,
+         department:user.department_name, // TODO
          is_super_admin: user.role == UserRole::SuperAdmin, // Default to false, update based on database field if available
          has_password: user.password.is_some(), // SSO-only users don't have password
          mfa_enabled: user.mfa_enabled,
@@ -303,6 +342,7 @@ pub async fn update_user(
     request_body = UserPatchRequest,
     responses(
        (status = 200, description = "User status updated successfully"),
+       (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "Super admin cannot deactivate/suspend/delete their own account"),
        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "User not found (code=5003)"),
        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
@@ -318,6 +358,15 @@ pub async fn patch_user_status(
     match claims.role {
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
+    }
+    if claims.role == UserRole::SuperAdmin
+        && claims.user_id == user_id
+        && matches!(
+            req.status,
+            UserStatus::Deactivated | UserStatus::Suspended | UserStatus::Deleted
+        )
+    {
+        return Err(AuthError::SuperAdminSelfStatusConflict);
     }
     match req.status {
         UserStatus::Active | UserStatus::Deactivated | UserStatus::Suspended => {},

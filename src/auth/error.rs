@@ -43,6 +43,8 @@ pub enum AuthErrorCode {
     OrgDoesNotExist = 6301,
     ResourceNotFound = 6302,
     EmailDomainNotAllowed = 6303,
+    BudgetExceedsParentAvailable = 6304,
+    SuperAdminSelfStatusConflict = 6305,
 
     // 6400-6499: SSO config / admin controls
     SsoProviderNotConfigured = 6400,
@@ -111,6 +113,8 @@ pub enum AuthError {
 
     PermissionDenied,
     EmailAlreadyExist,
+    BudgetExceedsParentAvailable,
+    SuperAdminSelfStatusConflict,
 
     OrgDoesNotExist { org_id: Option<Uuid> },
     ResourceNotFound,
@@ -507,6 +511,57 @@ impl AuthError {
                     StatusCode::FORBIDDEN,
                     ErrorDetail {
                         code: AuthErrorCode::PermissionDenied,
+                        description: Self::render(description_tpl, &params),
+                        solution: Self::render(solution_tpl, &params),
+                        description_key,
+                        solution_key,
+                        params,
+                        external_code: None,
+                    },
+                )
+            }
+
+            AuthError::BudgetExceedsParentAvailable => {
+                let params = Self::base_params();
+                let description_key =
+                    "error.budget.exceeds_parent_available.description".to_string();
+                let solution_key = "error.budget.exceeds_parent_available.solution".to_string();
+
+                let description_tpl =
+                    "The requested budget allocation exceeds the parent's available budget.";
+                let solution_tpl =
+                    "Reduce the allocation amount or increase the parent's budget, then try again.";
+
+                (
+                    StatusCode::BAD_REQUEST,
+                    ErrorDetail {
+                        code: AuthErrorCode::BudgetExceedsParentAvailable,
+                        description: Self::render(description_tpl, &params),
+                        solution: Self::render(solution_tpl, &params),
+                        description_key,
+                        solution_key,
+                        params,
+                        external_code: None,
+                    },
+                )
+            }
+
+            AuthError::SuperAdminSelfStatusConflict => {
+                let params = Self::base_params();
+                let description_key =
+                    "error.auth.super_admin_self_status_conflict.description".to_string();
+                let solution_key =
+                    "error.auth.super_admin_self_status_conflict.solution".to_string();
+
+                let description_tpl =
+                    "A super admin cannot deactivate, suspend, or delete their own account.";
+                let solution_tpl =
+                    "Update a different user's status, or ask another super admin to perform this action.";
+
+                (
+                    StatusCode::CONFLICT,
+                    ErrorDetail {
+                        code: AuthErrorCode::SuperAdminSelfStatusConflict,
                         description: Self::render(description_tpl, &params),
                         solution: Self::render(solution_tpl, &params),
                         description_key,
