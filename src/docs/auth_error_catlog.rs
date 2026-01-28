@@ -58,6 +58,8 @@ pub fn build_auth_error_catalog() -> Vec<AuthErrorCatalogItem> {
         AuthError::ResourceNotFound,
         AuthError::InvalidUserStatus,
         AuthError::AccountDeactivated,
+        AuthError::BudgetExceedsParentAvailable,
+        AuthError::SuperAdminSelfStatusConflict,
     ] {
         let (status, detail) = e.to_detail();
         items.push(AuthErrorCatalogItem::from_detail(status, detail));
@@ -126,4 +128,3 @@ pub fn build_auth_error_catalog() -> Vec<AuthErrorCatalogItem> {
     items.dedup_by_key(|x| x.code as u32);
     items
 }
-

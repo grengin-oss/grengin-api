@@ -342,6 +342,7 @@ pub async fn update_user(
     request_body = UserPatchRequest,
     responses(
        (status = 200, description = "User status updated successfully"),
+       (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "Super admin cannot deactivate/suspend/delete their own account"),
        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "User not found (code=5003)"),
        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
@@ -357,6 +358,15 @@ pub async fn patch_user_status(
     match claims.role {
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
+    }
+    if claims.role == UserRole::SuperAdmin
+        && claims.user_id == user_id
+        && matches!(
+            req.status,
+            UserStatus::Deactivated | UserStatus::Suspended | UserStatus::Deleted
+        )
+    {
+        return Err(AuthError::SuperAdminSelfStatusConflict);
     }
     match req.status {
         UserStatus::Active | UserStatus::Deactivated | UserStatus::Suspended => {},

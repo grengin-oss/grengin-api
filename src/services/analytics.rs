@@ -241,7 +241,15 @@ pub async fn get_department_analytics(
     db: &DatabaseConnection,
     start_date: Option<NaiveDate>,
     end_date: Option<NaiveDate>,
+    limit: Option<u64>,
+    offset: Option<u64>,
+    search: Option<String>,
 ) -> Result<DepartmentAnalyticsResponse, DbErr> {
+    let mut limit = limit.unwrap_or(20);
+    if limit == 0 {
+        limit = 20;
+    }
+    let offset = offset.unwrap_or(0);
     // Message window condition (kept inside CASE so departments with 0 messages still show up)
     let mut active_msg_cond =
         Expr::col((messages::Entity, messages::Column::Deleted)).eq(false);
@@ -322,7 +330,7 @@ pub async fn get_department_analytics(
     let total_users_expr = Func::count_distinct(user_id_case);
 
     // Build query: departments -> users -> conversations -> messages
-    let rows: Vec<DepartmentAnalyticsRow> = departments::Entity::find()
+    let mut select = departments::Entity::find()
         .select_only()
         .column_as(departments::Column::Name, "department")
         .expr_as(total_users_expr, "total_users")
@@ -337,10 +345,18 @@ pub async fn get_department_analytics(
         .join(JoinType::LeftJoin, conversations::Relation::Messages.def())
         .group_by(departments::Column::Id)
         .group_by(departments::Column::Name)
-        .order_by(departments::Column::Name, Order::Asc)
+        .order_by(departments::Column::Name, Order::Asc);
+
+    if let Some(search) = search.as_ref().filter(|s| !s.trim().is_empty()) {
+        select = select.filter(departments::Column::Name.into_expr().ilike(format!("%{}%", search)));
+    }
+
+    let paginator = select
         .into_model::<DepartmentAnalyticsRow>()
-        .all(db)
-        .await?;
+        .paginate(db, limit);
+    let page = offset / limit;
+    let stats = paginator.num_items_and_pages().await?;
+    let rows = paginator.fetch_page(page).await?;
 
     let analytics = rows
         .into_iter()
@@ -366,8 +382,11 @@ pub async fn get_department_analytics(
         .collect::<Vec<_>>();
 
     Ok(DepartmentAnalyticsResponse {
-        total: analytics.len() as i64,
-        departments:analytics,
+        total: stats.number_of_items as i64,
+        limit,
+        offset,
+        total_pages: stats.number_of_pages,
+        departments: analytics,
     })
 }
 

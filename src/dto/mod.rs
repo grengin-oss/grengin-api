@@ -12,3 +12,4 @@ pub mod files;
 pub mod llm;
 pub mod analytics;
 pub mod admin_department;
+pub mod admin_department_budget;

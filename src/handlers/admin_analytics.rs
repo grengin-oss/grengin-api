@@ -11,8 +11,8 @@ use crate::{
         error::{AuthError, AuthErrorResponse},
     },
     dto::analytics::{
-        AnalyticsQuery, DepartmentAnalyticsResponse, OverviewResponse, TimeSeriesQuery,
-        TimeSeriesResponse, UserAnalyticsQuery, UserAnalyticsResponse,
+        AnalyticsQuery, DepartmentAnalyticsQuery, DepartmentAnalyticsResponse, OverviewResponse,
+        TimeSeriesQuery, TimeSeriesResponse, UserAnalyticsQuery, UserAnalyticsResponse,
     },
     models::users::{UserRole, UserStatus},
     services::analytics::{self, calculate_user_analytics},
@@ -114,6 +114,9 @@ pub async fn get_user_analytics(
     params(
         ("start_date" = Option<String>, Query, description = "Start date (YYYY-MM-DD)"),
         ("end_date" = Option<String>, Query, description = "End date (YYYY-MM-DD)"),
+        ("offset" = Option<u64>, Query, description = "Number of items to skip (default: 0)"),
+        ("limit" = Option<u64>, Query, description = "Items per page (default: 20)"),
+        ("search" = Option<String>, Query, description = "Search by department name"),
     ),
     responses(
         (status = 200, description = "Department analytics", body = DepartmentAnalyticsResponse),
@@ -126,7 +129,7 @@ pub async fn get_user_analytics(
 )]
 pub async fn get_department_analytics(
     claims: Claims,
-    Query(query): Query<AnalyticsQuery>,
+    Query(query): Query<DepartmentAnalyticsQuery>,
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode, Json<DepartmentAnalyticsResponse>), AuthError> {
     match claims.role {
@@ -138,6 +141,9 @@ pub async fn get_department_analytics(
         &app_state.database,
         query.start_date,
         query.end_date,
+        query.limit,
+        query.offset,
+        query.search,
     )
     .await
     .map_err(|e| {

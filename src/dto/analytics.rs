@@ -28,6 +28,15 @@ pub struct UserAnalyticsQuery {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+pub struct DepartmentAnalyticsQuery {
+    pub start_date: Option<NaiveDate>,
+    pub end_date: Option<NaiveDate>,
+    pub offset: Option<u64>,
+    pub limit: Option<u64>,
+    pub search: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct TimeSeriesQuery {
     pub start_date: Option<NaiveDate>,
     pub end_date: Option<NaiveDate>,
@@ -99,6 +108,9 @@ pub struct DepartmentAnalytics {
 pub struct DepartmentAnalyticsResponse {
     pub departments: Vec<DepartmentAnalytics>,
     pub total: i64,
+    pub limit: u64,
+    pub offset: u64,
+    pub total_pages: u64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

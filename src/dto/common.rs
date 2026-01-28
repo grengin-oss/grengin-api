@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-use uuid::Uuid;
 use crate::models::users::{UserRole, UserStatus};
 
 #[derive(Debug,Deserialize,ToSchema)]
