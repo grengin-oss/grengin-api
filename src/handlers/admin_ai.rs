@@ -3,7 +3,17 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}}, dto::{admin_ai::{AiEngineModelsResponse, AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel, AiModelCapabilities}, models::ModelsResponse}, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}, users::UserRole}, state::SharedState};
+use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}}, dto::{admin_ai::{AiEngineModelsResponse, AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel, AiModelCapabilities}, models::ModelsResponse}, handlers::models::load_providers_cached, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}, users::UserRole}, state::SharedState};
+
+async fn load_models_response(app_state: &SharedState) -> Result<ModelsResponse, AuthError> {
+    let providers = load_providers_cached(&app_state.req_client)
+        .await
+        .map_err(|e| {
+            eprintln!("providers cache error: {e}");
+            AuthError::DbTimeout
+        })?;
+    Ok(ModelsResponse { providers })
+}
 
 #[utoipa::path(
     get,
@@ -23,7 +33,7 @@ pub async fn get_ai_engines(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
     }
-    let ai_models = ModelsResponse::default();
+    let ai_models = load_models_response(&app_state).await?;
     let selector = ai_engines::Entity::find();
     let ai_engines = selector
       .order_by_desc(ai_engines::Column::CreatedAt)
@@ -135,7 +145,7 @@ pub async fn get_ai_engines_by_key(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
    }
-   let ai_models = ModelsResponse::default();
+   let ai_models = load_models_response(&app_state).await?;
    let model = ai_engines::Entity::find()
       .filter(ai_engines::Column::EngineKey.eq(ai_engine_key))
       .order_by_desc(ai_engines::Column::CreatedAt)
@@ -200,7 +210,7 @@ pub async fn get_ai_engine_models_by_key(
     let mut response = AiEngineModelsResponse{ 
       models:Vec::new()
     };
-   let ai_models = ModelsResponse::default();
+   let ai_models = load_models_response(&app_state).await?;
    for provider in ai_models.providers{
        if provider.key != ai_engine_key {
          continue;
@@ -247,7 +257,7 @@ pub async fn update_ai_engines_by_key(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
    }
-   let ai_models = ModelsResponse::default();
+   let ai_models = load_models_response(&app_state).await?;
    let ai_engine = ai_engines::Entity::find()
       .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
       .order_by_desc(ai_engines::Column::CreatedAt)
@@ -351,7 +361,7 @@ pub async fn delete_ai_engines_api_key_key(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
    }
-   let ai_models = ModelsResponse::default();
+   let ai_models = load_models_response(&app_state).await?;
    let ai_engine = ai_engines::Entity::find()
       .filter(ai_engines::Column::EngineKey.eq(ai_engine_key))
       .order_by_desc(ai_engines::Column::CreatedAt)
