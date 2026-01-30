@@ -10,6 +10,9 @@ pub enum ChatStreamEvents{
   MessageStart,
   Delta,
   MessageEnd,
+  Event,
+  ToolCall,
+  ToolResult,
   Done
 }
 
@@ -39,12 +42,94 @@ pub struct ChatStream {
    pub latency_ms:Option<i32>,
    #[serde(skip_serializing_if = "Option::is_none")]
    pub cost:Option<f32>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub event:Option<ChatStreamEvent>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub tool_call:Option<ChatStreamToolCall>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub tool_result:Option<ChatStreamToolResult>,
 }
 
 impl ChatStream {
     pub fn to_string(&self) -> String{
        serde_json::to_string(self).unwrap()
     }
+}
+
+#[derive(Serialize, ToSchema, IntoParams)]
+pub struct ChatStreamEvent {
+   pub event_type:String,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub text:Option<String>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub data:Option<ChatStreamPayload>,
+}
+
+#[derive(Serialize, ToSchema, IntoParams)]
+pub struct ChatStreamToolCall {
+   pub tool_name:String,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub tool_id:Option<String>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub input_text:Option<String>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub kind:Option<ChatToolKind>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub web_search:Option<ChatStreamWebSearchAction>,
+}
+
+#[derive(Serialize, ToSchema, IntoParams)]
+pub struct ChatStreamToolResult {
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub tool_name:Option<String>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub tool_id:Option<String>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub kind:Option<ChatToolKind>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub web_search:Option<ChatStreamWebSearchResult>,
+}
+
+#[derive(Serialize, ToSchema, IntoParams)]
+pub struct ChatStreamPayload {
+   #[schema(value_type = Object)]
+   pub value: serde_json::Value,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all="snake_case")]
+pub enum ChatToolKind {
+   WebSearch,
+   Other,
+}
+
+#[derive(Serialize, ToSchema, IntoParams)]
+pub struct ChatStreamWebSearchAction {
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub query:Option<String>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub queries:Option<Vec<String>>,
+}
+
+#[derive(Serialize, ToSchema, IntoParams, Clone)]
+pub struct ChatStreamWebSearchResult {
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub query:Option<String>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub queries:Option<Vec<String>>,
+   pub results:Vec<ChatStreamWebSearchResultItem>,
+}
+
+#[derive(Serialize, ToSchema, IntoParams, Clone)]
+pub struct ChatStreamWebSearchResultItem {
+   pub title:String,
+   pub url:String,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub source:Option<String>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub page_age:Option<String>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub snippet:Option<String>,
 }
 
 #[derive(Deserialize, ToSchema, IntoParams)]

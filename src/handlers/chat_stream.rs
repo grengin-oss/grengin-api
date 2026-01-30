@@ -1,4 +1,4 @@
-use std::{convert::Infallible};
+use std::{collections::HashMap, convert::Infallible};
 use axum::{Json, extract::{Path, State}, response::{Sse, sse::{Event, KeepAlive}}};
 use chrono::Utc;
 use futures_util::StreamExt;
@@ -12,7 +12,19 @@ use crate::{
     auth::{claims::Claims, error::AuthErrorResponse},
     config::setting::{AnthropicSettings, OpenaiSettings},
     dto::{
-        chat_stream::{ChatInitRequest, ChatStream, ChatStreamEvents},
+        chat_stream::{
+            ChatInitRequest,
+            ChatStream,
+            ChatStreamEvents,
+            ChatStreamEvent,
+            ChatStreamPayload,
+            ChatStreamToolCall,
+            ChatStreamToolResult,
+            ChatStreamWebSearchAction,
+            ChatStreamWebSearchResult,
+            ChatStreamWebSearchResultItem,
+            ChatToolKind,
+        },
         files::File,
         llm::anthropic::ANTHROPIC_DEFAULT_MAX_TOKENS,
     },
@@ -92,6 +104,27 @@ fn calculate_cost_decimal(
         "data": { "input_tokens": 100, "output_tokens": 25, "latency_ms": 450 }
       })
     )),
+    ("event" = (
+      description = "event:event",
+      value = json!({
+        "event": "event",
+        "data": { "event": { "event_type": "thinking_delta", "text": "Considering options..." } }
+      })
+    )),
+    ("tool_call" = (
+      description = "event:tool_call",
+      value = json!({
+        "event": "tool_call",
+        "data": { "tool_call": { "tool_name": "web_search_call", "tool_id": "ws_123", "kind": "web_search", "web_search": { "query": "latest rust release" } } }
+      })
+    )),
+    ("tool_result" = (
+      description = "event:tool_result",
+      value = json!({
+        "event": "tool_result",
+        "data": { "tool_result": { "tool_name": "web_search_call", "tool_id": "ws_123", "kind": "web_search", "web_search": { "query": "latest rust release", "results": [{ "title": "...", "url": "https://example.com" }] } } }
+      })
+    )),
     ("done" = (
       description = "event:done",
       value = json!({
@@ -152,6 +185,27 @@ pub async fn handle_chat_stream_path_doc(){}
       value = json!({
         "event": "message_end",
         "data": { "input_tokens": 100, "output_tokens": 25, "latency_ms": 450 }
+      })
+    )),
+    ("event" = (
+      description = "event:event",
+      value = json!({
+        "event": "event",
+        "data": { "event": { "event_type": "thinking_delta", "text": "Considering options..." } }
+      })
+    )),
+    ("tool_call" = (
+      description = "event:tool_call",
+      value = json!({
+        "event": "tool_call",
+        "data": { "tool_call": { "tool_name": "web_search_call", "tool_id": "ws_123", "kind": "web_search", "web_search": { "query": "latest rust release" } } }
+      })
+    )),
+    ("tool_result" = (
+      description = "event:tool_result",
+      value = json!({
+        "event": "tool_result",
+        "data": { "tool_result": { "tool_name": "web_search_call", "tool_id": "ws_123", "kind": "web_search", "web_search": { "query": "latest rust release", "results": [{ "title": "...", "url": "https://example.com" }] } } }
       })
     )),
     ("done" = (
@@ -237,7 +291,7 @@ pub async fn handle_chat_stream(
     let (mut conversation, previous_messages) = conversations::Entity::find_by_id(conversation_id.clone())
        .filter(conversations::Column::ArchivedAt.is_null())
        .find_with_related(messages::Entity)
-       .order_by_desc(messages::Column::CreatedAt)
+       .order_by_asc(messages::Column::CreatedAt)
        .filter(messages::Column::Deleted.eq(false))
        .all(&app_state.database)
        .await
@@ -416,6 +470,12 @@ pub async fn handle_chat_stream(
     let mut response_tokens = 0;
     let mut total_tokens = 0;
     let mut request_id: Option<String> = None;
+    let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+    let mut tool_results: Vec<serde_json::Value> = Vec::new();
+    let mut tool_call_by_index: HashMap<u32, (String, Option<String>)> = HashMap::new();
+    let mut seen_tool_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut web_search_state: HashMap<String, ChatStreamWebSearchResult> = HashMap::new();
+    let mut last_web_search_call_id: Option<String> = None;
     let latency = start
       .elapsed()
       .as_millis() as i32;
@@ -429,6 +489,9 @@ pub async fn handle_chat_stream(
        output_tokens:None,
        latency_ms:None,
        cost:None,
+       event:None,
+       tool_call:None,
+       tool_result:None,
      };
      yield Event::default().event(ChatStreamEvents::Conversation.to_string()).data(first_chat_stream.to_string());
      let new_message_id = Uuid::new_v4();
@@ -465,6 +528,9 @@ pub async fn handle_chat_stream(
                 println!("SSE connection open for provider: {}", &provider);
             }
             Ok(ReqwestEvent::Message(msg)) => {
+                if provider.to_lowercase() == "openai" && std::env::var("OPENAI_STREAM_DEBUG").as_deref() == Ok("1") {
+                    println!("openai raw event: {}", msg.data);
+                }
                 let parse_result = stream_parser.parse_event(&msg.data);
                 match &parse_result {
                     StreamParseResult::TextDelta { text, request_id: rid } => {
@@ -497,6 +563,9 @@ pub async fn handle_chat_stream(
                             output_tokens:None,
                             latency_ms:None,
                             cost:None,
+                            event:None,
+                            tool_call:None,
+                            tool_result:None,
                         };
                         yield Event::default().event(ChatStreamEvents::Delta.to_string()).data(chat_stream.to_string());
                     }
@@ -538,6 +607,9 @@ pub async fn handle_chat_stream(
                             output_tokens:Some(response_tokens),
                             latency_ms:Some(latency),
                             cost:cost.to_f32(),
+                            event:None,
+                            tool_call:None,
+                            tool_result:None,
                       };
                       yield Event::default().event(ChatStreamEvents::MessageEnd.to_string()).data(message_end.to_string());
                     }
@@ -558,6 +630,9 @@ pub async fn handle_chat_stream(
                          output_tokens:None,
                          latency_ms:None,
                          cost:None,
+                         event:None,
+                         tool_call:None,
+                         tool_result:None,
                        };
                        yield Event::default().event(ChatStreamEvents::MessageStart.to_string()).data(message_start.to_string());
                        request_id = Some(req_id.clone());
@@ -578,8 +653,265 @@ pub async fn handle_chat_stream(
                          .await
                          .expect("failed to update in new llm response in table messages");
                     }
-                    StreamParseResult::ToolInput { .. } => {
-                        // Tool input streaming - accumulate for tool calls (future support)
+                    StreamParseResult::ToolInput { partial_json, index } => {
+                        let mut tool_name = None;
+                        let mut tool_id = None;
+                        if let Some(idx) = index {
+                            if let Some((name, id)) = tool_call_by_index.get(&idx) {
+                                tool_name = Some(name.clone());
+                                tool_id = id.clone();
+                            }
+                        }
+                        let resolved_name = tool_name.clone().unwrap_or_else(|| "tool_call".to_string());
+                        let is_web_search = resolved_name.contains("web_search");
+                        let tool_call = ChatStreamToolCall {
+                            tool_name: resolved_name,
+                            tool_id: tool_id.clone(),
+                            input_text: Some(partial_json.clone()),
+                            kind: Some(if is_web_search { ChatToolKind::WebSearch } else { ChatToolKind::Other }),
+                            web_search: None,
+                        };
+                        tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
+                        new_llm_message.tools_calls = Set(tool_calls.clone());
+                        new_llm_message.updated_at = Set(Utc::now());
+                        new_llm_message
+                          .clone()
+                          .update(&app_state.database)
+                          .await
+                          .expect("failed to update tool input in new llm response in table messages");
+                        let chat_stream = ChatStream {
+                            id:None,
+                            title:None,
+                            message_id:None,
+                            is_new:None,
+                            content:None,
+                            input_tokens:None,
+                            output_tokens:None,
+                            latency_ms:None,
+                            cost:None,
+                            event:None,
+                            tool_call:Some(tool_call),
+                            tool_result:None,
+                        };
+                        yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(chat_stream.to_string());
+                    }
+                    StreamParseResult::EventLog { event_type, message, data } => {
+                        let event = ChatStreamEvent {
+                            event_type:event_type.clone(),
+                            text: message.clone(),
+                            data: data.as_ref().map(|value| ChatStreamPayload { value:value.clone() }),
+                        };
+                        let chat_stream = ChatStream {
+                            id:None,
+                            title:None,
+                            message_id:None,
+                            is_new:None,
+                            content:None,
+                            input_tokens:None,
+                            output_tokens:None,
+                            latency_ms:None,
+                            cost:None,
+                            event:Some(event),
+                            tool_call:None,
+                            tool_result:None,
+                        };
+                        yield Event::default().event(ChatStreamEvents::Event.to_string()).data(chat_stream.to_string());
+                    }
+                    StreamParseResult::ToolCall { tool_name, tool_id, input, index, .. } => {
+                        if let Some(idx) = index {
+                            tool_call_by_index.insert(*idx, (tool_name.clone(), tool_id.clone()));
+                        }
+                        if let Some(id) = tool_id.as_ref() {
+                            if !seen_tool_call_ids.insert(id.clone()) {
+                                continue;
+                            }
+                        }
+                        let is_web_search = tool_name.contains("web_search");
+                        if is_web_search {
+                            last_web_search_call_id = tool_id.clone().or_else(|| last_web_search_call_id.clone());
+                        }
+                        let web_search = if is_web_search {
+                            input.as_ref().and_then(|value| {
+                                let query = value
+                                    .get("query")
+                                    .and_then(|q| q.as_str())
+                                    .map(|s| s.to_string());
+                                let queries = value
+                                    .get("queries")
+                                    .and_then(|q| q.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                            .collect::<Vec<String>>()
+                                    });
+                                if query.is_none() && queries.is_none() {
+                                    return None;
+                                }
+                                Some(ChatStreamWebSearchAction { query, queries })
+                            })
+                        } else {
+                            None
+                        };
+                        let tool_call = ChatStreamToolCall {
+                            tool_name: tool_name.clone(),
+                            tool_id: tool_id.clone(),
+                            input_text: None,
+                            kind: Some(if is_web_search { ChatToolKind::WebSearch } else { ChatToolKind::Other }),
+                            web_search,
+                        };
+                        tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
+                        new_llm_message.tools_calls = Set(tool_calls.clone());
+                        new_llm_message.updated_at = Set(Utc::now());
+                        new_llm_message
+                          .clone()
+                          .update(&app_state.database)
+                          .await
+                          .expect("failed to update tool calls in new llm response in table messages");
+                        let chat_stream = ChatStream {
+                            id:None,
+                            title:None,
+                            message_id:None,
+                            is_new:None,
+                            content:None,
+                            input_tokens:None,
+                            output_tokens:None,
+                            latency_ms:None,
+                            cost:None,
+                            event:None,
+                            tool_call:Some(tool_call),
+                            tool_result:None,
+                        };
+                        yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(chat_stream.to_string());
+                    }
+                    StreamParseResult::WebSearchAction { tool_name, tool_id, query, queries } => {
+                        let call_id = tool_id.clone().or_else(|| last_web_search_call_id.clone());
+                        if let Some(id) = call_id.clone() {
+                            last_web_search_call_id = Some(id.clone());
+                            let entry = web_search_state.entry(id.clone()).or_insert_with(|| ChatStreamWebSearchResult {
+                                query: None,
+                                queries: None,
+                                results: Vec::new(),
+                            });
+                            if query.is_some() {
+                                entry.query = query.clone();
+                            }
+                            if queries.is_some() {
+                                entry.queries = queries.clone();
+                            }
+                            let tool_result = ChatStreamToolResult {
+                                tool_name: Some("web_search_call".to_string()),
+                                tool_id: Some(id.clone()),
+                                kind: Some(ChatToolKind::WebSearch),
+                                web_search: Some(entry.clone()),
+                            };
+                            tool_results.push(serde_json::to_value(&tool_result).unwrap_or_else(|_| json!({})));
+                            new_llm_message.tools_results = Set(tool_results.clone());
+                            new_llm_message.updated_at = Set(Utc::now());
+                            new_llm_message
+                              .clone()
+                              .update(&app_state.database)
+                              .await
+                              .expect("failed to update tool results in new llm response in table messages");
+                            let chat_stream = ChatStream {
+                                id:None,
+                                title:None,
+                                message_id:None,
+                                is_new:None,
+                                content:None,
+                                input_tokens:None,
+                                output_tokens:None,
+                                latency_ms:None,
+                                cost:None,
+                                event:None,
+                                tool_call:None,
+                                tool_result:Some(tool_result),
+                            };
+                            yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(chat_stream.to_string());
+                        }
+                    }
+                    StreamParseResult::WebSearchResult { tool_name: _, tool_id, results } => {
+                        let call_id = tool_id.clone().or_else(|| last_web_search_call_id.clone());
+                        if let Some(id) = call_id.clone() {
+                            last_web_search_call_id = Some(id.clone());
+                            let entry = web_search_state.entry(id.clone()).or_insert_with(|| ChatStreamWebSearchResult {
+                                query: None,
+                                queries: None,
+                                results: Vec::new(),
+                            });
+                            for result in results {
+                                entry.results.push(ChatStreamWebSearchResultItem {
+                                    title: result.title.clone(),
+                                    url: result.url.clone(),
+                                    source: result.source.clone(),
+                                    page_age: result.page_age.clone(),
+                                    snippet: result.snippet.clone(),
+                                });
+                            }
+                            let tool_result = ChatStreamToolResult {
+                                tool_name: Some("web_search_call".to_string()),
+                                tool_id: Some(id.clone()),
+                                kind: Some(ChatToolKind::WebSearch),
+                                web_search: Some(entry.clone()),
+                            };
+                            tool_results.push(serde_json::to_value(&tool_result).unwrap_or_else(|_| json!({})));
+                            new_llm_message.tools_results = Set(tool_results.clone());
+                            new_llm_message.updated_at = Set(Utc::now());
+                            new_llm_message
+                              .clone()
+                              .update(&app_state.database)
+                              .await
+                              .expect("failed to update tool results in new llm response in table messages");
+                            let chat_stream = ChatStream {
+                                id:None,
+                                title:None,
+                                message_id:None,
+                                is_new:None,
+                                content:None,
+                                input_tokens:None,
+                                output_tokens:None,
+                                latency_ms:None,
+                                cost:None,
+                                event:None,
+                                tool_call:None,
+                                tool_result:Some(tool_result),
+                            };
+                            yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(chat_stream.to_string());
+                        }
+                    }
+                    StreamParseResult::ToolResult { tool_name, tool_id, .. } => {
+                        let is_web_search = tool_name
+                            .as_ref()
+                            .map(|name| name.contains("web_search"))
+                            .unwrap_or(false);
+                        let tool_result = ChatStreamToolResult {
+                            tool_name: tool_name.clone(),
+                            tool_id: tool_id.clone(),
+                            kind: Some(if is_web_search { ChatToolKind::WebSearch } else { ChatToolKind::Other }),
+                            web_search: None,
+                        };
+                        tool_results.push(serde_json::to_value(&tool_result).unwrap_or_else(|_| json!({})));
+                        new_llm_message.tools_results = Set(tool_results.clone());
+                        new_llm_message.updated_at = Set(Utc::now());
+                        new_llm_message
+                          .clone()
+                          .update(&app_state.database)
+                          .await
+                          .expect("failed to update tool results in new llm response in table messages");
+                        let chat_stream = ChatStream {
+                            id:None,
+                            title:None,
+                            message_id:None,
+                            is_new:None,
+                            content:None,
+                            input_tokens:None,
+                            output_tokens:None,
+                            latency_ms:None,
+                            cost:None,
+                            event:None,
+                            tool_call:None,
+                            tool_result:Some(tool_result),
+                        };
+                        yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(chat_stream.to_string());
                     }
                     StreamParseResult::Error { error_type, message } => {
                       new_llm_message.message_content = Set(message.clone());

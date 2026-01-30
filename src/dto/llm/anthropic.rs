@@ -244,7 +244,7 @@ pub struct AnthropicMessageResponse {
     pub usage: AnthropicUsage,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize,Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum AnthropicContentBlockResponse {
     #[serde(rename = "text")]
@@ -268,7 +268,7 @@ pub enum AnthropicContentBlockResponse {
     },
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize,Serialize, Clone)]
 pub struct WebSearchResult {
     #[serde(rename = "type")]
     pub result_type: String,
