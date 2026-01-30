@@ -2,10 +2,12 @@ use std::{convert::Infallible};
 use axum::{Json, extract::{Path, State}, response::{Sse, sse::{Event, KeepAlive}}};
 use chrono::Utc;
 use futures_util::StreamExt;
+use num_traits::ToPrimitive;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, prelude::Decimal};
 use serde_json::json;
 use tokio::time::Instant;
 use uuid::Uuid;
+use rust_decimal::prelude::FromPrimitive;
 use crate::{
     auth::{claims::Claims, error::AuthErrorResponse},
     config::setting::{AnthropicSettings, OpenaiSettings},
@@ -15,6 +17,7 @@ use crate::{
         llm::anthropic::ANTHROPIC_DEFAULT_MAX_TOKENS,
     },
     error::{AppError, ErrorResponse},
+    handlers::models::get_model_info_cached,
     handlers::llm::{StreamParseResult, StreamParser, anthropic::AnthropicStreamParser, openai::OpenaiStreamParser},
     llm::{prompt::Prompt, provider::{AnthropicApis, OpenaiApis, get_title_generation_model}},
     models::{conversations, messages::{self, ChatRole}},
@@ -26,6 +29,21 @@ use reqwest_eventsource::Event as ReqwestEvent;
 enum LlmProviderConfig<'a> {
     OpenAI(&'a OpenaiSettings),
     Anthropic(&'a AnthropicSettings),
+}
+
+fn calculate_cost_decimal(
+    input_tokens: i32,
+    output_tokens: i32,
+    input_rate: Option<f64>,
+    output_rate: Option<f64>,
+) -> Decimal {
+    let input_rate = input_rate.unwrap_or(0.0);
+    let output_rate = output_rate.unwrap_or(0.0);
+    if input_rate == 0.0 && output_rate == 0.0 {
+        return Decimal::from(0);
+    }
+    let cost = (input_tokens as f64 * input_rate + output_tokens as f64 * output_rate) / 1_000_000.0;
+    Decimal::from_f64(cost).unwrap_or_else(|| Decimal::from(0))
 }
 
 #[utoipa::path(
@@ -199,6 +217,14 @@ pub async fn handle_chat_stream(
          (LlmProviderConfig::Anthropic(&settings), model)
      },
      _ => return Err(AppError::InvalidLlmProvider{provider:provider.clone()})
+ };
+ let (input_rate, output_rate) = match get_model_info_cached(&app_state.req_client, &model_name).await {
+    Ok(Some(model)) => (model.input_token_rate, model.output_token_rate),
+    Ok(None) => (None, None),
+    Err(error) => {
+        eprintln!("models cache error: {error}");
+        (None, None)
+    }
  };
  if let Some(conversation_id) = req.conversation_id{
     chat_id = Some(Path(conversation_id));
@@ -402,6 +428,7 @@ pub async fn handle_chat_stream(
        input_tokens:None,
        output_tokens:None,
        latency_ms:None,
+       cost:None,
      };
      yield Event::default().event(ChatStreamEvents::Conversation.to_string()).data(first_chat_stream.to_string());
      let new_message_id = Uuid::new_v4();
@@ -448,7 +475,13 @@ pub async fn handle_chat_stream(
                         new_llm_message.message_content = Set(message_content.clone());
                         new_llm_message.request_tokens = Set(request_tokens);
                         new_llm_message.response_tokens = Set(response_tokens);
-                        new_llm_message.total_tokens = Set(request_tokens + request_tokens);
+                        new_llm_message.total_tokens = Set(request_tokens + response_tokens);
+                        new_llm_message.cost = Set(calculate_cost_decimal(
+                            request_tokens,
+                            response_tokens,
+                            input_rate,
+                            output_rate,
+                        ));
                         new_llm_message
                           .clone()
                           .update(&app_state.database)
@@ -463,6 +496,7 @@ pub async fn handle_chat_stream(
                             input_tokens:None,
                             output_tokens:None,
                             latency_ms:None,
+                            cost:None,
                         };
                         yield Event::default().event(ChatStreamEvents::Delta.to_string()).data(chat_stream.to_string());
                     }
@@ -477,11 +511,18 @@ pub async fn handle_chat_stream(
                          total_tokens = tokens.clone() as i32;
                        }
                        request_id = req_id.clone();
+                       let cost = calculate_cost_decimal(
+                           request_tokens,
+                           response_tokens,
+                           input_rate,
+                           output_rate,
+                       );
                        new_llm_message.request_id = Set(request_id);
                        new_llm_message.updated_at = Set(Utc::now());
                        new_llm_message.request_tokens = Set(request_tokens);
                        new_llm_message.response_tokens = Set(response_tokens);
-                       new_llm_message.total_tokens = Set(request_tokens + request_tokens);
+                       new_llm_message.total_tokens = Set(request_tokens + response_tokens);
+                       new_llm_message.cost = Set(cost);
                        new_llm_message
                          .clone()
                          .update(&app_state.database)
@@ -496,6 +537,7 @@ pub async fn handle_chat_stream(
                             input_tokens:Some(request_tokens),
                             output_tokens:Some(response_tokens),
                             latency_ms:Some(latency),
+                            cost:cost.to_f32(),
                       };
                       yield Event::default().event(ChatStreamEvents::MessageEnd.to_string()).data(message_end.to_string());
                     }
@@ -515,6 +557,7 @@ pub async fn handle_chat_stream(
                          input_tokens:Some(request_tokens),
                          output_tokens:None,
                          latency_ms:None,
+                         cost:None,
                        };
                        yield Event::default().event(ChatStreamEvents::MessageStart.to_string()).data(message_start.to_string());
                        request_id = Some(req_id.clone());
@@ -522,7 +565,13 @@ pub async fn handle_chat_stream(
                        new_llm_message.updated_at = Set(Utc::now());
                        new_llm_message.request_tokens = Set(request_tokens);
                        new_llm_message.response_tokens = Set(response_tokens);
-                       new_llm_message.total_tokens = Set(request_tokens + request_tokens);
+                       new_llm_message.total_tokens = Set(request_tokens + response_tokens);
+                       new_llm_message.cost = Set(calculate_cost_decimal(
+                           request_tokens,
+                           response_tokens,
+                           input_rate,
+                           output_rate,
+                       ));
                        new_llm_message
                          .clone()
                          .update(&app_state.database)
@@ -552,17 +601,34 @@ pub async fn handle_chat_stream(
                       if total_tokens == 0 {
                         total_tokens = request_tokens + response_tokens;
                       }
-                      println!("Stream ended for provider: {} input tokens: {} output_tokens: {} total_tokens: {} latency in ms: {}", &provider,request_tokens,response_tokens,total_tokens,latency);
+                      let message_cost = calculate_cost_decimal(
+                        request_tokens,
+                        response_tokens,
+                        input_rate,
+                        output_rate,
+                      );
+                      println!("Stream ended for provider: {} input tokens: {} output_tokens: {} total_tokens: {} latency in ms: {} cost: {}", &provider,request_tokens,response_tokens,total_tokens,latency,&message_cost);
                     new_llm_message.latency = Set(latency);
                     new_llm_message.request_tokens = Set(request_tokens);
                     new_llm_message.response_tokens = Set(response_tokens);
                     new_llm_message.total_tokens = Set(total_tokens);
+                    new_llm_message.cost = Set(message_cost);
                     new_llm_message.updated_at = Set(Utc::now());
                     new_llm_message
                       .clone()
                       .update(&app_state.database)
                       .await
                       .expect("failed to update llm response in table messages");
+                    if let Ok(Some(conversation)) = conversations::Entity::find_by_id(conversation_id.clone())
+                      .one(&app_state.database)
+                      .await
+                     {
+                      let mut active_conversation = conversation.clone().into_active_model();
+                      active_conversation.total_tokens = Set(conversation.total_tokens + total_tokens as i64);
+                      active_conversation.total_cost = Set(conversation.total_cost + message_cost);
+                      active_conversation.updated_at = Set(Utc::now());
+                      let _ = active_conversation.update(&app_state.database).await;
+                    }
                     yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
                     break;
                     },

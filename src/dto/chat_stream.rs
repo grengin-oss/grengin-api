@@ -37,6 +37,8 @@ pub struct ChatStream {
    pub output_tokens:Option<i32>,
    #[serde(skip_serializing_if = "Option::is_none")]
    pub latency_ms:Option<i32>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub cost:Option<f32>,
 }
 
 impl ChatStream {

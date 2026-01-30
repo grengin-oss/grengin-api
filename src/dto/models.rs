@@ -1,8 +1,6 @@
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use crate::handlers::models::list_models;
-
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelsResponse {
@@ -20,11 +18,11 @@ impl ModelsResponse {
     }
 
     pub fn default() -> Self {
-      ModelsResponse{providers:list_models()}
+      ModelsResponse{providers:Vec::new()}
     }
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize,Clone, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderInfo {
     pub key: String,
@@ -34,7 +32,7 @@ pub struct ProviderInfo {
     pub models: Vec<ModelInfo>,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize,Clone, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub key: String,
@@ -42,6 +40,10 @@ pub struct ModelInfo {
     pub engine: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_token_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_token_rate: Option<f64>,
     pub supports_streaming: bool,
     pub supports_tools: bool,
     pub supports_vision: bool,
