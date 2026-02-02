@@ -189,9 +189,32 @@ pub async fn get_list_models(
             .check_ai_engine_is_enabled(&provider.key)
             .await
             .unwrap_or(false);
-        if is_enabled {
-            filtered_providers.push(provider);
+        if !is_enabled {
+            continue;
         }
+        let whitelist = app_state
+            .settings
+            .get_ai_engine_whitelist(&provider.key)
+            .await
+            .unwrap_or_default();
+        if whitelist.is_empty() {
+            continue;
+        }
+        let models = provider
+            .models
+            .into_iter()
+            .filter(|model| whitelist.contains(&model.name) || whitelist.contains(&model.key))
+            .collect::<Vec<ModelInfo>>();
+        if models.is_empty() {
+            continue;
+        }
+        filtered_providers.push(ProviderInfo {
+            key: provider.key,
+            name: provider.name,
+            icon: provider.icon,
+            status: provider.status,
+            models,
+        });
     }
 
     (status, Json(ModelsResponse { providers: filtered_providers }))

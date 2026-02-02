@@ -3,6 +3,7 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
+use std::collections::HashSet;
 use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}}, dto::{admin_ai::{AiEngineModelsResponse, AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel, AiModelCapabilities}, models::ModelsResponse}, handlers::models::load_providers_cached, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}, users::UserRole}, state::SharedState};
 
 async fn load_models_response(app_state: &SharedState) -> Result<ModelsResponse, AuthError> {
@@ -35,7 +36,7 @@ pub async fn get_ai_engines(
     }
     let ai_models = load_models_response(&app_state).await?;
     let selector = ai_engines::Entity::find();
-    let ai_engines = selector
+    let mut ai_engines = selector
       .order_by_desc(ai_engines::Column::CreatedAt)
       .all(&app_state.database)
       .await
@@ -43,64 +44,81 @@ pub async fn get_ai_engines(
          eprintln!("db error get all {e}");
          AuthError::DbTimeout
       })?;
-    if ai_engines.is_empty() {
-       let mut ai_engines_active_models:Vec<ai_engines::ActiveModel> = Vec::new();
-       for provider in &ai_models.providers {
-          let api_key = app_state
-             .settings
-             .get_ai_engine_api_key(&provider.key)
-             .await;
-          ai_engines_active_models.push(ai_engines::ActiveModel {
-             id:Set(Uuid::new_v4()),
-             display_name:Set(provider.name.clone()),
-             is_enabled:Set(api_key.is_some()),
-             engine_key:Set(provider.key.clone()),
-             api_key_status:Set(ApiKeyStatus::NotValidated),
-             api_key:Set(api_key),
-             whitelist_models:Set(provider
-                .models
-                .iter()
-                .map(|model| model.name.clone())
-                .collect::<Vec<String>>()),
-             default_model:Set(String::from("<empty>")),
-             api_key_validated_at:Set(None),
-             created_at:Set(Utc::now()),
-             updated_at:Set(Utc::now()),
+    let mut existing_keys: HashSet<String> = ai_engines
+        .iter()
+        .map(|engine| engine.engine_key.clone())
+        .collect();
+    let mut to_insert: Vec<(ai_engines::ActiveModel, Option<String>, Vec<String>)> = Vec::new();
+    for provider in &ai_models.providers {
+        if existing_keys.contains(&provider.key) {
+            continue;
+        }
+        let api_key = app_state
+            .settings
+            .get_ai_engine_api_key(&provider.key)
+            .await
+            .map(|k|{
+              encrypt_key(&app_state.settings.auth.app_key, k.as_bytes())
+                .expect("Failed to encrypt the api key")
             });
-          }
-       ai_engines::Entity::insert_many(ai_engines_active_models)
-         .exec(&app_state.database)
-         .await
-         .map_err(|e|{
-            eprintln!("db insert many error {:?}",e);
-            AuthError::DbTimeout
-         })?;
-       let response = ai_models
-         .providers
-         .into_iter()
-         .map(|provider|{
-            AiEngineResponse {
-              icon:Some(provider.icon),
-              engine_key:provider.key,
-              display_name:provider.name,
-              is_enabled:false,
-              api_key_configured:false,
-              api_key_status:ApiKeyStatus::NotValidated,
-              api_key_preview:Some("<empty>".to_string()),
-              api_key_last_validated_at:None,
-              whitelisted_models:provider
-                .models
-                .into_iter()
-                .map(|model| model.key)
-                .collect(),
-              default_model:None,
-              created_at:Utc::now(),
-              updated_at:Utc::now(),
-            }
-          })
-          .collect();
-       return Ok((StatusCode::OK,Json(response)))
+        let whitelist_models = provider
+            .models
+            .iter()
+            .map(|model| model.name.clone())
+            .collect::<Vec<String>>();
+        to_insert.push((
+            ai_engines::ActiveModel {
+                id:Set(Uuid::new_v4()),
+                display_name:Set(provider.name.clone()),
+                is_enabled:Set(api_key.is_some()),
+                engine_key:Set(provider.key.clone()),
+                api_key_status:Set(ApiKeyStatus::NotValidated),
+                api_key:Set(api_key.clone()),
+                whitelist_models:Set(whitelist_models.clone()),
+                default_model:Set(String::from("<empty>")),
+                api_key_validated_at:Set(None),
+                created_at:Set(Utc::now()),
+                updated_at:Set(Utc::now()),
+            },
+            api_key,
+            whitelist_models,
+        ));
+        existing_keys.insert(provider.key.clone());
     }
+
+    if !to_insert.is_empty() {
+        ai_engines::Entity::insert_many(to_insert.iter().map(|(model, _, _)| model.clone()))
+            .exec(&app_state.database)
+            .await
+            .map_err(|e| {
+                eprintln!("db insert many error {:?}", e);
+                AuthError::DbTimeout
+            })?;
+        for (active_model, api_key, whitelist_models) in to_insert {
+             let model = active_model
+                .try_into_model()
+                .unwrap();
+             let engine_key = model
+                .engine_key
+                .clone();
+             let is_enabled = model
+                .is_enabled
+                .clone();
+             let _ = app_state
+                .settings
+                .load_ai_engine_in_state(engine_key, api_key, is_enabled, whitelist_models)
+                .await;
+        }
+        ai_engines = ai_engines::Entity::find()
+            .order_by_desc(ai_engines::Column::CreatedAt)
+            .all(&app_state.database)
+            .await
+            .map_err(|e| {
+                eprintln!("db error get all {e}");
+                AuthError::DbTimeout
+            })?;
+    }
+
     let response = ai_engines
       .into_iter()
       .map(|model|{
@@ -304,22 +322,29 @@ pub async fn update_ai_engines_by_key(
         eprintln!("db error model parse error {e}");
         AuthError::DbTimeout
       })?;
-     if let Some(api_key) = &model.api_key  {
-        let decrypted_api_key = decrypt_key(&app_state.settings.auth.app_key,&api_key)
-           .map_err(|e|{
-             eprintln!("Decryption api key error {:?}",e);
-             AuthError::DbTimeout
-           }
-          )?;
-        app_state
-          .settings
-          .load_ai_engine_in_state(&ai_engine_key,&decrypted_api_key,model.is_enabled)
-          .await
-          .map_err(|e|{
+    let decrypted_api_key = match &model.api_key {
+        Some(api_key) => Some(
+            decrypt_key(&app_state.settings.auth.app_key, api_key)
+                .map_err(|e| {
+                    eprintln!("Decryption api key error {:?}", e);
+                    AuthError::DbTimeout
+                })?,
+        ),
+        None => None,
+    };
+    app_state
+        .settings
+        .load_ai_engine_in_state(
+            &ai_engine_key,
+            decrypted_api_key,
+            model.is_enabled,
+            model.whitelist_models.clone(),
+        )
+        .await
+        .map_err(|e| {
             eprintln!("Ai engine loading error in state {e}");
             AuthError::DbTimeout
-      })?;
-    }
+        })?;
     let _ = validate_ai_engines_by_key(claims,Path(ai_engine_key),State(app_state.clone()));
     let response = AiEngineResponse{
             icon:ai_models.get_icon(&model.engine_key),
@@ -381,7 +406,12 @@ pub async fn delete_ai_engines_api_key_key(
     active_model.is_enabled = Set(false);
     let _ = app_state
       .settings
-      .load_ai_engine_in_state(ai_engine.engine_key,String::default(),false);
+      .load_ai_engine_in_state(
+          ai_engine.engine_key,
+          None,
+          false,
+          ai_engine.whitelist_models.clone(),
+      );
     active_model
      .clone()
      .update(&app_state.database)

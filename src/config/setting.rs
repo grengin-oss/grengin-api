@@ -3,6 +3,7 @@ use reqwest::Url;
 use sea_orm::{DatabaseConnection, EntityTrait, QueryOrder};
 use thiserror::Error;
 use tokio::sync::RwLock;
+use std::collections::HashMap;
 use crate::{auth::{encryption::{decrypt_key, key_from_b64}, jwt::{KEYS, Keys}}, models::{ai_engines, sso_providers}};
 
 pub type OidcClient = CoreClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointMaybeSet, EndpointMaybeSet>;
@@ -14,6 +15,7 @@ pub struct Settings {
     pub server:ServerSettings,
     pub openai:RwLock<Option<OpenaiSettings>>,
     pub anthropic:RwLock<Option<AnthropicSettings>>,
+    pub ai_engines_cache:RwLock<HashMap<String, AiEngineStateCache>>,
 }
 
 pub struct ServerSettings {
@@ -63,6 +65,13 @@ pub struct AnthropicSettings {
     pub is_enabled:bool,
 }
 
+#[derive(Clone, Default)]
+pub struct AiEngineStateCache {
+    pub api_key: Option<String>,
+    pub is_enabled: bool,
+    pub whitelist_models: Vec<String>,
+}
+
 impl Settings {
     pub async fn load_ai_engines_from_db(&mut self,database:&DatabaseConnection) -> Result<(), ConfigError> {
       let ai_engines = ai_engines::Entity::find()
@@ -71,13 +80,17 @@ impl Settings {
          .await
          .map_err(|e| ConfigError::DbError(e.to_string()))?;
       for engine in ai_engines {
-            if !engine.is_enabled {continue;}
-            let Some(encrypted_api_key) = engine.api_key else {continue};
-            let Some(api_key) = decrypt_key(&self.auth.app_key,&encrypted_api_key)
-               .ok()
-              else { continue }; // fall back for default <empty> string
-            self.load_ai_engine_in_state(engine.engine_key, api_key,true)
-             .await?;
+            let api_key = engine
+               .api_key
+               .as_ref()
+               .and_then(|encrypted_api_key| decrypt_key(&self.auth.app_key, encrypted_api_key).ok());
+            self.load_ai_engine_in_state(
+                engine.engine_key,
+                api_key,
+                engine.is_enabled,
+                engine.whitelist_models,
+            )
+            .await?;
         }
      Ok(())
     }
@@ -104,26 +117,73 @@ impl Settings {
        }
     }
 
-    pub async fn load_ai_engine_in_state<S: Into<String>>(&self,engine_key:S,api_key:S,is_enabled:bool) -> Result<(),ConfigError> {
-       match engine_key.into().as_str() {
-              "openai" => {
-              println!("openai api key added successfully from ai_engines Table");
-              *self.openai.write().await = Some(OpenaiSettings {
-                api_key:api_key.into(),
-                org_id: None,
-                project_id: None,
-                timeout_ms: 10_000,
-                max_retries: 10,
-                is_enabled,
-              });
-             }
-             "anthropic"  => {
-              println!("anthropic api key added successfully from ai_engines Table");
-             *self.anthropic.write().await = Some(AnthropicSettings { api_key:api_key.into(),is_enabled });
+    pub async fn load_ai_engine_in_state<S: Into<String>>(
+        &self,
+        engine_key: S,
+        api_key: Option<String>,
+        is_enabled: bool,
+        whitelist_models: Vec<String>,
+    ) -> Result<(),ConfigError> {
+        let engine_key = engine_key.into();
+        let cache_key = engine_key.to_lowercase();
+        self.set_ai_engine_cache(
+            cache_key.clone(),
+            api_key.clone(),
+            is_enabled,
+            whitelist_models,
+        )
+        .await;
+        match cache_key.as_str() {
+            "openai" => {
+                if is_enabled {
+                    println!("openai api key added successfully from ai_engines Table");
+                    *self.openai.write().await = Some(OpenaiSettings {
+                        api_key: api_key.clone().unwrap_or_default(),
+                        org_id: None,
+                        project_id: None,
+                        timeout_ms: 10_000,
+                        max_retries: 10,
+                        is_enabled,
+                    });
+                } else {
+                    *self.openai.write().await = None;
+                }
             }
-           _ => {}
-          }
-      Ok(())
+            "anthropic"  => {
+                if is_enabled {
+                    println!("anthropic api key added successfully from ai_engines Table");
+                    *self.anthropic.write().await = Some(AnthropicSettings { api_key: api_key.unwrap_or_default(), is_enabled });
+                } else {
+                    *self.anthropic.write().await = None;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub async fn set_ai_engine_cache(
+        &self,
+        engine_key: String,
+        api_key: Option<String>,
+        is_enabled: bool,
+        whitelist_models: Vec<String>,
+    ) {
+        let mut cache = self.ai_engines_cache.write().await;
+        cache.insert(
+            engine_key,
+            AiEngineStateCache {
+                api_key,
+                is_enabled,
+                whitelist_models,
+            },
+        );
+    }
+
+    pub async fn get_ai_engine_whitelist<S: AsRef<str>>(&self, engine_key: S) -> Option<Vec<String>> {
+        let key = engine_key.as_ref().to_lowercase();
+        let cache = self.ai_engines_cache.read().await;
+        cache.get(&key).map(|entry| entry.whitelist_models.clone())
     }
 
     pub async fn load_sso_providers_from_db(&mut self,database:&DatabaseConnection) -> Result<(), ConfigError> {
@@ -195,6 +255,7 @@ impl Settings {
             server:ServerSettings::from_env()?,
             openai:RwLock::new(OpenaiSettings::from_env().ok()),
             anthropic:RwLock::new(AnthropicSettings::from_env().ok()),
+            ai_engines_cache:RwLock::new(HashMap::new()),
         })
     }
 }
@@ -283,4 +344,3 @@ pub enum ConfigError {
     #[error("{0}")]
     Custom(String),
 }
-
