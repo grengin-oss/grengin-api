@@ -1,5 +1,5 @@
-use crate::dto::llm::anthropic::{AnthropicStreamEvent, AnthropicDelta};
-use super::{StreamParser, StreamParseResult};
+use crate::dto::llm::anthropic::{AnthropicStreamEvent, AnthropicDelta, AnthropicContentBlockResponse};
+use super::{StreamParser, StreamParseResult, StreamWebSearchResult};
 
 /// Anthropic stream parser
 pub struct AnthropicStreamParser;
@@ -25,6 +25,20 @@ impl StreamParser for AnthropicStreamParser {
         // 1) Raw JSON extraction for token usage (robust even if DTO is incomplete)
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
             match v.get("type").and_then(|t| t.as_str()) {
+                Some("content_block_delta") => {
+                    let delta_type = v.pointer("/delta/type").and_then(|x| x.as_str());
+                    if delta_type == Some("thinking_delta") {
+                        let message = v
+                            .pointer("/delta/thinking")
+                            .and_then(|x| x.as_str())
+                            .map(|s| s.to_string());
+                        return StreamParseResult::EventLog {
+                            event_type: "thinking_delta".to_string(),
+                            message,
+                            data: Some(v.clone()),
+                        };
+                    }
+                }
                 Some("message_start") => {
                     let request_id = v
                         .pointer("/message/id")
@@ -75,13 +89,48 @@ impl StreamParser for AnthropicStreamParser {
                     output_tokens: None,
                 },
 
-                AnthropicStreamEvent::ContentBlockDelta { delta, .. } => match delta {
+                AnthropicStreamEvent::ContentBlockStart { index, content_block } => match content_block {
+                    AnthropicContentBlockResponse::ToolUse { id, name, input } => StreamParseResult::ToolCall {
+                        tool_name: name,
+                        tool_id: Some(id),
+                        input: Some(input),
+                        index: Some(index),
+                        raw: None,
+                    },
+                    AnthropicContentBlockResponse::ServerToolUse { id, name, input } => StreamParseResult::ToolCall {
+                        tool_name: name,
+                        tool_id: Some(id),
+                        input: Some(input),
+                        index: Some(index),
+                        raw: None,
+                    },
+                    AnthropicContentBlockResponse::WebSearchToolResult { tool_use_id, content } => {
+                        let results = content
+                            .into_iter()
+                            .map(|item| StreamWebSearchResult {
+                                title: item.title,
+                                url: item.url,
+                                source: None,
+                                page_age: item.page_age,
+                                snippet: None,
+                            })
+                            .collect::<Vec<StreamWebSearchResult>>();
+                        StreamParseResult::WebSearchResult {
+                            tool_name: "web_search_call".to_string(),
+                            tool_id: Some(tool_use_id),
+                            results,
+                        }
+                    }
+                    _ => StreamParseResult::None,
+                },
+
+                AnthropicStreamEvent::ContentBlockDelta { index, delta } => match delta {
                     AnthropicDelta::TextDelta { text } => StreamParseResult::TextDelta {
                         text,
                         request_id: None,
                     },
                     AnthropicDelta::InputJsonDelta { partial_json } => {
-                        StreamParseResult::ToolInput { partial_json }
+                        StreamParseResult::ToolInput { partial_json, index: Some(index) }
                     }
                 },
 
@@ -91,7 +140,6 @@ impl StreamParser for AnthropicStreamParser {
                 },
 
                 AnthropicStreamEvent::MessageStop
-                | AnthropicStreamEvent::ContentBlockStart { .. }
                 | AnthropicStreamEvent::ContentBlockStop { .. }
                 | AnthropicStreamEvent::MessageDelta { .. }
                 | AnthropicStreamEvent::Ping => StreamParseResult::None,

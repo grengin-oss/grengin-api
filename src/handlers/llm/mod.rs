@@ -20,6 +20,42 @@ pub enum StreamParseResult {
 
     ToolInput {
         partial_json: String,
+        index: Option<u32>,
+    },
+
+    EventLog {
+        event_type: String,
+        message: Option<String>,
+        data: Option<serde_json::Value>,
+    },
+
+    ToolCall {
+        tool_name: String,
+        tool_id: Option<String>,
+        input: Option<serde_json::Value>,
+        index: Option<u32>,
+        raw: Option<serde_json::Value>,
+    },
+
+    WebSearchAction {
+        tool_name: String,
+        tool_id: Option<String>,
+        query: Option<String>,
+        queries: Option<Vec<String>>,
+    },
+
+    WebSearchResult {
+        tool_name: String,
+        tool_id: Option<String>,
+        results: Vec<StreamWebSearchResult>,
+    },
+
+    ToolResult {
+        tool_name: Option<String>,
+        tool_id: Option<String>,
+        output: Option<serde_json::Value>,
+        index: Option<u32>,
+        raw: Option<serde_json::Value>,
     },
 
     // NEW: token usage updates mid/final stream
@@ -34,6 +70,15 @@ pub enum StreamParseResult {
         error_type: String,
         message: String,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamWebSearchResult {
+    pub title: String,
+    pub url: String,
+    pub source: Option<String>,
+    pub page_age: Option<String>,
+    pub snippet: Option<String>,
 }
 
 /// Trait for parsing provider-specific streaming events

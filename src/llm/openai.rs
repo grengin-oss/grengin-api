@@ -60,7 +60,12 @@ impl OpenaiApis for ReqwestClient {
        }
        let tools = if web_search {
          Some(vec![OpenaiTool::web_search()])
-       }else{
+       } else {
+         None
+       };
+       let tool_choice = if web_search {
+         Some(crate::dto::llm::openai::OpenaiToolChoice::String("auto".to_string()))
+       } else {
          None
        };
        let body = OpenaiChatRequest {
@@ -68,8 +73,8 @@ impl OpenaiApis for ReqwestClient {
             stream: true,
             temperature,
             input:OpenaiMessage::from_prompts(prompts),
-            tool_choice:None,
-            tools:tools,
+            tool_choice,
+            tools,
             include:None,
         };
       let request = self
@@ -137,4 +142,3 @@ impl OpenaiApis for ReqwestClient {
         Ok(res.data)
     }
 }
-
