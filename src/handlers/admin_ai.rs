@@ -64,7 +64,7 @@ pub async fn get_ai_engines(
         let whitelist_models = provider
             .models
             .iter()
-            .map(|model| model.name.clone())
+            .map(|model| model.key.clone())
             .collect::<Vec<String>>();
         to_insert.push((
             ai_engines::ActiveModel {
@@ -235,9 +235,9 @@ pub async fn get_ai_engine_models_by_key(
        }
        for model in provider.models {
           response.models.push(AiModel{
-            model_id:model.key,
+            model_id:model.key.clone(),
             display_name:model.name.clone(),
-            is_whitelisted:ai_engine.whitelist_models.contains(&model.name),
+            is_whitelisted:ai_engine.whitelist_models.contains(&model.key),
             capabilities:AiModelCapabilities{ 
                vision:model.supports_vision,
                function_calling:model.supports_tools,
