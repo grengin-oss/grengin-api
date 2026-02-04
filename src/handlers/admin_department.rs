@@ -7,7 +7,7 @@ use sea_orm::{Condition, EntityName as _, FromQueryResult, JoinType, Order, Pagi
 use reqwest::StatusCode;
 use sea_orm::{ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait as _, QueryFilter, Statement, sqlx::postgres::types::{PgLTree, PgLTreeLabel}};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}}, dto::{admin_department::{DepartmentListQuery, DepartmentMembersResponse, DepartmentMemeberListQuery, DepartmentRequest, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery, DepartmentTreeResponse, DepartmentsListResponse, MoveDepartmentRequest}, admin_user::UserDetails, common::SortRule}, models::{departments::{self, BudgetPeriod}, users::{self, UserRole, UserStatus}}, state::SharedState};
+use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}}, dto::{admin_department::{DepartmentListQuery, DepartmentMembersResponse, DepartmentMemeberListQuery, DepartmentRequest, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery, DepartmentTreeResponse, DepartmentUpdateRequest, DepartmentsListResponse, MoveDepartmentRequest}, admin_user::UserDetails, common::SortRule}, models::{departments::{self, ActionOnExceed, BudgetPeriod}, users::{self, UserRole, UserStatus}}, services::budget_allocation::{period_bounds, sum_child_allocations, sum_department_cost_in_range}, state::SharedState};
 
 #[derive(Debug, Clone, FromQueryResult)]
 pub struct DepartmentRow {
@@ -18,6 +18,12 @@ pub struct DepartmentRow {
     pub parent_id: Option<Uuid>,
     pub depth: i32,
     pub path: String, // comes from path::text alias
+    #[sea_orm(from_alias = "budgetAllocated")]
+    pub budget_allocated: Decimal,
+    #[sea_orm(from_alias = "budgetPeriod")]
+    pub budget_period: BudgetPeriod,
+    #[sea_orm(from_alias = "actionOnExceed")]
+    pub action_on_exceed: ActionOnExceed,
     #[sea_orm(from_alias = "createdAt")]
     pub created_at: DateTime<Utc>,
     #[sea_orm(from_alias = "updatedAt")]
@@ -72,6 +78,9 @@ pub fn departments_base_select() -> sea_orm::Select<departments::Entity> {
         .column(departments::Column::ParentId)
         .column(departments::Column::Depth)
         .expr_as(Expr::cust("path::text"), "path")
+        .column(departments::Column::BudgetAllocated)
+        .column(departments::Column::BudgetPeriod)
+        .column(departments::Column::ActionOnExceed)
         .column(departments::Column::CreatedAt)
         .column(departments::Column::UpdatedAt)
 }
@@ -89,6 +98,37 @@ fn departments_tree_select() -> sea_orm::Select<departments::Entity> {
         .column(departments::Column::BudgetPeriod)
         .column(departments::Column::CreatedAt)
         .column(departments::Column::UpdatedAt)
+}
+
+async fn department_budget_snapshot(
+    db: &sea_orm::DatabaseConnection,
+    department_id: Uuid,
+    budget_allocated: Decimal,
+    budget_period: BudgetPeriod,
+) -> Result<(f64, f64, f64), AuthError> {
+    let budget_distributed = sum_child_allocations(db, department_id, None)
+        .await
+        .map_err(|e| {
+            eprintln!("sum_child_allocations error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    let now = Utc::now();
+    let (period_start, period_end) = period_bounds(&budget_period, now);
+    let budget_used = sum_department_cost_in_range(db, department_id, period_start, period_end)
+        .await
+        .map_err(|e| {
+            eprintln!("sum_department_cost_in_range error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    let budget_available = (budget_allocated - budget_distributed).max(Decimal::ZERO);
+
+    Ok((
+        budget_distributed.to_string().parse().unwrap_or(0.0),
+        budget_available.to_string().parse().unwrap_or(0.0),
+        budget_used.to_string().parse().unwrap_or(0.0),
+    ))
 }
 
 #[utoipa::path(
@@ -315,33 +355,38 @@ pub async fn list_departments(
         .collect();
 
     // Build response
-    let departments = rows
-        .into_iter()
-        .map(|d| {
-            let member_count = *direct_map.get(&d.id).unwrap_or(&0) as i32;
-            let child_count = *child_map.get(&d.id).unwrap_or(&0) as i32;
+    let mut departments = Vec::with_capacity(rows.len());
+    for d in rows {
+        let member_count = *direct_map.get(&d.id).unwrap_or(&0) as i32;
+        let child_count = *child_map.get(&d.id).unwrap_or(&0) as i32;
+        let (budget_distributed, budget_available, budget_used) = department_budget_snapshot(
+            &app_state.database,
+            d.id,
+            d.budget_allocated,
+            d.budget_period,
+        )
+        .await?;
 
-            DepartmentResponse {
-                id: d.id,
-                name: d.name,
-                description: d.description,
-                parent_id: d.parent_id,
-                path: d.path,
-                depth: d.depth,
-                leader_ids: vec![],
-                member_count,
-                total_member_count: 0, // keep for detail endpoint to avoid heavy list queries
-                child_count,
-                budget_allocated: 0.0,
-                budget_distributed: 0.0,
-                budget_available: 0.0,
-                budget_used: 0.0,
-                budget_period: BudgetPeriod::Daily,
-                created_at: d.created_at,
-                updated_at: d.updated_at,
-            }
-        })
-        .collect();
+        departments.push(DepartmentResponse {
+            id: d.id,
+            name: d.name,
+            description: d.description,
+            parent_id: d.parent_id,
+            path: d.path,
+            depth: d.depth,
+            leader_ids: vec![],
+            member_count,
+            total_member_count: 0, // keep for detail endpoint to avoid heavy list queries
+            child_count,
+            budget_allocated: d.budget_allocated.to_string().parse().unwrap_or(0.0),
+            budget_distributed,
+            budget_available,
+            budget_used,
+            budget_period: d.budget_period,
+            created_at: d.created_at,
+            updated_at: d.updated_at,
+        });
+    }
 
     Ok((StatusCode::OK, Json(DepartmentsListResponse { departments, total })))
 }
@@ -617,6 +662,14 @@ pub async fn get_department_by_id(
             AuthError::DbTimeout
         })? as i32;
 
+    let (budget_distributed, budget_available, budget_used) = department_budget_snapshot(
+        &app_state.database,
+        dept.id,
+        dept.budget_allocated,
+        dept.budget_period,
+    )
+    .await?;
+
     let resp = DepartmentResponse {
         id: dept.id,
         name: dept.name,
@@ -628,11 +681,11 @@ pub async fn get_department_by_id(
         member_count,
         total_member_count,
         child_count,
-        budget_allocated: 0.0,
-        budget_distributed: 0.0,
-        budget_available: 0.0,
-        budget_used: 0.0,
-        budget_period: BudgetPeriod::Daily,
+        budget_allocated: dept.budget_allocated.to_string().parse().unwrap_or(0.0),
+        budget_distributed,
+        budget_available,
+        budget_used,
+        budget_period: dept.budget_period,
         created_at: dept.created_at,
         updated_at: dept.updated_at,
     };
@@ -643,7 +696,7 @@ pub async fn get_department_by_id(
 #[utoipa::path( 
     put, path = "/admin/departments/{department_id}",
     tag = "admin", params( ("department_id" = Uuid, Path, description = "Department id") ),
-    request_body = DepartmentRequest,
+    request_body = DepartmentUpdateRequest,
     responses( 
         (status = 200, body = DepartmentResponse),
         (status = 401, content_type = "application/json", body = AuthErrorResponse),
@@ -655,7 +708,7 @@ pub async fn update_department(
     claims: Claims,
     State(app_state): State<SharedState>,
     Path(department_id): Path<Uuid>,
-    Json(req): Json<DepartmentRequest>,
+    Json(req): Json<DepartmentUpdateRequest>,
 ) -> Result<(StatusCode, Json<DepartmentResponse>), AuthError> {
     match claims.role {
         UserRole::SuperAdmin | UserRole::Admin => {}
@@ -673,9 +726,61 @@ pub async fn update_department(
         })?
         .ok_or(AuthError::DbNotFound)?;
 
+    let name = req.name.clone().unwrap_or(dept.name.clone());
+    let description = req.description.clone().unwrap_or(dept.description.clone());
+    let parent_id = req.parent_id.or(dept.parent_id);
+    let budget_period = req.budget_period.unwrap_or(dept.budget_period);
+    let action_on_exceed = req.action_on_exceed.unwrap_or(dept.action_on_exceed);
+    let budget_allocated = if let Some(value) = req.budget_allocated {
+        Decimal::from_f32_retain(value).ok_or(AuthError::ServiceTemporarilyUnavailable)?
+    } else {
+        dept.budget_allocated
+    };
+
+    if req.parent_id.is_some() || req.budget_allocated.is_some() {
+        if let Some(parent_id) = parent_id {
+            let parent = departments_base_select()
+                .filter(departments::Column::Id.eq(parent_id))
+                .into_model::<DepartmentRow>()
+                .one(&app_state.database)
+                .await
+                .map_err(|e| {
+                    eprintln!("find parent error: {e}");
+                    AuthError::DbTimeout
+                })?
+                .ok_or(AuthError::DbNotFound)?;
+
+            let other_children_alloc =
+                sum_child_allocations(&app_state.database, parent.id, Some(dept.id))
+                    .await
+                    .map_err(|e| {
+                        eprintln!("sum other children error: {e}");
+                        AuthError::DbTimeout
+                    })?;
+
+            let now = Utc::now();
+            let (p_start, p_end) = period_bounds(&parent.budget_period, now);
+            let parent_used =
+                sum_department_cost_in_range(&app_state.database, parent.id, p_start, p_end)
+                    .await
+                    .map_err(|e| {
+                        eprintln!("sum parent used error: {e}");
+                        AuthError::DbTimeout
+                    })?;
+
+            let parent_available_for_children =
+                (parent.budget_allocated - other_children_alloc - parent_used)
+                    .max(Decimal::ZERO);
+
+            if budget_allocated > parent_available_for_children {
+                return Err(AuthError::BudgetExceedsParentAvailable);
+            }
+        }
+    }
+
     // Recompute path/depth if parent changes
-    let (path, depth) = if req.parent_id != dept.parent_id {
-        if let Some(parent_id) = req.parent_id {
+    let (path, depth) = if parent_id != dept.parent_id {
+        if let Some(parent_id) = parent_id {
             let parent = departments_base_select()
                 .filter(departments::Column::Id.eq(parent_id))
                 .into_model::<DepartmentRow>()
@@ -702,9 +807,9 @@ pub async fn update_department(
     let stmt = SqlQuery::update()
         .table(departments::Entity)
         .values([
-            (departments::Column::Name, req.name.clone().into()),
-            (departments::Column::Description, req.description.clone().into()),
-            (departments::Column::ParentId, req.parent_id.into()),
+            (departments::Column::Name, name.into()),
+            (departments::Column::Description, description.into()),
+            (departments::Column::ParentId, parent_id.into()),
             (departments::Column::Depth, depth.into()),
             (
                 departments::Column::Path,
@@ -712,6 +817,9 @@ pub async fn update_department(
                     .cast_as(Alias::new("ltree"))
                     .into(),
             ),
+            (departments::Column::BudgetAllocated, budget_allocated.into()),
+            (departments::Column::BudgetPeriod, budget_period.into()),
+            (departments::Column::ActionOnExceed, action_on_exceed.into()),
             (departments::Column::UpdatedAt, updated_at.into()),
         ])
         .and_where(Expr::col(departments::Column::Id).eq(department_id))
@@ -732,39 +840,7 @@ pub async fn update_department(
             AuthError::DbTimeout
         })?;
 
-    // Fetch updated row for response
-    let updated = departments_base_select()
-        .filter(departments::Column::Id.eq(department_id))
-        .into_model::<DepartmentRow>()
-        .one(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("db error: {e}");
-            AuthError::DbTimeout
-        })?
-        .ok_or(AuthError::DbNotFound)?;
-
-    let resp = DepartmentResponse {
-        id: updated.id,
-        name: updated.name,
-        description: updated.description,
-        parent_id: updated.parent_id,
-        path: updated.path,
-        depth: updated.depth,
-        leader_ids: req.leader_ids,
-        member_count: 0,
-        total_member_count: 0,
-        child_count: 0,
-        budget_allocated: 0.0,
-        budget_distributed: 0.0,
-        budget_available: 0.0,
-        budget_used: 0.0,
-        budget_period: BudgetPeriod::Daily,
-        created_at: updated.created_at,
-        updated_at: updated.updated_at,
-    };
-
-    Ok((StatusCode::OK, Json(resp)))
+    get_department_by_id(claims, State(app_state), Path(department_id)).await
 }
 
 #[utoipa::path(

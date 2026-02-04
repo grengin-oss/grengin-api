@@ -15,7 +15,7 @@ use crate::{
         TimeSeriesQuery, TimeSeriesResponse, UserAnalyticsQuery, UserAnalyticsResponse,
     },
     models::users::{UserRole, UserStatus},
-    services::analytics::{self, calculate_user_analytics},
+    services::analytics_cache,
     state::SharedState,
 };
 
@@ -26,6 +26,7 @@ use crate::{
     params(
         ("start_date" = Option<String>, Query, description = "Start date (YYYY-MM-DD)"),
         ("end_date" = Option<String>, Query, description = "End date (YYYY-MM-DD)"),
+        ("live" = Option<bool>, Query, description = "Bypass cache and fetch live data"),
     ),
     responses(
         (status = 200, description = "Dashboard overview statistics", body = OverviewResponse),
@@ -46,10 +47,11 @@ pub async fn get_analytics_overview(
         _ => return Err(AuthError::PermissionDenied),
     }
 
-    let result = analytics::get_overview_analytics(
+    let result = analytics_cache::get_overview_cached(
         &app_state.database,
         query.start_date,
         query.end_date,
+        query.live.unwrap_or(false),
     )
     .await
     .map_err(|e| {
@@ -75,6 +77,7 @@ pub async fn get_analytics_overview(
         ("status" = Option<UserStatus>, Query, description = "Account status"),
         ("role" = Option<UserRole>, Query, description = "UserRole superadmin,admin,user,observer"),
         ("unassigned_department" = Option<bool>, Query, description = "Default false"),
+        ("live" = Option<bool>, Query, description = "Bypass cache and fetch live data"),
     ),
     responses(
         (status = 200, description = "User analytics with pagination", body = UserAnalyticsResponse),
@@ -93,12 +96,8 @@ pub async fn get_user_analytics(
         UserRole::SuperAdmin | UserRole::Admin => {}
         _ => return Err(AuthError::PermissionDenied),
     }
-
-    let page = query.page.unwrap_or(0);
-    let limit = query.limit.unwrap_or(20);
-
     let db: &DatabaseConnection = &app_state.database;
-    let result = calculate_user_analytics(db, query, page, limit)
+    let result = analytics_cache::get_user_analytics_cached(db, query)
         .await
         .map_err(|e| { 
             eprintln!("{}",e);
@@ -117,6 +116,7 @@ pub async fn get_user_analytics(
         ("offset" = Option<u64>, Query, description = "Number of items to skip (default: 0)"),
         ("limit" = Option<u64>, Query, description = "Items per page (default: 20)"),
         ("search" = Option<String>, Query, description = "Search by department name"),
+        ("live" = Option<bool>, Query, description = "Bypass cache and fetch live data"),
     ),
     responses(
         (status = 200, description = "Department analytics", body = DepartmentAnalyticsResponse),
@@ -137,14 +137,7 @@ pub async fn get_department_analytics(
         _ => return Err(AuthError::PermissionDenied),
     }
 
-    let result = analytics::get_department_analytics(
-        &app_state.database,
-        query.start_date,
-        query.end_date,
-        query.limit,
-        query.offset,
-        query.search,
-    )
+    let result = analytics_cache::get_department_analytics_cached(&app_state.database, query)
     .await
     .map_err(|e| {
         eprintln!("Department analytics error: {}", e);
@@ -163,6 +156,7 @@ pub async fn get_department_analytics(
         ("end_date" = Option<String>, Query, description = "End date (YYYY-MM-DD)"),
         ("granularity" = Option<String>, Query, description = "Time granularity (hour/day/week/month)"),
         ("group_by" = Option<String>, Query, description = "Group by dimension"),
+        ("live" = Option<bool>, Query, description = "Bypass cache and fetch live data"),
     ),
     responses(
         (status = 200, description = "Time series analytics data", body = TimeSeriesResponse),
@@ -182,13 +176,9 @@ pub async fn get_timeseries_analytics(
         _ => return Err(AuthError::PermissionDenied),
     }
 
-    let granularity = query.granularity.unwrap_or_else(|| "day".to_string());
-
-    let result = analytics::get_timeseries_analytics(
+    let result = analytics_cache::get_timeseries_analytics_cached(
         &app_state.database,
-        query.start_date,
-        query.end_date,
-        granularity,
+        query,
     )
     .await
     .map_err(|e| {

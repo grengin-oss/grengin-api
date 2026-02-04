@@ -4,7 +4,7 @@ use serde_json::json;
 use anyhow::Error;
 use migration::MigratorTrait;
 use tower_http::cors::{Any, CorsLayer};
-use crate::{config::setting::Settings, routes::{admin::admin_routes, auth::auth_routes, branding::branding_routes, chat::chat_routes, open_error::errors_routes, file::files_routes, message::message_routes, models::models_routes, oidc::oidc_routes, swagger_ui::swagger_ui_routes}, state::AppState};
+use crate::{config::setting::Settings, routes::{admin::admin_routes, auth::auth_routes, branding::branding_routes, chat::chat_routes, open_error::errors_routes, file::files_routes, message::message_routes, models::models_routes, oidc::oidc_routes, swagger_ui::swagger_ui_routes}, services::analytics_cache::spawn_analytics_cache_refresh, state::AppState};
 
 async fn sample_root() -> (StatusCode,Json<serde_json::Value>){
     (StatusCode::OK,Json(json!({"status":"Okay","version":env!("CARGO_PKG_VERSION")})))
@@ -21,6 +21,7 @@ pub async fn init_app() -> Result<(),Error>{
     drop(database); // Close this connection, AppState will create its own
 
     let app_state = AppState::from_settings(settings).await?;
+    spawn_analytics_cache_refresh(app_state.database.clone());
     let cors = CorsLayer::new()
       .allow_methods(Any)
       .allow_origin(Any)

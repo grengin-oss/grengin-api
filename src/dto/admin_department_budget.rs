@@ -5,7 +5,6 @@ use uuid::Uuid;
 use crate::models::departments::{ActionOnExceed, BudgetPeriod};
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct SubDepartmentBudgetDto {
     pub department_id: Uuid,
     pub name: String,
@@ -14,7 +13,6 @@ pub struct SubDepartmentBudgetDto {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct DepartmentBudgetStatusDto {
     pub department_id: Uuid,
     pub budget_allocated: f32,
@@ -29,7 +27,6 @@ pub struct DepartmentBudgetStatusDto {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct SetDepartmentBudgetRequest {
     pub budget_allocated: f32,
     pub budget_period: BudgetPeriod,
@@ -37,7 +34,6 @@ pub struct SetDepartmentBudgetRequest {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct DepartmentBudgetUpdatedDto {
     pub id: Uuid,
     pub name: String,
@@ -45,13 +41,11 @@ pub struct DepartmentBudgetUpdatedDto {
     pub parent_id: Option<Uuid>,
     pub path: String,
     pub depth: i32,
-
     pub budget_allocated: f32,
     pub budget_distributed: f32,
     pub budget_available: f32,
     pub budget_used: f32,
     pub budget_period: BudgetPeriod,
-
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

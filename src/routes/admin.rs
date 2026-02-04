@@ -1,5 +1,5 @@
 use axum::{Router, routing::{delete, get, patch, post, put}};
-use crate::{handlers::{admin_ai::{delete_ai_engines_api_key_key, get_ai_engine_models_by_key, get_ai_engines, get_ai_engines_by_key, update_ai_engines_by_key, validate_ai_engines_by_key}, admin_analytics::{get_analytics_overview, get_department_analytics, get_timeseries_analytics, get_user_analytics}, admin_department::{add_users_in_department, create_department, delete_department, get_department_by_id, get_departments_tree, get_users_from_department, list_departments, move_department, remove_users_from_department, update_department}, admin_department_budgets::{get_department_budget, set_department_budget}, admin_sso_provider::{delete_sso_provider_by_id, get_sso_provider_by_id, get_sso_providers, update_sso_provider_by_id}, admin_users::{add_new_user, delete_user, get_user_by_id, get_users, patch_user_status, update_user}, branding::{get_admin_branding, update_branding}}, state::SharedState};
+use crate::{handlers::{admin_ai::{delete_ai_engines_api_key_key, get_ai_engine_models_by_key, get_ai_engines, get_ai_engines_by_key, update_ai_engines_by_key, validate_ai_engines_by_key}, admin_analytics::{get_analytics_overview, get_department_analytics, get_timeseries_analytics, get_user_analytics}, admin_department::{add_users_in_department, create_department, delete_department, get_department_by_id, get_departments_tree, get_users_from_department, list_departments, move_department, remove_users_from_department, update_department}, admin_department_budgets::get_department_budget, admin_sso_provider::{delete_sso_provider_by_id, get_sso_provider_by_id, get_sso_providers, update_sso_provider_by_id}, admin_users::{add_new_user, delete_user, get_user_by_id, get_users, patch_user_status, update_user}, branding::{get_admin_branding, update_branding}}, state::SharedState};
 
 pub fn admin_routes() -> Router<SharedState> {
    Router::new()
@@ -22,6 +22,6 @@ pub fn admin_routes() -> Router<SharedState> {
      .route("/admin/departments/tree", get(get_departments_tree))
      .route("/admin/departments/{department_id}",get(get_department_by_id).put(update_department).delete(delete_department))
      .route("/admin/departments/{department_id}/move", post(move_department))
-     .route("/admin/departments/{department_id}/budget", get(get_department_budget).put(set_department_budget))
+     .route("/admin/departments/{department_id}/budget", get(get_department_budget))
      .route("/admin/departments/{department_id}/members",post(add_users_in_department).get(get_users_from_department).delete(remove_users_from_department))
 }
