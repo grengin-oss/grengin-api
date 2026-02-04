@@ -10,3 +10,4 @@ pub mod files;
 pub mod usage_logs;
 pub mod usage_summary_daily;
 pub mod departments;
+pub mod analytics;

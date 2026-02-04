@@ -11,6 +11,7 @@ pub struct AnalyticsQuery {
     pub department: Option<String>,
     pub model_provider: Option<String>,
     pub model_name: Option<String>,
+    pub live: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -25,6 +26,7 @@ pub struct UserAnalyticsQuery {
     pub role:Option<UserRole>,
     pub status:Option<UserStatus>,
     pub unassigned_department:Option<bool>,
+    pub live: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -34,6 +36,7 @@ pub struct DepartmentAnalyticsQuery {
     pub offset: Option<u64>,
     pub limit: Option<u64>,
     pub search: Option<String>,
+    pub live: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -42,9 +45,10 @@ pub struct TimeSeriesQuery {
     pub end_date: Option<NaiveDate>,
     pub granularity: Option<String>,
     pub group_by: Option<String>,
+    pub live: Option<bool>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct OverviewResponse {
     pub total_users: i64,
     pub active_users: i64,
@@ -58,7 +62,7 @@ pub struct OverviewResponse {
     pub cost_growth_rate: f64,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ModelUsage {
     pub model_provider: String,
     pub model_name: String,
@@ -67,7 +71,7 @@ pub struct ModelUsage {
     pub total_cost: f64,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UserAnalytics {
     pub user_id: Uuid,
     pub user_email: String,
@@ -83,7 +87,7 @@ pub struct UserAnalytics {
     pub last_activity: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UserAnalyticsResponse {
     pub users: Vec<UserAnalytics>,
     pub total: i64,
@@ -92,7 +96,7 @@ pub struct UserAnalyticsResponse {
     pub total_pages: u64,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct DepartmentAnalytics {
     pub department: String,
     pub total_users: i64,
@@ -104,7 +108,7 @@ pub struct DepartmentAnalytics {
     pub error_count: i64,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct DepartmentAnalyticsResponse {
     pub departments: Vec<DepartmentAnalytics>,
     pub total: i64,
@@ -113,7 +117,7 @@ pub struct DepartmentAnalyticsResponse {
     pub total_pages: u64,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TimeSeriesDataPoint {
     pub timestamp: String,
     pub total_requests: i64,
@@ -124,7 +128,7 @@ pub struct TimeSeriesDataPoint {
     pub error_count: i64,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TimeSeriesResponse {
     pub data: Vec<TimeSeriesDataPoint>,
     pub granularity: String,

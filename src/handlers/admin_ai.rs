@@ -56,7 +56,9 @@ pub async fn get_ai_engines(
         let api_key = app_state
             .settings
             .get_ai_engine_api_key(&provider.key)
-            .await
+            .await;
+        let api_key_encrypted = api_key
+            .clone()
             .map(|k|{
               encrypt_key(&app_state.settings.auth.app_key, k.as_bytes())
                 .expect("Failed to encrypt the api key")
@@ -70,10 +72,10 @@ pub async fn get_ai_engines(
             ai_engines::ActiveModel {
                 id:Set(Uuid::new_v4()),
                 display_name:Set(provider.name.clone()),
-                is_enabled:Set(api_key.is_some()),
+                is_enabled:Set(api_key_encrypted.is_some()),
                 engine_key:Set(provider.key.clone()),
-                api_key_status:Set(ApiKeyStatus::NotValidated),
-                api_key:Set(api_key.clone()),
+                api_key_status:Set(if api_key_encrypted.is_some(){ApiKeyStatus::NotValidated}else{ApiKeyStatus::NotConfigured}),
+                api_key:Set(api_key_encrypted.clone()),
                 whitelist_models:Set(whitelist_models.clone()),
                 default_model:Set(String::from("<empty>")),
                 api_key_validated_at:Set(None),

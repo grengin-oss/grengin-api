@@ -2,7 +2,7 @@ use utoipa::OpenApi;
 use crate::auth::claims::Claims;
 use crate::auth::error::{AuthError,AuthErrorCode,AuthErrorDetailVariant,AuthErrorResponse};
 use crate::dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel,AiEngineModelsResponse, AiModelCapabilities};
-use crate::dto::admin_department_budget::{DepartmentBudgetStatusDto, DepartmentBudgetUpdatedDto, SetDepartmentBudgetRequest, SubDepartmentBudgetDto};
+use crate::dto::admin_department_budget::{DepartmentBudgetStatusDto, SubDepartmentBudgetDto};
 use crate::dto::admin_department::{DepartmentListQuery, DepartmentMembersResponse, DepartmentRequest, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery, DepartmentTreeResponse, DepartmentsListResponse, MoveDepartmentRequest};
 use crate::dto::analytics::DepartmentAnalyticsResponse;
 use crate::dto::branding::{BrandingResponse, BrandingUpdate};
@@ -79,7 +79,6 @@ use crate::models::users::{UserRole, UserStatus};
         admin_department::remove_users_from_department,
         admin_department::get_users_from_department,
         admin_department_budgets::get_department_budget,
-        admin_department_budgets::set_department_budget,
     ),
     components(
         schemas(
@@ -147,9 +146,7 @@ use crate::models::users::{UserRole, UserStatus};
             DepartmentTreeResponse,
             MoveDepartmentRequest,
             SubDepartmentBudgetDto,
-            DepartmentBudgetStatusDto,
-            SetDepartmentBudgetRequest,
-            DepartmentBudgetUpdatedDto
+            DepartmentBudgetStatusDto
         )
     ),
     tags(
