@@ -41,6 +41,7 @@ pub struct Model {
     pub path:String, //Ltree for postgress
     
     pub budget_allocated: Decimal,
+    pub budget_available: Decimal,
     pub budget_period: BudgetPeriod,
     pub action_on_exceed: ActionOnExceed,
     

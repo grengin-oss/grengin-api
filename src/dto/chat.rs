@@ -31,6 +31,15 @@ pub struct ConversationResponse {
   pub message_count:u64
 }
 
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationPaginatedResponse {
+  pub total:u64,
+  pub limit:u64,
+  pub offset:u64,
+  pub conversations:Vec<ConversationResponse>,
+}
+
 #[derive(Serialize, ToSchema, IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageResponse {

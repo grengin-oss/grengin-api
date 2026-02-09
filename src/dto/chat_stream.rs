@@ -13,7 +13,9 @@ pub enum ChatStreamEvents{
   Event,
   ToolCall,
   ToolResult,
-  Done
+  Done,
+  #[serde(rename = "budget_warning")]
+  DepartmentBudgetWarning,
 }
 
 impl ChatStreamEvents {

@@ -37,6 +37,7 @@ pub struct DepartmentAnalyticsQuery {
     pub limit: Option<u64>,
     pub search: Option<String>,
     pub live: Option<bool>,
+    pub department_id:Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

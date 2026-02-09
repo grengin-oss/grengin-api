@@ -4,7 +4,6 @@ use std::{collections::hash_map::DefaultHasher, hash::{Hash, Hasher}};
 use sea_orm::{ActiveValue::Set, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
 use serde::{de::DeserializeOwned, Serialize};
 use uuid::Uuid;
-
 use crate::{
     dto::analytics::{
         DepartmentAnalyticsQuery, DepartmentAnalyticsResponse, OverviewResponse, TimeSeriesQuery,
@@ -368,6 +367,7 @@ async fn refresh_cache_window(
         limit: Some(20),
         search: None,
         live: None,
+        department_id:None,
     };
     let departments = analytics_service::get_department_analytics(
         db,

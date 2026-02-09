@@ -318,6 +318,8 @@ async fn oidc_oauth_callback(
             last_login_at:Set(Utc::now()),
             password_changed_at:Set(None),
             department_id:Set(None),
+            is_independent: Set(false),
+            effective_permissions: Set(None),
             status:Set(UserStatus::Active),
             mfa_enabled:Set(false),
             mfa_secret:Set(None),
@@ -352,7 +354,7 @@ async fn oidc_oauth_callback(
         hd: user.hd,
         role: user.role, // TODO: Map from database if role field exists
         status: user.status,
-        department_id:None,
+        department_id: user.department_id,
         is_super_admin: user.role == UserRole::SuperAdmin, // Default to false, update based on database field if available
         has_password: user.password.is_some(), // SSO-only users don't have password
         mfa_enabled: user.mfa_enabled,
@@ -360,6 +362,7 @@ async fn oidc_oauth_callback(
         password_changed_at: None,
         created_at: user.created_at,
         updated_at: user.updated_at,
+        effective_permissions: user.effective_permissions,
     };
 
     let resp = AuthTokenResponse {

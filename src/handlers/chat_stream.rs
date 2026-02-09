@@ -4,6 +4,7 @@ use chrono::Utc;
 use futures_util::StreamExt;
 use num_traits::ToPrimitive;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, prelude::Decimal};
+use serde::Serialize;
 use serde_json::json;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -32,7 +33,8 @@ use crate::{
     handlers::models::get_model_info_cached,
     handlers::llm::{StreamParseResult, StreamParser, anthropic::AnthropicStreamParser, openai::OpenaiStreamParser},
     llm::{prompt::Prompt, provider::{AnthropicApis, OpenaiApis, get_title_generation_model}},
-    models::{conversations, messages::{self, ChatRole}},
+    models::{conversations, departments::ActionOnExceed, messages::{self, ChatRole}, users},
+    services::budget_allocation::{get_department_budget_status, refresh_department_budget_available},
     state::SharedState,
 };
 use reqwest_eventsource::Event as ReqwestEvent;
@@ -41,6 +43,14 @@ use reqwest_eventsource::Event as ReqwestEvent;
 enum LlmProviderConfig<'a> {
     OpenAI(&'a OpenaiSettings),
     Anthropic(&'a AnthropicSettings),
+}
+
+#[derive(Debug, Serialize)]
+struct BudgetWarningPayload {
+    department_id: Uuid,
+    budget_available: String,
+    action: &'static str,
+    message: String,
 }
 
 fn calculate_cost_decimal(
@@ -136,7 +146,7 @@ fn calculate_cost_decimal(
    ),
     (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
     (status = 400, content_type = "application/json", body = ErrorResponse, description = "Validation error (code=2002 empty messages)"),
-    (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003)"),
+    (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003) or budget exceeded (code=6001)"),
     (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found / DB not found (code=5003)"),
     (status = 503, content_type = "application/json", body = ErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
 
@@ -219,7 +229,7 @@ pub async fn handle_chat_stream_path_doc(){}
    ),
     (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
     (status = 400, content_type = "application/json", body = ErrorResponse, description = "Validation error (code=2002 empty messages)"),
-    (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003)"),
+    (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003) or budget exceeded (code=6001)"),
     (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found / DB not found (code=5003)"),
     (status = 503, content_type = "application/json", body = ErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     ),
@@ -272,6 +282,44 @@ pub async fn handle_chat_stream(
      },
      _ => return Err(AppError::InvalidLlmProvider{provider:provider.clone()})
  };
+ let mut budget_warning: Option<BudgetWarningPayload> = None;
+ let user = users::Entity::find_by_id(claims.user_id)
+    .one(&app_state.database)
+    .await
+    .map_err(|e| {
+        eprintln!("find user error: {e}");
+        AppError::DbTimeout
+    })?;
+ if let Some(user) = user {
+    if let Some(department_id) = user.department_id {
+        let (budget_available, action_on_exceed) =
+            get_department_budget_status(&app_state.database, department_id)
+                .await
+                .map_err(|e| {
+                    eprintln!("get department budget status error: {e}");
+                    AppError::DbTimeout
+                })?;
+        if budget_available.to_f32() <= Some(0_f32) {
+           
+            match action_on_exceed {
+                ActionOnExceed::Block => {
+                    return Err(AppError::DepartmentBudgetExceeded);
+                }
+                ActionOnExceed::Warn => {
+                    budget_warning = Some(BudgetWarningPayload {
+                        department_id,
+                        budget_available: budget_available.to_string(),
+                        action: "warn",
+                        message:
+                            "Department budget is exhausted for the current period. The chat will proceed, but usage may exceed the budget."
+                                .to_string(),
+                    });
+                }
+            }
+        }
+    }
+ }
+
  let (input_rate, output_rate) = match get_model_info_cached(&app_state.req_client, &model_name).await {
     Ok(Some(model)) => (model.input_token_rate, model.output_token_rate),
     Ok(None) => (None, None),
@@ -479,7 +527,7 @@ pub async fn handle_chat_stream(
     let latency = start
       .elapsed()
       .as_millis() as i32;
-    let first_chat_stream = ChatStream{
+     let first_chat_stream = ChatStream{
        id: Some(conversation_id.clone()),
        title:title.clone(),
        message_id:None,
@@ -494,6 +542,11 @@ pub async fn handle_chat_stream(
        tool_result:None,
      };
      yield Event::default().event(ChatStreamEvents::Conversation.to_string()).data(first_chat_stream.to_string());
+     let mut budget_warning = budget_warning;
+     if let Some(payload) = budget_warning.take() {
+        let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+        yield Event::default().event(ChatStreamEvents::DepartmentBudgetWarning.to_string()).data(data);
+     }
      let new_message_id = Uuid::new_v4();
      let mut new_llm_message = messages::ActiveModel {
         id: Set(new_message_id.clone()),
@@ -960,6 +1013,18 @@ pub async fn handle_chat_stream(
                       active_conversation.total_cost = Set(conversation.total_cost + message_cost);
                       active_conversation.updated_at = Set(Utc::now());
                       let _ = active_conversation.update(&app_state.database).await;
+                    }
+                    if let Ok(Some(user)) = users::Entity::find_by_id(claims.user_id)
+                        .one(&app_state.database)
+                        .await
+                    {
+                        if let Some(department_id) = user.department_id {
+                            if let Err(e) =
+                                refresh_department_budget_available(&app_state.database, department_id).await
+                            {
+                                eprintln!("refresh budget available error: {e}");
+                            }
+                        }
                     }
                     yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
                     break;

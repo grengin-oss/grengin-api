@@ -4,7 +4,7 @@ use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, EntityTrait, FromQueryResult, IntoActiveModel, JoinType, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}}, dto::{admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest}, common::{PaginationQuery, SortRule}}, models::{departments, users::{self, UserRole, UserStatus}}, state::SharedState};
+use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}, permissions::{PERMISSION_USERS_MANAGE, PERMISSION_USERS_VIEW}}, dto::{admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest}, common::{PaginationQuery, SortRule}}, models::{departments, users::{self, UserRole, UserStatus}}, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -25,10 +25,6 @@ pub async fn get_user_by_id(
     State(app_state): State<SharedState>,
     Path(user_id): Path<Uuid>,
 ) -> Result<(StatusCode,Json<UserDetails>), AuthError> {
-    match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-    }
     let user = users::Entity::find_by_id(user_id)
       .one(&app_state.database)
       .await
@@ -37,6 +33,17 @@ pub async fn get_user_by_id(
         AuthError::DbTimeout
        })?
        .ok_or(AuthError::EmailDoesNotExist)?;
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
+      .ensure_permission(
+        claims.user_id,
+        claims.role,
+        PERMISSION_USERS_VIEW,
+        user.department_id,
+        PermissionScopeMode::RequireOrgWide,
+        Some(user_id),
+      )
+      .await?;
      let user_response = UserDetails {
          id: user.id,
          sub: user.google_id.unwrap_or(user.azure_id.unwrap_or(user.email.clone())),
@@ -55,6 +62,7 @@ pub async fn get_user_by_id(
          password_changed_at: None,
          created_at: user.created_at,
          updated_at: user.updated_at,
+         effective_permissions: user.effective_permissions,
       };
     Ok((StatusCode::OK,Json(user_response)))
 }
@@ -106,10 +114,17 @@ pub async fn get_users(
   Query(query):Query<PaginationQuery>,
   State(app_state): State<SharedState>,
 ) -> Result<(StatusCode,Json<UserResponse>),AuthError>{
-   match claims.role {
-      UserRole::SuperAdmin | UserRole::Admin => (),
-      _ => return Err(AuthError::PermissionDenied)
-   }
+   let authz = AuthorizationService::new(&app_state.database);
+   authz
+     .ensure_permission(
+       claims.user_id,
+       claims.role,
+       PERMISSION_USERS_VIEW,
+       None,
+       PermissionScopeMode::RequireOrgWide,
+       None,
+     )
+     .await?;
    let limit = query.limit.unwrap_or(30);
    let offset = query.offset.unwrap_or(0);
    let page = offset / limit;
@@ -204,7 +219,8 @@ pub async fn get_users(
          password_changed_at: None,
          created_at: user.created_at,
          updated_at: user.updated_at,
-      })
+         effective_permissions: None,
+       })
       .collect::<Vec<_>>();
  Ok((StatusCode::OK,Json(response)))
 }
@@ -228,10 +244,17 @@ pub async fn add_new_user(
   State(app_state): State<SharedState>,
   Json(req):Json<UserRequest>
 ) -> Result<(StatusCode,&'static str),AuthError>{
-    match claims.role {
-      UserRole::SuperAdmin | UserRole::Admin => (),
-      _ => return Err(AuthError::PermissionDenied)
-   }
+   let authz = AuthorizationService::new(&app_state.database);
+   authz
+     .ensure_permission(
+       claims.user_id,
+       claims.role,
+       PERMISSION_USERS_MANAGE,
+       None,
+       PermissionScopeMode::RequireOrgWide,
+       None,
+     )
+     .await?;
    let user = users::ActiveModel{
      id: Set(Uuid::new_v4()),
      status: Set(UserStatus::Active),
@@ -251,6 +274,8 @@ pub async fn add_new_user(
      role: Set(req.role),
      hd:Set(req.email.trim().split_once("@").map(|splited| splited.1.to_string())),
      department_id:Set(req.department_id),
+     is_independent: Set(false),
+     effective_permissions: Set(None),
      metadata:Set(None), 
     };
    user
@@ -285,10 +310,6 @@ pub async fn update_user(
     Path(user_id): Path<Uuid>,
     Json(req): Json<UserUpdateRequest>,
 ) -> Result<StatusCode, AuthError> {
-    match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-    }
     let model = users::Entity::find_by_id(user_id)
         .one(&app_state.database)
         .await
@@ -297,7 +318,19 @@ pub async fn update_user(
             AuthError::DbTimeout
         })?
         .ok_or(AuthError::EmailDoesNotExist)?;
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
+      .ensure_permission(
+        claims.user_id,
+        claims.role,
+        PERMISSION_USERS_MANAGE,
+        model.department_id,
+        PermissionScopeMode::RequireOrgWide,
+        Some(user_id),
+      )
+      .await?;
 
+    let original_department_id = model.department_id;
     let mut active: users::ActiveModel = model.into();
 
     if let Some(email) = req.email {
@@ -313,6 +346,16 @@ pub async fn update_user(
         active.role = Set(role);
     }
     if let Some(dept) = req.department_id {
+        authz
+          .ensure_permission(
+            claims.user_id,
+            claims.role,
+            PERMISSION_USERS_MANAGE,
+            Some(dept),
+            PermissionScopeMode::RequireOrgWide,
+            Some(user_id),
+          )
+          .await?;
         active.department_id = Set(Some(dept));
     }
     active.updated_at = Set(Utc::now());
@@ -328,6 +371,12 @@ pub async fn update_user(
                 AuthError::DbTimeout
             }
         })?;
+
+    if let Some(dept) = req.department_id {
+        if Some(dept) != original_department_id {
+            let _ = authz.recompute_effective_permissions(user_id).await;
+        }
+    }
 
     Ok(StatusCode::OK)
 }
@@ -355,10 +404,6 @@ pub async fn patch_user_status(
     Path(user_id): Path<Uuid>,
     Json(req): Json<UserPatchRequest>,
 ) -> Result<(StatusCode,&'static str), AuthError> {
-    match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-    }
     if claims.role == UserRole::SuperAdmin
         && claims.user_id == user_id
         && matches!(
@@ -380,6 +425,17 @@ pub async fn patch_user_status(
             AuthError::DbTimeout
         })?
         .ok_or(AuthError::EmailDoesNotExist)?;
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
+      .ensure_permission(
+        claims.user_id,
+        claims.role,
+        PERMISSION_USERS_MANAGE,
+        model.department_id,
+        PermissionScopeMode::RequireOrgWide,
+        Some(user_id),
+      )
+      .await?;
     let mut active: users::ActiveModel = model.into();
     active.status = Set(req.status);
     active.updated_at = Set(Utc::now());
@@ -413,11 +469,6 @@ pub async fn delete_user(
     State(app_state): State<SharedState>,
     Path(user_id): Path<Uuid>,
 ) -> Result<StatusCode, AuthError> {
-    match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-    }
-    
     let user = users::Entity::find_by_id(user_id)
       .one(&app_state.database)
       .await
@@ -426,6 +477,17 @@ pub async fn delete_user(
             AuthError::DbTimeout
         })?
       .ok_or(AuthError::EmailDoesNotExist)?;
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
+      .ensure_permission(
+        claims.user_id,
+        claims.role,
+        PERMISSION_USERS_MANAGE,
+        user.department_id,
+        PermissionScopeMode::RequireOrgWide,
+        Some(user_id),
+      )
+      .await?;
      let mut active_model =user
        .into_active_model();
      active_model.updated_at = Set(Utc::now());
