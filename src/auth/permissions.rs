@@ -6,8 +6,8 @@ pub struct PermissionDefinition {
 }
 
 pub const PERMISSIONS: &[PermissionDefinition] = &[
-    PermissionDefinition { domain: "platform", action: "manage", is_scopeable: false },
-    PermissionDefinition { domain: "platform", action: "view", is_scopeable: false },
+    PermissionDefinition { domain: "ai_platform", action: "manage", is_scopeable: false },
+    PermissionDefinition { domain: "ai_platform", action: "view", is_scopeable: false },
     PermissionDefinition { domain: "users", action: "view", is_scopeable: true },
     PermissionDefinition { domain: "users", action: "manage", is_scopeable: true },
     PermissionDefinition { domain: "analytics", action: "view", is_scopeable: true },
@@ -18,6 +18,8 @@ pub const PERMISSIONS: &[PermissionDefinition] = &[
     PermissionDefinition { domain: "mcp_servers", action: "delegate", is_scopeable: true },
     PermissionDefinition { domain: "departments", action: "view", is_scopeable: true },
     PermissionDefinition { domain: "departments", action: "manage", is_scopeable: true },
+    PermissionDefinition { domain: "sso_providers", action: "view", is_scopeable: false },
+    PermissionDefinition { domain: "sso_providers", action: "manage", is_scopeable: false },
     PermissionDefinition { domain: "roles", action: "view", is_scopeable: false },
     PermissionDefinition { domain: "roles", action: "manage", is_scopeable: false },
     PermissionDefinition { domain: "roles", action: "assign", is_scopeable: true },
@@ -31,8 +33,8 @@ pub const ROLE_DEPARTMENT_ADMIN: &str = "Department Admin";
 pub const ROLE_USER: &str = "User";
 pub const ROLE_OBSERVER: &str = "Observer";
 
-pub const PERMISSION_PLATFORM_MANAGE: &str = "platform:manage";
-pub const PERMISSION_PLATFORM_VIEW: &str = "platform:view";
+pub const PERMISSION_AI_PLATFORM_MANAGE: &str = "ai_platform:manage";
+pub const PERMISSION_AI_PLATFORM_VIEW: &str = "ai_platform:view";
 pub const PERMISSION_USERS_VIEW: &str = "users:view";
 pub const PERMISSION_USERS_MANAGE: &str = "users:manage";
 pub const PERMISSION_ANALYTICS_VIEW: &str = "analytics:view";
@@ -43,6 +45,8 @@ pub const PERMISSION_MCP_ADMIN: &str = "mcp_servers:admin";
 pub const PERMISSION_MCP_DELEGATE: &str = "mcp_servers:delegate";
 pub const PERMISSION_DEPARTMENTS_VIEW: &str = "departments:view";
 pub const PERMISSION_DEPARTMENTS_MANAGE: &str = "departments:manage";
+pub const PERMISSION_SSO_PROVIDERS_VIEW: &str = "sso_providers:view";
+pub const PERMISSION_SSO_PROVIDERS_MANAGE: &str = "sso_providers:manage";
 pub const PERMISSION_ROLES_VIEW: &str = "roles:view";
 pub const PERMISSION_ROLES_MANAGE: &str = "roles:manage";
 pub const PERMISSION_ROLES_ASSIGN: &str = "roles:assign";

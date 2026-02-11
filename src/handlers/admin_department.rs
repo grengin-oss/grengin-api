@@ -3,11 +3,12 @@ use axum::{Json, extract::{Path, Query, State}};
 use chrono::{DateTime, Utc};
 use migration::{Alias, BinOper, Func, SimpleExpr, extension::postgres::PgExpr};
 use rust_decimal::Decimal;
-use sea_orm::{Condition, EntityName as _, FromQueryResult, JoinType, Order, PaginatorTrait, QueryOrder, QuerySelect, RelationTrait, sea_query::{Expr, PostgresQueryBuilder,Query as SqlQuery}};
+use serde::Serialize;
+use sea_orm::{ActiveModelTrait, Condition, DatabaseConnection, EntityName as _, FromQueryResult, JoinType, Order, PaginatorTrait, QueryOrder, QuerySelect, RelationTrait, sea_query::{Expr, PostgresQueryBuilder,Query as SqlQuery}};
 use reqwest::StatusCode;
-use sea_orm::{ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait as _, QueryFilter, Statement, sqlx::postgres::types::{PgLTree, PgLTreeLabel}};
+use sea_orm::{ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait as _, QueryFilter, Statement, sqlx::postgres::types::{PgLTree, PgLTreeLabel}};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}, permissions::{PERMISSION_DEPARTMENTS_MANAGE, PERMISSION_DEPARTMENTS_VIEW, PERMISSION_USERS_VIEW}}, dto::{admin_department::{DepartmentListQuery, DepartmentMembersResponse, DepartmentMemeberListQuery, DepartmentRequest, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery, DepartmentTreeResponse, DepartmentUpdateRequest, DepartmentsListResponse, MoveDepartmentRequest}, admin_user::UserDetails, common::SortRule}, models::{departments::{self, ActionOnExceed, BudgetPeriod}, users::{self, UserRole, UserStatus}}, services::{authorization::{AuthorizationService, PermissionScopeMode}, budget_allocation::{period_bounds, sum_child_allocations, sum_department_cost_in_range}}, state::SharedState};
+use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}, permissions::{PERMISSION_DEPARTMENTS_MANAGE, PERMISSION_DEPARTMENTS_VIEW, PERMISSION_ROLES_ASSIGN, PERMISSION_USERS_VIEW, ROLE_DEPARTMENT_ADMIN}}, dto::{admin_department::{DepartmentListQuery, DepartmentMembersResponse, DepartmentMemeberListQuery, DepartmentRequest, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery, DepartmentTreeResponse, DepartmentUpdateRequest, DepartmentsListResponse, MoveDepartmentRequest}, admin_user::UserDetails, common::SortRule}, models::{departments::{self, ActionOnExceed, BudgetPeriod}, roles, user_role_assignments, users::{self, UserRole, UserStatus}}, services::{authorization::{AuthorizationService, PermissionScopeMode}, auth_audit::record_auth_event, budget_allocation::{period_bounds, sum_child_allocations, sum_department_cost_in_range}}, state::SharedState};
 
 #[derive(Debug, Clone, FromQueryResult)]
 pub struct DepartmentRow {
@@ -66,6 +67,177 @@ fn build_ltree_path(parent_path: Option<&str>, id: uuid::Uuid) -> Result<String,
     tree.push(label);
 
     Ok(tree.to_string())
+}
+
+async fn sync_department_admin_assignments(
+    authz: &AuthorizationService<'_>,
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    actor_role: UserRole,
+    department_id: Uuid,
+    department_admin_ids: &[Uuid],
+    permission_scope: Option<Uuid>,
+) -> Result<(), AuthError> {
+    authz
+        .ensure_permission(
+            actor_id,
+            actor_role,
+            PERMISSION_ROLES_ASSIGN,
+            permission_scope,
+            PermissionScopeMode::RequireOrgWide,
+            Some(department_id),
+        )
+        .await?;
+
+    let role = roles::Entity::find()
+        .filter(roles::Column::Name.eq(ROLE_DEPARTMENT_ADMIN))
+        .one(db)
+        .await
+        .map_err(|e| {
+            eprintln!("role lookup error: {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+
+    let desired_ids: HashSet<Uuid> = department_admin_ids.iter().copied().collect();
+
+    if !desired_ids.is_empty() {
+        let existing_users = users::Entity::find()
+            .select_only()
+            .column(users::Column::Id)
+            .filter(users::Column::Id.is_in(desired_ids.iter().copied()))
+            .into_tuple::<Uuid>()
+            .all(db)
+            .await
+            .map_err(|e| {
+                eprintln!("user lookup error: {e}");
+                AuthError::DbTimeout
+            })?;
+
+        if existing_users.len() != desired_ids.len() {
+            return Err(AuthError::ResourceNotFound);
+        }
+    }
+
+    let existing_assignments = user_role_assignments::Entity::find()
+        .filter(user_role_assignments::Column::RoleId.eq(role.id))
+        .filter(user_role_assignments::Column::ScopeDepartmentId.eq(department_id))
+        .all(db)
+        .await
+        .map_err(|e| {
+            eprintln!("role assignment lookup error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    let existing_ids: HashSet<Uuid> = existing_assignments
+        .iter()
+        .map(|assignment| assignment.user_id)
+        .collect();
+
+    let to_add: Vec<Uuid> = desired_ids.difference(&existing_ids).copied().collect();
+    let to_remove: Vec<user_role_assignments::Model> = existing_assignments
+        .into_iter()
+        .filter(|assignment| !desired_ids.contains(&assignment.user_id))
+        .collect();
+
+    let now = Utc::now();
+    let mut affected_users: HashSet<Uuid> = HashSet::new();
+
+    for user_id in to_add {
+        let assignment_id = Uuid::new_v4();
+        let assignment = user_role_assignments::ActiveModel {
+            id: Set(assignment_id),
+            user_id: Set(user_id),
+            role_id: Set(role.id),
+            scope_department_id: Set(Some(department_id)),
+            assigned_by: Set(actor_id),
+            created_at: Set(now),
+            updated_at: Set(now),
+        };
+
+        assignment
+            .insert(db)
+            .await
+            .map_err(|e| {
+                let s = e.to_string();
+                if s.contains("duplicate key value violates unique constraint") {
+                    AuthError::DbConflict
+                } else {
+                    eprintln!("role assignment insert error: {e}");
+                    AuthError::DbTimeout
+                }
+            })?;
+
+        if let Some(payload) = audit_payload(RoleAssignmentPayload {
+            assignment_id,
+            user_id,
+            role_id: role.id,
+            scope_department_id: Some(department_id),
+        }) {
+            let _ = record_auth_event(
+                db,
+                "auth.role_assigned",
+                Some(actor_id),
+                payload,
+            )
+            .await;
+        }
+
+        affected_users.insert(user_id);
+    }
+
+    for assignment in to_remove {
+        let assignment_id = assignment.id;
+        let user_id = assignment.user_id;
+
+        user_role_assignments::Entity::delete_by_id(assignment_id)
+            .exec(db)
+            .await
+            .map_err(|e| {
+                eprintln!("role assignment delete error: {e}");
+                AuthError::DbTimeout
+            })?;
+
+        if let Some(payload) = audit_payload(RoleAssignmentPayload {
+            assignment_id,
+            user_id,
+            role_id: role.id,
+            scope_department_id: Some(department_id),
+        }) {
+            let _ = record_auth_event(
+                db,
+                "auth.role_unassigned",
+                Some(actor_id),
+                payload,
+            )
+            .await;
+        }
+
+        affected_users.insert(user_id);
+    }
+
+    if !affected_users.is_empty() {
+        let affected: Vec<Uuid> = affected_users.into_iter().collect();
+        let _ = authz.recompute_effective_permissions_for_users(&affected).await;
+    }
+
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct RoleAssignmentPayload {
+    assignment_id: Uuid,
+    user_id: Uuid,
+    role_id: Uuid,
+    scope_department_id: Option<Uuid>,
+}
+
+fn audit_payload<T: Serialize>(value: T) -> Option<serde_json::Value> {
+    serde_json::to_value(value)
+        .map_err(|e| {
+            eprintln!("audit payload error: {e}");
+        })
+        .ok()
 }
 
 // Selects all columns but casts path -> text so decoding works
@@ -210,7 +382,7 @@ pub async fn create_department(
     ])
     .to_owned();
 let (sql, values) = insert.build(PostgresQueryBuilder);
- app_state
+    app_state
     .database
     .execute(Statement::from_sql_and_values(
         DatabaseBackend::Postgres,
@@ -222,6 +394,19 @@ let (sql, values) = insert.build(PostgresQueryBuilder);
         eprintln!("insert error: {e}");
         AuthError::DbTimeout
     })?;
+
+    if let Some(admin_ids) = req.department_admin_ids.as_deref() {
+        sync_department_admin_assignments(
+            &authz,
+            &app_state.database,
+            claims.user_id,
+            claims.role,
+            id,
+            admin_ids,
+            req.parent_id,
+        )
+        .await?;
+    }
   get_department_by_id(claims,State(app_state),Path(id))
     .await
 }
@@ -885,6 +1070,19 @@ pub async fn update_department(
             eprintln!("update error: {e}");
             AuthError::DbTimeout
         })?;
+
+    if let Some(admin_ids) = req.department_admin_ids.as_deref() {
+        sync_department_admin_assignments(
+            &authz,
+            &app_state.database,
+            claims.user_id,
+            claims.role,
+            department_id,
+            admin_ids,
+            Some(department_id),
+        )
+        .await?;
+    }
 
     if parent_changed {
         let _ = authz

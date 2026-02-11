@@ -96,6 +96,7 @@ pub struct DepartmentRequest {
     pub name: String,
     pub description: String,
     pub parent_id: Option<Uuid>,
+    pub department_admin_ids: Option<Vec<Uuid>>,
     pub leader_ids: Vec<Uuid>,
 }
 
@@ -104,7 +105,7 @@ pub struct DepartmentUpdateRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub parent_id: Option<Uuid>,
-    pub leader_ids: Option<Vec<Uuid>>,
+    pub department_admin_ids: Option<Vec<Uuid>>,
     pub budget_allocated: Option<f32>,
     pub budget_period: Option<BudgetPeriod>,
     pub action_on_exceed: Option<ActionOnExceed>,

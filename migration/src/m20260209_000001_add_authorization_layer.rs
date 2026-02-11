@@ -491,8 +491,8 @@ impl MigrationTrait for Migration {
 impl Migration {
     async fn seed_permissions_and_roles(&self, manager: &SchemaManager<'_>) -> Result<(), DbErr> {
         let permissions = vec![
-            ("platform", "manage", false),
-            ("platform", "view", false),
+            ("ai_platform", "manage", false),
+            ("ai_platform", "view", false),
             ("users", "view", true),
             ("users", "manage", true),
             ("analytics", "view", true),
@@ -503,6 +503,8 @@ impl Migration {
             ("mcp_servers", "delegate", true),
             ("departments", "view", true),
             ("departments", "manage", true),
+            ("sso_providers", "view", false),
+            ("sso_providers", "manage", false),
             ("roles", "view", false),
             ("roles", "manage", false),
             ("roles", "assign", true),
@@ -590,10 +592,12 @@ impl Migration {
 
         if let Some(role_id) = role_ids.get("IT Admin") {
             for key in [
-                "platform:manage",
+                "ai_platform:manage",
                 "mcp_servers:view",
                 "mcp_servers:admin",
                 "mcp_servers:delegate",
+                "sso_providers:view",
+                "sso_providers:manage",
             ] {
                 if let Some(permission_id) = permission_ids.get(key) {
                     role_permissions.push((*role_id, *permission_id));

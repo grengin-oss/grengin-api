@@ -21,6 +21,9 @@ pub enum StreamParseResult {
     ToolInput {
         partial_json: String,
         index: Option<u32>,
+        tool_name: Option<String>,
+        tool_id: Option<String>,
+        web_search: Option<StreamWebSearchAction>,
     },
 
     EventLog {
@@ -35,6 +38,7 @@ pub enum StreamParseResult {
         input: Option<serde_json::Value>,
         index: Option<u32>,
         raw: Option<serde_json::Value>,
+        web_search: Option<StreamWebSearchAction>,
     },
 
     WebSearchAction {
@@ -73,6 +77,19 @@ pub enum StreamParseResult {
 }
 
 #[derive(Debug, Clone)]
+pub struct StreamWebSearchAction {
+    pub query: Option<String>,
+    pub queries: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamWebSearchState {
+    pub query: Option<String>,
+    pub queries: Option<Vec<String>>,
+    pub results: Vec<StreamWebSearchResult>,
+}
+
+#[derive(Debug, Clone)]
 pub struct StreamWebSearchResult {
     pub title: String,
     pub url: String,
@@ -85,6 +102,78 @@ pub struct StreamWebSearchResult {
 pub trait StreamParser: Send + Sync {
     /// Parse a raw SSE message data string into a StreamParseResult
     fn parse_event(&self, data: &str) -> StreamParseResult;
+}
+
+pub fn parse_web_search_action(input: &serde_json::Value) -> Option<StreamWebSearchAction> {
+    let query = input
+        .get("query")
+        .and_then(|q| q.as_str())
+        .map(|s| s.to_string());
+    let mut queries = input
+        .get("queries")
+        .and_then(|q| q.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<String>>()
+        });
+    if queries.is_none() {
+        if let Some(query_value) = query.as_ref() {
+            queries = Some(vec![query_value.clone()]);
+        }
+    }
+    if query.is_none() && queries.is_none() {
+        None
+    } else {
+        Some(StreamWebSearchAction { query, queries })
+    }
+}
+
+pub fn update_web_search_action_state(
+    state: &mut std::collections::HashMap<String, StreamWebSearchState>,
+    last_call_id: &mut Option<String>,
+    tool_id: Option<String>,
+    action: Option<StreamWebSearchAction>,
+) -> Option<(String, StreamWebSearchState)> {
+    let call_id = tool_id.or_else(|| last_call_id.clone());
+    if let Some(id) = call_id {
+        *last_call_id = Some(id.clone());
+        let entry = state.entry(id.clone()).or_insert_with(|| StreamWebSearchState {
+            query: None,
+            queries: None,
+            results: Vec::new(),
+        });
+        if let Some(action) = action {
+            if action.query.is_some() {
+                entry.query = action.query;
+            }
+            if action.queries.is_some() {
+                entry.queries = action.queries;
+            }
+        }
+        return Some((id, entry.clone()));
+    }
+    None
+}
+
+pub fn update_web_search_results_state(
+    state: &mut std::collections::HashMap<String, StreamWebSearchState>,
+    last_call_id: &mut Option<String>,
+    tool_id: Option<String>,
+    results: Vec<StreamWebSearchResult>,
+) -> Option<(String, StreamWebSearchState)> {
+    let call_id = tool_id.or_else(|| last_call_id.clone());
+    if let Some(id) = call_id {
+        *last_call_id = Some(id.clone());
+        let entry = state.entry(id.clone()).or_insert_with(|| StreamWebSearchState {
+            query: None,
+            queries: None,
+            results: Vec::new(),
+        });
+        entry.results.extend(results);
+        return Some((id.clone(), entry.clone()));
+    }
+    None
 }
 
 impl StreamParseResult {

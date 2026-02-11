@@ -1,5 +1,5 @@
 use crate::dto::llm::openai::{OpenaiResponseStreamEvent, OpenaiChatCompletionChunk};
-use super::{StreamParser, StreamParseResult, StreamWebSearchResult};
+use super::{parse_web_search_action, StreamParser, StreamParseResult, StreamWebSearchResult};
 use serde_json::Value;
 
 /// OpenAI stream parser
@@ -158,12 +158,14 @@ fn extract_openai_tool_event(v: &Value) -> Option<StreamParseResult> {
                 .and_then(|n| n.as_str())
                 .unwrap_or("tool_call")
                 .to_string();
+            let web_search = None;
             return Some(StreamParseResult::ToolCall {
                 tool_name,
                 tool_id: v.get("id").and_then(|id| id.as_str()).map(|s| s.to_string()),
                 input: Some(Value::String(delta.to_string())),
                 index: None,
                 raw: Some(v.clone()),
+                web_search,
             });
         }
     }
@@ -257,12 +259,18 @@ fn parse_openai_tool_item(
         });
     }
 
+    let web_search = if tool_name.contains("web_search") {
+        input.as_ref().and_then(parse_web_search_action)
+    } else {
+        None
+    };
     Some(StreamParseResult::ToolCall {
         tool_name,
         tool_id,
         input,
         index: None,
         raw: Some(raw.clone()),
+        web_search,
     })
 }
 

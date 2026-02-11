@@ -31,13 +31,40 @@ use crate::{
     },
     error::{AppError, ErrorResponse},
     handlers::models::get_model_info_cached,
-    handlers::llm::{StreamParseResult, StreamParser, anthropic::AnthropicStreamParser, openai::OpenaiStreamParser},
+    handlers::llm::{
+        StreamParseResult,
+        StreamParser,
+        StreamWebSearchAction as ParsedWebSearchAction,
+        StreamWebSearchState,
+        update_web_search_action_state,
+        update_web_search_results_state,
+        anthropic::AnthropicStreamParser,
+        openai::OpenaiStreamParser,
+    },
     llm::{prompt::Prompt, provider::{AnthropicApis, OpenaiApis, get_title_generation_model}},
     models::{conversations, departments::ActionOnExceed, messages::{self, ChatRole}, users},
     services::budget_allocation::{get_department_budget_status, refresh_department_budget_available},
     state::SharedState,
 };
 use reqwest_eventsource::Event as ReqwestEvent;
+
+fn to_chat_web_search_result(state: &StreamWebSearchState) -> ChatStreamWebSearchResult {
+    ChatStreamWebSearchResult {
+        query: state.query.clone(),
+        queries: state.queries.clone(),
+        results: state
+            .results
+            .iter()
+            .map(|result| ChatStreamWebSearchResultItem {
+                title: result.title.clone(),
+                url: result.url.clone(),
+                source: result.source.clone(),
+                page_age: result.page_age.clone(),
+                snippet: result.snippet.clone(),
+            })
+            .collect(),
+    }
+}
 
 /// Provider configuration enum for handling different LLM providers
 enum LlmProviderConfig<'a> {
@@ -520,9 +547,8 @@ pub async fn handle_chat_stream(
     let mut request_id: Option<String> = None;
     let mut tool_calls: Vec<serde_json::Value> = Vec::new();
     let mut tool_results: Vec<serde_json::Value> = Vec::new();
-    let mut tool_call_by_index: HashMap<u32, (String, Option<String>)> = HashMap::new();
     let mut seen_tool_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut web_search_state: HashMap<String, ChatStreamWebSearchResult> = HashMap::new();
+    let mut web_search_state: HashMap<String, StreamWebSearchState> = HashMap::new();
     let mut last_web_search_call_id: Option<String> = None;
     let latency = start
       .elapsed()
@@ -706,23 +732,26 @@ pub async fn handle_chat_stream(
                          .await
                          .expect("failed to update in new llm response in table messages");
                     }
-                    StreamParseResult::ToolInput { partial_json, index } => {
-                        let mut tool_name = None;
-                        let mut tool_id = None;
-                        if let Some(idx) = index {
-                            if let Some((name, id)) = tool_call_by_index.get(&idx) {
-                                tool_name = Some(name.clone());
-                                tool_id = id.clone();
-                            }
-                        }
+                    StreamParseResult::ToolInput { partial_json, tool_name, tool_id, web_search, .. } => {
                         let resolved_name = tool_name.clone().unwrap_or_else(|| "tool_call".to_string());
-                        let is_web_search = resolved_name.contains("web_search");
+                        let is_web_search = web_search.is_some() || resolved_name.contains("web_search");
+                        if is_web_search {
+                            let _ = update_web_search_action_state(
+                                &mut web_search_state,
+                                &mut last_web_search_call_id,
+                                tool_id.clone(),
+                                web_search.clone(),
+                            );
+                        }
                         let tool_call = ChatStreamToolCall {
                             tool_name: resolved_name,
                             tool_id: tool_id.clone(),
                             input_text: Some(partial_json.clone()),
                             kind: Some(if is_web_search { ChatToolKind::WebSearch } else { ChatToolKind::Other }),
-                            web_search: None,
+                            web_search: web_search.clone().map(|action| ChatStreamWebSearchAction {
+                                query: action.query.clone(),
+                                queries: action.queries.clone(),
+                            }),
                         };
                         tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
                         new_llm_message.tools_calls = Set(tool_calls.clone());
@@ -770,47 +799,30 @@ pub async fn handle_chat_stream(
                         };
                         yield Event::default().event(ChatStreamEvents::Event.to_string()).data(chat_stream.to_string());
                     }
-                    StreamParseResult::ToolCall { tool_name, tool_id, input, index, .. } => {
-                        if let Some(idx) = index {
-                            tool_call_by_index.insert(*idx, (tool_name.clone(), tool_id.clone()));
-                        }
+                    StreamParseResult::ToolCall { tool_name, tool_id, web_search, .. } => {
                         if let Some(id) = tool_id.as_ref() {
                             if !seen_tool_call_ids.insert(id.clone()) {
                                 continue;
                             }
                         }
-                        let is_web_search = tool_name.contains("web_search");
+                        let is_web_search = web_search.is_some() || tool_name.contains("web_search");
                         if is_web_search {
-                            last_web_search_call_id = tool_id.clone().or_else(|| last_web_search_call_id.clone());
+                            let _ = update_web_search_action_state(
+                                &mut web_search_state,
+                                &mut last_web_search_call_id,
+                                tool_id.clone(),
+                                web_search.clone(),
+                            );
                         }
-                        let web_search = if is_web_search {
-                            input.as_ref().and_then(|value| {
-                                let query = value
-                                    .get("query")
-                                    .and_then(|q| q.as_str())
-                                    .map(|s| s.to_string());
-                                let queries = value
-                                    .get("queries")
-                                    .and_then(|q| q.as_array())
-                                    .map(|arr| {
-                                        arr.iter()
-                                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                            .collect::<Vec<String>>()
-                                    });
-                                if query.is_none() && queries.is_none() {
-                                    return None;
-                                }
-                                Some(ChatStreamWebSearchAction { query, queries })
-                            })
-                        } else {
-                            None
-                        };
                         let tool_call = ChatStreamToolCall {
                             tool_name: tool_name.clone(),
                             tool_id: tool_id.clone(),
                             input_text: None,
                             kind: Some(if is_web_search { ChatToolKind::WebSearch } else { ChatToolKind::Other }),
-                            web_search,
+                            web_search: web_search.as_ref().map(|action| ChatStreamWebSearchAction {
+                                query: action.query.clone(),
+                                queries: action.queries.clone(),
+                            }),
                         };
                         tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
                         new_llm_message.tools_calls = Set(tool_calls.clone());
@@ -836,26 +848,19 @@ pub async fn handle_chat_stream(
                         };
                         yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(chat_stream.to_string());
                     }
-                    StreamParseResult::WebSearchAction { tool_name, tool_id, query, queries } => {
-                        let call_id = tool_id.clone().or_else(|| last_web_search_call_id.clone());
-                        if let Some(id) = call_id.clone() {
-                            last_web_search_call_id = Some(id.clone());
-                            let entry = web_search_state.entry(id.clone()).or_insert_with(|| ChatStreamWebSearchResult {
-                                query: None,
-                                queries: None,
-                                results: Vec::new(),
-                            });
-                            if query.is_some() {
-                                entry.query = query.clone();
-                            }
-                            if queries.is_some() {
-                                entry.queries = queries.clone();
-                            }
+                    StreamParseResult::WebSearchAction { tool_name: _, tool_id, query, queries } => {
+                        let entry = update_web_search_action_state(
+                            &mut web_search_state,
+                            &mut last_web_search_call_id,
+                            tool_id.clone(),
+                            Some(ParsedWebSearchAction { query:query.clone(), queries:queries.clone() }),
+                        );
+                        if let Some((resolved_id, entry)) = entry {
                             let tool_result = ChatStreamToolResult {
                                 tool_name: Some("web_search_call".to_string()),
-                                tool_id: Some(id.clone()),
+                                tool_id: Some(resolved_id),
                                 kind: Some(ChatToolKind::WebSearch),
-                                web_search: Some(entry.clone()),
+                                web_search: Some(to_chat_web_search_result(&entry)),
                             };
                             tool_results.push(serde_json::to_value(&tool_result).unwrap_or_else(|_| json!({})));
                             new_llm_message.tools_results = Set(tool_results.clone());
@@ -883,28 +888,18 @@ pub async fn handle_chat_stream(
                         }
                     }
                     StreamParseResult::WebSearchResult { tool_name: _, tool_id, results } => {
-                        let call_id = tool_id.clone().or_else(|| last_web_search_call_id.clone());
-                        if let Some(id) = call_id.clone() {
-                            last_web_search_call_id = Some(id.clone());
-                            let entry = web_search_state.entry(id.clone()).or_insert_with(|| ChatStreamWebSearchResult {
-                                query: None,
-                                queries: None,
-                                results: Vec::new(),
-                            });
-                            for result in results {
-                                entry.results.push(ChatStreamWebSearchResultItem {
-                                    title: result.title.clone(),
-                                    url: result.url.clone(),
-                                    source: result.source.clone(),
-                                    page_age: result.page_age.clone(),
-                                    snippet: result.snippet.clone(),
-                                });
-                            }
+                        let entry = update_web_search_results_state(
+                            &mut web_search_state,
+                            &mut last_web_search_call_id,
+                            tool_id.clone(),
+                            results.clone(),
+                        );
+                        if let Some((resolved_id, entry)) = entry {
                             let tool_result = ChatStreamToolResult {
                                 tool_name: Some("web_search_call".to_string()),
-                                tool_id: Some(id.clone()),
+                                tool_id: Some(resolved_id),
                                 kind: Some(ChatToolKind::WebSearch),
-                                web_search: Some(entry.clone()),
+                                web_search: Some(to_chat_web_search_result(&entry)),
                             };
                             tool_results.push(serde_json::to_value(&tool_result).unwrap_or_else(|_| json!({})));
                             new_llm_message.tools_results = Set(tool_results.clone());

@@ -2,6 +2,7 @@ use axum::{extract::{Path, State}, Json};
 use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait, Set};
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
@@ -28,6 +29,42 @@ struct RolePermissionRow {
     role_id: Uuid,
     domain: String,
     action: String,
+}
+
+#[derive(Serialize)]
+struct RoleCreatedPayload {
+    role_id: Uuid,
+    name: String,
+    permissions: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct RoleUpdatedPayload {
+    role_id: Uuid,
+    name: Option<String>,
+    permissions: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct RoleDeletedPayload {
+    role_id: Uuid,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct RoleAssignmentPayload {
+    assignment_id: Uuid,
+    user_id: Uuid,
+    role_id: Uuid,
+    scope_department_id: Option<Uuid>,
+}
+
+fn audit_payload<T: Serialize>(value: T) -> Option<serde_json::Value> {
+    serde_json::to_value(value)
+        .map_err(|e| {
+            eprintln!("audit payload error: {e}");
+        })
+        .ok()
 }
 
 #[utoipa::path(
@@ -250,17 +287,19 @@ pub async fn create_role(
             })?;
     }
 
-    let _ = record_auth_event(
-        &app_state.database,
-        "auth.role_created",
-        Some(claims.user_id),
-        serde_json::json!({
-            "role_id": role_id,
-            "name": req.name,
-            "permissions": assigned_permissions,
-        }),
-    )
-    .await;
+    if let Some(payload) = audit_payload(RoleCreatedPayload {
+        role_id,
+        name: req.name.clone(),
+        permissions: assigned_permissions.clone(),
+    }) {
+        let _ = record_auth_event(
+            &app_state.database,
+            "auth.role_created",
+            Some(claims.user_id),
+            payload,
+        )
+        .await;
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -474,17 +513,19 @@ pub async fn update_role(
     }
 
     let response_name = name.clone().unwrap_or(role.name.clone());
-    let _ = record_auth_event(
-        &app_state.database,
-        "auth.role_updated",
-        Some(claims.user_id),
-        serde_json::json!({
-            "role_id": role_id,
-            "name": name,
-            "permissions": permissions_list,
-        }),
-    )
-    .await;
+    if let Some(payload) = audit_payload(RoleUpdatedPayload {
+        role_id,
+        name: name.clone(),
+        permissions: permissions_list.clone(),
+    }) {
+        let _ = record_auth_event(
+            &app_state.database,
+            "auth.role_updated",
+            Some(claims.user_id),
+            payload,
+        )
+        .await;
+    }
 
     Ok((
         StatusCode::OK,
@@ -564,16 +605,18 @@ pub async fn delete_role(
 
     let _ = authz.recompute_effective_permissions_for_users(&assigned_users).await;
 
-    let _ = record_auth_event(
-        &app_state.database,
-        "auth.role_deleted",
-        Some(claims.user_id),
-        serde_json::json!({
-            "role_id": role_id,
-            "name": role.name,
-        }),
-    )
-    .await;
+    if let Some(payload) = audit_payload(RoleDeletedPayload {
+        role_id,
+        name: role.name.clone(),
+    }) {
+        let _ = record_auth_event(
+            &app_state.database,
+            "auth.role_deleted",
+            Some(claims.user_id),
+            payload,
+        )
+        .await;
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -758,18 +801,20 @@ pub async fn assign_role_to_user(
 
     let _ = authz.recompute_effective_permissions(user_id).await;
 
-    let _ = record_auth_event(
-        &app_state.database,
-        "auth.role_assigned",
-        Some(claims.user_id),
-        serde_json::json!({
-            "assignment_id": assignment_id,
-            "user_id": user_id,
-            "role_id": req.role_id,
-            "scope_department_id": req.scope_department_id,
-        }),
-    )
-    .await;
+    if let Some(payload) = audit_payload(RoleAssignmentPayload {
+        assignment_id,
+        user_id,
+        role_id: req.role_id,
+        scope_department_id: req.scope_department_id,
+    }) {
+        let _ = record_auth_event(
+            &app_state.database,
+            "auth.role_assigned",
+            Some(claims.user_id),
+            payload,
+        )
+        .await;
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -843,18 +888,20 @@ pub async fn remove_role_from_user(
 
     let _ = authz.recompute_effective_permissions(user_id).await;
 
-    let _ = record_auth_event(
-        &app_state.database,
-        "auth.role_unassigned",
-        Some(claims.user_id),
-        serde_json::json!({
-            "assignment_id": assignment_id,
-            "user_id": user_id,
-            "role_id": assignment.role_id,
-            "scope_department_id": assignment.scope_department_id,
-        }),
-    )
-    .await;
+    if let Some(payload) = audit_payload(RoleAssignmentPayload {
+        assignment_id,
+        user_id,
+        role_id: assignment.role_id,
+        scope_department_id: assignment.scope_department_id,
+    }) {
+        let _ = record_auth_event(
+            &app_state.database,
+            "auth.role_unassigned",
+            Some(claims.user_id),
+            payload,
+        )
+        .await;
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }

@@ -3,6 +3,7 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait, Set};
 use sea_orm::sea_query::{Alias, BinOper, Expr};
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
@@ -19,6 +20,35 @@ use crate::{
     services::{authorization::{AuthorizationService, PermissionScopeMode}, auth_audit::record_auth_event},
     state::SharedState,
 };
+
+#[derive(Serialize)]
+struct McpAccessDefaultChangedPayload {
+    server_id: Uuid,
+    access_default: mcp_servers::McpAccessDefault,
+}
+
+#[derive(Serialize)]
+struct McpAccessRuleCreatedPayload {
+    rule_id: Uuid,
+    server_id: Uuid,
+    subject_type: McpSubjectType,
+    subject_id: Uuid,
+    rule_type: McpRuleType,
+}
+
+#[derive(Serialize)]
+struct McpAccessRuleDeletedPayload {
+    rule_id: Uuid,
+    server_id: Uuid,
+}
+
+fn audit_payload<T: Serialize>(value: T) -> Option<serde_json::Value> {
+    serde_json::to_value(value)
+        .map_err(|e| {
+            eprintln!("audit payload error: {e}");
+        })
+        .ok()
+}
 
 #[utoipa::path(
     get,
@@ -167,16 +197,18 @@ pub async fn update_mcp_server_default(
         })
         .collect::<Vec<_>>();
 
-    let _ = record_auth_event(
-        &app_state.database,
-        "auth.mcp_access_default_changed",
-        Some(claims.user_id),
-        serde_json::json!({
-            "server_id": server_id,
-            "access_default": req.access_default,
-        }),
-    )
-    .await;
+    if let Some(payload) = audit_payload(McpAccessDefaultChangedPayload {
+        server_id,
+        access_default: req.access_default,
+    }) {
+        let _ = record_auth_event(
+            &app_state.database,
+            "auth.mcp_access_default_changed",
+            Some(claims.user_id),
+            payload,
+        )
+        .await;
+    }
 
     let _ = authz.recompute_effective_permissions_for_all_users().await;
 
@@ -309,19 +341,21 @@ pub async fn create_mcp_access_rule(
             AuthError::DbTimeout
         })?;
 
-    let _ = record_auth_event(
-        &app_state.database,
-        "auth.mcp_access_rule_created",
-        Some(claims.user_id),
-        serde_json::json!({
-            "rule_id": rule_id,
-            "server_id": server_id,
-            "subject_type": req.subject_type,
-            "subject_id": req.subject_id,
-            "rule_type": req.rule_type,
-        }),
-    )
-    .await;
+    if let Some(payload) = audit_payload(McpAccessRuleCreatedPayload {
+        rule_id,
+        server_id,
+        subject_type: req.subject_type,
+        subject_id: req.subject_id,
+        rule_type: req.rule_type,
+    }) {
+        let _ = record_auth_event(
+            &app_state.database,
+            "auth.mcp_access_rule_created",
+            Some(claims.user_id),
+            payload,
+        )
+        .await;
+    }
 
     let affected_users = match req.subject_type {
         McpSubjectType::User => vec![req.subject_id],
@@ -471,16 +505,18 @@ pub async fn delete_mcp_access_rule(
             AuthError::DbTimeout
         })?;
 
-    let _ = record_auth_event(
-        &app_state.database,
-        "auth.mcp_access_rule_deleted",
-        Some(claims.user_id),
-        serde_json::json!({
-            "rule_id": rule_id,
-            "server_id": server_id,
-        }),
-    )
-    .await;
+    if let Some(payload) = audit_payload(McpAccessRuleDeletedPayload {
+        rule_id,
+        server_id,
+    }) {
+        let _ = record_auth_event(
+            &app_state.database,
+            "auth.mcp_access_rule_deleted",
+            Some(claims.user_id),
+            payload,
+        )
+        .await;
+    }
 
     let affected_users = match rule.subject_type {
         McpSubjectType::User => vec![rule.subject_id],

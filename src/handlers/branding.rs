@@ -3,7 +3,7 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, IntoActiveModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}, permissions::PERMISSION_PLATFORM_MANAGE}, dto::branding::{BrandingResponse, BrandingUpdate}, models::branding, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
+use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}, permissions::PERMISSION_AI_PLATFORM_MANAGE}, dto::branding::{BrandingResponse, BrandingUpdate}, models::branding, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
 
 fn create_default_branding() -> branding::Model {
     branding::Model {
@@ -92,7 +92,7 @@ pub async fn get_admin_branding(
         .ensure_permission(
             claims.user_id,
             claims.role,
-            PERMISSION_PLATFORM_MANAGE,
+            PERMISSION_AI_PLATFORM_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,
             None,
@@ -125,7 +125,7 @@ pub async fn update_branding(
         .ensure_permission(
             claims.user_id,
             claims.role,
-            PERMISSION_PLATFORM_MANAGE,
+            PERMISSION_AI_PLATFORM_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,
             None,

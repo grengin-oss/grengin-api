@@ -2,6 +2,7 @@ use axum::{Json, extract::State};
 use reqwest::StatusCode;
 use sea_orm::EntityTrait;
 use uuid::Uuid;
+use serde_json::{Map, Value};
 
 use crate::{
     auth::{claims::Claims, error::{AuthError, AuthErrorResponse}},
@@ -48,22 +49,26 @@ pub async fn get_my_permissions(
             .ok_or(AuthError::ResourceNotFound)?;
     }
 
+    let mut default_effective = Map::new();
+    default_effective.insert("permissions".to_string(), Value::Object(Map::new()));
+    default_effective.insert("mcp_access".to_string(), Value::Object(Map::new()));
+    default_effective.insert(
+        "administered_departments".to_string(),
+        Value::Array(Vec::new()),
+    );
+
     let effective = user
         .effective_permissions
-        .unwrap_or(serde_json::json!({
-            "permissions": {},
-            "mcp_access": {},
-            "administered_departments": [],
-        }));
+        .unwrap_or_else(|| Value::Object(default_effective));
 
     let permissions = effective
         .get("permissions")
         .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
+        .unwrap_or_else(|| Value::Object(Map::new()));
     let mcp_access = effective
         .get("mcp_access")
         .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
+        .unwrap_or_else(|| Value::Object(Map::new()));
     let administered_departments = effective
         .get("administered_departments")
         .and_then(|v| v.as_array())

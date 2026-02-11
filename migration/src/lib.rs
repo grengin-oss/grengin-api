@@ -24,6 +24,7 @@ mod m20260127_000003_add_department_budget_columns;
 mod m20260130_000003_create_analytics;
 mod m20260204_000001_add_department_budget_available;
 mod m20260209_000001_add_authorization_layer;
+mod m20260210_000001_update_permissions_ai_platform_sso;
 
 pub struct Migrator;
 
@@ -55,6 +56,7 @@ impl MigratorTrait for Migrator {
           Box::new(m20260130_000003_create_analytics::Migration),
           Box::new(m20260204_000001_add_department_budget_available::Migration),
           Box::new(m20260209_000001_add_authorization_layer::Migration),
+          Box::new(m20260210_000001_update_permissions_ai_platform_sso::Migration),
          ]
     }
 }
