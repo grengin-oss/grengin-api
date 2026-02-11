@@ -224,6 +224,52 @@ async fn sync_department_admin_assignments(
     Ok(())
 }
 
+async fn load_department_admin_ids_map(
+    db: &DatabaseConnection,
+    department_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<Uuid>>, AuthError> {
+    if department_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let role = roles::Entity::find()
+        .filter(roles::Column::Name.eq(ROLE_DEPARTMENT_ADMIN))
+        .one(db)
+        .await
+        .map_err(|e| {
+            eprintln!("role lookup error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    let role = match role {
+        Some(role) => role,
+        None => return Ok(HashMap::new()),
+    };
+
+    let rows = user_role_assignments::Entity::find()
+        .select_only()
+        .column(user_role_assignments::Column::ScopeDepartmentId)
+        .column(user_role_assignments::Column::UserId)
+        .filter(user_role_assignments::Column::RoleId.eq(role.id))
+        .filter(user_role_assignments::Column::ScopeDepartmentId.is_in(department_ids.iter().copied()))
+        .into_tuple::<(Option<Uuid>, Uuid)>()
+        .all(db)
+        .await
+        .map_err(|e| {
+            eprintln!("role assignment lookup error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    let mut map: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for (scope_id, user_id) in rows {
+        if let Some(dept_id) = scope_id {
+            map.entry(dept_id).or_default().push(user_id);
+        }
+    }
+
+    Ok(map)
+}
+
 #[derive(Serialize)]
 struct RoleAssignmentPayload {
     assignment_id: Uuid,
@@ -395,7 +441,7 @@ let (sql, values) = insert.build(PostgresQueryBuilder);
         AuthError::DbTimeout
     })?;
 
-    if let Some(admin_ids) = req.department_admin_ids.as_deref() {
+    if let Some(admin_ids) = req.admin_ids.as_deref() {
         sync_department_admin_assignments(
             &authz,
             &app_state.database,
@@ -563,6 +609,8 @@ pub async fn list_departments(
         .map(|r| (r.parent_id, r.cnt))
         .collect();
 
+    let admin_map = load_department_admin_ids_map(&app_state.database, &dept_ids).await?;
+
     // Build response
     let mut departments = Vec::with_capacity(rows.len());
     for d in rows {
@@ -575,6 +623,7 @@ pub async fn list_departments(
             d.budget_period,
         )
         .await?;
+        let admin_ids = admin_map.get(&d.id).cloned().unwrap_or_default();
 
         departments.push(DepartmentResponse {
             id: d.id,
@@ -583,7 +632,7 @@ pub async fn list_departments(
             parent_id: d.parent_id,
             path: d.path,
             depth: d.depth,
-            leader_ids: vec![],
+            admin_ids,
             member_count,
             total_member_count: 0, // keep for detail endpoint to avoid heavy list queries
             child_count,
@@ -701,11 +750,14 @@ pub async fn get_departments_tree(
         .map(|r| (r.department_id, r.cnt))
         .collect();
 
+    let admin_map = load_department_admin_ids_map(&app_state.database, &dept_ids).await?;
+
     let mut nodes: HashMap<Uuid, DepartmentTreeNode> = HashMap::with_capacity(rows.len());
     let mut children_map: HashMap<Uuid, Vec<Uuid>> = HashMap::with_capacity(rows.len());
 
     for d in rows {
         let member_count = *direct_map.get(&d.id).unwrap_or(&0) as i32;
+        let admin_ids = admin_map.get(&d.id).cloned().unwrap_or_default();
 
         if let Some(pid) = d.parent_id {
             children_map.entry(pid).or_default().push(d.id);
@@ -720,7 +772,7 @@ pub async fn get_departments_tree(
                 parent_id: d.parent_id,
                 path: d.path,
                 depth: d.depth,
-                leader_ids: vec![],
+                admin_ids,
                 member_count,
                 total_member_count: member_count,
                 child_count: 0,
@@ -832,6 +884,9 @@ pub async fn get_department_by_id(
         })?
         .ok_or(AuthError::DbNotFound)?;
 
+    let mut admin_map = load_department_admin_ids_map(&app_state.database, &[dept.id]).await?;
+    let admin_ids = admin_map.remove(&dept.id).unwrap_or_default();
+
     // 1) Direct members count
     let member_count = users::Entity::find()
         .filter(users::Column::DepartmentId.eq(dept.id))
@@ -900,7 +955,7 @@ pub async fn get_department_by_id(
         parent_id: dept.parent_id,
         path: dept.path,
         depth: dept.depth,
-        leader_ids: vec![],
+        admin_ids,
         member_count,
         total_member_count,
         child_count,
@@ -1071,7 +1126,7 @@ pub async fn update_department(
             AuthError::DbTimeout
         })?;
 
-    if let Some(admin_ids) = req.department_admin_ids.as_deref() {
+    if let Some(admin_ids) = req.admin_ids.as_deref() {
         sync_department_admin_assignments(
             &authz,
             &app_state.database,
