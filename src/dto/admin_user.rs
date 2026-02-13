@@ -31,6 +31,9 @@ pub struct UserDetails {
     pub password_changed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub effective_permissions: Option<serde_json::Value>,
 }
 
 #[derive(Serialize,ToSchema)]

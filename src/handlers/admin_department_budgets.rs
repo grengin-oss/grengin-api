@@ -5,7 +5,7 @@ use migration::Expr;
 use rust_decimal::Decimal;
 use sea_orm::{ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QuerySelect};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}}, dto::admin_department_budget::{DepartmentBudgetStatusDto, SubDepartmentBudgetDto}, models::{departments::{self, ActionOnExceed, BudgetPeriod}, users::UserRole}, services::budget_allocation::{period_bounds, sum_child_allocations, sum_department_cost_in_range, sum_department_cost_total}, state::SharedState};
+use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}, permissions::PERMISSION_BUDGET_VIEW}, dto::admin_department_budget::{DepartmentBudgetStatusDto, SubDepartmentBudgetDto}, models::{departments::{self, ActionOnExceed, BudgetPeriod}}, services::{authorization::{AuthorizationService, PermissionScopeMode}, budget_allocation::{period_bounds, sum_child_allocations, sum_department_cost_in_range, sum_department_cost_total}}, state::SharedState};
 
 #[derive(Debug, Clone, FromQueryResult)]
 pub struct DepartmentBudgetRow {
@@ -29,7 +29,7 @@ pub struct DepartmentBudgetRow {
     pub updated_at: DateTime<Utc>,
 }
 
-fn departments_budget_select() -> sea_orm::Select<departments::Entity> {
+pub fn departments_budget_select() -> sea_orm::Select<departments::Entity> {
     departments::Entity::find()
         .select_only()
         .column(departments::Column::Id)
@@ -38,6 +38,7 @@ fn departments_budget_select() -> sea_orm::Select<departments::Entity> {
         .column(departments::Column::ParentId)
         .column(departments::Column::Depth)
         .expr_as(Expr::cust("path::text"), "path")
+        .column(departments::Column::BudgetAvailable)
         .column(departments::Column::BudgetAllocated)
         .column(departments::Column::BudgetPeriod)
         .column(departments::Column::ActionOnExceed)
@@ -66,10 +67,17 @@ pub async fn get_department_budget(
     State(app_state): State<SharedState>,
     Path(department_id): Path<uuid::Uuid>,
 ) -> Result<(StatusCode, Json<DepartmentBudgetStatusDto>), AuthError> {
-    match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => (),
-        _ => return Err(AuthError::PermissionDenied),
-    }
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            claims.role,
+            PERMISSION_BUDGET_VIEW,
+            Some(department_id),
+            PermissionScopeMode::RequireOrgWide,
+            Some(department_id),
+        )
+        .await?;
 
     let dept = departments_budget_select()
         .filter(departments::Column::Id.eq(department_id))
@@ -106,7 +114,8 @@ pub async fn get_department_budget(
             AuthError::DbTimeout
         })?;
 
-    let budget_available = (dept.budget_allocated - budget_distributed).max(rust_decimal::Decimal::ZERO);
+    let budget_available =
+        (dept.budget_allocated - budget_distributed - budget_used).max(rust_decimal::Decimal::ZERO);
 
     // direct children budgets
     let children = departments_budget_select()

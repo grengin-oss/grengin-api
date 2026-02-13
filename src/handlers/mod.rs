@@ -14,3 +14,6 @@ pub mod open_error;
 pub mod admin_analytics;
 pub mod admin_department;
 pub mod admin_department_budgets;
+pub mod admin_roles;
+pub mod admin_mcp;
+pub mod me;

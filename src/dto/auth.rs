@@ -79,4 +79,7 @@ pub struct User {
     pub created_at: DateTime<Utc>,
     /// User last update timestamp (required)
     pub updated_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub effective_permissions: Option<serde_json::Value>,
 }

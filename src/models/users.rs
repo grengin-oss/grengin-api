@@ -50,6 +50,9 @@ pub struct Model {
   pub role:UserRole,
   pub hd: Option<String>, //hosted domain of user email/website
   pub department_id:Option<Uuid>, // previously department Option<String>
+  pub is_independent: bool,
+  #[sea_orm(column_type = "JsonBinary", nullable)]
+  pub effective_permissions: Option<serde_json::Value>,
   #[sea_orm(column_type = "JsonBinary", nullable)]
   pub metadata:Option<serde_json::Value>,
 }
@@ -84,4 +87,3 @@ impl Related<super::departments::Entity> for Entity {
 
 
 impl ActiveModelBehavior for ActiveModel {}
-

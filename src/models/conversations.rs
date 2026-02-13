@@ -53,6 +53,8 @@ pub struct ConversationWithCount {
     pub total_tokens: i64,
     #[sea_orm(from_alias = "totalCost")]
     pub total_cost: Decimal,
+    #[sea_orm(from_alias = "metadata")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

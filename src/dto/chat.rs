@@ -16,6 +16,7 @@ pub struct ConversationResponse {
   pub id:Uuid,
    #[serde(skip_serializing_if = "Option::is_none")]
   pub title:Option<String>,
+  pub web_search_enabled: bool,
   pub archived:bool,
    #[serde(skip_serializing_if = "Option::is_none")]
   pub archived_at:Option<DateTime<Utc>>,
@@ -29,6 +30,15 @@ pub struct ConversationResponse {
    #[serde(skip_serializing_if = "Option::is_none")]
   pub messages:Option<Vec<MessageResponse>>,
   pub message_count:u64
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationPaginatedResponse {
+  pub total:u64,
+  pub limit:u64,
+  pub offset:u64,
+  pub conversations:Vec<ConversationResponse>,
 }
 
 #[derive(Serialize, ToSchema, IntoParams)]

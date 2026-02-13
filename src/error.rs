@@ -35,6 +35,9 @@ pub enum ErrorCode {
     InvalidLlmProvider = 4001,
     LlmProviderNotConfigured = 4002,
     LlmProviderDisabledByAdmin = 4003,
+
+    // 6000-6999: budgets
+    DepartmentBudgetExceeded = 6001,
 }
 
 impl Serialize for ErrorCode {
@@ -105,6 +108,8 @@ pub enum AppError {
     InvalidLlmProvider { provider: String },
     LlmProviderNotConfigured { provider: String },
     LlmProviderDisabledByAdmin { provider: String },
+
+    DepartmentBudgetExceeded,
 }
 
 impl AppError {
@@ -421,6 +426,30 @@ impl AppError {
                     StatusCode::FORBIDDEN,
                     ErrorDetail {
                         code: ErrorCode::LlmProviderDisabledByAdmin,
+                        description: Self::render(description_tpl, &params),
+                        solution: Self::render(solution_tpl, &params),
+                        description_key,
+                        solution_key,
+                        params,
+                        external_code: None,
+                    },
+                )
+            }
+
+            // -------- budgets --------
+            AppError::DepartmentBudgetExceeded => {
+                let params = Self::base_params();
+                let description_key = "error.budget.exceeded.description".to_string();
+                let solution_key = "error.budget.exceeded.solution".to_string();
+
+                let description_tpl = "The department budget is exhausted for the current period.";
+                let solution_tpl =
+                    "Wait for the next budget period or ask an admin to increase the budget.";
+
+                (
+                    StatusCode::FORBIDDEN,
+                    ErrorDetail {
+                        code: ErrorCode::DepartmentBudgetExceeded,
                         description: Self::render(description_tpl, &params),
                         solution: Self::render(solution_tpl, &params),
                         description_key,

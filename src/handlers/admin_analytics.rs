@@ -9,13 +9,14 @@ use crate::{
     auth::{
         claims::Claims,
         error::{AuthError, AuthErrorResponse},
+        permissions::PERMISSION_ANALYTICS_VIEW,
     },
     dto::analytics::{
         AnalyticsQuery, DepartmentAnalyticsQuery, DepartmentAnalyticsResponse, OverviewResponse,
         TimeSeriesQuery, TimeSeriesResponse, UserAnalyticsQuery, UserAnalyticsResponse,
     },
     models::users::{UserRole, UserStatus},
-    services::analytics_cache,
+    services::{analytics_cache, authorization::{AuthorizationService, PermissionScopeMode}},
     state::SharedState,
 };
 
@@ -42,10 +43,17 @@ pub async fn get_analytics_overview(
     Query(query): Query<AnalyticsQuery>,
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode, Json<OverviewResponse>), AuthError> {
-    match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-    }
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            claims.role,
+            PERMISSION_ANALYTICS_VIEW,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
 
     let result = analytics_cache::get_overview_cached(
         &app_state.database,
@@ -92,10 +100,17 @@ pub async fn get_user_analytics(
     Query(query): Query<UserAnalyticsQuery>,
     State(app_state): State<SharedState>,
 ) -> Result<(axum::http::StatusCode, Json<UserAnalyticsResponse>), AuthError> {
-    match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-    }
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            claims.role,
+            PERMISSION_ANALYTICS_VIEW,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
     let db: &DatabaseConnection = &app_state.database;
     let result = analytics_cache::get_user_analytics_cached(db, query)
         .await
@@ -132,10 +147,17 @@ pub async fn get_department_analytics(
     Query(query): Query<DepartmentAnalyticsQuery>,
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode, Json<DepartmentAnalyticsResponse>), AuthError> {
-    match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-    }
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            claims.role,
+            PERMISSION_ANALYTICS_VIEW,
+            query.department_id,
+            PermissionScopeMode::RequireOrgWide,
+            query.department_id,
+        )
+        .await?;
 
     let result = analytics_cache::get_department_analytics_cached(&app_state.database, query)
     .await
@@ -171,10 +193,17 @@ pub async fn get_timeseries_analytics(
     Query(query): Query<TimeSeriesQuery>,
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode, Json<TimeSeriesResponse>), AuthError> {
-    match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-    }
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            claims.role,
+            PERMISSION_ANALYTICS_VIEW,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
 
     let result = analytics_cache::get_timeseries_analytics_cached(
         &app_state.database,

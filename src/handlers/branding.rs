@@ -3,7 +3,7 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, IntoActiveModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}}, dto::branding::{BrandingResponse, BrandingUpdate}, models::{branding, users::UserRole}, state::SharedState};
+use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}, permissions::PERMISSION_AI_PLATFORM_MANAGE}, dto::branding::{BrandingResponse, BrandingUpdate}, models::branding, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
 
 fn create_default_branding() -> branding::Model {
     branding::Model {
@@ -87,10 +87,17 @@ pub async fn get_admin_branding(
     claims: Claims,
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode, Json<BrandingResponse>), AuthError> {
-    match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-    }
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            claims.role,
+            PERMISSION_AI_PLATFORM_MANAGE,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
     let branding = get_or_create_branding(&app_state).await?;
     Ok((StatusCode::OK, Json(model_to_response(&branding))))
 }
@@ -113,10 +120,17 @@ pub async fn update_branding(
     State(app_state): State<SharedState>,
     Json(req): Json<BrandingUpdate>,
 ) -> Result<(StatusCode, Json<BrandingResponse>), AuthError> {
-    match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-    }
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            claims.role,
+            PERMISSION_AI_PLATFORM_MANAGE,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
 
     let branding_model = get_or_create_branding(&app_state).await?;
     let mut active_model = branding_model.into_active_model();

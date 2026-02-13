@@ -3,7 +3,7 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, IntoActiveModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}, sso_provider::{is_editable, sso_providers_list}}, dto::admin_sso_providers::{EditableField, SsoProviderEditableResponse, SsoProviderResponse, SsoProviderUpdateRequest}, models::{sso_providers, users::UserRole}, state::SharedState};
+use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}, permissions::PERMISSION_SSO_PROVIDERS_MANAGE, sso_provider::{is_editable, sso_providers_list}}, dto::admin_sso_providers::{EditableField, SsoProviderEditableResponse, SsoProviderResponse, SsoProviderUpdateRequest}, models::sso_providers, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -21,10 +21,17 @@ pub async fn get_sso_providers(
     claims: Claims,
      State(app_state): State<SharedState>,
 ) -> Result<(StatusCode,Json<Vec<SsoProviderResponse>>), AuthError> {
-     match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-     }
+     let authz = AuthorizationService::new(&app_state.database);
+     authz
+        .ensure_permission(
+            claims.user_id,
+            claims.role,
+            PERMISSION_SSO_PROVIDERS_MANAGE,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
      let mut models = sso_providers::Entity::find()
        .all(&app_state.database)
        .await
@@ -104,10 +111,17 @@ pub async fn get_sso_provider_by_id(
      Path(provider_id):Path<Uuid>,
      State(app_state): State<SharedState>,
 ) -> Result<(StatusCode,Json<SsoProviderEditableResponse>), AuthError> {
-     match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-     }
+     let authz = AuthorizationService::new(&app_state.database);
+     authz
+        .ensure_permission(
+            claims.user_id,
+            claims.role,
+            PERMISSION_SSO_PROVIDERS_MANAGE,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            Some(provider_id),
+        )
+        .await?;
      let model = sso_providers::Entity::find_by_id(provider_id)
        .one(&app_state.database)
        .await
@@ -154,10 +168,17 @@ pub async fn delete_sso_provider_by_id(
      Path(provider_id):Path<Uuid>,
      State(app_state): State<SharedState>,
 ) -> Result<(StatusCode,&'static str), AuthError> {
-     match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-     }
+     let authz = AuthorizationService::new(&app_state.database);
+     authz
+        .ensure_permission(
+            claims.user_id,
+            claims.role,
+            PERMISSION_SSO_PROVIDERS_MANAGE,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            Some(provider_id),
+        )
+        .await?;
      let model = sso_providers::Entity::find_by_id(provider_id)
        .one(&app_state.database)
        .await
@@ -201,10 +222,17 @@ pub async fn update_sso_provider_by_id(
      State(app_state): State<SharedState>,
      Json(req):Json<SsoProviderUpdateRequest>
 ) -> Result<(StatusCode,Json<SsoProviderResponse>), AuthError> {
-     match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-     }
+     let authz = AuthorizationService::new(&app_state.database);
+     authz
+        .ensure_permission(
+            claims.user_id,
+            claims.role,
+            PERMISSION_SSO_PROVIDERS_MANAGE,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            Some(provider_id),
+        )
+        .await?;
      let model = sso_providers::Entity::find_by_id(provider_id)
        .one(&app_state.database)
        .await
@@ -282,5 +310,3 @@ pub async fn update_sso_provider_by_id(
     };
   Ok((StatusCode::OK,Json(response)))
 }
-
-

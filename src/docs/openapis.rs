@@ -4,6 +4,8 @@ use crate::auth::error::{AuthError,AuthErrorCode,AuthErrorDetailVariant,AuthErro
 use crate::dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel,AiEngineModelsResponse, AiModelCapabilities};
 use crate::dto::admin_department_budget::{DepartmentBudgetStatusDto, SubDepartmentBudgetDto};
 use crate::dto::admin_department::{DepartmentListQuery, DepartmentMembersResponse, DepartmentRequest, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery, DepartmentTreeResponse, DepartmentsListResponse, MoveDepartmentRequest};
+use crate::dto::admin_mcp::{McpAccessDefaultRequest, McpAccessRuleDto, McpAccessRuleRequest, McpServerAccessResponse};
+use crate::dto::admin_roles::{PermissionDto, PermissionsResponse, RoleDto, RoleRequest, RoleUpdateRequest, RolesResponse, UserRoleAssignmentDto, UserRoleAssignmentRequest, UserRoleAssignmentsResponse};
 use crate::dto::analytics::DepartmentAnalyticsResponse;
 use crate::dto::branding::{BrandingResponse, BrandingUpdate};
 use crate::dto::admin_sso_providers::{EditableField, SsoProviderEditableResponse, SsoProviderResponse, SsoProviderUpdateRequest};
@@ -14,12 +16,15 @@ use crate::dto::common::{PaginationQuery, SortRule};
 use crate::dto::files::{Attachment, File, FileResponse, FileUploadRequest};
 use crate::dto::models::{ModelInfo, ProviderInfo};
 use crate::dto::oauth::OAuthCallback;
+use crate::dto::me::{AdministeredDepartmentsResponse, EffectivePermissionsResponse};
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::docs::{security::ApiSecurityAddon,app_error_catlog::AppErrorCatalogItem};
 use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, RefreshTokenRequest, TokenType, User};
-use crate::handlers::{auth,admin_department,admin_department_budgets,admin_analytics,oidc,open_error,chat,chat_stream,file,message,admin_users,admin_sso_provider,branding,admin_ai,models};
+use crate::handlers::{auth,admin_department,admin_department_budgets,admin_analytics,admin_mcp,admin_roles,oidc,open_error,chat,chat_stream,file,message,admin_users,admin_sso_provider,branding,admin_ai,models,me};
 use crate::models::messages::ChatRole;
 use crate::models::departments::{ActionOnExceed, BudgetPeriod};
+use crate::models::mcp_server_access_rules::{McpRuleType, McpSubjectType};
+use crate::models::mcp_servers::McpAccessDefault;
 use crate::models::users::{UserRole, UserStatus};
 
 #[derive(OpenApi)]
@@ -78,6 +83,21 @@ use crate::models::users::{UserRole, UserStatus};
         admin_department::add_users_in_department,
         admin_department::remove_users_from_department,
         admin_department::get_users_from_department,
+        admin_roles::get_permissions,
+        admin_roles::list_roles,
+        admin_roles::create_role,
+        admin_roles::get_role_by_id,
+        admin_roles::update_role,
+        admin_roles::delete_role,
+        admin_roles::list_user_role_assignments,
+        admin_roles::assign_role_to_user,
+        admin_roles::remove_role_from_user,
+        admin_mcp::get_mcp_server_access,
+        admin_mcp::update_mcp_server_default,
+        admin_mcp::create_mcp_access_rule,
+        admin_mcp::delete_mcp_access_rule,
+        me::get_my_permissions,
+        me::get_my_administered_departments,
         admin_department_budgets::get_department_budget,
     ),
     components(
@@ -146,13 +166,32 @@ use crate::models::users::{UserRole, UserStatus};
             DepartmentTreeResponse,
             MoveDepartmentRequest,
             SubDepartmentBudgetDto,
-            DepartmentBudgetStatusDto
+            DepartmentBudgetStatusDto,
+            PermissionDto,
+            PermissionsResponse,
+            RoleDto,
+            RoleRequest,
+            RoleUpdateRequest,
+            RolesResponse,
+            UserRoleAssignmentDto,
+            UserRoleAssignmentRequest,
+            UserRoleAssignmentsResponse,
+            McpAccessRuleDto,
+            McpAccessRuleRequest,
+            McpAccessDefaultRequest,
+            McpServerAccessResponse,
+            AdministeredDepartmentsResponse,
+            EffectivePermissionsResponse,
+            McpAccessDefault,
+            McpSubjectType,
+            McpRuleType
         )
     ),
     tags(
         (name = "auth", description = "Authentication & user endpoints"),
         (name = "branding", description = "Branding configuration endpoints"),
         (name = "admin", description = "Admin endpoints"),
+        (name = "me", description = "Current user permissions"),
         (name = "root", description = "Root / health"),
     ),
     modifiers(

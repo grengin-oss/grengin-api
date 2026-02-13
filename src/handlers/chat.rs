@@ -4,8 +4,15 @@ use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, Iterable, PaginatorTrait as _, QueryFilter, QueryOrder, QuerySelect};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::AuthErrorResponse}, dto::{chat::{ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse, TokenUsage}, common::PaginationQuery, files::File}, error::{AppError, ErrorResponse}, models::{conversations::{self, ConversationWithCount}, messages::{self}}, state::SharedState};
+use crate::{auth::{claims::Claims, error::AuthErrorResponse}, dto::{chat::{ArchiveChatRequest, ConversationPaginatedResponse, ConversationResponse, MessageParts, MessageResponse, TokenUsage}, common::PaginationQuery, files::File}, error::{AppError, ErrorResponse}, models::{conversations::{self, ConversationWithCount}, messages::{self}}, state::SharedState};
 use num_traits::cast::ToPrimitive;
+
+fn resolve_web_search_enabled(metadata: Option<&serde_json::Value>) -> bool {
+    metadata
+        .and_then(|value| value.get("webSearch"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
 
 #[utoipa::path(
     get,
@@ -18,7 +25,7 @@ use num_traits::cast::ToPrimitive;
         ("search" = Option<String>, Query, description = "Search in conversation titles (case-insensitive)"),
     ),
     responses(
-        (status = 200, body = Vec<ConversationResponse>),
+        (status = 200, body = ConversationPaginatedResponse),
         (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
         (status = 503, content_type = "application/json", body = ErrorResponse, description = "Database timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
@@ -27,10 +34,31 @@ pub async fn get_chats(
   claims:Claims,
   Query(query):Query<PaginationQuery>,
   State(app_state): State<SharedState>
-) -> Result<(StatusCode,Json<Vec<ConversationResponse>>),AppError>{
+) -> Result<(StatusCode,Json<ConversationPaginatedResponse>),AppError>{
     let mut response = Vec::new();
     let limit = query.limit.unwrap_or(20).min(100); // Cap at 100
     let offset = query.offset.unwrap_or(0);
+    let search = query.search.clone();
+    let archived = query.archived.unwrap_or(false);
+
+    let mut count_query = conversations::Entity::find()
+        .filter(conversations::Column::UserId.eq(claims.user_id));
+    if let Some(title) = search.as_ref() {
+        count_query =
+            count_query.filter(conversations::Column::Title.into_expr().ilike(format!("%{}%", title)));
+    }
+    if archived {
+        count_query = count_query.filter(conversations::Column::ArchivedAt.is_not_null());
+    } else {
+        count_query = count_query.filter(conversations::Column::ArchivedAt.is_null());
+    }
+    let total = count_query
+        .count(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("conversation count query error -> {e}");
+            AppError::DbTimeout
+        })?;
 
     let mut select = conversations::Entity::find()
         .select_only()
@@ -39,10 +67,10 @@ pub async fn get_chats(
         .left_join(messages::Entity)
         .filter(conversations::Column::UserId.eq(claims.user_id));
 
-    if let Some(title) = query.search {
+    if let Some(title) = search.as_ref() {
         select = select.filter(conversations::Column::Title.into_expr().ilike(format!("%{}%",title)));
     }
-    if query.archived.unwrap_or(false){
+    if archived{
         select = select.filter(conversations::Column::ArchivedAt.is_not_null());
     }else{
         select = select.filter(conversations::Column::ArchivedAt.is_null());
@@ -72,9 +100,11 @@ pub async fn get_chats(
           eprintln!("conversation in count error {}",e);
           AppError::DbTimeout}
        )?;
+       let web_search_enabled = resolve_web_search_enabled(conversation_with_count.metadata.as_ref());
        let conversation_response = ConversationResponse{ 
             id: conversation_with_count.id,
             title: conversation_with_count.title,
+            web_search_enabled,
             archived: conversation_with_count.archived_at.is_some(),
             archived_at: conversation_with_count.archived_at,
             model:conversation_with_count.model_name,
@@ -88,7 +118,13 @@ pub async fn get_chats(
         };
         response.push(conversation_response);
      }
-  Ok((StatusCode::OK,Json(response)))
+    let payload = ConversationPaginatedResponse {
+        total,
+        limit,
+        offset,
+        conversations: response,
+    };
+  Ok((StatusCode::OK,Json(payload)))
 }
 
 #[utoipa::path(
@@ -131,9 +167,11 @@ pub async fn get_chat_by_id(
 
     let message_count = messages_models.len() as u64;
 
+    let web_search_enabled = resolve_web_search_enabled(conversation_model.metadata.as_ref());
     let mut conversation_response = ConversationResponse{
         id: conversation_model.id,
         title: conversation_model.title,
+        web_search_enabled,
         archived: conversation_model.archived_at.is_some(),
         archived_at: conversation_model.archived_at,
         model:conversation_model.model_name,
@@ -235,9 +273,11 @@ pub async fn update_chat_by_id(
        .map_err(|e|{
           eprintln!("{}",e);
           AppError::DbTimeout})?;
+    let web_search_enabled = resolve_web_search_enabled(conversation_model.metadata.as_ref());
     let response = ConversationResponse{
         id: conversation_model.id,
         title: conversation_model.title,
+        web_search_enabled,
         archived:req.archived,
         archived_at:Some(utc_now),
         model:conversation_model.model_name,

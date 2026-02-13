@@ -4,7 +4,7 @@ use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
 use std::collections::HashSet;
-use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}}, dto::{admin_ai::{AiEngineModelsResponse, AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel, AiModelCapabilities}, models::ModelsResponse}, handlers::models::load_providers_cached, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}, users::UserRole}, state::SharedState};
+use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}, permissions::PERMISSION_AI_PLATFORM_MANAGE}, dto::{admin_ai::{AiEngineModelsResponse, AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel, AiModelCapabilities}, models::ModelsResponse}, handlers::models::load_providers_cached, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}}, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
 
 async fn load_models_response(app_state: &SharedState) -> Result<ModelsResponse, AuthError> {
     let providers = load_providers_cached(&app_state.req_client)
@@ -30,10 +30,17 @@ pub async fn get_ai_engines(
     claims:Claims,
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode,Json<Vec<AiEngineResponse>>),AuthError>{
-    match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-    }
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            claims.role,
+            PERMISSION_AI_PLATFORM_MANAGE,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
     let ai_models = load_models_response(&app_state).await?;
     let selector = ai_engines::Entity::find();
     let mut ai_engines = selector
@@ -161,10 +168,17 @@ pub async fn get_ai_engines_by_key(
     Path(ai_engine_key):Path<String>,
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode,Json<AiEngineResponse>),AuthError>{
-   match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-   }
+   let authz = AuthorizationService::new(&app_state.database);
+   authz
+        .ensure_permission(
+            claims.user_id,
+            claims.role,
+            PERMISSION_AI_PLATFORM_MANAGE,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
    let ai_models = load_models_response(&app_state).await?;
    let model = ai_engines::Entity::find()
       .filter(ai_engines::Column::EngineKey.eq(ai_engine_key))
@@ -213,10 +227,17 @@ pub async fn get_ai_engine_models_by_key(
     Path(ai_engine_key):Path<String>,
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode,Json<AiEngineModelsResponse>),AuthError>{
-   match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-   }
+   let authz = AuthorizationService::new(&app_state.database);
+   authz
+        .ensure_permission(
+            claims.user_id,
+            claims.role,
+            PERMISSION_AI_PLATFORM_MANAGE,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
    let ai_engine = ai_engines::Entity::find()
       .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
       .order_by_desc(ai_engines::Column::CreatedAt)
@@ -273,10 +294,17 @@ pub async fn update_ai_engines_by_key(
     State(app_state): State<SharedState>,
     Json(req):Json<AiEngineUpdateRequest>
 ) -> Result<(StatusCode,Json<AiEngineResponse>),AuthError>{
-   match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-   }
+   let authz = AuthorizationService::new(&app_state.database);
+   authz
+        .ensure_permission(
+            claims.user_id,
+            claims.role,
+            PERMISSION_AI_PLATFORM_MANAGE,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
    let ai_models = load_models_response(&app_state).await?;
    let ai_engine = ai_engines::Entity::find()
       .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
@@ -384,10 +412,17 @@ pub async fn delete_ai_engines_api_key_key(
     Path(ai_engine_key):Path<String>,
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode,Json<AiEngineResponse>),AuthError>{
-   match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-   }
+   let authz = AuthorizationService::new(&app_state.database);
+   authz
+        .ensure_permission(
+            claims.user_id,
+            claims.role,
+            PERMISSION_AI_PLATFORM_MANAGE,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
    let ai_models = load_models_response(&app_state).await?;
    let ai_engine = ai_engines::Entity::find()
       .filter(ai_engines::Column::EngineKey.eq(ai_engine_key))
@@ -462,10 +497,17 @@ pub async fn validate_ai_engines_by_key(
     Path(ai_engine_key):Path<String>,
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode,Json<AiEngineValidationResponse>),AuthError>{
-   match claims.role {
-        UserRole::SuperAdmin | UserRole::Admin => {}
-        _ => return Err(AuthError::PermissionDenied),
-   }
+   let authz = AuthorizationService::new(&app_state.database);
+   authz
+        .ensure_permission(
+            claims.user_id,
+            claims.role,
+            PERMISSION_AI_PLATFORM_MANAGE,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
    let api_key_status =  match ai_engine_key.as_ref() {
        "openai" => {
          let openai_settings = &app_state

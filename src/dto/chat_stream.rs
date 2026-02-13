@@ -13,7 +13,9 @@ pub enum ChatStreamEvents{
   Event,
   ToolCall,
   ToolResult,
-  Done
+  Done,
+  #[serde(rename = "budget_warning")]
+  DepartmentBudgetWarning,
 }
 
 impl ChatStreamEvents {
@@ -103,7 +105,7 @@ pub enum ChatToolKind {
    Other,
 }
 
-#[derive(Serialize, ToSchema, IntoParams)]
+#[derive(Clone,Serialize, ToSchema, IntoParams)]
 pub struct ChatStreamWebSearchAction {
    #[serde(skip_serializing_if = "Option::is_none")]
    pub query:Option<String>,

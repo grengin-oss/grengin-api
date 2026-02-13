@@ -1,12 +1,21 @@
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use crate::dto::llm::anthropic::{AnthropicStreamEvent, AnthropicDelta, AnthropicContentBlockResponse};
-use super::{StreamParser, StreamParseResult, StreamWebSearchResult};
+use super::{parse_web_search_action, StreamParser, StreamParseResult, StreamWebSearchAction, StreamWebSearchResult};
 
 /// Anthropic stream parser
-pub struct AnthropicStreamParser;
+pub struct AnthropicStreamParser {
+    tool_calls: Mutex<HashMap<u32, (String, Option<String>)>>,
+    tool_input_buffers: Mutex<HashMap<u32, String>>,
+}
 
 impl AnthropicStreamParser {
     pub fn new() -> Self {
-        Self
+        Self {
+            tool_calls: Mutex::new(HashMap::new()),
+            tool_input_buffers: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -90,20 +99,42 @@ impl StreamParser for AnthropicStreamParser {
                 },
 
                 AnthropicStreamEvent::ContentBlockStart { index, content_block } => match content_block {
-                    AnthropicContentBlockResponse::ToolUse { id, name, input } => StreamParseResult::ToolCall {
-                        tool_name: name,
-                        tool_id: Some(id),
-                        input: Some(input),
-                        index: Some(index),
-                        raw: None,
-                    },
-                    AnthropicContentBlockResponse::ServerToolUse { id, name, input } => StreamParseResult::ToolCall {
-                        tool_name: name,
-                        tool_id: Some(id),
-                        input: Some(input),
-                        index: Some(index),
-                        raw: None,
-                    },
+                    AnthropicContentBlockResponse::ToolUse { id, name, input } => {
+                        if let Ok(mut calls) = self.tool_calls.lock() {
+                            calls.insert(index, (name.clone(), Some(id.clone())));
+                        }
+                        let web_search = if name.contains("web_search") {
+                            parse_web_search_action(&input)
+                        } else {
+                            None
+                        };
+                        StreamParseResult::ToolCall {
+                            tool_name: name,
+                            tool_id: Some(id),
+                            input: Some(input),
+                            index: Some(index),
+                            raw: None,
+                            web_search,
+                        }
+                    }
+                    AnthropicContentBlockResponse::ServerToolUse { id, name, input } => {
+                        if let Ok(mut calls) = self.tool_calls.lock() {
+                            calls.insert(index, (name.clone(), Some(id.clone())));
+                        }
+                        let web_search = if name.contains("web_search") {
+                            parse_web_search_action(&input)
+                        } else {
+                            None
+                        };
+                        StreamParseResult::ToolCall {
+                            tool_name: name,
+                            tool_id: Some(id),
+                            input: Some(input),
+                            index: Some(index),
+                            raw: None,
+                            web_search,
+                        }
+                    }
                     AnthropicContentBlockResponse::WebSearchToolResult { tool_use_id, content } => {
                         let results = content
                             .into_iter()
@@ -130,9 +161,39 @@ impl StreamParser for AnthropicStreamParser {
                         request_id: None,
                     },
                     AnthropicDelta::InputJsonDelta { partial_json } => {
-                        StreamParseResult::ToolInput { partial_json, index: Some(index) }
+                        let (tool_name, tool_id) = self
+                            .tool_calls
+                            .lock()
+                            .ok()
+                            .and_then(|calls| calls.get(&index).cloned())
+                            .unwrap_or((String::new(), None));
+
+                        let mut web_search: Option<StreamWebSearchAction> = None;
+                        if !tool_name.is_empty() && tool_name.contains("web_search") {
+                            if let Ok(mut buffers) = self.tool_input_buffers.lock() {
+                                let buffer = buffers.entry(index).or_default();
+                                buffer.push_str(&partial_json);
+                                if let Ok(value) = serde_json::from_str::<serde_json::Value>(buffer) {
+                                    web_search = parse_web_search_action(&value);
+                                }
+                            }
+                        }
+
+                        StreamParseResult::ToolInput {
+                            partial_json,
+                            index: Some(index),
+                            tool_name: if tool_name.is_empty() { None } else { Some(tool_name) },
+                            tool_id,
+                            web_search,
+                        }
                     }
                 },
+                AnthropicStreamEvent::ContentBlockStop { index } => {
+                    if let Ok(mut buffers) = self.tool_input_buffers.lock() {
+                        buffers.remove(&index);
+                    }
+                    StreamParseResult::None
+                }
 
                 AnthropicStreamEvent::Error { error } => StreamParseResult::Error {
                     error_type: error.error_type,
@@ -140,7 +201,6 @@ impl StreamParser for AnthropicStreamParser {
                 },
 
                 AnthropicStreamEvent::MessageStop
-                | AnthropicStreamEvent::ContentBlockStop { .. }
                 | AnthropicStreamEvent::MessageDelta { .. }
                 | AnthropicStreamEvent::Ping => StreamParseResult::None,
             },

@@ -56,6 +56,7 @@ pub async fn handle_refresh_token(
         password_changed_at: None,
         created_at: user.created_at,
         updated_at: user.updated_at,
+        effective_permissions: user.effective_permissions,
     };
     let resp = AuthTokenResponse {
         access_token:access_token_claims.get_token_string(),
