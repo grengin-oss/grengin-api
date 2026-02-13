@@ -593,7 +593,7 @@ pub async fn handle_chat_stream(
         total_tokens: Set(total_tokens),
         latency: Set(latency),
         cost: Set(Decimal::from(0)),
-        metadata: Set(None),
+        metadata: Set(Some(json!({"webSearch":req.web_search}))),
       };
      new_llm_message
           .clone()
@@ -978,7 +978,7 @@ pub async fn handle_chat_stream(
             Err(e) => {
                 match e {
                   reqwest_eventsource::Error::StreamEnded => {
-                      if total_tokens == 0 {
+                    if total_tokens == 0 {
                         total_tokens = request_tokens + response_tokens;
                       }
                       let message_cost = calculate_cost_decimal(
@@ -993,6 +993,8 @@ pub async fn handle_chat_stream(
                     new_llm_message.response_tokens = Set(response_tokens);
                     new_llm_message.total_tokens = Set(total_tokens);
                     new_llm_message.cost = Set(message_cost);
+                    new_llm_message.tools_calls = Set(tool_calls.clone());
+                    new_llm_message.tools_results = Set(tool_results.clone());
                     new_llm_message.updated_at = Set(Utc::now());
                     new_llm_message
                       .clone()

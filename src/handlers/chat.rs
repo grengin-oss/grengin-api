@@ -7,6 +7,13 @@ use uuid::Uuid;
 use crate::{auth::{claims::Claims, error::AuthErrorResponse}, dto::{chat::{ArchiveChatRequest, ConversationPaginatedResponse, ConversationResponse, MessageParts, MessageResponse, TokenUsage}, common::PaginationQuery, files::File}, error::{AppError, ErrorResponse}, models::{conversations::{self, ConversationWithCount}, messages::{self}}, state::SharedState};
 use num_traits::cast::ToPrimitive;
 
+fn resolve_web_search_enabled(metadata: Option<&serde_json::Value>) -> bool {
+    metadata
+        .and_then(|value| value.get("webSearch"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
 #[utoipa::path(
     get,
     path = "/chat",
@@ -93,9 +100,11 @@ pub async fn get_chats(
           eprintln!("conversation in count error {}",e);
           AppError::DbTimeout}
        )?;
+       let web_search_enabled = resolve_web_search_enabled(conversation_with_count.metadata.as_ref());
        let conversation_response = ConversationResponse{ 
             id: conversation_with_count.id,
             title: conversation_with_count.title,
+            web_search_enabled,
             archived: conversation_with_count.archived_at.is_some(),
             archived_at: conversation_with_count.archived_at,
             model:conversation_with_count.model_name,
@@ -158,9 +167,11 @@ pub async fn get_chat_by_id(
 
     let message_count = messages_models.len() as u64;
 
+    let web_search_enabled = resolve_web_search_enabled(conversation_model.metadata.as_ref());
     let mut conversation_response = ConversationResponse{
         id: conversation_model.id,
         title: conversation_model.title,
+        web_search_enabled,
         archived: conversation_model.archived_at.is_some(),
         archived_at: conversation_model.archived_at,
         model:conversation_model.model_name,
@@ -262,9 +273,11 @@ pub async fn update_chat_by_id(
        .map_err(|e|{
           eprintln!("{}",e);
           AppError::DbTimeout})?;
+    let web_search_enabled = resolve_web_search_enabled(conversation_model.metadata.as_ref());
     let response = ConversationResponse{
         id: conversation_model.id,
         title: conversation_model.title,
+        web_search_enabled,
         archived:req.archived,
         archived_at:Some(utc_now),
         model:conversation_model.model_name,
