@@ -25,7 +25,18 @@ pub fn get_title_generation_model(provider:&str) -> Option<&str>{
 
 #[async_trait]
 pub trait OpenaiApis {
-    async fn openai_chat_stream(&self,openai_settings:&OpenaiSettings,model_name:String,temperature:Option<f32>,mut prompts:Vec<Prompt>,user_id:&Uuid,web_search:bool) -> Result<EventSource,Error>;
+    async fn openai_chat_stream(
+        &self,
+        openai_settings: &OpenaiSettings,
+        model_name: String,
+        temperature: Option<f32>,
+        prompts: Vec<Prompt>,
+        user_id: &Uuid,
+        tools: Option<Vec<crate::dto::llm::openai::OpenaiTool>>,
+        tool_choice: Option<crate::dto::llm::openai::OpenaiToolChoice>,
+        previous_response_id: Option<String>,
+        input: Option<Vec<crate::dto::llm::openai::OpenaiInputItem>>,
+    ) -> Result<EventSource,Error>;
     async fn openai_chat_stream_text(&self,openai_settings:&OpenaiSettings,model_name:String,temperature:Option<f32>,prompt:Vec<String>) -> Result<EventSource,Error>;
     async fn openai_upload_file(&self,openai_settings:&OpenaiSettings,attachment:&Attachment) -> Result<String,Error>;
     async fn openai_get_title(&self,openai_settings:&OpenaiSettings,prompt:String) -> Result<PromptTitleResponse,Error>;

@@ -28,6 +28,7 @@ mod m20260210_000001_update_permissions_ai_platform_sso;
 mod m20260216_000001_mcp_revamp;
 mod m20260217_000001_mcp_credentials;
 mod m20260217_000002_mcp_url_rename;
+mod m20260218_000001_fix_mcp_schema;
 
 pub struct Migrator;
 
@@ -63,6 +64,7 @@ impl MigratorTrait for Migrator {
           Box::new(m20260216_000001_mcp_revamp::Migration),
           Box::new(m20260217_000001_mcp_credentials::Migration),
           Box::new(m20260217_000002_mcp_url_rename::Migration),
+          Box::new(m20260218_000001_fix_mcp_schema::Migration),
          ]
     }
 }

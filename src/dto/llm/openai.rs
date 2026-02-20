@@ -13,7 +13,7 @@ pub struct OpenaiChatRequest {
     pub model: String,
 
     // Responses API accepts string or array; you're using the array form.
-    pub input: Vec<OpenaiMessage>,
+    pub input: Vec<OpenaiInputItem>,
 
     #[serde(default)]
     pub stream: bool,
@@ -32,6 +32,10 @@ pub struct OpenaiChatRequest {
     // NEW: request extra output fields (e.g., sources from web search)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include: Option<Vec<String>>,
+
+    // Optional: continue from a previous response when sending tool outputs
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_response_id: Option<String>,
 }
 
 // Chat Completions request (/v1/chat/completions)
@@ -75,10 +79,24 @@ pub enum OpenaiTool {
         filters: Option<OpenaiWebSearchFilters>,
     },
 
+    #[serde(rename = "function")]
+    Function {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(rename = "parameters")]
+        parameters: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        strict: Option<bool>,
+    },
+
     // Forward compatibility
     #[serde(other)]
     Other,
 }
+
+// NOTE: Responses API function tools use top-level name/parameters fields,
+// not a nested "function" object.
 
 impl OpenaiTool {
     pub fn web_search() -> Self {
@@ -103,6 +121,21 @@ pub struct OpenaiWebSearchFilters {
     pub allowed_domains: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OpenaiInputItem {
+    Message(OpenaiMessage),
+    FunctionCallOutput(OpenaiFunctionCallOutput),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenaiFunctionCallOutput {
+    #[serde(rename = "type")]
+    pub item_type: String,
+    pub call_id: String,
+    pub output: String,
+}
+
 // tool_choice can be "auto" | "none" | { "type": "web_search" } etc.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -115,6 +148,8 @@ pub enum OpenaiToolChoice {
 pub struct OpenaiToolChoiceObject {
     #[serde(rename = "type")]
     pub tool_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 //
@@ -321,7 +356,7 @@ pub struct OpenaiMessageDelta {
 // ---------------------------
 //
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OpenaiContentType {
     #[serde(rename = "input_text")]
@@ -335,7 +370,7 @@ pub enum OpenaiContentType {
     InputImage,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenaiMessage {
     pub role: ChatRole,
     pub content: Vec<OpenaiContent>,
@@ -414,7 +449,7 @@ impl OpenaiMessage {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenaiContent {
     #[serde(rename = "type")]
     pub content_type: OpenaiContentType,

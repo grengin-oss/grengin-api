@@ -1,5 +1,15 @@
 pub mod openai;
 pub mod anthropic;
+pub mod tool;
+
+pub use tool::{
+    tool_name_is_web_search,
+    ToolCall,
+    ToolInput,
+    ToolInputDelta,
+    ToolKind,
+    ToolResult,
+};
 
 /// Result of parsing a streaming event
 #[derive(Debug, Clone)]
@@ -18,13 +28,7 @@ pub enum StreamParseResult {
         request_id: Option<String>,
     },
 
-    ToolInput {
-        partial_json: String,
-        index: Option<u32>,
-        tool_name: Option<String>,
-        tool_id: Option<String>,
-        web_search: Option<StreamWebSearchAction>,
-    },
+    ToolInput(ToolInputDelta),
 
     EventLog {
         event_type: String,
@@ -32,14 +36,7 @@ pub enum StreamParseResult {
         data: Option<serde_json::Value>,
     },
 
-    ToolCall {
-        tool_name: String,
-        tool_id: Option<String>,
-        input: Option<serde_json::Value>,
-        index: Option<u32>,
-        raw: Option<serde_json::Value>,
-        web_search: Option<StreamWebSearchAction>,
-    },
+    ToolCall(ToolCall),
 
     WebSearchAction {
         tool_name: String,
@@ -54,13 +51,7 @@ pub enum StreamParseResult {
         results: Vec<StreamWebSearchResult>,
     },
 
-    ToolResult {
-        tool_name: Option<String>,
-        tool_id: Option<String>,
-        output: Option<serde_json::Value>,
-        index: Option<u32>,
-        raw: Option<serde_json::Value>,
-    },
+    ToolResult(ToolResult),
 
     // NEW: token usage updates mid/final stream
     TokenUsage {
@@ -74,6 +65,47 @@ pub enum StreamParseResult {
         error_type: String,
         message: String,
     },
+}
+
+pub(crate) fn build_tool_call(
+    tool_name: String,
+    tool_id: Option<String>,
+    input: Option<ToolInput>,
+    index: Option<u32>,
+    raw: Option<serde_json::Value>,
+) -> ToolCall {
+    let web_search = if tool_name_is_web_search(&tool_name) {
+        input
+            .as_ref()
+            .and_then(|value| value.as_json())
+            .and_then(parse_web_search_action)
+    } else {
+        None
+    };
+    ToolCall {
+        tool_name,
+        tool_id,
+        input,
+        index,
+        raw,
+        web_search,
+    }
+}
+
+pub(crate) fn build_tool_input_delta(
+    partial_json: String,
+    index: Option<u32>,
+    tool_name: Option<String>,
+    tool_id: Option<String>,
+    web_search: Option<StreamWebSearchAction>,
+) -> ToolInputDelta {
+    ToolInputDelta {
+        partial_json,
+        index,
+        tool_name,
+        tool_id,
+        web_search,
+    }
 }
 
 #[derive(Debug, Clone)]

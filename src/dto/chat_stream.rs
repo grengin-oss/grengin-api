@@ -75,6 +75,8 @@ pub struct ChatStreamToolCall {
    #[serde(skip_serializing_if = "Option::is_none")]
    pub input_text:Option<String>,
    #[serde(skip_serializing_if = "Option::is_none")]
+   pub input:Option<ChatStreamToolInput>,
+   #[serde(skip_serializing_if = "Option::is_none")]
    pub kind:Option<ChatToolKind>,
    #[serde(skip_serializing_if = "Option::is_none")]
    pub web_search:Option<ChatStreamWebSearchAction>,
@@ -103,6 +105,16 @@ pub struct ChatStreamPayload {
 pub enum ChatToolKind {
    WebSearch,
    Other,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(tag = "type", rename_all="snake_case")]
+pub enum ChatStreamToolInput {
+   Text { text: String },
+   Json {
+      #[schema(value_type = Object)]
+      value: serde_json::Value,
+   },
 }
 
 #[derive(Clone,Serialize, ToSchema, IntoParams)]
@@ -142,6 +154,7 @@ pub struct ChatInitRequest{
   #[serde(default)]
   pub web_search: bool,
   pub selected_tools: Option<Vec<String>>,
+  pub selected_mcp_servers: Option<Vec<Uuid>>,
   pub conversation_id: Option<Uuid>,
   pub messages: Vec<MessageRequest>,
   pub temperature:Option<f32>,

@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     error::AppError,
-    auth::{claims::Claims, encryption::encrypt_key},
+    auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}},
     dto::mcp::{
         BulkToolAccessUpdate, BulkToolAccessUpdateResponse, McpAccessRule,
         McpAuthorizeResponse, McpServer, McpServerAccessList, McpServerAccessUpdate,
@@ -30,6 +30,28 @@ use crate::{
     },
     state::SharedState,
 };
+
+fn encrypt_db_url_in_config(
+    app_key: &[u8; 32],
+    connection_config: &mut serde_json::Value,
+) -> Result<(), AppError> {
+    let Some(obj) = connection_config.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(db_url_value) = obj.get("db_url").cloned() else {
+        return Ok(());
+    };
+    let Some(db_url) = db_url_value.as_str() else {
+        return Ok(());
+    };
+    if decrypt_key(app_key, db_url).is_ok() {
+        return Ok(());
+    }
+    let encrypted = encrypt_key(app_key, db_url.as_bytes())
+        .map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
+    obj.insert("db_url".to_string(), serde_json::Value::String(encrypted));
+    Ok(())
+}
 
 #[derive(Deserialize)]
 pub struct ListServersQuery {
@@ -63,7 +85,10 @@ pub async fn list_mcp_servers(
     let servers = finder
         .all(&state.database)
         .await
-        .map_err(|_| AppError::DbUnavailable)?;
+        .map_err(|e|{
+            eprintln!("Db get error {}",e);
+            AppError::DbTimeout
+        })?;
     let dtos: Vec<_> = servers.into_iter().map(to_server_dto).collect();
     let total = dtos.len() as i64;
     Ok(Json(PaginatedMcpServers {
@@ -87,6 +112,8 @@ pub async fn create_mcp_server(
     Json(req): Json<McpServerCreate>,
 ) -> Result<(StatusCode, Json<McpServer>), AppError> {
     let now = Utc::now();
+    let mut connection_config = req.connection_config;
+    encrypt_db_url_in_config(&state.settings.auth.app_key, &mut connection_config)?;
     let client_secret = match req.client_secret {
         Some(ref secret) if !secret.is_empty() => Some(
             encrypt_key(&state.settings.auth.app_key, secret.as_bytes())
@@ -99,7 +126,7 @@ pub async fn create_mcp_server(
         name: Set(req.name),
         description: Set(req.description),
         transport_type: Set(req.transport_type),
-        connection_config: Set(req.connection_config),
+        connection_config: Set(connection_config),
         client_id: Set(req.client_id),
         client_secret: Set(client_secret),
         url: Set(req.url),
@@ -117,7 +144,10 @@ pub async fn create_mcp_server(
     let saved = model
         .insert(&state.database)
         .await
-        .map_err(|_| AppError::DbUnavailable)?;
+        .map_err(|e|{
+            eprintln!("Db create error {}",e);
+            AppError::DbTimeout
+        })?;
     state.upsert_mcp_client(&saved).await;
     Ok((StatusCode::CREATED, Json(to_server_dto(saved))))
 }
@@ -141,7 +171,10 @@ pub async fn get_mcp_server(
     let server = mcp_servers::Entity::find_by_id(server_id)
         .one(&state.database)
         .await
-        .map_err(|_| AppError::DbUnavailable)?
+        .map_err(|e|{
+            eprintln!("Db get one error {}",e);
+            AppError::DbTimeout
+         })?
         .ok_or(AppError::McpServerNotFound)?;
     Ok(Json(to_server_dto(server)))
 }
@@ -177,6 +210,8 @@ pub async fn update_mcp_server(
         active.description = Set(Some(desc));
     }
     if let Some(cfg) = req.connection_config {
+        let mut cfg = cfg;
+        encrypt_db_url_in_config(&state.settings.auth.app_key, &mut cfg)?;
         active.connection_config = Set(cfg);
     }
     if let Some(client_id) = req.client_id {
@@ -206,7 +241,10 @@ pub async fn update_mcp_server(
     let saved = active
         .update(&state.database)
         .await
-        .map_err(|_| AppError::DbUnavailable)?;
+        .map_err(|e|{
+            eprintln!("Db get error {}",e);
+            AppError::DbTimeout
+        })?;
     state.upsert_mcp_client(&saved).await;
     Ok(Json(to_server_dto(saved)))
 }
@@ -230,7 +268,10 @@ pub async fn delete_mcp_server(
     mcp_servers::Entity::delete_by_id(server_id)
         .exec(&state.database)
         .await
-        .map_err(|_| AppError::DbUnavailable)?;
+        .map_err(|e|{
+            eprintln!("Db get error {}",e);
+            AppError::DbTimeout
+        })?;
     state.remove_mcp_client(&server_id).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -332,11 +373,17 @@ pub async fn list_mcp_server_executions(
     let total = paginator
         .num_items()
         .await
-        .map_err(|_| AppError::DbUnavailable)?;
+                    .map_err(|e|{
+              eprintln!("Db get error {}",e);
+              AppError::DbTimeout
+           })?;
     let data = paginator
         .fetch_page(offset / limit)
         .await
-        .map_err(|_| AppError::DbUnavailable)?;
+                    .map_err(|e|{
+              eprintln!("Db get error {}",e);
+              AppError::DbTimeout
+           })?;
     let executions = data.into_iter().map(to_execution_dto).collect();
     Ok(Json(PaginatedMcpToolExecutions {
         executions,
@@ -360,7 +407,10 @@ pub async fn get_mcp_server_access(
         .filter(mcp_access_policies::Column::ServerId.eq(server_id))
         .all(&state.database)
         .await
-        .map_err(|_| AppError::DbUnavailable)?;
+        .map_err(|e|{
+            eprintln!("Db get error {}",e);
+            AppError::DbTimeout
+        })?;
     Ok(Json(McpServerAccessList {
         server_id,
         server_name: server.name,
@@ -378,11 +428,19 @@ pub async fn update_mcp_server_access(
         if let Some(server) = mcp_servers::Entity::find_by_id(server_id)
             .one(&state.database)
             .await
-            .map_err(|_| AppError::DbUnavailable)?
+            .map_err(|e|{
+              eprintln!("Db get error {}",e);
+              AppError::DbTimeout
+           })?
         {
             let mut active: mcp_servers::ActiveModel = server.into();
             active.default_access = Set(default_access);
-            let _ = active.update(&state.database).await.map_err(|_| AppError::DbUnavailable)?;
+            let _ = active.update(&state.database)
+              .await
+              .map_err(|e|{
+                 eprintln!("Db get error {}",e);
+                AppError::DbTimeout
+            })?;
         }
     }
 
@@ -391,7 +449,10 @@ pub async fn update_mcp_server_access(
         .filter(mcp_access_policies::Column::ServerId.eq(server_id))
         .exec(&state.database)
         .await
-        .map_err(|_| AppError::DbUnavailable)?;
+        .map_err(|e|{
+            eprintln!("Db get error {}",e);
+            AppError::DbTimeout
+        })?;
 
     if let Some(rules) = req.rules {
         for r in rules {
@@ -412,7 +473,10 @@ pub async fn update_mcp_server_access(
             model
                 .insert(&state.database)
                 .await
-                .map_err(|_| AppError::McpAccessUpdateFailed)?;
+                .map_err(|e|{
+                   eprintln!("Db get error {}",e);
+                   AppError::DbTimeout
+        })?;
         }
     }
 
@@ -427,7 +491,10 @@ pub async fn get_mcp_server_tools_access(
         .filter(mcp_tools::Column::ServerId.eq(server_id))
         .all(&state.database)
         .await
-        .map_err(|_| AppError::DbUnavailable)?;
+        .map_err(|e|{
+            eprintln!("Db get error {}",e);
+            AppError::DbTimeout
+        })?;
     let mut result = Vec::new();
     for tool in tools {
         let rules = mcp_access_policies::Entity::find()
@@ -435,7 +502,10 @@ pub async fn get_mcp_server_tools_access(
             .filter(mcp_access_policies::Column::ToolId.eq(tool.id))
             .all(&state.database)
             .await
-            .map_err(|_| AppError::DbUnavailable)?;
+            .map_err(|e|{
+               eprintln!("Db get error {}",e);
+               AppError::DbTimeout
+        })?;
         result.push(McpToolAccessList {
             tool_id: tool.id,
             tool_name: tool.name.clone(),
@@ -471,7 +541,10 @@ pub async fn update_mcp_server_tools_access(
                 .filter(mcp_access_policies::Column::ToolId.eq(item.tool_id))
                 .exec(&state.database)
                 .await
-                .map_err(|_| AppError::DbUnavailable)?;
+                .map_err(|e|{
+                   eprintln!("Db get error {}",e);
+                   AppError::DbTimeout
+           })?;
             if let Some(rules) = item.rules {
                 for r in rules {
                     let model = mcp_access_policies::ActiveModel {
@@ -532,7 +605,10 @@ pub async fn get_mcp_tool_access(
         .filter(mcp_access_policies::Column::ToolId.eq(tool_id))
         .all(&state.database)
         .await
-        .map_err(|_| AppError::DbUnavailable)?;
+        .map_err(|e|{
+              eprintln!("Db get error {}",e);
+              AppError::DbTimeout
+           })?;
     Ok(Json(McpToolAccessList {
         tool_id,
         tool_name: tool.name,
@@ -564,7 +640,10 @@ pub async fn update_mcp_tool_access(
         .filter(mcp_access_policies::Column::ToolId.eq(tool_id))
         .exec(&state.database)
         .await
-        .map_err(|_| AppError::DbUnavailable)?;
+        .map_err(|e|{
+              eprintln!("Db delete error {}",e);
+              AppError::DbTimeout
+           })?;
     if let Some(rules) = req.rules {
         for r in rules {
             let model = mcp_access_policies::ActiveModel {
@@ -615,7 +694,10 @@ pub async fn list_mcp_tools(
     let tools = finder
         .all(&state.database)
         .await
-        .map_err(|_| AppError::DbUnavailable)?;
+        .map_err(|e|{
+              eprintln!("Db get all error {}",e);
+              AppError::DbTimeout
+           })?;
     let dto_tools: Vec<McpTool> = tools.iter().map(to_tool_dto).collect();
     Ok(Json(McpToolsList {
         tools: dto_tools,
@@ -631,7 +713,10 @@ pub async fn list_mcp_connections(
         .filter(mcp_connections::Column::UserId.eq(claims.user_id))
         .all(&state.database)
         .await
-        .map_err(|_| AppError::DbUnavailable)?;
+        .map_err(|e|{
+              eprintln!("Db get all error {}",e);
+              AppError::DbTimeout
+           })?;
     let connections = rows
         .into_iter()
         .map(|c| McpUserConnection {
@@ -762,7 +847,10 @@ async fn upsert_connection(
         active
             .update(&state.database)
             .await
-            .map_err(|_| AppError::DbUnavailable)?;
+            .map_err(|e|{
+              eprintln!("Db update error {}",e);
+              AppError::DbTimeout
+           })?;
     } else {
         let model = mcp_connections::ActiveModel {
             id: Set(Uuid::new_v4()),
@@ -782,7 +870,10 @@ async fn upsert_connection(
         model
             .insert(&state.database)
             .await
-            .map_err(|_| AppError::DbUnavailable)?;
+            .map_err(|e|{
+              eprintln!("Db create error {}",e);
+              AppError::DbTimeout
+           })?;
     }
     Ok(())
 }

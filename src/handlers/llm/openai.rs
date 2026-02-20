@@ -1,13 +1,36 @@
-use crate::dto::llm::openai::{OpenaiResponseStreamEvent, OpenaiChatCompletionChunk};
-use super::{parse_web_search_action, StreamParser, StreamParseResult, StreamWebSearchResult};
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use crate::dto::llm::openai::{OpenaiChatCompletionChunk, OpenaiResponseStreamEvent};
+use super::{
+    build_tool_call,
+    build_tool_input_delta,
+    parse_web_search_action,
+    tool_name_is_web_search,
+    StreamParseResult,
+    StreamParser,
+    StreamWebSearchResult,
+    ToolInput,
+    ToolResult,
+};
 use serde_json::Value;
 
+#[derive(Debug, Clone)]
+struct OpenaiToolCallMeta {
+    name: String,
+    call_id: Option<String>,
+}
+
 /// OpenAI stream parser
-pub struct OpenaiStreamParser;
+pub struct OpenaiStreamParser {
+    tool_calls: Mutex<HashMap<String, OpenaiToolCallMeta>>, // item_id -> meta
+}
 
 impl OpenaiStreamParser {
     pub fn new() -> Self {
-        Self
+        Self {
+            tool_calls: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -19,8 +42,80 @@ impl Default for OpenaiStreamParser {
 
 impl StreamParser for OpenaiStreamParser {
     fn parse_event(&self, data: &str) -> StreamParseResult {
+        if let Ok(v) = serde_json::from_str::<Value>(data) {
+            if let Some(event_type) = v.get("type").and_then(|t| t.as_str()) {
+                match event_type {
+                    "response.output_item.added" => {
+                        if let Some(item) = v.get("item") {
+                            let item_type = item.get("type").and_then(|t| t.as_str());
+                            if item_type == Some("function_call") {
+                                let item_id = item.get("id").and_then(|id| id.as_str());
+                                let name = item
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("tool_call")
+                                    .to_string();
+                                let call_id = item
+                                    .get("call_id")
+                                    .and_then(|id| id.as_str())
+                                    .map(|s| s.to_string());
+                                if let Some(item_id) = item_id {
+                                    if let Ok(mut calls) = self.tool_calls.lock() {
+                                        calls.insert(
+                                            item_id.to_string(),
+                                            OpenaiToolCallMeta { name, call_id },
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        return StreamParseResult::None;
+                    }
+                    "response.function_call_arguments.delta" => {
+                        let item_id = v.get("item_id").and_then(|id| id.as_str());
+                        let delta = v.get("delta").and_then(|d| d.as_str()).unwrap_or("");
+                        if let Some(item_id) = item_id {
+                            let (tool_name, tool_id) = self
+                                .tool_calls
+                                .lock()
+                                .ok()
+                                .and_then(|calls| calls.get(item_id).cloned())
+                                .map(|meta| (meta.name, meta.call_id))
+                                .unwrap_or((String::new(), None));
+                            let delta = build_tool_input_delta(
+                                delta.to_string(),
+                                None,
+                                if tool_name.is_empty() { None } else { Some(tool_name) },
+                                tool_id,
+                                None,
+                            );
+                            return StreamParseResult::ToolInput(delta);
+                        }
+                    }
+                    "response.function_call_arguments.done" => {
+                        let item_id = v.get("item_id").and_then(|id| id.as_str());
+                        let arguments = v.get("arguments").cloned();
+                        if let (Some(item_id), Some(arguments)) = (item_id, arguments) {
+                            let (tool_name, tool_id) = self
+                                .tool_calls
+                                .lock()
+                                .ok()
+                                .and_then(|calls| calls.get(item_id).cloned())
+                                .map(|meta| (meta.name, meta.call_id))
+                                .unwrap_or((String::new(), None));
+                            if !tool_name.is_empty() {
+                                let input = parse_tool_input(arguments);
+                                let call = build_tool_call(tool_name, tool_id, input, None, Some(v.clone()));
+                                return StreamParseResult::ToolCall(call);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         // 1) Prefer typed Responses-API events (response.output_text.delta etc.)
-        
         if let Ok(stream_event) = serde_json::from_str::<OpenaiResponseStreamEvent>(data) {
             match stream_event {
                 OpenaiResponseStreamEvent::OutputTextDelta(delta) => {
@@ -33,6 +128,11 @@ impl StreamParser for OpenaiStreamParser {
                 // If your DTO includes ResponseCompleted with usage, emit usage here.
                 // If not, we still handle it via the raw JSON fallback below.
                 OpenaiResponseStreamEvent::ResponseCompleted(ev) => {
+                    if let Ok(v) = serde_json::from_str::<Value>(data) {
+                        if let Some(event) = extract_openai_tool_event(&v) {
+                            return event;
+                        }
+                    }
                     if let Some(usage) = ev.response.usage.clone() {
                         return StreamParseResult::TokenUsage {
                             request_id: Some(ev.response.id),
@@ -154,19 +254,31 @@ fn extract_openai_tool_event(v: &Value) -> Option<StreamParseResult> {
 
     if is_toolish {
         if let Some(delta) = v.get("delta").and_then(|d| d.as_str()) {
-            let tool_name = v.get("name")
+            let tool_name = v
+                .get("name")
                 .and_then(|n| n.as_str())
                 .unwrap_or("tool_call")
                 .to_string();
-            let web_search = None;
-            return Some(StreamParseResult::ToolCall {
-                tool_name,
-                tool_id: v.get("id").and_then(|id| id.as_str()).map(|s| s.to_string()),
-                input: Some(Value::String(delta.to_string())),
-                index: None,
-                raw: Some(v.clone()),
+            let tool_id = v
+                .get("call_id")
+                .or_else(|| v.get("id"))
+                .and_then(|id| id.as_str())
+                .map(|s| s.to_string());
+            let web_search = if tool_name_is_web_search(&tool_name) {
+                serde_json::from_str::<Value>(delta)
+                    .ok()
+                    .and_then(|value| parse_web_search_action(&value))
+            } else {
+                None
+            };
+            let delta = build_tool_input_delta(
+                delta.to_string(),
+                None,
+                Some(tool_name),
+                tool_id,
                 web_search,
-            });
+            );
+            return Some(StreamParseResult::ToolInput(delta));
         }
     }
 
@@ -194,11 +306,17 @@ fn parse_openai_tool_item(
         .or_else(|| if item_type.is_empty() { None } else { Some(item_type) })
         .unwrap_or("tool_call")
         .to_string();
-    let tool_id = item.get("id").and_then(|id| id.as_str()).map(|s| s.to_string());
-    let input = item.get("input")
+    let tool_id = item
+        .get("call_id")
+        .or_else(|| item.get("id"))
+        .and_then(|id| id.as_str())
+        .map(|s| s.to_string());
+    let input = item
+        .get("input")
         .cloned()
         .or_else(|| item.get("arguments").cloned())
-        .or_else(|| item.get("call").cloned());
+        .or_else(|| item.get("call").cloned())
+        .and_then(parse_tool_input);
     let output = item.get("output")
         .cloned()
         .or_else(|| item.get("result").cloned())
@@ -210,16 +328,20 @@ fn parse_openai_tool_item(
     let status = item.get("status").and_then(|s| s.as_str());
 
     if output.is_some() {
-        return Some(StreamParseResult::ToolResult {
+        return Some(StreamParseResult::ToolResult(ToolResult {
             tool_name: Some(tool_name),
             tool_id,
             output,
             index: None,
             raw: Some(raw.clone()),
-        });
+        }));
     }
 
-    if action.is_some() && tool_name.contains("web_search") {
+    if status == Some("in_progress") && input.is_none() {
+        return None;
+    }
+
+    if action.is_some() && tool_name_is_web_search(&tool_name) {
         let query = action
             .as_ref()
             .and_then(|a| a.get("query"))
@@ -250,28 +372,17 @@ fn parse_openai_tool_item(
         if let Some(status) = item.get("status") {
             payload.insert("status".to_string(), status.clone());
         }
-        return Some(StreamParseResult::ToolResult {
+        return Some(StreamParseResult::ToolResult(ToolResult {
             tool_name: Some(tool_name),
             tool_id,
             output: Some(serde_json::Value::Object(payload)),
             index: None,
             raw: Some(raw.clone()),
-        });
+        }));
     }
 
-    let web_search = if tool_name.contains("web_search") {
-        input.as_ref().and_then(parse_web_search_action)
-    } else {
-        None
-    };
-    Some(StreamParseResult::ToolCall {
-        tool_name,
-        tool_id,
-        input,
-        index: None,
-        raw: Some(raw.clone()),
-        web_search,
-    })
+    let call = build_tool_call(tool_name, tool_id, input, None, Some(raw.clone()));
+    Some(StreamParseResult::ToolCall(call))
 }
 
 fn parse_openai_url_citation(annotation: &Value) -> Option<StreamWebSearchResult> {
@@ -288,4 +399,25 @@ fn parse_openai_url_citation(annotation: &Value) -> Option<StreamWebSearchResult
         page_age: None,
         snippet: None,
     })
+}
+
+fn parse_tool_input(value: Value) -> Option<ToolInput> {
+    if value.is_null() {
+        return None;
+    }
+    match value {
+        Value::String(raw) => {
+            if raw.trim().is_empty() {
+                return None;
+            }
+            let trimmed = raw.trim_start();
+            if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+                    return Some(ToolInput::Json(parsed));
+                }
+            }
+            Some(ToolInput::Text(raw))
+        }
+        other => Some(ToolInput::Json(other)),
+    }
 }
