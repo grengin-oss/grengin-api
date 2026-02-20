@@ -9,3 +9,4 @@ pub mod auth;
 pub mod open_error;
 pub mod branding;
 pub mod me;
+pub mod mcp;

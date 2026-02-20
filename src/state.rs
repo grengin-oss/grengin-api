@@ -3,7 +3,8 @@ use sea_orm::{Database, DatabaseConnection};
 use tokio::sync::RwLock;
 use std::sync::Arc;
 use reqwest::Client as ReqwestClient;
-use crate::{auth::{azure::build_azure_client, encryption::decrypt_key, google::build_google_client}, config::setting::{ConfigError, OidcClient, Settings}, dto::oauth::AuthProvider, models::users};
+use crate::{auth::{azure::build_azure_client, encryption::decrypt_key, google::build_google_client}, config::setting::{ConfigError, OidcClient, Settings}, dto::oauth::AuthProvider, models::{users, mcp_servers}};
+use uuid::Uuid;
 
 pub struct AppState {
     pub database:DatabaseConnection,
@@ -221,6 +222,16 @@ impl AppState {
     };
  return api_key_preview
 }
+
+    /// Placeholder: manage MCP client cache when feature is wired.
+    pub async fn upsert_mcp_client(&self, _server: &mcp_servers::Model) {
+        // intentionally left blank
+    }
+
+    /// Placeholder: drop MCP client cache entry.
+    pub async fn remove_mcp_client(&self, _server_id: &Uuid) {
+        // intentionally left blank
+    }
 
 
 }

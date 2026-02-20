@@ -25,6 +25,9 @@ mod m20260130_000003_create_analytics;
 mod m20260204_000001_add_department_budget_available;
 mod m20260209_000001_add_authorization_layer;
 mod m20260210_000001_update_permissions_ai_platform_sso;
+mod m20260216_000001_mcp_revamp;
+mod m20260217_000001_mcp_credentials;
+mod m20260217_000002_mcp_url_rename;
 
 pub struct Migrator;
 
@@ -57,6 +60,9 @@ impl MigratorTrait for Migrator {
           Box::new(m20260204_000001_add_department_budget_available::Migration),
           Box::new(m20260209_000001_add_authorization_layer::Migration),
           Box::new(m20260210_000001_update_permissions_ai_platform_sso::Migration),
+          Box::new(m20260216_000001_mcp_revamp::Migration),
+          Box::new(m20260217_000001_mcp_credentials::Migration),
+          Box::new(m20260217_000002_mcp_url_rename::Migration),
          ]
     }
 }

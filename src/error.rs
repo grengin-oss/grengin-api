@@ -110,6 +110,8 @@ pub enum AppError {
     LlmProviderDisabledByAdmin { provider: String },
 
     DepartmentBudgetExceeded,
+    McpServerNotFound,
+    McpAccessUpdateFailed,
 }
 
 impl AppError {
@@ -175,6 +177,28 @@ impl AppError {
 
                 let description_tpl = "The requested resource was not found.";
                 let solution_tpl = "Check the URL and try again.";
+
+                (
+                    StatusCode::NOT_FOUND,
+                    ErrorDetail {
+                        code: ErrorCode::ResourceNotFound,
+                        description: Self::render(description_tpl, &params),
+                        solution: Self::render(solution_tpl, &params),
+                        description_key,
+                        solution_key,
+                        params,
+                        external_code: None,
+                    },
+                )
+            }
+            AppError::McpServerNotFound => {
+                let mut params = Self::base_params();
+                params.insert("resource".to_string(), "MCP server".to_string());
+                let description_key = "error.not_found.description".to_string();
+                let solution_key = "error.not_found.solution".to_string();
+
+                let description_tpl = "The requested {resource} was not found.";
+                let solution_tpl = "Verify the MCP server id and try again.";
 
                 (
                     StatusCode::NOT_FOUND,
@@ -450,6 +474,29 @@ impl AppError {
                     StatusCode::FORBIDDEN,
                     ErrorDetail {
                         code: ErrorCode::DepartmentBudgetExceeded,
+                        description: Self::render(description_tpl, &params),
+                        solution: Self::render(solution_tpl, &params),
+                        description_key,
+                        solution_key,
+                        params,
+                        external_code: None,
+                    },
+                )
+            }
+
+            AppError::McpAccessUpdateFailed => {
+                let params = Self::base_params();
+                let description_key = "error.service_unavailable.description".to_string();
+                let solution_key = "error.service_unavailable.solution".to_string();
+
+                let description_tpl = "Updating MCP access policies failed.";
+                let solution_tpl =
+                    "Retry the request or contact support if it persists.";
+
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    ErrorDetail {
+                        code: ErrorCode::ServiceTemporarilyUnavailable,
                         description: Self::render(description_tpl, &params),
                         solution: Self::render(solution_tpl, &params),
                         description_key,

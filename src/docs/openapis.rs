@@ -20,7 +20,7 @@ use crate::dto::me::{AdministeredDepartmentsResponse, EffectivePermissionsRespon
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::docs::{security::ApiSecurityAddon,app_error_catlog::AppErrorCatalogItem};
 use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, RefreshTokenRequest, TokenType, User};
-use crate::handlers::{auth,admin_department,admin_department_budgets,admin_analytics,admin_mcp,admin_roles,oidc,open_error,chat,chat_stream,file,message,admin_users,admin_sso_provider,branding,admin_ai,models,me};
+use crate::handlers::{auth,admin_department,admin_department_budgets,admin_analytics,admin_mcp,admin_roles,oidc,open_error,chat,chat_stream,file,message,admin_users,admin_sso_provider,branding,admin_ai,models,me,mcp};
 use crate::models::messages::ChatRole;
 use crate::models::departments::{ActionOnExceed, BudgetPeriod};
 use crate::models::mcp_server_access_rules::{McpRuleType, McpSubjectType};
@@ -96,6 +96,14 @@ use crate::models::users::{UserRole, UserStatus};
         admin_mcp::update_mcp_server_default,
         admin_mcp::create_mcp_access_rule,
         admin_mcp::delete_mcp_access_rule,
+        mcp::list_mcp_servers,
+        mcp::create_mcp_server,
+        mcp::get_mcp_server,
+        mcp::update_mcp_server,
+        mcp::delete_mcp_server,
+        mcp::test_mcp_server,
+        mcp::sync_mcp_server_tools,
+        mcp::list_mcp_server_executions,
         me::get_my_permissions,
         me::get_my_administered_departments,
         admin_department_budgets::get_department_budget,
