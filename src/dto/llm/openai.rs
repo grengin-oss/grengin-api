@@ -165,6 +165,18 @@ pub enum OpenaiResponseStreamEvent {
     #[serde(rename = "response.output_text.delta")]
     OutputTextDelta(OpenaiOutputTextDelta),
 
+    #[serde(rename = "response.output_item.added")]
+    OutputItemAdded(OpenaiResponseOutputItemAdded),
+
+    #[serde(rename = "response.function_call_arguments.delta")]
+    FunctionCallArgumentsDelta(OpenaiFunctionCallArgumentsDelta),
+
+    #[serde(rename = "response.function_call_arguments.done")]
+    FunctionCallArgumentsDone(OpenaiFunctionCallArgumentsDone),
+
+    #[serde(rename = "response.output_text.annotation.added")]
+    OutputTextAnnotationAdded(OpenaiOutputTextAnnotationAdded),
+
     // NEW: capture response lifecycle events so you can read usage on completion
     #[serde(rename = "response.created")]
     ResponseCreated(OpenaiResponseEvent),
@@ -187,6 +199,91 @@ pub enum OpenaiResponseStreamEvent {
 pub struct OpenaiOutputTextDelta {
     pub item_id: String,
     pub delta: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenaiResponseOutputItemAdded {
+    pub item: OpenaiResponseOutputItem,
+    #[serde(default)]
+    pub output_index: Option<u32>,
+    #[serde(default)]
+    pub sequence_number: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenaiFunctionCallArgumentsDelta {
+    pub item_id: String,
+    pub delta: String,
+    #[serde(default)]
+    pub output_index: Option<u32>,
+    #[serde(default)]
+    pub sequence_number: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenaiFunctionCallArgumentsDone {
+    pub item_id: String,
+    pub arguments: serde_json::Value,
+    #[serde(default)]
+    pub output_index: Option<u32>,
+    #[serde(default)]
+    pub sequence_number: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenaiOutputTextAnnotationAdded {
+    pub annotation: serde_json::Value,
+    #[serde(default)]
+    pub output_index: Option<u32>,
+    #[serde(default)]
+    pub sequence_number: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub enum OpenaiResponseOutputItem {
+    #[serde(rename = "function_call")]
+    FunctionCall(OpenaiFunctionCallItem),
+
+    #[serde(rename = "web_search_call")]
+    WebSearchCall(OpenaiWebSearchCallItem),
+
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenaiFunctionCallItem {
+    pub id: String,
+    #[serde(default)]
+    pub call_id: Option<String>,
+    pub name: String,
+    #[serde(default)]
+    pub arguments: Option<serde_json::Value>,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenaiWebSearchCallItem {
+    pub id: String,
+    #[serde(default)]
+    pub call_id: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub action: Option<OpenaiWebSearchAction>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenaiWebSearchAction {
+    #[serde(rename = "type")]
+    #[serde(default)]
+    pub action_type: Option<String>,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub queries: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
