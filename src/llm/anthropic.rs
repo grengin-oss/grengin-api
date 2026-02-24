@@ -5,7 +5,7 @@ use reqwest_eventsource::EventSource;
 use uuid::Uuid;
 use crate::{
     config::setting::AnthropicSettings, dto::llm::anthropic::{
-        AnthropicChatRequest, AnthropicChatResponse, AnthropicContentBlockResponse, AnthropicListModelsResponse, AnthropicMessage, AnthropicRole, AnthropicToolUnion, AnthropicWebSearchTool
+        AnthropicChatRequest, AnthropicChatResponse, AnthropicContentBlockResponse, AnthropicListModelsResponse, AnthropicMessage, AnthropicRole, AnthropicToolUnion
     }, handlers::file::get_file_binary, llm::{prompt::{Prompt, PromptTitleResponse}, provider::{AnthropicApis, AnthropicHeaders}}
 };
 
@@ -29,7 +29,7 @@ impl AnthropicApis for ReqwestClient {
         max_tokens: i32,
         temperature: Option<f32>,
         mut prompts: Vec<Prompt>,
-        web_search: bool,
+        tools: Option<Vec<AnthropicToolUnion>>,
         user_id:&Uuid,
     ) -> Result<EventSource, Error> {
         for prompt in &mut prompts {
@@ -40,32 +40,16 @@ impl AnthropicApis for ReqwestClient {
            }
         }
         let (messages, system_prompt) = AnthropicMessage::from_prompts(prompts);    
-        let tools = if web_search {
-            Some(vec![AnthropicToolUnion::WebSearchTool(
-                AnthropicWebSearchTool::new(Some(5)),
-            )])
-        } else {
-            None
-        };
-
-        let body = AnthropicChatRequest {
-            model: model_name,
+        self.anthropic_chat_stream_with_messages(
+            anthropic_settings,
+            model_name,
             max_tokens,
-            messages,
-            stream: true,
             temperature,
-            system: system_prompt,
+            messages,
+            system_prompt,
             tools,
-            stop_sequences: None,
-        };
-
-        let request = self
-            .post(format!("{ANTHROPIC_API_URL}/v1/messages"))
-            .add_anthropic_headers(anthropic_settings)
-            .json(&body);
-
-        let es = EventSource::new(request)?;
-        Ok(es)
+        )
+        .await
     }
 
     async fn anthropic_chat_stream_text(
@@ -89,6 +73,36 @@ impl AnthropicApis for ReqwestClient {
             temperature,
             system: None,
             tools: None,
+            stop_sequences: None,
+        };
+
+        let request = self
+            .post(format!("{ANTHROPIC_API_URL}/v1/messages"))
+            .add_anthropic_headers(anthropic_settings)
+            .json(&body);
+
+        let es = EventSource::new(request)?;
+        Ok(es)
+    }
+
+    async fn anthropic_chat_stream_with_messages(
+        &self,
+        anthropic_settings: &AnthropicSettings,
+        model_name: String,
+        max_tokens: i32,
+        temperature: Option<f32>,
+        messages: Vec<AnthropicMessage>,
+        system: Option<String>,
+        tools: Option<Vec<AnthropicToolUnion>>,
+    ) -> Result<EventSource, Error> {
+        let body = AnthropicChatRequest {
+            model: model_name,
+            max_tokens,
+            messages,
+            stream: true,
+            temperature,
+            system,
+            tools,
             stop_sequences: None,
         };
 

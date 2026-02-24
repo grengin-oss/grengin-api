@@ -7,6 +7,27 @@ use uuid::Uuid;
 use crate::models::mcp_access_policies::{McpAccessType, McpPermission};
 use crate::models::mcp_servers::{McpDefaultAccess, McpTransportType};
 
+#[derive(Debug, Deserialize)]
+pub struct ListServersQuery {
+    pub status: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListExecutionsQuery {
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+    pub tool_name: Option<String>,
+    pub is_error: Option<bool>,
+    pub user_id: Option<Uuid>,
+}
+
+#[derive(Deserialize)]
+pub struct ListToolsQuery {
+    pub server_id: Option<Uuid>,
+    pub search: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct McpServer {
     pub id: Uuid,

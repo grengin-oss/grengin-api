@@ -4,7 +4,17 @@ use reqwest_eventsource::EventSource;
 use serde::{Deserialize, Serialize};
 use utoipa::{ToSchema};
 use uuid::Uuid;
-use crate::{config::setting::{AnthropicSettings, OpenaiSettings}, dto::{files::Attachment, llm::{anthropic::AnthropicListModelsResponse, openai::OpenaiModel}}, llm::prompt::{Prompt, PromptTitleResponse}};
+use crate::{
+    config::setting::{AnthropicSettings, OpenaiSettings},
+    dto::{
+        files::Attachment,
+        llm::{
+            anthropic::{AnthropicListModelsResponse, AnthropicMessage, AnthropicToolUnion},
+            openai::OpenaiModel,
+        },
+    },
+    llm::prompt::{Prompt, PromptTitleResponse},
+};
 
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -59,8 +69,19 @@ pub trait AnthropicApis {
         max_tokens: i32,
         temperature: Option<f32>,
         prompts: Vec<Prompt>,
-        web_search: bool,
+        tools: Option<Vec<AnthropicToolUnion>>,
         user_id:&Uuid,
+    ) -> Result<EventSource, Error>;
+
+    async fn anthropic_chat_stream_with_messages(
+        &self,
+        anthropic_settings: &AnthropicSettings,
+        model_name: String,
+        max_tokens: i32,
+        temperature: Option<f32>,
+        messages: Vec<AnthropicMessage>,
+        system: Option<String>,
+        tools: Option<Vec<AnthropicToolUnion>>,
     ) -> Result<EventSource, Error>;
 
     async fn anthropic_chat_stream_text(

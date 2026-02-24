@@ -1,6 +1,6 @@
 use crate::{dto::files::File, models::messages::ChatRole};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Prompt {
    pub text:String,
    pub role:ChatRole,

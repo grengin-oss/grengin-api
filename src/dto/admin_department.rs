@@ -115,3 +115,11 @@ pub struct DepartmentUpdateRequest {
 pub struct MoveDepartmentRequest {
     pub new_parent_id: Uuid,
 }
+
+#[derive(Serialize)]
+pub struct RoleAssignmentPayload {
+    pub assignment_id: Uuid,
+    pub user_id: Uuid,
+    pub role_id: Uuid,
+    pub scope_department_id: Option<Uuid>,
+}

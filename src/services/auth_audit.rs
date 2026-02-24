@@ -5,6 +5,14 @@ use uuid::Uuid;
 
 use crate::{auth::error::AuthError, models::auth_audit_events};
 
+pub fn build_audit_payload<T: serde::Serialize>(value: T) -> Option<Value> {
+    serde_json::to_value(value)
+        .map_err(|e| {
+            eprintln!("audit payload error: {e}");
+        })
+        .ok()
+}
+
 pub async fn record_auth_event(
     db: &sea_orm::DatabaseConnection,
     event: &str,

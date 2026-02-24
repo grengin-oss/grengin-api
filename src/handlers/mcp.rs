@@ -8,18 +8,19 @@ use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
 };
-use serde::Deserialize;
+use serde_json::json;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
     error::AppError,
-    auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}},
+    auth::{claims::Claims, encryption::encrypt_key},
     dto::mcp::{
-        BulkToolAccessUpdate, BulkToolAccessUpdateResponse, McpAccessRule,
-        McpAuthorizeResponse, McpServer, McpServerAccessList, McpServerAccessUpdate,
-        McpServerCreate, McpServerTestResult, McpServerUpdate, McpSyncResult, McpTool,
-        McpToolAccessList, McpToolAccessUpdate, McpToolExecution, McpToolsList, McpUserConnection,
-        McpUserConnectionsList, PaginatedMcpServers, PaginatedMcpToolExecutions,
+        BulkToolAccessUpdate, BulkToolAccessUpdateResponse, ListExecutionsQuery, ListServersQuery,
+        ListToolsQuery, McpAuthorizeResponse, McpServer, McpServerAccessList,
+        McpServerAccessUpdate, McpServerCreate, McpServerTestResult, McpServerUpdate, McpSyncResult,
+        McpTool, McpToolAccessList, McpToolAccessUpdate, McpToolsList,
+        McpUserConnection, McpUserConnectionsList, PaginatedMcpServers, PaginatedMcpToolExecutions,
     },
     models::{
         mcp_access_policies,
@@ -28,36 +29,17 @@ use crate::{
         mcp_servers::McpDefaultAccess,
         mcp_tools,
     },
+    llm::tooling::sanitize_tool_name,
+    services::mcp_helpers::{
+        encrypt_db_url_in_config,
+        to_access_rule_dto,
+        to_execution_dto,
+        to_server_dto,
+        to_tool_dto,
+        upsert_connection,
+    },
     state::SharedState,
 };
-
-fn encrypt_db_url_in_config(
-    app_key: &[u8; 32],
-    connection_config: &mut serde_json::Value,
-) -> Result<(), AppError> {
-    let Some(obj) = connection_config.as_object_mut() else {
-        return Ok(());
-    };
-    let Some(db_url_value) = obj.get("db_url").cloned() else {
-        return Ok(());
-    };
-    let Some(db_url) = db_url_value.as_str() else {
-        return Ok(());
-    };
-    if decrypt_key(app_key, db_url).is_ok() {
-        return Ok(());
-    }
-    let encrypted = encrypt_key(app_key, db_url.as_bytes())
-        .map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
-    obj.insert("db_url".to_string(), serde_json::Value::String(encrypted));
-    Ok(())
-}
-
-#[derive(Deserialize)]
-pub struct ListServersQuery {
-    pub status: Option<String>,
-    pub enabled: Option<bool>,
-}
 
 #[utoipa::path(
     get,
@@ -311,26 +293,134 @@ pub async fn test_mcp_server(
     )
 )]
 pub async fn sync_mcp_server_tools(
-    Path(_server_id): Path<Uuid>,
+    State(state): State<SharedState>,
+    Path(server_id): Path<Uuid>,
 ) -> Result<Json<McpSyncResult>, AppError> {
+    let server = mcp_servers::Entity::find_by_id(server_id)
+        .one(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp server lookup error: {e}");
+            AppError::DbTimeout
+        })?
+        .ok_or(AppError::McpServerNotFound)?;
+
+    let client = {
+        let clients = state.mcp_clients.read().await;
+        clients.get(&server_id).cloned()
+    }
+    .ok_or(AppError::McpServerNotFound)?;
+
+    let tools = client.list_tools().await.map_err(|e| {
+        eprintln!("mcp list tools error: {e}");
+        AppError::ServiceTemporarilyUnavailable
+    })?;
+
+    let existing_tools = mcp_tools::Entity::find()
+        .filter(mcp_tools::Column::ServerId.eq(server_id))
+        .all(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp tools lookup error: {e}");
+            AppError::DbTimeout
+        })?;
+
+    let mut existing_by_name: HashMap<String, mcp_tools::Model> = existing_tools
+        .into_iter()
+        .map(|tool| (tool.original_name.clone(), tool))
+        .collect();
+
+    let mut tools_added = 0;
+    let mut tools_updated = 0;
+    let mut tools_removed = 0;
+
+    for tool in tools {
+        let original_name = tool.name.clone();
+        let sanitized_name = sanitize_tool_name(&tool.name);
+        let input_schema = serde_json::to_value(&tool.input_schema).unwrap_or_else(|_| json!({}));
+        let parameters = input_schema.clone();
+        let is_read_only = tool
+            .annotations
+            .as_ref()
+            .and_then(|a| a.read_only_hint)
+            .unwrap_or(false);
+
+        if let Some(existing) = existing_by_name.remove(&original_name) {
+            let inherit_from_server = existing.inherit_access_from_server;
+            let mut active: mcp_tools::ActiveModel = existing.into();
+            active.name = Set(sanitized_name);
+            active.description = Set(tool.description.clone());
+            active.input_schema = Set(input_schema);
+            active.parameters = Set(parameters);
+            active.enabled = Set(true);
+            active.is_read_only = Set(is_read_only);
+            active.inherit_access_from_server = Set(inherit_from_server);
+            active.last_synced_at = Set(Some(Utc::now()));
+            active.updated_at = Set(Utc::now());
+            if let Err(e) = active.update(&state.database).await {
+                eprintln!("mcp tool update error: {e}");
+            } else {
+                tools_updated += 1;
+            }
+        } else {
+            let model = mcp_tools::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                server_id: Set(server_id),
+                server_name: Set(server.name.clone()),
+                name: Set(sanitized_name),
+                original_name: Set(original_name),
+                description: Set(tool.description.clone()),
+                input_schema: Set(input_schema),
+                parameters: Set(parameters),
+                enabled: Set(true),
+                is_read_only: Set(is_read_only),
+                inherit_access_from_server: Set(true),
+                last_synced_at: Set(Some(Utc::now())),
+                created_at: Set(Utc::now()),
+                updated_at: Set(Utc::now()),
+            };
+            if let Err(e) = model.insert(&state.database).await {
+                eprintln!("mcp tool insert error: {e}");
+            } else {
+                tools_added += 1;
+            }
+        }
+    }
+
+    for (_, tool) in existing_by_name.into_iter() {
+        if tool.enabled {
+            tools_removed += 1;
+        }
+        let mut active: mcp_tools::ActiveModel = tool.into();
+        active.enabled = Set(false);
+        active.last_synced_at = Set(Some(Utc::now()));
+        active.updated_at = Set(Utc::now());
+        if let Err(e) = active.update(&state.database).await {
+            eprintln!("mcp tool disable error: {e}");
+        }
+    }
+
+    let total_tools = mcp_tools::Entity::find()
+        .filter(mcp_tools::Column::ServerId.eq(server_id))
+        .filter(mcp_tools::Column::Enabled.eq(true))
+        .count(&state.database)
+        .await
+        .unwrap_or(0) as i32;
+
+    let mut server_active: mcp_servers::ActiveModel = server.into();
+    server_active.tool_count = Set(total_tools);
+    server_active.last_synced_at = Set(Some(Utc::now()));
+    let _ = server_active.update(&state.database).await;
+
     Ok(Json(McpSyncResult {
         success: true,
-        tools_added: None,
-        tools_updated: None,
-        tools_removed: None,
-        total_tools: None,
+        tools_added: Some(tools_added),
+        tools_updated: Some(tools_updated),
+        tools_removed: Some(tools_removed),
+        total_tools: Some(total_tools),
         synced_at: Some(Utc::now()),
         error: None,
     }))
-}
-
-#[derive(Deserialize)]
-pub struct ListExecutionsQuery {
-    pub limit: Option<u64>,
-    pub offset: Option<u64>,
-    pub tool_name: Option<String>,
-    pub is_error: Option<bool>,
-    pub user_id: Option<Uuid>,
 }
 
 #[utoipa::path(
@@ -669,12 +759,6 @@ pub async fn update_mcp_tool_access(
     get_mcp_tool_access(State(state), Path(tool_id)).await
 }
 
-#[derive(Deserialize)]
-pub struct ListToolsQuery {
-    pub server_id: Option<Uuid>,
-    pub search: Option<String>,
-}
-
 pub async fn list_mcp_tools(
     State(state): State<SharedState>,
     Query(query): Query<ListToolsQuery>,
@@ -757,123 +841,4 @@ pub async fn disconnect_mcp_connection(
         "success": true,
         "message": "Disconnected"
     })))
-}
-
-// helpers
-
-fn to_server_dto(model: mcp_servers::Model) -> McpServer {
-    McpServer {
-        id: model.id,
-        name: model.name,
-        description: model.description,
-        transport_type: model.transport_type,
-        connection_config: model.connection_config,
-        client_id: model.client_id,
-        client_secret_configured: model.client_secret.is_some(),
-        url: model.url,
-        enabled: model.enabled,
-        status: model.status,
-        status_message: model.status_message,
-        tool_count: model.tool_count,
-        default_access: model.default_access,
-        last_connected_at: model.last_connected_at,
-        last_synced_at: model.last_synced_at,
-        created_at: model.created_at,
-        updated_at: model.updated_at,
-    }
-}
-
-fn to_tool_dto(model: &mcp_tools::Model) -> McpTool {
-    McpTool {
-        id: model.id,
-        server_id: model.server_id,
-        server_name: model.server_name.clone(),
-        name: model.name.clone(),
-        original_name: model.original_name.clone(),
-        description: model.description.clone(),
-        input_schema: model.input_schema.clone(),
-        parameters: model.parameters.clone(),
-        enabled: model.enabled,
-        is_read_only: model.is_read_only,
-        inherit_access_from_server: model.inherit_access_from_server,
-        last_synced_at: model.last_synced_at,
-    }
-}
-
-fn to_execution_dto(model: mcp_executions::Model) -> McpToolExecution {
-    McpToolExecution {
-        id: model.id,
-        server_id: model.server_id,
-        server_name: model.server_name,
-        tool_name: model.tool_name,
-        conversation_id: model.conversation_id,
-        user_id: model.user_id,
-        user_email: model.user_email,
-        arguments: model.arguments,
-        result: model.result,
-        is_error: model.is_error,
-        duration_ms: model.duration_ms,
-        executed_at: model.executed_at,
-    }
-}
-
-fn to_access_rule_dto(model: mcp_access_policies::Model) -> McpAccessRule {
-    McpAccessRule {
-        id: Some(model.id),
-        access_type: model.access_type,
-        role_name: model.role_name,
-        department_id: model.department_id,
-        user_id: model.user_id,
-        permission: model.permission,
-    }
-}
-
-async fn upsert_connection(
-    state: &SharedState,
-    user_id: Uuid,
-    server_id: Uuid,
-    connected: bool,
-) -> Result<(), AppError> {
-    if let Some(existing) = mcp_connections::Entity::find()
-        .filter(mcp_connections::Column::UserId.eq(user_id))
-        .filter(mcp_connections::Column::ServerId.eq(server_id))
-        .one(&state.database)
-        .await
-        .map_err(|_| AppError::DbUnavailable)?
-    {
-        let mut active: mcp_connections::ActiveModel = existing.into();
-        active.connected = Set(connected);
-        active.updated_at = Set(Utc::now());
-        active
-            .update(&state.database)
-            .await
-            .map_err(|e|{
-              eprintln!("Db update error {}",e);
-              AppError::DbTimeout
-           })?;
-    } else {
-        let model = mcp_connections::ActiveModel {
-            id: Set(Uuid::new_v4()),
-            user_id: Set(user_id),
-            server_id: Set(server_id),
-            server_name: Set("".into()),
-            connected: Set(connected),
-            connected_at: Set(if connected { Some(Utc::now()) } else { None }),
-            expires_at: Set(None),
-            scopes: Set(None),
-            access_token: Set(None),
-            refresh_token: Set(None),
-            token_type: Set(None),
-            created_at: Set(Utc::now()),
-            updated_at: Set(Utc::now()),
-        };
-        model
-            .insert(&state.database)
-            .await
-            .map_err(|e|{
-              eprintln!("Db create error {}",e);
-              AppError::DbTimeout
-           })?;
-    }
-    Ok(())
 }

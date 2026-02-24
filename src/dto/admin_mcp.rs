@@ -34,3 +34,24 @@ pub struct McpAccessRuleRequest {
     pub subject_id: Uuid,
     pub rule_type: McpRuleType,
 }
+
+#[derive(Serialize)]
+pub struct McpAccessDefaultChangedPayload {
+    pub server_id: Uuid,
+    pub access_default: McpAccessDefault,
+}
+
+#[derive(Serialize)]
+pub struct McpAccessRuleCreatedPayload {
+    pub rule_id: Uuid,
+    pub server_id: Uuid,
+    pub subject_type: McpSubjectType,
+    pub subject_id: Uuid,
+    pub rule_type: McpRuleType,
+}
+
+#[derive(Serialize)]
+pub struct McpAccessRuleDeletedPayload {
+    pub rule_id: Uuid,
+    pub server_id: Uuid,
+}

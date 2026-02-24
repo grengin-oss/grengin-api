@@ -3,12 +3,42 @@ use axum::{Json, extract::{Path, Query, State}};
 use chrono::{DateTime, Utc};
 use migration::{Alias, BinOper, Func, SimpleExpr, extension::postgres::PgExpr};
 use rust_decimal::Decimal;
-use serde::Serialize;
 use sea_orm::{ActiveModelTrait, Condition, DatabaseConnection, EntityName as _, FromQueryResult, JoinType, Order, PaginatorTrait, QueryOrder, QuerySelect, RelationTrait, sea_query::{Expr, PostgresQueryBuilder,Query as SqlQuery}};
 use reqwest::StatusCode;
 use sea_orm::{ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait as _, QueryFilter, Statement, sqlx::postgres::types::{PgLTree, PgLTreeLabel}};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}, permissions::{PERMISSION_DEPARTMENTS_MANAGE, PERMISSION_DEPARTMENTS_VIEW, PERMISSION_ROLES_ASSIGN, PERMISSION_USERS_VIEW, ROLE_DEPARTMENT_ADMIN}}, dto::{admin_department::{DepartmentListQuery, DepartmentMembersResponse, DepartmentMemeberListQuery, DepartmentRequest, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery, DepartmentTreeResponse, DepartmentUpdateRequest, DepartmentsListResponse, MoveDepartmentRequest}, admin_user::UserDetails, common::SortRule}, models::{departments::{self, ActionOnExceed, BudgetPeriod}, roles, user_role_assignments, users::{self, UserRole, UserStatus}}, services::{authorization::{AuthorizationService, PermissionScopeMode}, auth_audit::record_auth_event, budget_allocation::{period_bounds, sum_child_allocations, sum_department_cost_in_range}}, state::SharedState};
+use crate::{
+    auth::{
+        claims::Claims,
+        error::{AuthError, AuthErrorResponse},
+        permissions::{
+            PERMISSION_DEPARTMENTS_MANAGE, PERMISSION_DEPARTMENTS_VIEW, PERMISSION_ROLES_ASSIGN,
+            PERMISSION_USERS_VIEW, ROLE_DEPARTMENT_ADMIN,
+        },
+    },
+    dto::{
+        admin_department::{
+            DepartmentListQuery, DepartmentMembersResponse, DepartmentMemeberListQuery,
+            DepartmentRequest, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery,
+            DepartmentTreeResponse, DepartmentUpdateRequest, DepartmentsListResponse,
+            MoveDepartmentRequest, RoleAssignmentPayload,
+        },
+        admin_user::UserDetails,
+        common::SortRule,
+    },
+    models::{
+        departments::{self, ActionOnExceed, BudgetPeriod},
+        roles,
+        user_role_assignments,
+        users::{self, UserRole, UserStatus},
+    },
+    services::{
+        authorization::{AuthorizationService, PermissionScopeMode},
+        auth_audit::{build_audit_payload, record_auth_event},
+        budget_allocation::{period_bounds, sum_child_allocations, sum_department_cost_in_range},
+    },
+    state::SharedState,
+};
 
 #[derive(Debug, Clone, FromQueryResult)]
 pub struct DepartmentRow {
@@ -168,7 +198,7 @@ async fn sync_department_admin_assignments(
                 }
             })?;
 
-        if let Some(payload) = audit_payload(RoleAssignmentPayload {
+        if let Some(payload) = build_audit_payload(RoleAssignmentPayload {
             assignment_id,
             user_id,
             role_id: role.id,
@@ -198,7 +228,7 @@ async fn sync_department_admin_assignments(
                 AuthError::DbTimeout
             })?;
 
-        if let Some(payload) = audit_payload(RoleAssignmentPayload {
+        if let Some(payload) = build_audit_payload(RoleAssignmentPayload {
             assignment_id,
             user_id,
             role_id: role.id,
@@ -270,21 +300,6 @@ async fn load_department_admin_ids_map(
     Ok(map)
 }
 
-#[derive(Serialize)]
-struct RoleAssignmentPayload {
-    assignment_id: Uuid,
-    user_id: Uuid,
-    role_id: Uuid,
-    scope_department_id: Option<Uuid>,
-}
-
-fn audit_payload<T: Serialize>(value: T) -> Option<serde_json::Value> {
-    serde_json::to_value(value)
-        .map_err(|e| {
-            eprintln!("audit payload error: {e}");
-        })
-        .ok()
-}
 
 // Selects all columns but casts path -> text so decoding works
 pub fn departments_base_select() -> sea_orm::Select<departments::Entity> {

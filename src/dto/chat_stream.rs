@@ -3,6 +3,14 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 use crate::{dto::files::{File}, models::messages::ChatRole};
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BudgetWarningPayload {
+   pub department_id: Uuid,
+   pub budget_available: String,
+   pub action: &'static str,
+   pub message: String,
+}
+
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all="snake_case")]
 pub enum ChatStreamEvents{
@@ -90,6 +98,11 @@ pub struct ChatStreamToolResult {
    pub tool_id:Option<String>,
    #[serde(skip_serializing_if = "Option::is_none")]
    pub kind:Option<ChatToolKind>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   pub status:Option<String>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   #[schema(value_type = Object)]
+   pub output:Option<serde_json::Value>,
    #[serde(skip_serializing_if = "Option::is_none")]
    pub web_search:Option<ChatStreamWebSearchResult>,
 }

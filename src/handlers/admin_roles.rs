@@ -2,15 +2,14 @@ use axum::{extract::{Path, State}, Json};
 use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait, Set};
-use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
     auth::{claims::Claims, error::{AuthError, AuthErrorResponse}, permissions::{PERMISSION_ROLES_ASSIGN, PERMISSION_ROLES_MANAGE, PERMISSION_ROLES_VIEW, ROLE_DEPARTMENT_ADMIN}},
     dto::admin_roles::{
-        PermissionDto, PermissionsResponse, RoleDto, RoleRequest, RoleUpdateRequest,
-        RolesResponse, UserRoleAssignmentDto, UserRoleAssignmentRequest,
-        UserRoleAssignmentsResponse,
+        PermissionDto, PermissionsResponse, RoleAssignmentPayload, RoleCreatedPayload, RoleDeletedPayload,
+        RoleDto, RoleRequest, RoleUpdateRequest, RoleUpdatedPayload, RolesResponse,
+        UserRoleAssignmentDto, UserRoleAssignmentRequest, UserRoleAssignmentsResponse,
     },
     models::{
         permissions,
@@ -19,7 +18,10 @@ use crate::{
         user_role_assignments,
         users,
     },
-    services::{authorization::{AuthorizationService, PermissionScopeMode}, auth_audit::record_auth_event},
+    services::{
+        authorization::{AuthorizationService, PermissionScopeMode},
+        auth_audit::{build_audit_payload, record_auth_event},
+    },
     state::SharedState,
 };
 
@@ -31,41 +33,6 @@ struct RolePermissionRow {
     action: String,
 }
 
-#[derive(Serialize)]
-struct RoleCreatedPayload {
-    role_id: Uuid,
-    name: String,
-    permissions: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct RoleUpdatedPayload {
-    role_id: Uuid,
-    name: Option<String>,
-    permissions: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct RoleDeletedPayload {
-    role_id: Uuid,
-    name: String,
-}
-
-#[derive(Serialize)]
-struct RoleAssignmentPayload {
-    assignment_id: Uuid,
-    user_id: Uuid,
-    role_id: Uuid,
-    scope_department_id: Option<Uuid>,
-}
-
-fn audit_payload<T: Serialize>(value: T) -> Option<serde_json::Value> {
-    serde_json::to_value(value)
-        .map_err(|e| {
-            eprintln!("audit payload error: {e}");
-        })
-        .ok()
-}
 
 #[utoipa::path(
     get,
@@ -287,7 +254,7 @@ pub async fn create_role(
             })?;
     }
 
-    if let Some(payload) = audit_payload(RoleCreatedPayload {
+    if let Some(payload) = build_audit_payload(RoleCreatedPayload {
         role_id,
         name: req.name.clone(),
         permissions: assigned_permissions.clone(),
@@ -513,7 +480,7 @@ pub async fn update_role(
     }
 
     let response_name = name.clone().unwrap_or(role.name.clone());
-    if let Some(payload) = audit_payload(RoleUpdatedPayload {
+    if let Some(payload) = build_audit_payload(RoleUpdatedPayload {
         role_id,
         name: name.clone(),
         permissions: permissions_list.clone(),
@@ -605,7 +572,7 @@ pub async fn delete_role(
 
     let _ = authz.recompute_effective_permissions_for_users(&assigned_users).await;
 
-    if let Some(payload) = audit_payload(RoleDeletedPayload {
+    if let Some(payload) = build_audit_payload(RoleDeletedPayload {
         role_id,
         name: role.name.clone(),
     }) {
@@ -801,7 +768,7 @@ pub async fn assign_role_to_user(
 
     let _ = authz.recompute_effective_permissions(user_id).await;
 
-    if let Some(payload) = audit_payload(RoleAssignmentPayload {
+    if let Some(payload) = build_audit_payload(RoleAssignmentPayload {
         assignment_id,
         user_id,
         role_id: req.role_id,
@@ -888,7 +855,7 @@ pub async fn remove_role_from_user(
 
     let _ = authz.recompute_effective_permissions(user_id).await;
 
-    if let Some(payload) = audit_payload(RoleAssignmentPayload {
+    if let Some(payload) = build_audit_payload(RoleAssignmentPayload {
         assignment_id,
         user_id,
         role_id: assignment.role_id,

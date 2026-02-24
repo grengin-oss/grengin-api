@@ -3,52 +3,29 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait, Set};
 use sea_orm::sea_query::{Alias, BinOper, Expr};
-use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
     auth::{claims::Claims, error::{AuthError, AuthErrorResponse}, permissions::{PERMISSION_MCP_ADMIN, PERMISSION_MCP_DELEGATE, PERMISSION_MCP_VIEW}},
-    dto::admin_mcp::{McpAccessDefaultRequest, McpAccessRuleDto, McpAccessRuleRequest, McpServerAccessResponse},
+    dto::admin_mcp::{
+        McpAccessDefaultChangedPayload, McpAccessDefaultRequest, McpAccessRuleCreatedPayload,
+        McpAccessRuleDeletedPayload, McpAccessRuleDto, McpAccessRuleRequest,
+        McpServerAccessResponse,
+    },
     models::{
         departments,
-        mcp_server_access_rules::{self, McpRuleType, McpSubjectType},
+        mcp_server_access_rules::{self, McpSubjectType},
         mcp_servers,
         roles,
         user_role_assignments,
         users,
     },
-    services::{authorization::{AuthorizationService, PermissionScopeMode}, auth_audit::record_auth_event},
+    services::{
+        authorization::{AuthorizationService, PermissionScopeMode},
+        auth_audit::{build_audit_payload, record_auth_event},
+    },
     state::SharedState,
 };
-
-#[derive(Serialize)]
-struct McpAccessDefaultChangedPayload {
-    server_id: Uuid,
-    access_default: mcp_servers::McpAccessDefault,
-}
-
-#[derive(Serialize)]
-struct McpAccessRuleCreatedPayload {
-    rule_id: Uuid,
-    server_id: Uuid,
-    subject_type: McpSubjectType,
-    subject_id: Uuid,
-    rule_type: McpRuleType,
-}
-
-#[derive(Serialize)]
-struct McpAccessRuleDeletedPayload {
-    rule_id: Uuid,
-    server_id: Uuid,
-}
-
-fn audit_payload<T: Serialize>(value: T) -> Option<serde_json::Value> {
-    serde_json::to_value(value)
-        .map_err(|e| {
-            eprintln!("audit payload error: {e}");
-        })
-        .ok()
-}
 
 #[utoipa::path(
     get,
@@ -197,7 +174,7 @@ pub async fn update_mcp_server_default(
         })
         .collect::<Vec<_>>();
 
-    if let Some(payload) = audit_payload(McpAccessDefaultChangedPayload {
+    if let Some(payload) = build_audit_payload(McpAccessDefaultChangedPayload {
         server_id,
         access_default: req.access_default,
     }) {
@@ -341,7 +318,7 @@ pub async fn create_mcp_access_rule(
             AuthError::DbTimeout
         })?;
 
-    if let Some(payload) = audit_payload(McpAccessRuleCreatedPayload {
+    if let Some(payload) = build_audit_payload(McpAccessRuleCreatedPayload {
         rule_id,
         server_id,
         subject_type: req.subject_type,
@@ -505,7 +482,7 @@ pub async fn delete_mcp_access_rule(
             AuthError::DbTimeout
         })?;
 
-    if let Some(payload) = audit_payload(McpAccessRuleDeletedPayload {
+    if let Some(payload) = build_audit_payload(McpAccessRuleDeletedPayload {
         rule_id,
         server_id,
     }) {

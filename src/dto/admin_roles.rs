@@ -61,3 +61,31 @@ pub struct UserRoleAssignmentRequest {
     pub role_id: Uuid,
     pub scope_department_id: Option<Uuid>,
 }
+
+#[derive(Serialize)]
+pub struct RoleCreatedPayload {
+    pub role_id: Uuid,
+    pub name: String,
+    pub permissions: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct RoleUpdatedPayload {
+    pub role_id: Uuid,
+    pub name: Option<String>,
+    pub permissions: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct RoleDeletedPayload {
+    pub role_id: Uuid,
+    pub name: String,
+}
+
+#[derive(Serialize)]
+pub struct RoleAssignmentPayload {
+    pub assignment_id: Uuid,
+    pub user_id: Uuid,
+    pub role_id: Uuid,
+    pub scope_department_id: Option<Uuid>,
+}
