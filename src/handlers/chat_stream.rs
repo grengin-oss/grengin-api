@@ -1332,6 +1332,18 @@ pub async fn handle_chat_stream(
                     }
                     break;
                     },
+                    reqwest_eventsource::Error::InvalidStatusCode(status, response) => {
+                        let body = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "<failed to read response body>".to_string());
+                        eprintln!(
+                            "Streaming error for provider:{} status:{} body:{}",
+                            provider, status, body
+                        );
+                        stream_finished = true;
+                        break;
+                    }
                     _ => {
                         println!("Streaming error for provider:{} error:{}",provider,e.to_string());
                         stream_finished = true;

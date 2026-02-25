@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::{
@@ -22,6 +22,147 @@ pub struct McpToolDescriptor {
     pub description: Option<String>,
     pub input_schema: Value,
     pub is_read_only: bool,
+}
+
+fn normalize_openai_parameters(schema: &Value) -> Value {
+    fn sanitize_schema(schema: &Value) -> Value {
+        let Value::Object(map) = schema else {
+            return json!({});
+        };
+        let mut out = Map::new();
+        let allowed_keys = [
+            "type",
+            "properties",
+            "required",
+            "additionalProperties",
+            "items",
+            "oneOf",
+            "anyOf",
+            "allOf",
+            "$defs",
+            "definitions",
+            "description",
+            "title",
+            "enum",
+            "default",
+            "nullable",
+            "format",
+            "minimum",
+            "maximum",
+            "minLength",
+            "maxLength",
+            "pattern",
+        ];
+
+        for key in allowed_keys {
+            if let Some(value) = map.get(key) {
+                let sanitized = match key {
+                    "properties" => match value {
+                        Value::Object(props) => {
+                            let mut props_out = Map::new();
+                            for (name, prop_schema) in props {
+                                props_out.insert(name.clone(), sanitize_schema(prop_schema));
+                            }
+                            Value::Object(props_out)
+                        }
+                        _ => json!({}),
+                    },
+                    "items" => sanitize_items(value),
+                    "oneOf" | "anyOf" | "allOf" => match value {
+                        Value::Array(list) => Value::Array(
+                            list.iter()
+                                .map(|item| sanitize_schema(item))
+                                .collect(),
+                        ),
+                        _ => Value::Array(Vec::new()),
+                    },
+                    "$defs" | "definitions" => match value {
+                        Value::Object(defs) => {
+                            let mut defs_out = Map::new();
+                            for (name, def_schema) in defs {
+                                defs_out.insert(name.clone(), sanitize_schema(def_schema));
+                            }
+                            Value::Object(defs_out)
+                        }
+                        _ => json!({}),
+                    },
+                    "additionalProperties" => match value {
+                        Value::Bool(_) => value.clone(),
+                        Value::Object(_) => sanitize_schema(value),
+                        _ => Value::Bool(false),
+                    },
+                    "required" => match value {
+                        Value::Array(reqs) => Value::Array(
+                            reqs.iter()
+                                .filter_map(|item| item.as_str().map(|s| Value::String(s.to_string())))
+                                .collect(),
+                        ),
+                        _ => Value::Array(Vec::new()),
+                    },
+                    "type" => sanitize_type(value),
+                    _ => value.clone(),
+                };
+                out.insert(key.to_string(), sanitized);
+            }
+        }
+
+        let needs_items = out
+            .get("type")
+            .and_then(|value| match value {
+                Value::String(s) => Some(s == "array"),
+                Value::Array(list) => Some(list.iter().any(|item| item.as_str() == Some("array"))),
+                _ => None,
+            })
+            .unwrap_or(false);
+        if needs_items {
+            let items = out.get("items").cloned().unwrap_or_else(|| json!({}));
+            let items = sanitize_items(&items);
+            out.insert("items".to_string(), items);
+        }
+
+        Value::Object(out)
+    }
+
+    fn sanitize_items(value: &Value) -> Value {
+        match value {
+            Value::Object(_) => sanitize_schema(value),
+            Value::Array(list) => list
+                .iter()
+                .find(|item| item.is_object())
+                .map(sanitize_schema)
+                .unwrap_or_else(|| json!({})),
+            _ => json!({}),
+        }
+    }
+
+    fn sanitize_type(value: &Value) -> Value {
+        match value {
+            Value::String(_) => value.clone(),
+            Value::Array(list) => {
+                let mut out = Vec::new();
+                for item in list {
+                    if let Some(s) = item.as_str() {
+                        out.push(Value::String(s.to_string()));
+                    }
+                }
+                Value::Array(out)
+            }
+            _ => Value::String("object".to_string()),
+        }
+    }
+
+    let mut normalized = sanitize_schema(schema);
+    let Value::Object(ref mut map) = normalized else {
+        return json!({"type":"object","properties":{}});
+    };
+    if !map.contains_key("type") {
+        map.insert("type".to_string(), Value::String("object".to_string()));
+    }
+    if !map.contains_key("properties") {
+        map.insert("properties".to_string(), json!({}));
+    }
+
+    normalized
 }
 
 pub async fn load_openai_mcp_tools(
@@ -73,7 +214,7 @@ pub async fn load_openai_mcp_tools(
         openai_tools.push(OpenaiTool::Function {
             name: openai_name.clone(),
             description: tool.description.clone(),
-            parameters: tool.input_schema.clone(),
+            parameters: normalize_openai_parameters(&tool.input_schema),
             strict: None,
         });
         lookup.insert(openai_name, descriptor);

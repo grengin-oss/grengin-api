@@ -335,8 +335,8 @@ pub async fn sync_mcp_server_tools(
     let mut tools_removed = 0;
 
     for tool in tools {
-        let original_name = tool.name.clone();
-        let sanitized_name = sanitize_tool_name(&tool.name);
+        let original_name = tool.name.to_string();
+        let sanitized_name = sanitize_tool_name(tool.name.as_ref());
         let input_schema = serde_json::to_value(&tool.input_schema).unwrap_or_else(|_| json!({}));
         let parameters = input_schema.clone();
         let is_read_only = tool
@@ -349,7 +349,7 @@ pub async fn sync_mcp_server_tools(
             let inherit_from_server = existing.inherit_access_from_server;
             let mut active: mcp_tools::ActiveModel = existing.into();
             active.name = Set(sanitized_name);
-            active.description = Set(tool.description.clone());
+            active.description = Set(tool.description.as_ref().map(|d| d.to_string()));
             active.input_schema = Set(input_schema);
             active.parameters = Set(parameters);
             active.enabled = Set(true);
@@ -369,7 +369,7 @@ pub async fn sync_mcp_server_tools(
                 server_name: Set(server.name.clone()),
                 name: Set(sanitized_name),
                 original_name: Set(original_name),
-                description: Set(tool.description.clone()),
+                description: Set(tool.description.as_ref().map(|d| d.to_string())),
                 input_schema: Set(input_schema),
                 parameters: Set(parameters),
                 enabled: Set(true),
