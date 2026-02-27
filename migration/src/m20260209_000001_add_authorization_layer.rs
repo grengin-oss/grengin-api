@@ -646,6 +646,10 @@ impl Migration {
     }
 
     async fn migrate_legacy_users(&self, manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+        if !self.legacy_role_column_exists(manager).await? {
+            return Ok(());
+        }
+
         let mut role_ids = std::collections::HashMap::new();
         let role_rows = manager
             .get_connection()
@@ -727,6 +731,17 @@ impl Migration {
         }
 
         Ok(())
+    }
+
+    async fn legacy_role_column_exists(&self, manager: &SchemaManager<'_>) -> Result<bool, DbErr> {
+        let rows = manager
+            .get_connection()
+            .query_all(Statement::from_string(
+                DatabaseBackend::Postgres,
+                "SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'role'",
+            ))
+            .await?;
+        Ok(!rows.is_empty())
     }
 }
 

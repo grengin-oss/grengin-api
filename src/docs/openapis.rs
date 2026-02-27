@@ -25,7 +25,7 @@ use crate::models::messages::ChatRole;
 use crate::models::departments::{ActionOnExceed, BudgetPeriod};
 use crate::models::mcp_server_access_rules::{McpRuleType, McpSubjectType};
 use crate::models::mcp_servers::McpAccessDefault;
-use crate::models::users::{UserRole, UserStatus};
+use crate::models::users::UserStatus;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -114,7 +114,6 @@ use crate::models::users::{UserRole, UserStatus};
             AuthTokenResponse,
             TokenType,
             User,
-            UserRole,
             UserStatus,
             ChatRole,
             Claims,

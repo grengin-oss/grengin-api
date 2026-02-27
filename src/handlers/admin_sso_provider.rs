@@ -25,7 +25,6 @@ pub async fn get_sso_providers(
      authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_SSO_PROVIDERS_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -115,7 +114,6 @@ pub async fn get_sso_provider_by_id(
      authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_SSO_PROVIDERS_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -172,7 +170,6 @@ pub async fn delete_sso_provider_by_id(
      authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_SSO_PROVIDERS_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -226,7 +223,6 @@ pub async fn update_sso_provider_by_id(
      authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_SSO_PROVIDERS_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,

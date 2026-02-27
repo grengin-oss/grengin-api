@@ -1,6 +1,6 @@
 [package]
 name = "grengin-api"
-version = "0.2.35"
+version = "0.2.37"
 edition = "2024"
 
 [workspace]

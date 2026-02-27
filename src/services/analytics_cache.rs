@@ -113,12 +113,12 @@ fn user_cache_suffix(query: &UserAnalyticsQuery, page: u64, limit: u64) -> Strin
     let sort_by = query.sort_by.as_deref().unwrap_or("lastActivity");
     let order = query.order.as_deref().unwrap_or("desc");
     let search = json_key(&query.search);
-    let role = json_key(&query.role);
+    let role_id = json_key(&query.role_id);
     let status = json_key(&query.status);
     let unassigned_department = query.unassigned_department.unwrap_or(false);
 
     format!(
-        "page={page}&limit={limit}&sort_by={sort_by}&order={order}&search={search}&role={role}&status={status}&unassigned={unassigned_department}"
+        "page={page}&limit={limit}&sort_by={sort_by}&order={order}&search={search}&role_id={role_id}&status={status}&unassigned={unassigned_department}"
     )
 }
 
@@ -350,7 +350,7 @@ async fn refresh_cache_window(
         sort_by: None,
         order: None,
         search: None,
-        role: None,
+        role_id: None,
         status: None,
         unassigned_department: None,
         live: None,

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-use crate::models::users::{UserRole, UserStatus};
+use crate::models::users::UserStatus;
+use uuid::Uuid;
 
 #[derive(Debug,Deserialize,ToSchema)]
 #[serde(rename_all="snake_case")]
@@ -20,7 +21,7 @@ pub struct PaginationQuery {
    pub search:Option<String>,
    pub archived:Option<bool>,
    pub ascending:Option<bool>,
-   pub role:Option<UserRole>,
+   pub role_id:Option<Uuid>,
    pub status:Option<UserStatus>,
    pub unassigned_department:Option<bool>,
    pub sort:Option<SortRule>,

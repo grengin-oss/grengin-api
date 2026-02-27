@@ -78,7 +78,6 @@ impl<'a> AuthorizationService<'a> {
     pub async fn ensure_permission(
         &self,
         actor_id: Uuid,
-        legacy_role: users::UserRole,
         permission: &str,
         target_department_id: Option<Uuid>,
         scope_mode: PermissionScopeMode,
@@ -87,7 +86,6 @@ impl<'a> AuthorizationService<'a> {
         let allowed = self
             .user_has_permission(
                 actor_id,
-                legacy_role,
                 permission,
                 target_department_id,
                 scope_mode,
@@ -118,14 +116,13 @@ impl<'a> AuthorizationService<'a> {
     pub async fn user_has_permission(
         &self,
         user_id: Uuid,
-        legacy_role: users::UserRole,
         permission: &str,
         target_department_id: Option<Uuid>,
         scope_mode: PermissionScopeMode,
     ) -> Result<bool, AuthError> {
         let has_assignments = self.user_has_assignments(user_id).await?;
         if !has_assignments {
-            return Ok(legacy_role_allows(legacy_role, permission));
+            return Ok(false);
         }
 
         let (domain, action) = match split_permission_key(permission) {
@@ -170,6 +167,52 @@ impl<'a> AuthorizationService<'a> {
             target_path.as_deref(),
             scope_mode,
         ))
+    }
+
+    pub async fn user_has_role_name(
+        &self,
+        user_id: Uuid,
+        role_name: &str,
+    ) -> Result<bool, AuthError> {
+        let count = user_role_assignments::Entity::find()
+            .join(JoinType::InnerJoin, user_role_assignments::Relation::Roles.def())
+            .filter(user_role_assignments::Column::UserId.eq(user_id))
+            .filter(roles::Column::Name.eq(role_name))
+            .count(self.db)
+            .await
+            .map_err(|e| {
+                eprintln!("role lookup error: {e}");
+                AuthError::DbTimeout
+            })?;
+        Ok(count > 0)
+    }
+
+    pub async fn user_roles_map(
+        &self,
+        user_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<String>>, AuthError> {
+        if user_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows = user_role_assignments::Entity::find()
+            .select_only()
+            .column(user_role_assignments::Column::UserId)
+            .column_as(roles::Column::Name, "role_name")
+            .join(JoinType::InnerJoin, user_role_assignments::Relation::Roles.def())
+            .filter(user_role_assignments::Column::UserId.is_in(user_ids.iter().copied()))
+            .into_tuple::<(Uuid, String)>()
+            .all(self.db)
+            .await
+            .map_err(|e| {
+                eprintln!("role assignments lookup error: {e}");
+                AuthError::DbTimeout
+            })?;
+
+        let mut map: HashMap<Uuid, Vec<String>> = HashMap::new();
+        for (user_id, role_name) in rows {
+            map.entry(user_id).or_default().push(role_name);
+        }
+        Ok(map)
     }
 
     pub async fn recompute_effective_permissions(&self, user_id: Uuid) -> Result<(), AuthError> {
@@ -707,10 +750,6 @@ struct UserPermissionRow {
 
 pub fn is_path_within_scope(scope_path: &str, target_path: &str) -> bool {
     target_path == scope_path || target_path.starts_with(&format!("{scope_path}."))
-}
-
-pub fn legacy_role_allows(role: users::UserRole, _permission: &str) -> bool {
-    matches!(role, users::UserRole::SuperAdmin | users::UserRole::Admin)
 }
 
 fn select_department_rule(

@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
-use crate::{dto::{admin_user::UserDetails, common::SortRule}, models::{departments::{ActionOnExceed, BudgetPeriod}, users::{UserRole, UserStatus}}};
+use crate::{dto::{admin_user::UserDetails, common::SortRule}, models::{departments::{ActionOnExceed, BudgetPeriod}, users::UserStatus}};
 
 #[derive(Serialize,IntoParams,ToSchema)]
 pub struct DepartmentMembersResponse{
@@ -37,7 +37,7 @@ pub struct DepartmentMemeberListQuery {
     pub search:Option<String>,
     pub archived:Option<bool>,
     pub order:Option<String>,
-    pub role:Option<UserRole>,
+    pub role_id:Option<Uuid>,
     pub status:Option<UserStatus>,
     pub sort:Option<SortRule>,
 }

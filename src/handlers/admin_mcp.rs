@@ -51,7 +51,6 @@ pub async fn get_mcp_server_access(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_MCP_VIEW,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -125,7 +124,6 @@ pub async fn update_mcp_server_default(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_MCP_ADMIN,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -228,7 +226,6 @@ pub async fn create_mcp_access_rule(
         authz
             .ensure_permission(
                 claims.user_id,
-                claims.role,
                 PERMISSION_MCP_ADMIN,
                 None,
                 PermissionScopeMode::RequireOrgWide,
@@ -255,7 +252,6 @@ pub async fn create_mcp_access_rule(
         authz
             .ensure_permission(
                 claims.user_id,
-                claims.role,
                 PERMISSION_MCP_DELEGATE,
                 target_department_id,
                 PermissionScopeMode::RequireOrgWide,
@@ -438,7 +434,6 @@ pub async fn delete_mcp_access_rule(
         authz
             .ensure_permission(
                 claims.user_id,
-                claims.role,
                 PERMISSION_MCP_ADMIN,
                 None,
                 PermissionScopeMode::RequireOrgWide,
@@ -465,7 +460,6 @@ pub async fn delete_mcp_access_rule(
         authz
             .ensure_permission(
                 claims.user_id,
-                claims.role,
                 PERMISSION_MCP_DELEGATE,
                 target_department_id,
                 PermissionScopeMode::RequireOrgWide,

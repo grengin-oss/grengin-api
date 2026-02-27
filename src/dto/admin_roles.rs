@@ -9,6 +9,7 @@ pub struct PermissionDto {
     pub domain: String,
     pub action: String,
     pub is_scopeable: bool,
+    pub description_key: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -22,6 +23,7 @@ pub struct RoleDto {
     pub name: String,
     pub is_system: bool,
     pub permissions: Vec<String>,
+    pub user_count: u64,
 }
 
 #[derive(Serialize, ToSchema)]

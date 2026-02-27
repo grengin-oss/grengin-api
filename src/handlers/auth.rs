@@ -1,7 +1,16 @@
 use axum::{Json, extract::State};
 use reqwest::StatusCode;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-use crate::{auth::{claims::{Claiming, Claims, RefreshClaims}, error::{AuthError, AuthErrorResponse}}, dto::auth::{AuthTokenResponse, RefreshTokenRequest, TokenType, User}, models::users::{self, UserRole, UserStatus}, state::SharedState};
+use crate::{
+    auth::{
+        claims::{Claiming, Claims, RefreshClaims},
+        error::{AuthError, AuthErrorResponse},
+    },
+    dto::auth::{AuthTokenResponse, RefreshTokenRequest, TokenType, User},
+    models::users::{self, UserStatus},
+    services::authorization::AuthorizationService,
+    state::SharedState,
+};
 
 #[utoipa::path(
     post,
@@ -38,7 +47,11 @@ pub async fn handle_refresh_token(
         UserStatus::Deactivated | UserStatus::Suspended => return Err(AuthError::AccountDeactivated),
         _ => ()
     }
-    let access_token_claims = Claims::new_access_token(user.email.clone(), user.name.clone(), user.id, user.role);
+    let access_token_claims = Claims::new_access_token(user.email.clone(), user.name.clone(), user.id);
+    let authz = AuthorizationService::new(&app_state.database);
+    let mut roles_map = authz.user_roles_map(&[user.id]).await?;
+    let roles = roles_map.remove(&user.id).unwrap_or_default();
+    let is_super_admin = roles.iter().any(|r| r == "Super Admin");
     let user_response = User {
         id: user.id,
         sub: user.azure_id.unwrap_or(user.google_id.unwrap_or(user.email.clone())),
@@ -46,10 +59,10 @@ pub async fn handle_refresh_token(
         name: user.name,
         picture: user.picture,
         hd: user.hd,
-        role: user.role, // TODO: Map from database if role field exists
+        roles,
         status: user.status,
         department_id:user.department_id, // TODO
-        is_super_admin: user.role == UserRole::SuperAdmin, // Default to false, update based on database field if available
+        is_super_admin,
         has_password: user.password.is_some(), // SSO-only users don't have password
         mfa_enabled: user.mfa_enabled,
         last_login_at: Some(user.last_login_at),

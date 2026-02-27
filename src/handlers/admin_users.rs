@@ -4,7 +4,25 @@ use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, EntityTrait, FromQueryResult, IntoActiveModel, JoinType, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}, permissions::{PERMISSION_USERS_MANAGE, PERMISSION_USERS_VIEW}}, dto::{admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest}, common::{PaginationQuery, SortRule}}, models::{departments, users::{self, UserRole, UserStatus}}, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
+use crate::{
+    auth::{
+        claims::Claims,
+        error::{AuthError, AuthErrorResponse},
+        permissions::{PERMISSION_USERS_MANAGE, PERMISSION_USERS_VIEW},
+    },
+    dto::{
+        admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest},
+        common::{PaginationQuery, SortRule},
+    },
+    models::{
+        departments,
+        roles,
+        user_role_assignments,
+        users::{self, UserStatus},
+    },
+    services::authorization::{AuthorizationService, PermissionScopeMode},
+    state::SharedState,
+};
 
 #[utoipa::path(
     get,
@@ -37,13 +55,15 @@ pub async fn get_user_by_id(
     authz
       .ensure_permission(
         claims.user_id,
-        claims.role,
         PERMISSION_USERS_VIEW,
         user.department_id,
         PermissionScopeMode::RequireOrgWide,
         Some(user_id),
       )
       .await?;
+     let mut roles_map = authz.user_roles_map(&[user.id]).await?;
+     let roles = roles_map.remove(&user.id).unwrap_or_default();
+     let is_super_admin = roles.iter().any(|r| r == "Super Admin");
      let user_response = UserDetails {
          id: user.id,
          sub: user.google_id.unwrap_or(user.azure_id.unwrap_or(user.email.clone())),
@@ -51,11 +71,11 @@ pub async fn get_user_by_id(
          name: user.name,
          picture: user.picture,
          hd: user.hd,
-         role: user.role, 
+         roles,
          status: user.status,
          department_id: user.department_id,
          department:None, // TODO
-         is_super_admin: user.role == UserRole::SuperAdmin, 
+         is_super_admin,
          has_password: user.password.is_some(), // SSO-only users don't have password
          mfa_enabled: user.mfa_enabled,
          last_login_at: Some(user.last_login_at),
@@ -72,7 +92,6 @@ pub struct UserDepartmentRow {
     pub id: Uuid,
     pub email: String,
     pub name: Option<String>,
-    pub role: users::UserRole,
     pub status: users::UserStatus,
     pub department_id: Option<Uuid>,
     pub google_id:Option<String>,
@@ -96,7 +115,7 @@ pub struct UserDepartmentRow {
         ("offset" = Option<u64>, Query, description = "Default value : 0"),
         ("search" = Option<String>, Query, description = "Search by name,email,department"),
         ("status" = Option<UserStatus>, Query, description = "Account status"),
-        ("role" = Option<UserRole>, Query, description = "UserRole superadmin,admin,user,observer"),
+        ("role_id" = Option<Uuid>, Query, description = "Filter by RBAC role id"),
         ("ascending" = Option<bool>, Query, description = "Order of users list default false"),
         ("unassigned_department" = Option<bool>, Query, description = "Default false"),
         ("sort" = Option<SortRule>, Query, description = "Sort by column example 'name','updated_at','created_at','email','last_login_at'"),
@@ -118,7 +137,6 @@ pub async fn get_users(
    authz
      .ensure_permission(
        claims.user_id,
-       claims.role,
        PERMISSION_USERS_VIEW,
        None,
        PermissionScopeMode::RequireOrgWide,
@@ -139,7 +157,6 @@ pub async fn get_users(
     .column(users::Column::Id)
     .column(users::Column::Email)
     .column(users::Column::Name)
-    .column(users::Column::Role)
     .column(users::Column::Status)
     .column_as(users::Column::AzureId, "azure_id")
     .column_as(users::Column::GoogleId, "google_id")
@@ -161,8 +178,27 @@ pub async fn get_users(
    if query.unassigned_department.unwrap_or(false)  {
        select = select.filter(users::Column::DepartmentId.is_null())
    }
-   if let Some(role) = query.role  {
-       select = select.filter(users::Column::Role.eq(role));
+   if let Some(role_id) = query.role_id {
+       let role_user_ids: Vec<Uuid> = user_role_assignments::Entity::find()
+           .select_only()
+           .column(user_role_assignments::Column::UserId)
+           .filter(user_role_assignments::Column::RoleId.eq(role_id))
+           .into_tuple::<Uuid>()
+           .all(&app_state.database)
+           .await
+           .map_err(|e| {
+               eprintln!("role filter lookup error: {e}");
+               AuthError::DbTimeout
+           })?;
+       if role_user_ids.is_empty() {
+           return Ok((StatusCode::OK, Json(UserResponse {
+               users: Vec::new(),
+               total: 0,
+               limit,
+               offset,
+           })));
+       }
+       select = select.filter(users::Column::Id.is_in(role_user_ids));
    }
    if let Some(status) = query.status{
        select = select.filter(users::Column::Status.eq(status))
@@ -199,27 +235,33 @@ pub async fn get_users(
          eprintln!("db get many error: {}",e);
          AuthError::DbTimeout
      })?;
+     let user_ids: Vec<Uuid> = rows.iter().map(|u| u.id).collect();
+     let roles_map = authz.user_roles_map(&user_ids).await?;
      response.users = rows
        .into_iter()
-       .map(|user| UserDetails {
-         id: user.id,
-         sub: user.google_id.unwrap_or(user.azure_id.unwrap_or(user.email.clone())),
-         email: user.email,
-         name: user.name,
-         picture: user.picture,
-         hd:None,
-         role: user.role, // TODO: Map from database if role field exists
-         status: user.status,
-         department_id: user.department_id,
-         department:user.department_name, // TODO
-         is_super_admin: user.role == UserRole::SuperAdmin, // Default to false, update based on database field if available
-         has_password: user.password.is_some(), // SSO-only users don't have password
-         mfa_enabled: user.mfa_enabled,
-         last_login_at: Some(user.last_login_at),
-         password_changed_at: None,
-         created_at: user.created_at,
-         updated_at: user.updated_at,
-         effective_permissions: None,
+       .map(|user| {
+         let roles = roles_map.get(&user.id).cloned().unwrap_or_default();
+         let is_super_admin = roles.iter().any(|r| r == "Super Admin");
+         UserDetails {
+           id: user.id,
+           sub: user.google_id.unwrap_or(user.azure_id.unwrap_or(user.email.clone())),
+           email: user.email,
+           name: user.name,
+           picture: user.picture,
+           hd:None,
+           roles,
+           status: user.status,
+           department_id: user.department_id,
+           department:user.department_name, // TODO
+           is_super_admin,
+           has_password: user.password.is_some(), // SSO-only users don't have password
+           mfa_enabled: user.mfa_enabled,
+           last_login_at: Some(user.last_login_at),
+           password_changed_at: None,
+           created_at: user.created_at,
+           updated_at: user.updated_at,
+           effective_permissions: None,
+         }
        })
       .collect::<Vec<_>>();
  Ok((StatusCode::OK,Json(response)))
@@ -248,15 +290,16 @@ pub async fn add_new_user(
    authz
      .ensure_permission(
        claims.user_id,
-       claims.role,
        PERMISSION_USERS_MANAGE,
        None,
        PermissionScopeMode::RequireOrgWide,
        None,
      )
      .await?;
+   let user_id = Uuid::new_v4();
+   let now = Utc::now();
    let user = users::ActiveModel{
-     id: Set(Uuid::new_v4()),
+     id: Set(user_id),
      status: Set(UserStatus::Active),
      picture: Set(None),
      email: Set(req.email.trim().to_string()),
@@ -267,11 +310,10 @@ pub async fn add_new_user(
      azure_id: Set(None),
      mfa_enabled: Set(false),
      mfa_secret: Set(None),
-     created_at: Set(Utc::now()),
-     updated_at: Set(Utc::now()),
-     last_login_at: Set(Utc::now()),
+     created_at: Set(now),
+     updated_at: Set(now),
+     last_login_at: Set(now),
      password_changed_at: Set(None),
-     role: Set(req.role),
      hd:Set(req.email.trim().split_once("@").map(|splited| splited.1.to_string())),
      department_id:Set(req.department_id),
      is_independent: Set(false),
@@ -285,6 +327,32 @@ pub async fn add_new_user(
         eprintln!("insert error: {e}");
         AuthError::DbTimeout
     })?;
+   let role = roles::Entity::find()
+     .filter(roles::Column::Name.eq("User"))
+     .one(&app_state.database)
+     .await
+     .map_err(|e| {
+       eprintln!("role lookup error: {e}");
+       AuthError::DbTimeout
+     })?
+     .ok_or(AuthError::ResourceNotFound)?;
+   let assignment = user_role_assignments::ActiveModel {
+     id: Set(Uuid::new_v4()),
+     user_id: Set(user_id),
+     role_id: Set(role.id),
+     scope_department_id: Set(None),
+     assigned_by: Set(claims.user_id),
+     created_at: Set(now),
+     updated_at: Set(now),
+   };
+   assignment
+     .insert(&app_state.database)
+     .await
+     .map_err(|e| {
+        eprintln!("role assignment insert error: {e}");
+        AuthError::DbTimeout
+     })?;
+   let _ = authz.recompute_effective_permissions(user_id).await;
  Ok((StatusCode::CREATED,"User added successfully"))
 }
 
@@ -322,7 +390,6 @@ pub async fn update_user(
     authz
       .ensure_permission(
         claims.user_id,
-        claims.role,
         PERMISSION_USERS_MANAGE,
         model.department_id,
         PermissionScopeMode::RequireOrgWide,
@@ -342,14 +409,10 @@ pub async fn update_user(
     if let Some(name) = req.name {
         active.name = Set(Some(name));
     }
-    if let Some(role) = req.role {
-        active.role = Set(role);
-    }
     if let Some(dept) = req.department_id {
         authz
           .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_USERS_MANAGE,
             Some(dept),
             PermissionScopeMode::RequireOrgWide,
@@ -404,7 +467,9 @@ pub async fn patch_user_status(
     Path(user_id): Path<Uuid>,
     Json(req): Json<UserPatchRequest>,
 ) -> Result<(StatusCode,&'static str), AuthError> {
-    if claims.role == UserRole::SuperAdmin
+    let authz = AuthorizationService::new(&app_state.database);
+    let is_super_admin = authz.user_has_role_name(claims.user_id, "Super Admin").await?;
+    if is_super_admin
         && claims.user_id == user_id
         && matches!(
             req.status,
@@ -425,11 +490,9 @@ pub async fn patch_user_status(
             AuthError::DbTimeout
         })?
         .ok_or(AuthError::EmailDoesNotExist)?;
-    let authz = AuthorizationService::new(&app_state.database);
     authz
       .ensure_permission(
         claims.user_id,
-        claims.role,
         PERMISSION_USERS_MANAGE,
         model.department_id,
         PermissionScopeMode::RequireOrgWide,
@@ -481,7 +544,6 @@ pub async fn delete_user(
     authz
       .ensure_permission(
         claims.user_id,
-        claims.role,
         PERMISSION_USERS_MANAGE,
         user.department_id,
         PermissionScopeMode::RequireOrgWide,

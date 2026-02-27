@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
-use crate::{models::users::{UserRole, UserStatus}};
+use crate::models::users::UserStatus;
 
 #[derive(Serialize, ToSchema)]
 pub struct UserDetails {
@@ -18,7 +18,7 @@ pub struct UserDetails {
     /// Hosted domain (organization domain)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hd: Option<String>,
-    pub role:UserRole,
+    pub roles: Vec<String>,
     pub status:UserStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub department: Option<String>,
@@ -48,7 +48,6 @@ pub struct UserResponse{
 pub struct UserRequest{
    pub email:String,
    pub name:String,
-   pub role:UserRole,
    pub department_id:Option<Uuid>,
 }
 
@@ -57,7 +56,6 @@ pub struct UserRequest{
 pub struct UserUpdateRequest{
    pub email:Option<String>,
    pub name:Option<String>,
-   pub role:Option<UserRole>,
    pub department_id:Option<Uuid>,
 }
 

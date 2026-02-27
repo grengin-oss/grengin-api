@@ -34,7 +34,6 @@ pub async fn get_ai_engines(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_AI_PLATFORM_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -172,7 +171,6 @@ pub async fn get_ai_engines_by_key(
    authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_AI_PLATFORM_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -231,7 +229,6 @@ pub async fn get_ai_engine_models_by_key(
    authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_AI_PLATFORM_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -298,7 +295,6 @@ pub async fn update_ai_engines_by_key(
    authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_AI_PLATFORM_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -416,7 +412,6 @@ pub async fn delete_ai_engines_api_key_key(
    authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_AI_PLATFORM_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -501,7 +496,6 @@ pub async fn validate_ai_engines_by_key(
    authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_AI_PLATFORM_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,

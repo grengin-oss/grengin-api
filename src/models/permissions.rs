@@ -11,6 +11,7 @@ pub struct Model {
     pub domain: String,
     pub action: String,
     pub is_scopeable: bool,
+    pub description_key: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

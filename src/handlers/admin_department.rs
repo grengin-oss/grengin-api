@@ -30,7 +30,7 @@ use crate::{
         departments::{self, ActionOnExceed, BudgetPeriod},
         roles,
         user_role_assignments,
-        users::{self, UserRole, UserStatus},
+        users::{self, UserStatus},
     },
     services::{
         authorization::{AuthorizationService, PermissionScopeMode},
@@ -103,7 +103,6 @@ async fn sync_department_admin_assignments(
     authz: &AuthorizationService<'_>,
     db: &DatabaseConnection,
     actor_id: Uuid,
-    actor_role: UserRole,
     department_id: Uuid,
     department_admin_ids: &[Uuid],
     permission_scope: Option<Uuid>,
@@ -111,7 +110,6 @@ async fn sync_department_admin_assignments(
     authz
         .ensure_permission(
             actor_id,
-            actor_role,
             PERMISSION_ROLES_ASSIGN,
             permission_scope,
             PermissionScopeMode::RequireOrgWide,
@@ -385,7 +383,6 @@ pub async fn create_department(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_MANAGE,
             req.parent_id,
             PermissionScopeMode::RequireOrgWide,
@@ -461,15 +458,14 @@ let (sql, values) = insert.build(PostgresQueryBuilder);
             &authz,
             &app_state.database,
             claims.user_id,
-            claims.role,
             id,
             admin_ids,
             req.parent_id,
         )
         .await?;
     }
-  get_department_by_id(claims,State(app_state),Path(id))
-    .await
+    let (_, Json(response)) = get_department_by_id(claims, State(app_state), Path(id)).await?;
+    Ok((StatusCode::CREATED, Json(response)))
 }
 
 #[derive(Debug, FromQueryResult)]
@@ -516,7 +512,6 @@ pub async fn list_departments(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_VIEW,
             target_scope,
             PermissionScopeMode::RequireOrgWide,
@@ -689,7 +684,6 @@ pub async fn get_departments_tree(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_VIEW,
             q.root_id,
             PermissionScopeMode::RequireOrgWide,
@@ -880,7 +874,6 @@ pub async fn get_department_by_id(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_VIEW,
             Some(department_id),
             PermissionScopeMode::RequireOrgWide,
@@ -1007,7 +1000,6 @@ pub async fn update_department(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_MANAGE,
             Some(department_id),
             PermissionScopeMode::RequireOrgWide,
@@ -1146,7 +1138,6 @@ pub async fn update_department(
             &authz,
             &app_state.database,
             claims.user_id,
-            claims.role,
             department_id,
             admin_ids,
             Some(department_id),
@@ -1190,7 +1181,6 @@ pub async fn move_department(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_MANAGE,
             Some(department_id),
             PermissionScopeMode::RequireOrgWide,
@@ -1200,7 +1190,6 @@ pub async fn move_department(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_MANAGE,
             Some(req.new_parent_id),
             PermissionScopeMode::RequireOrgWide,
@@ -1337,13 +1326,21 @@ pub async fn delete_department(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_MANAGE,
             Some(department_id),
             PermissionScopeMode::RequireOrgWide,
             Some(department_id),
         )
         .await?;
+    // Remove scoped role assignments for this department to avoid FK set-null conflicts
+    let _ = user_role_assignments::Entity::delete_many()
+        .filter(user_role_assignments::Column::ScopeDepartmentId.eq(department_id))
+        .exec(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("role assignment delete error: {e}");
+            AuthError::DbTimeout
+        })?;
     let res = departments::Entity::delete_by_id(department_id)
         .exec(&app_state.database)
         .await
@@ -1383,7 +1380,6 @@ pub async fn add_users_in_department(
      authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_MANAGE,
             Some(department_id),
             PermissionScopeMode::RequireOrgWide,
@@ -1435,7 +1431,6 @@ pub async fn remove_users_from_department(
      authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_MANAGE,
             Some(department_id),
             PermissionScopeMode::RequireOrgWide,
@@ -1500,7 +1495,7 @@ app_state
         ("include_sub_department" = bool, Query, description = "Default value : false"),
         ("search" = Option<String>, Query, description = "Search by name,email,department"),
         ("status" = Option<UserStatus>, Query, description = "Account status"),
-        ("role" = Option<UserRole>, Query, description = "UserRole superadmin,admin,user,observer"),
+        ("role_id" = Option<Uuid>, Query, description = "Filter by RBAC role id"),
         ("sort" = Option<SortRule>, Query, description = "Sort by column example 'name','updated_at','created_at','email','last_login_at'"),
         ("order" = Option<String>, Query, description = "Sort order (asc/desc)"),
     ),
@@ -1523,7 +1518,6 @@ pub async fn get_users_from_department(
      authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_USERS_VIEW,
             Some(department_id),
             PermissionScopeMode::RequireOrgWide,
@@ -1558,8 +1552,22 @@ pub async fn get_users_from_department(
     let mut select = users::Entity::find()
         .filter(users::Column::Status.ne(UserStatus::Deleted))
         .join(JoinType::LeftJoin, users::Relation::Departments.def());
-    if let Some(role) = query.role  {
-       select = select.filter(users::Column::Role.eq(role));
+    if let Some(role_id) = query.role_id {
+        let role_user_ids: Vec<Uuid> = user_role_assignments::Entity::find()
+            .select_only()
+            .column(user_role_assignments::Column::UserId)
+            .filter(user_role_assignments::Column::RoleId.eq(role_id))
+            .into_tuple::<Uuid>()
+            .all(&app_state.database)
+            .await
+            .map_err(|e| {
+                eprintln!("role filter lookup error: {e}");
+                AuthError::DbTimeout
+            })?;
+        if role_user_ids.is_empty() {
+            return Ok((StatusCode::OK, Json(DepartmentMembersResponse { total: 0, members: Vec::new() })));
+        }
+        select = select.filter(users::Column::Id.is_in(role_user_ids));
     }
     if let Some(status) = query.status{
        select = select.filter(users::Column::Status.eq(status))
@@ -1602,27 +1610,33 @@ pub async fn get_users_from_department(
         .await
         .map_err(|e| { eprintln!("db error: {e}"); AuthError::DbTimeout })?
      };
+     let user_ids: Vec<Uuid> = users_row.iter().map(|u| u.id).collect();
+     let roles_map = authz.user_roles_map(&user_ids).await?;
      response.members = users_row
        .into_iter()
-       .map(|user| UserDetails{ 
-        id:user.id,
-        sub: user.azure_id.unwrap_or(user.google_id.unwrap_or(user.email.clone())),
-        email:user.email,
-        name: user.name,
-        picture:user.picture,
-        hd:user.hd,
-        role:user.role,
-        status:user.status,
-        department:None,
-        department_id:user.department_id,
-        is_super_admin:user.role == UserRole::SuperAdmin,
-        has_password:user.password.is_some(),
-        mfa_enabled:user.mfa_enabled,
-        last_login_at:Some(user.last_login_at),
-        password_changed_at:user.password_changed_at,
-        created_at:user.created_at,
-        updated_at:user.updated_at,
-        effective_permissions:user.effective_permissions,
+       .map(|user| {
+        let roles = roles_map.get(&user.id).cloned().unwrap_or_default();
+        let is_super_admin = roles.iter().any(|r| r == "Super Admin");
+        UserDetails{ 
+            id:user.id,
+            sub: user.azure_id.unwrap_or(user.google_id.unwrap_or(user.email.clone())),
+            email:user.email,
+            name: user.name,
+            picture:user.picture,
+            hd:user.hd,
+            roles,
+            status:user.status,
+            department:None,
+            department_id:user.department_id,
+            is_super_admin,
+            has_password:user.password.is_some(),
+            mfa_enabled:user.mfa_enabled,
+            last_login_at:Some(user.last_login_at),
+            password_changed_at:user.password_changed_at,
+            created_at:user.created_at,
+            updated_at:user.updated_at,
+            effective_permissions:user.effective_permissions,
+        }
     }).collect();
     response.total = response.members.len() as i32;
   Ok((StatusCode::OK,Json(response)))

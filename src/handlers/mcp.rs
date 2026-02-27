@@ -13,8 +13,13 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
+    auth::{
+        claims::Claims,
+        encryption::encrypt_key,
+        error::AuthError,
+        permissions::{PERMISSION_MCP_ADMIN, PERMISSION_MCP_DELEGATE, PERMISSION_MCP_VIEW},
+    },
     error::AppError,
-    auth::{claims::Claims, encryption::encrypt_key},
     dto::mcp::{
         BulkToolAccessUpdate, BulkToolAccessUpdateResponse, ListExecutionsQuery, ListServersQuery,
         ListToolsQuery, McpAuthorizeResponse, McpServer, McpServerAccessList,
@@ -30,6 +35,7 @@ use crate::{
         mcp_tools,
     },
     llm::tooling::sanitize_tool_name,
+    services::authorization::{AuthorizationService, PermissionScopeMode},
     services::mcp_helpers::{
         encrypt_db_url_in_config,
         to_access_rule_dto,
@@ -54,9 +60,20 @@ use crate::{
     )
 )]
 pub async fn list_mcp_servers(
+    claims: Claims,
     State(state): State<SharedState>,
     Query(query): Query<ListServersQuery>,
-) -> Result<Json<PaginatedMcpServers>, AppError> {
+) -> Result<Json<PaginatedMcpServers>, AuthError> {
+    let authz = AuthorizationService::new(&state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_MCP_VIEW,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
     let mut finder = mcp_servers::Entity::find();
     if let Some(enabled) = query.enabled {
         finder = finder.filter(mcp_servers::Column::Enabled.eq(enabled));
@@ -69,7 +86,7 @@ pub async fn list_mcp_servers(
         .await
         .map_err(|e|{
             eprintln!("Db get error {}",e);
-            AppError::DbTimeout
+            AuthError::DbTimeout
         })?;
     let dtos: Vec<_> = servers.into_iter().map(to_server_dto).collect();
     let total = dtos.len() as i64;
@@ -90,16 +107,28 @@ pub async fn list_mcp_servers(
     )
 )]
 pub async fn create_mcp_server(
+    claims: Claims,
     State(state): State<SharedState>,
     Json(req): Json<McpServerCreate>,
-) -> Result<(StatusCode, Json<McpServer>), AppError> {
+) -> Result<(StatusCode, Json<McpServer>), AuthError> {
+    let authz = AuthorizationService::new(&state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_MCP_ADMIN,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
     let now = Utc::now();
     let mut connection_config = req.connection_config;
-    encrypt_db_url_in_config(&state.settings.auth.app_key, &mut connection_config)?;
+    encrypt_db_url_in_config(&state.settings.auth.app_key, &mut connection_config)
+        .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
     let client_secret = match req.client_secret {
         Some(ref secret) if !secret.is_empty() => Some(
             encrypt_key(&state.settings.auth.app_key, secret.as_bytes())
-                .map_err(|_| AppError::ServiceTemporarilyUnavailable)?,
+                .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?,
         ),
         _ => None,
     };
@@ -128,7 +157,7 @@ pub async fn create_mcp_server(
         .await
         .map_err(|e|{
             eprintln!("Db create error {}",e);
-            AppError::DbTimeout
+            AuthError::DbTimeout
         })?;
     state.upsert_mcp_client(&saved).await;
     Ok((StatusCode::CREATED, Json(to_server_dto(saved))))
@@ -147,17 +176,28 @@ pub async fn create_mcp_server(
     )
 )]
 pub async fn get_mcp_server(
+    claims: Claims,
     State(state): State<SharedState>,
     Path(server_id): Path<Uuid>,
-) -> Result<Json<McpServer>, AppError> {
+) -> Result<Json<McpServer>, AuthError> {
+    let authz = AuthorizationService::new(&state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_MCP_VIEW,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            Some(server_id),
+        )
+        .await?;
     let server = mcp_servers::Entity::find_by_id(server_id)
         .one(&state.database)
         .await
         .map_err(|e|{
             eprintln!("Db get one error {}",e);
-            AppError::DbTimeout
+            AuthError::DbTimeout
          })?
-        .ok_or(AppError::McpServerNotFound)?;
+        .ok_or(AuthError::ResourceNotFound)?;
     Ok(Json(to_server_dto(server)))
 }
 
@@ -175,15 +215,26 @@ pub async fn get_mcp_server(
     )
 )]
 pub async fn update_mcp_server(
+    claims: Claims,
     State(state): State<SharedState>,
     Path(server_id): Path<Uuid>,
     Json(req): Json<McpServerUpdate>,
-) -> Result<Json<McpServer>, AppError> {
+) -> Result<Json<McpServer>, AuthError> {
+    let authz = AuthorizationService::new(&state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_MCP_ADMIN,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            Some(server_id),
+        )
+        .await?;
     let server = mcp_servers::Entity::find_by_id(server_id)
         .one(&state.database)
         .await
-        .map_err(|_| AppError::DbUnavailable)?
-        .ok_or(AppError::McpServerNotFound)?;
+        .map_err(|_| AuthError::DbUnavailable)?
+        .ok_or(AuthError::ResourceNotFound)?;
     let mut active: mcp_servers::ActiveModel = server.into();
     if let Some(name) = req.name {
         active.name = Set(name);
@@ -193,7 +244,8 @@ pub async fn update_mcp_server(
     }
     if let Some(cfg) = req.connection_config {
         let mut cfg = cfg;
-        encrypt_db_url_in_config(&state.settings.auth.app_key, &mut cfg)?;
+        encrypt_db_url_in_config(&state.settings.auth.app_key, &mut cfg)
+            .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
         active.connection_config = Set(cfg);
     }
     if let Some(client_id) = req.client_id {
@@ -208,7 +260,7 @@ pub async fn update_mcp_server(
         } else {
             Some(
                 encrypt_key(&state.settings.auth.app_key, client_secret.as_bytes())
-                    .map_err(|_| AppError::ServiceTemporarilyUnavailable)?,
+                    .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?,
             )
         };
         active.client_secret = Set(encrypted);
@@ -225,7 +277,7 @@ pub async fn update_mcp_server(
         .await
         .map_err(|e|{
             eprintln!("Db get error {}",e);
-            AppError::DbTimeout
+            AuthError::DbTimeout
         })?;
     state.upsert_mcp_client(&saved).await;
     Ok(Json(to_server_dto(saved)))
@@ -244,15 +296,26 @@ pub async fn update_mcp_server(
     )
 )]
 pub async fn delete_mcp_server(
+    claims: Claims,
     State(state): State<SharedState>,
     Path(server_id): Path<Uuid>,
-) -> Result<StatusCode, AppError> {
+) -> Result<StatusCode, AuthError> {
+    let authz = AuthorizationService::new(&state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_MCP_ADMIN,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            Some(server_id),
+        )
+        .await?;
     mcp_servers::Entity::delete_by_id(server_id)
         .exec(&state.database)
         .await
         .map_err(|e|{
             eprintln!("Db get error {}",e);
-            AppError::DbTimeout
+            AuthError::DbTimeout
         })?;
     state.remove_mcp_client(&server_id).await;
     Ok(StatusCode::NO_CONTENT)
@@ -270,8 +333,20 @@ pub async fn delete_mcp_server(
     )
 )]
 pub async fn test_mcp_server(
+    claims: Claims,
+    State(state): State<SharedState>,
     Path(_server_id): Path<Uuid>,
-) -> Result<Json<McpServerTestResult>, AppError> {
+) -> Result<Json<McpServerTestResult>, AuthError> {
+    let authz = AuthorizationService::new(&state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_MCP_ADMIN,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
     Ok(Json(McpServerTestResult {
         success: true,
         message: Some("Connection test not implemented; stub response".into()),
@@ -293,27 +368,38 @@ pub async fn test_mcp_server(
     )
 )]
 pub async fn sync_mcp_server_tools(
+    claims: Claims,
     State(state): State<SharedState>,
     Path(server_id): Path<Uuid>,
-) -> Result<Json<McpSyncResult>, AppError> {
+) -> Result<Json<McpSyncResult>, AuthError> {
+    let authz = AuthorizationService::new(&state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_MCP_ADMIN,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            Some(server_id),
+        )
+        .await?;
     let server = mcp_servers::Entity::find_by_id(server_id)
         .one(&state.database)
         .await
         .map_err(|e| {
             eprintln!("mcp server lookup error: {e}");
-            AppError::DbTimeout
+            AuthError::DbTimeout
         })?
-        .ok_or(AppError::McpServerNotFound)?;
+        .ok_or(AuthError::ResourceNotFound)?;
 
     let client = {
         let clients = state.mcp_clients.read().await;
         clients.get(&server_id).cloned()
     }
-    .ok_or(AppError::McpServerNotFound)?;
+    .ok_or(AuthError::ResourceNotFound)?;
 
     let tools = client.list_tools().await.map_err(|e| {
         eprintln!("mcp list tools error: {e}");
-        AppError::ServiceTemporarilyUnavailable
+        AuthError::ServiceTemporarilyUnavailable
     })?;
 
     let existing_tools = mcp_tools::Entity::find()
@@ -322,7 +408,7 @@ pub async fn sync_mcp_server_tools(
         .await
         .map_err(|e| {
             eprintln!("mcp tools lookup error: {e}");
-            AppError::DbTimeout
+            AuthError::DbTimeout
         })?;
 
     let mut existing_by_name: HashMap<String, mcp_tools::Model> = existing_tools
@@ -440,10 +526,21 @@ pub async fn sync_mcp_server_tools(
     )
 )]
 pub async fn list_mcp_server_executions(
+    claims: Claims,
     State(state): State<SharedState>,
     Path(server_id): Path<Uuid>,
     Query(query): Query<ListExecutionsQuery>,
-) -> Result<Json<PaginatedMcpToolExecutions>, AppError> {
+) -> Result<Json<PaginatedMcpToolExecutions>, AuthError> {
+    let authz = AuthorizationService::new(&state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_MCP_VIEW,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            Some(server_id),
+        )
+        .await?;
     let mut finder =
         mcp_executions::Entity::find().filter(mcp_executions::Column::ServerId.eq(server_id));
     if let Some(tool) = query.tool_name {
@@ -465,14 +562,14 @@ pub async fn list_mcp_server_executions(
         .await
                     .map_err(|e|{
               eprintln!("Db get error {}",e);
-              AppError::DbTimeout
+              AuthError::DbTimeout
            })?;
     let data = paginator
         .fetch_page(offset / limit)
         .await
                     .map_err(|e|{
               eprintln!("Db get error {}",e);
-              AppError::DbTimeout
+              AuthError::DbTimeout
            })?;
     let executions = data.into_iter().map(to_execution_dto).collect();
     Ok(Json(PaginatedMcpToolExecutions {
@@ -484,14 +581,25 @@ pub async fn list_mcp_server_executions(
 }
 
 pub async fn get_mcp_server_access(
+    claims: Claims,
     State(state): State<SharedState>,
     Path(server_id): Path<Uuid>,
-) -> Result<Json<McpServerAccessList>, AppError> {
+) -> Result<Json<McpServerAccessList>, AuthError> {
+    let authz = AuthorizationService::new(&state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_MCP_VIEW,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            Some(server_id),
+        )
+        .await?;
     let server = mcp_servers::Entity::find_by_id(server_id)
         .one(&state.database)
         .await
-        .map_err(|_| AppError::DbUnavailable)?
-        .ok_or(AppError::McpServerNotFound)?;
+        .map_err(|_| AuthError::DbUnavailable)?
+        .ok_or(AuthError::ResourceNotFound)?;
     let rules = mcp_access_policies::Entity::find()
         .filter(mcp_access_policies::Column::TargetType.eq(McpAccessTarget::Server))
         .filter(mcp_access_policies::Column::ServerId.eq(server_id))
@@ -499,7 +607,7 @@ pub async fn get_mcp_server_access(
         .await
         .map_err(|e|{
             eprintln!("Db get error {}",e);
-            AppError::DbTimeout
+            AuthError::DbTimeout
         })?;
     Ok(Json(McpServerAccessList {
         server_id,
@@ -510,17 +618,28 @@ pub async fn get_mcp_server_access(
 }
 
 pub async fn update_mcp_server_access(
+    claims: Claims,
     State(state): State<SharedState>,
     Path(server_id): Path<Uuid>,
     Json(req): Json<McpServerAccessUpdate>,
-) -> Result<Json<McpServerAccessList>, AppError> {
+) -> Result<Json<McpServerAccessList>, AuthError> {
+    let authz = AuthorizationService::new(&state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_MCP_ADMIN,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            Some(server_id),
+        )
+        .await?;
     if let Some(default_access) = req.default_access {
         if let Some(server) = mcp_servers::Entity::find_by_id(server_id)
             .one(&state.database)
             .await
             .map_err(|e|{
               eprintln!("Db get error {}",e);
-              AppError::DbTimeout
+              AuthError::DbTimeout
            })?
         {
             let mut active: mcp_servers::ActiveModel = server.into();
@@ -529,7 +648,7 @@ pub async fn update_mcp_server_access(
               .await
               .map_err(|e|{
                  eprintln!("Db get error {}",e);
-                AppError::DbTimeout
+                AuthError::DbTimeout
             })?;
         }
     }
@@ -541,7 +660,7 @@ pub async fn update_mcp_server_access(
         .await
         .map_err(|e|{
             eprintln!("Db get error {}",e);
-            AppError::DbTimeout
+            AuthError::DbTimeout
         })?;
 
     if let Some(rules) = req.rules {
@@ -565,25 +684,36 @@ pub async fn update_mcp_server_access(
                 .await
                 .map_err(|e|{
                    eprintln!("Db get error {}",e);
-                   AppError::DbTimeout
+                   AuthError::DbTimeout
         })?;
         }
     }
 
-    get_mcp_server_access(State(state), Path(server_id)).await
+    get_mcp_server_access(claims, State(state), Path(server_id)).await
 }
 
 pub async fn get_mcp_server_tools_access(
+    claims: Claims,
     State(state): State<SharedState>,
     Path(server_id): Path<Uuid>,
-) -> Result<Json<Vec<McpToolAccessList>>, AppError> {
+) -> Result<Json<Vec<McpToolAccessList>>, AuthError> {
+    let authz = AuthorizationService::new(&state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_MCP_VIEW,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            Some(server_id),
+        )
+        .await?;
     let tools = mcp_tools::Entity::find()
         .filter(mcp_tools::Column::ServerId.eq(server_id))
         .all(&state.database)
         .await
         .map_err(|e|{
             eprintln!("Db get error {}",e);
-            AppError::DbTimeout
+            AuthError::DbTimeout
         })?;
     let mut result = Vec::new();
     for tool in tools {
@@ -594,7 +724,7 @@ pub async fn get_mcp_server_tools_access(
             .await
             .map_err(|e|{
                eprintln!("Db get error {}",e);
-               AppError::DbTimeout
+               AuthError::DbTimeout
         })?;
         result.push(McpToolAccessList {
             tool_id: tool.id,
@@ -608,16 +738,27 @@ pub async fn get_mcp_server_tools_access(
 }
 
 pub async fn update_mcp_server_tools_access(
+    claims: Claims,
     State(state): State<SharedState>,
     Path(server_id): Path<Uuid>,
     Json(req): Json<BulkToolAccessUpdate>,
-) -> Result<Json<BulkToolAccessUpdateResponse>, AppError> {
+) -> Result<Json<BulkToolAccessUpdateResponse>, AuthError> {
+    let authz = AuthorizationService::new(&state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_MCP_DELEGATE,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            Some(server_id),
+        )
+        .await?;
     let mut updated = Vec::new();
     for item in req.tools {
         if let Some(tool) = mcp_tools::Entity::find_by_id(item.tool_id)
             .one(&state.database)
             .await
-            .map_err(|_| AppError::DbUnavailable)?
+            .map_err(|_| AuthError::DbUnavailable)?
         {
             let inherit_flag = item
                 .inherit_from_server
@@ -633,7 +774,7 @@ pub async fn update_mcp_server_tools_access(
                 .await
                 .map_err(|e|{
                    eprintln!("Db get error {}",e);
-                   AppError::DbTimeout
+                   AuthError::DbTimeout
            })?;
             if let Some(rules) = item.rules {
                 for r in rules {
@@ -654,7 +795,7 @@ pub async fn update_mcp_server_tools_access(
                     model
                         .insert(&state.database)
                         .await
-                        .map_err(|_| AppError::McpAccessUpdateFailed)?;
+                        .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
                 }
             }
 
@@ -668,7 +809,7 @@ pub async fn update_mcp_server_tools_access(
                     .filter(mcp_access_policies::Column::ToolId.eq(item.tool_id))
                     .all(&state.database)
                     .await
-                    .map_err(|_| AppError::DbUnavailable)?
+                    .map_err(|_| AuthError::DbUnavailable)?
                     .into_iter()
                     .map(to_access_rule_dto)
                     .collect(),
@@ -682,14 +823,25 @@ pub async fn update_mcp_server_tools_access(
 }
 
 pub async fn get_mcp_tool_access(
+    claims: Claims,
     State(state): State<SharedState>,
     Path(tool_id): Path<Uuid>,
-) -> Result<Json<McpToolAccessList>, AppError> {
+) -> Result<Json<McpToolAccessList>, AuthError> {
+    let authz = AuthorizationService::new(&state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_MCP_VIEW,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            Some(tool_id),
+        )
+        .await?;
     let tool = mcp_tools::Entity::find_by_id(tool_id)
         .one(&state.database)
         .await
-        .map_err(|_| AppError::DbUnavailable)?
-        .ok_or(AppError::ResourceNotFound)?;
+        .map_err(|_| AuthError::DbUnavailable)?
+        .ok_or(AuthError::ResourceNotFound)?;
     let rules = mcp_access_policies::Entity::find()
         .filter(mcp_access_policies::Column::TargetType.eq(McpAccessTarget::Tool))
         .filter(mcp_access_policies::Column::ToolId.eq(tool_id))
@@ -697,7 +849,7 @@ pub async fn get_mcp_tool_access(
         .await
         .map_err(|e|{
               eprintln!("Db get error {}",e);
-              AppError::DbTimeout
+              AuthError::DbTimeout
            })?;
     Ok(Json(McpToolAccessList {
         tool_id,
@@ -709,14 +861,25 @@ pub async fn get_mcp_tool_access(
 }
 
 pub async fn update_mcp_tool_access(
+    claims: Claims,
     State(state): State<SharedState>,
     Path(tool_id): Path<Uuid>,
     Json(req): Json<McpToolAccessUpdate>,
-) -> Result<Json<McpToolAccessList>, AppError> {
+) -> Result<Json<McpToolAccessList>, AuthError> {
+    let authz = AuthorizationService::new(&state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_MCP_DELEGATE,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            Some(tool_id),
+        )
+        .await?;
     if let Some(tool) = mcp_tools::Entity::find_by_id(tool_id)
         .one(&state.database)
         .await
-        .map_err(|_| AppError::DbUnavailable)?
+        .map_err(|_| AuthError::DbUnavailable)?
     {
         let mut active: mcp_tools::ActiveModel = tool.clone().into();
         if let Some(inherit) = req.inherit_from_server {
@@ -732,7 +895,7 @@ pub async fn update_mcp_tool_access(
         .await
         .map_err(|e|{
               eprintln!("Db delete error {}",e);
-              AppError::DbTimeout
+              AuthError::DbTimeout
            })?;
     if let Some(rules) = req.rules {
         for r in rules {
@@ -753,10 +916,10 @@ pub async fn update_mcp_tool_access(
             model
                 .insert(&state.database)
                 .await
-                .map_err(|_| AppError::McpAccessUpdateFailed)?;
+                .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
         }
     }
-    get_mcp_tool_access(State(state), Path(tool_id)).await
+    get_mcp_tool_access(claims, State(state), Path(tool_id)).await
 }
 
 pub async fn list_mcp_tools(
