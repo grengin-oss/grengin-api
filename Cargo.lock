@@ -1249,7 +1249,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "grengin-api"
-version = "0.2.37"
+version = "0.2.39"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1263,6 +1263,7 @@ dependencies = [
  "jsonwebtoken",
  "migration",
  "num-traits",
+ "oauth2",
  "openidconnect",
  "openssl",
  "reqwest",

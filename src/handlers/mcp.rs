@@ -1,9 +1,10 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    response::{IntoResponse, Redirect, Response},
     Json,
 };
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
@@ -22,7 +23,8 @@ use crate::{
     error::AppError,
     dto::mcp::{
         BulkToolAccessUpdate, BulkToolAccessUpdateResponse, ListExecutionsQuery, ListServersQuery,
-        ListToolsQuery, McpAuthorizeResponse, McpServer, McpServerAccessList,
+        ListToolsQuery, McpAuthorizeQuery, McpAuthorizeResponse, McpOauthCallbackQuery, McpServer,
+        McpServerAccessList,
         McpServerAccessUpdate, McpServerCreate, McpServerTestResult, McpServerUpdate, McpSyncResult,
         McpTool, McpToolAccessList, McpToolAccessUpdate, McpToolsList,
         McpUserConnection, McpUserConnectionsList, PaginatedMcpServers, PaginatedMcpToolExecutions,
@@ -30,14 +32,18 @@ use crate::{
     models::{
         mcp_access_policies,
         mcp_access_policies::McpAccessTarget,
-        mcp_connections, mcp_executions, mcp_servers,
+        mcp_connections, mcp_executions, mcp_oauth_states, mcp_servers,
         mcp_servers::McpDefaultAccess,
         mcp_tools,
     },
     llm::tooling::sanitize_tool_name,
     services::authorization::{AuthorizationService, PermissionScopeMode},
+    services::mcp_client::{build_authorization_url, exchange_code},
     services::mcp_helpers::{
+        build_oauth_config,
         encrypt_db_url_in_config,
+        resolve_mcp_oauth_token,
+        store_oauth_tokens,
         to_access_rule_dto,
         to_execution_dto,
         to_server_dto,
@@ -74,7 +80,8 @@ pub async fn list_mcp_servers(
             None,
         )
         .await?;
-    let mut finder = mcp_servers::Entity::find();
+    let mut finder = mcp_servers::Entity::find()
+     .order_by_desc(mcp_servers::Column::CreatedAt);
     if let Some(enabled) = query.enabled {
         finder = finder.filter(mcp_servers::Column::Enabled.eq(enabled));
     }
@@ -88,7 +95,10 @@ pub async fn list_mcp_servers(
             eprintln!("Db get error {}",e);
             AuthError::DbTimeout
         })?;
-    let dtos: Vec<_> = servers.into_iter().map(to_server_dto).collect();
+    let dtos: Vec<_> = servers
+        .into_iter()
+        .map(|server| to_server_dto(&state, server))
+        .collect();
     let total = dtos.len() as i64;
     Ok(Json(PaginatedMcpServers {
         servers: dtos,
@@ -122,6 +132,7 @@ pub async fn create_mcp_server(
         )
         .await?;
     let now = Utc::now();
+    let server_name = req.name.clone();
     let mut connection_config = req.connection_config;
     encrypt_db_url_in_config(&state.settings.auth.app_key, &mut connection_config)
         .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
@@ -155,12 +166,21 @@ pub async fn create_mcp_server(
     let saved = model
         .insert(&state.database)
         .await
-        .map_err(|e|{
-            eprintln!("Db create error {}",e);
-            AuthError::DbTimeout
+        .map_err(|e| {
+            let s = e.to_string();
+            if s.contains("duplicate key value violates unique constraint")
+                || s.contains("uq-mcp-servers-name")
+            {
+                AuthError::McpServerNameConflict {
+                    name: Some(server_name.clone()),
+                }
+            } else {
+                eprintln!("Db create error {}", e);
+                AuthError::DbTimeout
+            }
         })?;
     state.upsert_mcp_client(&saved).await;
-    Ok((StatusCode::CREATED, Json(to_server_dto(saved))))
+    Ok((StatusCode::CREATED, Json(to_server_dto(&state, saved))))
 }
 
 #[utoipa::path(
@@ -198,7 +218,7 @@ pub async fn get_mcp_server(
             AuthError::DbTimeout
          })?
         .ok_or(AuthError::ResourceNotFound)?;
-    Ok(Json(to_server_dto(server)))
+    Ok(Json(to_server_dto(&state, server)))
 }
 
 #[utoipa::path(
@@ -236,6 +256,7 @@ pub async fn update_mcp_server(
         .map_err(|_| AuthError::DbUnavailable)?
         .ok_or(AuthError::ResourceNotFound)?;
     let mut active: mcp_servers::ActiveModel = server.into();
+    let requested_name = req.name.clone();
     if let Some(name) = req.name {
         active.name = Set(name);
     }
@@ -275,12 +296,21 @@ pub async fn update_mcp_server(
     let saved = active
         .update(&state.database)
         .await
-        .map_err(|e|{
-            eprintln!("Db get error {}",e);
-            AuthError::DbTimeout
+        .map_err(|e| {
+            let s = e.to_string();
+            if s.contains("duplicate key value violates unique constraint")
+                || s.contains("uq-mcp-servers-name")
+            {
+                AuthError::McpServerNameConflict {
+                    name: requested_name.clone(),
+                }
+            } else {
+                eprintln!("Db get error {}", e);
+                AuthError::DbTimeout
+            }
         })?;
     state.upsert_mcp_client(&saved).await;
-    Ok(Json(to_server_dto(saved)))
+    Ok(Json(to_server_dto(&state, saved)))
 }
 
 #[utoipa::path(
@@ -397,10 +427,32 @@ pub async fn sync_mcp_server_tools(
     }
     .ok_or(AuthError::ResourceNotFound)?;
 
-    let tools = client.list_tools().await.map_err(|e| {
-        eprintln!("mcp list tools error: {e}");
-        AuthError::ServiceTemporarilyUnavailable
-    })?;
+    let requires_oauth = server.transport_type == mcp_servers::McpTransportType::Http
+        && server.connection_config.get("oauth").is_some();
+    let oauth_token = if requires_oauth {
+        match resolve_mcp_oauth_token(&state, claims.user_id, server_id).await {
+            Ok(token) => token,
+            Err(err) => {
+                eprintln!("mcp oauth token lookup error: {:?}", err);
+                return Err(AuthError::ServiceTemporarilyUnavailable);
+            }
+        }
+    } else {
+        None
+    };
+
+    if requires_oauth && oauth_token.is_none() {
+        eprintln!("mcp oauth token missing for server {server_id}");
+        return Err(AuthError::ServiceTemporarilyUnavailable);
+    }
+
+    let tools = client
+        .list_tools_with_auth(oauth_token)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp list tools error: {e}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
 
     let existing_tools = mcp_tools::Entity::find()
         .filter(mcp_tools::Column::ServerId.eq(server_id))
@@ -985,13 +1037,153 @@ pub async fn authorize_mcp_connection(
     claims: Claims,
     State(state): State<SharedState>,
     Path(server_id): Path<Uuid>,
+    Query(query): Query<McpAuthorizeQuery>,
 ) -> Result<Json<McpAuthorizeResponse>, AppError> {
-    upsert_connection(&state, claims.user_id, server_id, true).await?;
+    let server = mcp_servers::Entity::find_by_id(server_id)
+        .one(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp server lookup error: {e}");
+            AppError::DbTimeout
+        })?
+        .ok_or(AppError::McpServerNotFound)?;
+
+    if !server.enabled {
+        return Err(AppError::McpServerNotFound);
+    }
+
+    if server.transport_type != mcp_servers::McpTransportType::Http {
+        return Err(AppError::ServiceTemporarilyUnavailable);
+    }
+
+    let oauth_config = build_oauth_config(&state, &server)?;
+    let authorization = build_authorization_url(&oauth_config).map_err(|e| {
+        eprintln!("mcp oauth authorize url error: {e}");
+        AppError::ServiceTemporarilyUnavailable
+    })?;
+
+    let now = Utc::now();
+    let expires_at = now + Duration::minutes(10);
+    let model = mcp_oauth_states::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        server_id: Set(server_id),
+        user_id: Set(claims.user_id),
+        state: Set(authorization.state.clone()),
+        pkce_verifier: Set(authorization.pkce_verifier.clone()),
+        redirect_uri: Set(query.redirect_uri.clone()),
+        expires_at: Set(Some(expires_at)),
+        created_at: Set(now),
+    };
+    model
+        .insert(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp oauth state insert error: {e}");
+            AppError::DbTimeout
+        })?;
+
     Ok(Json(McpAuthorizeResponse {
         success: true,
-        authorization_url: Some(format!("https://auth.example.com/mcp/{server_id}")),
+        authorization_url: Some(authorization.authorization_url),
         message: Some("Authorize via provided URL".into()),
     }))
+}
+
+pub async fn mcp_oauth_callback(
+    State(state): State<SharedState>,
+    Query(query): Query<McpOauthCallbackQuery>,
+) -> Result<Response, AppError> {
+    let oauth_state = mcp_oauth_states::Entity::find()
+        .filter(mcp_oauth_states::Column::State.eq(query.state.clone()))
+        .one(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp oauth state lookup error: {e}");
+            AppError::DbTimeout
+        })?
+        .ok_or(AppError::ResourceNotFound)?;
+
+    if let Some(expires_at) = oauth_state.expires_at {
+        if expires_at <= Utc::now() {
+            let _ = mcp_oauth_states::Entity::delete_by_id(oauth_state.id)
+                .exec(&state.database)
+                .await;
+            return Err(AppError::ResourceNotFound);
+        }
+    }
+
+    if let Some(error) = query.error.clone() {
+        let response = build_oauth_callback_response(
+            oauth_state.redirect_uri.as_deref(),
+            oauth_state.server_id,
+            false,
+        );
+        eprintln!("mcp oauth error: {error} {:?}", query.error_description);
+        let _ = mcp_oauth_states::Entity::delete_by_id(oauth_state.id)
+            .exec(&state.database)
+            .await;
+        return Ok(response);
+    }
+
+    let code = query
+        .code
+        .ok_or(AppError::ValidationMissingField { field: "code" })?;
+
+    let server = mcp_servers::Entity::find_by_id(oauth_state.server_id)
+        .one(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp server lookup error: {e}");
+            AppError::DbTimeout
+        })?
+        .ok_or(AppError::McpServerNotFound)?;
+
+    let oauth_config = build_oauth_config(&state, &server)?;
+    let tokens = exchange_code(
+        &oauth_config,
+        &code,
+        &oauth_state.pkce_verifier,
+        &state.req_client,
+    )
+    .await
+    .map_err(|e| {
+        eprintln!("mcp oauth token exchange error: {e}");
+        AppError::ServiceTemporarilyUnavailable
+    })?;
+
+    store_oauth_tokens(&state, oauth_state.user_id, server.id, &server.name, tokens).await?;
+
+    let _ = mcp_oauth_states::Entity::delete_by_id(oauth_state.id)
+        .exec(&state.database)
+        .await;
+
+    Ok(build_oauth_callback_response(
+        oauth_state.redirect_uri.as_deref(),
+        oauth_state.server_id,
+        true,
+    ))
+}
+
+fn build_oauth_callback_response(
+    redirect_uri: Option<&str>,
+    server_id: Uuid,
+    success: bool,
+) -> Response {
+    if let Some(redirect_uri) = redirect_uri {
+        let separator = if redirect_uri.contains('?') { "&" } else { "?" };
+        let status_value = if success { "success" } else { "error" };
+        let url = format!(
+            "{redirect_uri}{separator}mcp_server_id={server_id}&status={status_value}"
+        );
+        return Redirect::to(&url).into_response();
+    }
+
+    let body = json!({
+        "success": success,
+        "server_id": server_id,
+        "status": if success { "success" } else { "error" }
+    });
+    (StatusCode::OK, Json(body)).into_response()
 }
 
 pub async fn disconnect_mcp_connection(

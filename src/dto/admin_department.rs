@@ -21,6 +21,7 @@ pub struct DepartmentListQuery {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub include_children: bool,
+    pub search: Option<String>,
 }
 
 #[derive(Deserialize, IntoParams, ToSchema)]
@@ -97,7 +98,6 @@ pub struct DepartmentRequest {
     pub description: String,
     pub parent_id: Option<Uuid>,
     pub admin_ids: Option<Vec<Uuid>>,
-    pub leader_ids: Vec<Uuid>,
 }
 
 #[derive(Deserialize,IntoParams,ToSchema)]

@@ -28,6 +28,19 @@ pub struct ListToolsQuery {
     pub search: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct McpAuthorizeQuery {
+    pub redirect_uri: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpOauthCallbackQuery {
+    pub code: Option<String>,
+    pub state: String,
+    pub error: Option<String>,
+    pub error_description: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct McpServer {
     pub id: Uuid,
@@ -38,6 +51,10 @@ pub struct McpServer {
     pub connection_config: JsonValue,
     pub client_id: Option<String>,
     pub client_secret_configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "client_secret_preview")]
+    #[schema(value_type = String, rename = "client_secret_preview")]
+    pub client_secret_preview: Option<String>,
     pub url: Option<String>,
     pub enabled: bool,
     pub status: Option<String>,

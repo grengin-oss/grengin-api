@@ -45,6 +45,7 @@ pub enum AuthErrorCode {
     EmailDomainNotAllowed = 6303,
     BudgetExceedsParentAvailable = 6304,
     SuperAdminSelfStatusConflict = 6305,
+    McpServerNameConflict = 6306,
 
     // 6400-6499: SSO config / admin controls
     SsoProviderNotConfigured = 6400,
@@ -126,6 +127,7 @@ pub enum AuthError {
     SsoProviderDisabledByAdmin { provider: Option<String> },
 
     EmailDomainNotAllowed { domain: Option<String> },
+    McpServerNameConflict { name: Option<String> },
 }
 
 impl AuthError {
@@ -562,6 +564,35 @@ impl AuthError {
                     StatusCode::CONFLICT,
                     ErrorDetail {
                         code: AuthErrorCode::SuperAdminSelfStatusConflict,
+                        description: Self::render(description_tpl, &params),
+                        solution: Self::render(solution_tpl, &params),
+                        description_key,
+                        solution_key,
+                        params,
+                        external_code: None,
+                    },
+                )
+            }
+
+            AuthError::McpServerNameConflict { name } => {
+                let mut params = Self::base_params();
+                if let Some(name) = name.as_ref() {
+                    params.insert("name".to_string(), name.clone());
+                }
+                let description_key = "error.mcp_server.name_conflict.description".to_string();
+                let solution_key = "error.mcp_server.name_conflict.solution".to_string();
+
+                let description_tpl = if name.is_some() {
+                    "An MCP server named \"{name}\" already exists."
+                } else {
+                    "An MCP server with this name already exists."
+                };
+                let solution_tpl = "Choose a different name and try again.";
+
+                (
+                    StatusCode::CONFLICT,
+                    ErrorDetail {
+                        code: AuthErrorCode::McpServerNameConflict,
                         description: Self::render(description_tpl, &params),
                         solution: Self::render(solution_tpl, &params),
                         description_key,

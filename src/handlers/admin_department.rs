@@ -486,6 +486,11 @@ struct ChildCountRow {
     get,
     path = "/admin/departments",
     tag = "admin",
+    params(
+        ("parent_id" = Option<String>, Query, description = "Filter by parent department id (use \"root\" for top-level)"),
+        ("include_children" = Option<bool>, Query, description = "Include descendant departments when parent_id is set (default: false)"),
+        ("search" = Option<String>, Query, description = "Search by department name"),
+    ),
     responses(
        (status = 200, body = DepartmentsListResponse),
        (status = 401, content_type = "application/json", body = AuthErrorResponse),
@@ -551,6 +556,10 @@ pub async fn list_departments(
                 query = query.filter(departments::Column::ParentId.eq(parent_uuid));
             }
         }
+    }
+
+    if let Some(search) = q.search.as_deref() {
+        query = query.filter(departments::Column::Name.into_expr().ilike(format!("%{}%", search)));
     }
 
     let rows = query

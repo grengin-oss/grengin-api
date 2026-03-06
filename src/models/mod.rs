@@ -22,4 +22,5 @@ pub mod mcp_tools;
 pub mod mcp_server_tools;
 pub mod mcp_executions;
 pub mod mcp_connections;
+pub mod mcp_oauth_states;
 pub mod auth_audit_events;

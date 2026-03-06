@@ -4,8 +4,9 @@ use crate::{
     handlers::mcp::{
         authorize_mcp_connection, create_mcp_server, delete_mcp_server, disconnect_mcp_connection,
         get_mcp_server, get_mcp_server_tools_access, get_mcp_tool_access, list_mcp_connections,
-        list_mcp_server_executions, list_mcp_servers, list_mcp_tools, sync_mcp_server_tools,
-        test_mcp_server, update_mcp_server, update_mcp_server_tools_access, update_mcp_tool_access,
+        list_mcp_server_executions, list_mcp_servers, list_mcp_tools, mcp_oauth_callback,
+        sync_mcp_server_tools, test_mcp_server, update_mcp_server,
+        update_mcp_server_tools_access, update_mcp_tool_access,
     },
     state::SharedState,
 };
@@ -49,4 +50,5 @@ pub fn mcp_routes() -> Router<SharedState> {
             "/mcp/connections/{server_id}/disconnect",
             post(disconnect_mcp_connection),
         )
+        .route("/mcp/oauth/callback", get(mcp_oauth_callback))
 }

@@ -8,7 +8,7 @@ use crate::{
     dto::llm::openai::OpenaiTool,
     error::AppError,
     llm::tooling::mcp_openai_tool_name,
-    models::mcp_tools,
+    models::{mcp_servers, mcp_tools},
     state::SharedState,
 };
 
@@ -17,11 +17,19 @@ pub struct McpToolDescriptor {
     pub openai_name: String,
     pub server_id: Uuid,
     pub server_name: String,
+    pub server_description: Option<String>,
     pub tool_id: Uuid,
     pub original_name: String,
     pub description: Option<String>,
     pub input_schema: Value,
     pub is_read_only: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct McpServerSummary {
+    pub server_id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
 }
 
 fn normalize_openai_parameters(schema: &Value) -> Value {
@@ -169,9 +177,28 @@ pub async fn load_openai_mcp_tools(
     state: &SharedState,
     selected_server_ids: &[Uuid],
     selected_tools: &[String],
-) -> Result<(Vec<OpenaiTool>, HashMap<String, McpToolDescriptor>), AppError> {
+) -> Result<(Vec<OpenaiTool>, HashMap<String, McpToolDescriptor>, Vec<McpServerSummary>), AppError> {
     if selected_server_ids.is_empty() {
-        return Ok((Vec::new(), HashMap::new()));
+        return Ok((Vec::new(), HashMap::new(), Vec::new()));
+    }
+
+    let servers = mcp_servers::Entity::find()
+        .filter(mcp_servers::Column::Id.is_in(selected_server_ids.to_vec()))
+        .all(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp servers fetch error: {e}");
+            AppError::DbTimeout
+        })?;
+    let mut server_map: HashMap<Uuid, (String, Option<String>)> = HashMap::new();
+    let mut server_summaries = Vec::new();
+    for server in servers {
+        server_map.insert(server.id, (server.name.clone(), server.description.clone()));
+        server_summaries.push(McpServerSummary {
+            server_id: server.id,
+            name: server.name,
+            description: server.description,
+        });
     }
 
     let tools = mcp_tools::Entity::find()
@@ -191,6 +218,10 @@ pub async fn load_openai_mcp_tools(
     let mut lookup = HashMap::new();
 
     for tool in tools {
+        let (server_name, server_description) = server_map
+            .get(&tool.server_id)
+            .cloned()
+            .unwrap_or((tool.server_name.clone(), None));
         let openai_name = mcp_openai_tool_name(&tool.server_id, &tool.name);
         if filter_by_selected
             && !selected_set.contains(&openai_name)
@@ -203,7 +234,8 @@ pub async fn load_openai_mcp_tools(
         let descriptor = McpToolDescriptor {
             openai_name: openai_name.clone(),
             server_id: tool.server_id,
-            server_name: tool.server_name.clone(),
+            server_name,
+            server_description,
             tool_id: tool.id,
             original_name: tool.original_name.clone(),
             description: tool.description.clone(),
@@ -220,5 +252,5 @@ pub async fn load_openai_mcp_tools(
         lookup.insert(openai_name, descriptor);
     }
 
-    Ok((openai_tools, lookup))
+    Ok((openai_tools, lookup, server_summaries))
 }

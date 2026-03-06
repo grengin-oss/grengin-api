@@ -52,11 +52,12 @@ use crate::{
         anthropic::AnthropicStreamParser,
         openai::OpenaiStreamParser,
     },
-    llm::{prompt::Prompt, provider::{AnthropicApis, OpenaiApis, get_title_generation_model}},
-    models::{conversations, departments::ActionOnExceed, messages::{self, ChatRole}, users, mcp_executions},
+    llm::{prompt::Prompt, provider::{AnthropicApis, OpenaiApis, get_title_generation_model}, tooling::mcp_server_short_id},
+    models::{conversations, departments::ActionOnExceed, messages::{self, ChatRole}, users, mcp_executions, mcp_servers::McpTransportType},
     services::{
         budget_allocation::{get_department_budget_status, refresh_department_budget_available},
-        mcp_tools::load_openai_mcp_tools,
+        mcp_helpers::resolve_mcp_oauth_token,
+        mcp_tools::{load_openai_mcp_tools, McpServerSummary},
     },
     state::SharedState,
     utils::chat_stream::{
@@ -87,6 +88,34 @@ fn calculate_cost_decimal(
     }
     let cost = (input_tokens as f64 * input_rate + output_tokens as f64 * output_rate) / 1_000_000.0;
     Decimal::from_f64(cost).unwrap_or_else(|| Decimal::from(0))
+}
+
+fn build_mcp_server_context(servers: &[McpServerSummary]) -> Option<String> {
+    if servers.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    lines.push("MCP servers selected for this request:".to_string());
+    for server in servers {
+        let short_id = mcp_server_short_id(&server.server_id);
+        let mut line = format!(
+            "- {} (id: {}, short: {})",
+            server.name, server.server_id, short_id
+        );
+        if let Some(description) = server
+            .description
+            .as_ref()
+            .map(|text| text.trim())
+            .filter(|text| !text.is_empty())
+        {
+            line.push_str(&format!(" — {}", description));
+        }
+        lines.push(line);
+    }
+    lines.push(
+        "Tools starting with mcp__<short>__ map to the corresponding server above.".to_string(),
+    );
+    Some(lines.join("\n"))
 }
 
 #[utoipa::path(
@@ -505,11 +534,27 @@ pub async fn handle_chat_stream(
  let provider_is_openai = provider.to_lowercase() == "openai";
  let provider_is_anthropic = provider.to_lowercase() == "anthropic";
  let supports_mcp_tools = provider_is_openai || provider_is_anthropic;
- let (mcp_openai_tools, mcp_tool_lookup) = if supports_mcp_tools {
+ let (mcp_openai_tools, mcp_tool_lookup, mcp_server_summaries) = if supports_mcp_tools {
      load_openai_mcp_tools(&app_state, &selected_mcp_servers, &selected_tools).await?
  } else {
-     (Vec::new(), HashMap::new())
+     (Vec::new(), HashMap::new(), Vec::new())
  };
+ if supports_mcp_tools {
+     if let Some(context) = build_mcp_server_context(&mcp_server_summaries) {
+         let insert_at = previous_prompts
+             .iter()
+             .position(|prompt| prompt.role != ChatRole::System)
+             .unwrap_or(previous_prompts.len());
+         previous_prompts.insert(
+             insert_at,
+             Prompt {
+                 role: ChatRole::System,
+                 text: context,
+                 files: Vec::new(),
+             },
+         );
+     }
+ }
  let mut openai_tools = Vec::new();
  if web_search {
      openai_tools.push(OpenaiTool::web_search());
@@ -1167,15 +1212,45 @@ pub async fn handle_chat_stream(
 
                             let exec_start = Instant::now();
                             let call_result = {
-                                let client = {
+                                let (client, requires_oauth) = {
                                     let clients = app_state.mcp_clients.read().await;
-                                    clients.get(&tool_ref.server_id).cloned()
+                                    match clients.get(&tool_ref.server_id) {
+                                        Some(client) => {
+                                            let requires_oauth = client.transport_type == McpTransportType::Http
+                                                && client.connection_config.get("oauth").is_some();
+                                            (Some(client.clone()), requires_oauth)
+                                        }
+                                        None => (None, false),
+                                    }
+                                };
+                                let auth_token = if requires_oauth {
+                                    match resolve_mcp_oauth_token(&app_state, claims.user_id, tool_ref.server_id)
+                                        .await
+                                    {
+                                        Ok(token) => token,
+                                        Err(err) => {
+                                            eprintln!("mcp oauth token error: {:?}", err);
+                                            None
+                                        }
+                                    }
+                                } else {
+                                    None
                                 };
                                 match client {
-                                    Some(client) => client
-                                        .call_tool(&tool_ref.original_name, args_for_call.clone())
-                                        .await
-                                        .map_err(|e| e.to_string()),
+                                    Some(client) => {
+                                        if requires_oauth && auth_token.is_none() {
+                                            Err("mcp oauth connection missing; authorize via /mcp/connections/{server_id}/authorize".to_string())
+                                        } else {
+                                            client
+                                                .call_tool(
+                                                    &tool_ref.original_name,
+                                                    args_for_call.clone(),
+                                                    auth_token,
+                                                )
+                                                .await
+                                                .map_err(|e| e.to_string())
+                                        }
+                                    }
                                     None => Err(format!(
                                         "mcp server {} not connected",
                                         tool_ref.server_id
