@@ -6,7 +6,7 @@ use crate::dto::admin_department_budget::{DepartmentBudgetStatusDto, SubDepartme
 use crate::dto::admin_department::{DepartmentListQuery, DepartmentMembersResponse, DepartmentRequest, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery, DepartmentTreeResponse, DepartmentsListResponse, MoveDepartmentRequest};
 use crate::dto::admin_mcp::{McpAccessDefaultRequest, McpAccessRuleDto, McpAccessRuleRequest, McpServerAccessResponse};
 use crate::dto::admin_roles::{PermissionDto, PermissionsResponse, RoleDto, RoleRequest, RoleUpdateRequest, RolesResponse, UserRoleAssignmentDto, UserRoleAssignmentRequest, UserRoleAssignmentsResponse};
-use crate::dto::analytics::DepartmentAnalyticsResponse;
+use crate::dto::analytics::{DepartmentAnalyticsQuery, DepartmentAnalyticsResponse, ScopedUserAnalyticsQuery, UserAnalyticsResponse};
 use crate::dto::branding::{BrandingResponse, BrandingUpdate};
 use crate::dto::admin_sso_providers::{EditableField, SsoProviderEditableResponse, SsoProviderResponse, SsoProviderUpdateRequest};
 use crate::dto::admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest};
@@ -16,7 +16,7 @@ use crate::dto::common::{PaginationQuery, SortRule};
 use crate::dto::files::{Attachment, File, FileResponse, FileUploadRequest};
 use crate::dto::models::{ModelInfo, ProviderInfo};
 use crate::dto::oauth::OAuthCallback;
-use crate::dto::me::{AdministeredDepartmentsResponse, EffectivePermissionsResponse};
+use crate::dto::me::EffectivePermissionsResponse;
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::docs::{security::ApiSecurityAddon,app_error_catlog::AppErrorCatalogItem};
 use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, RefreshTokenRequest, TokenType, User};
@@ -105,7 +105,11 @@ use crate::models::users::UserStatus;
         mcp::sync_mcp_server_tools,
         mcp::list_mcp_server_executions,
         me::get_my_permissions,
-        me::get_my_administered_departments,
+        me::get_my_administered_department_analytics,
+        me::get_my_administered_department_user_analytics,
+        me::get_my_administered_department_members,
+        me::get_my_administered_departments_list,
+        me::get_my_administered_departments_tree,
         admin_department_budgets::get_department_budget,
     ),
     components(
@@ -166,6 +170,9 @@ use crate::models::users::UserStatus;
             EditableField,
             DepartmentMembersResponse,
             DepartmentAnalyticsResponse,
+            DepartmentAnalyticsQuery,
+            UserAnalyticsResponse,
+            ScopedUserAnalyticsQuery,
             BudgetPeriod,
             ActionOnExceed,
             DepartmentTreeQuery,
@@ -187,7 +194,6 @@ use crate::models::users::UserStatus;
             McpAccessRuleRequest,
             McpAccessDefaultRequest,
             McpServerAccessResponse,
-            AdministeredDepartmentsResponse,
             EffectivePermissionsResponse,
             McpAccessDefault,
             McpSubjectType,

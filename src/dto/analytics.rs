@@ -30,6 +30,21 @@ pub struct UserAnalyticsQuery {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+pub struct ScopedUserAnalyticsQuery {
+    pub start_date: Option<NaiveDate>,
+    pub end_date: Option<NaiveDate>,
+    pub page: Option<u64>,
+    pub limit: Option<u64>,
+    pub sort_by: Option<String>,
+    pub order: Option<String>,
+    pub search: Option<String>,
+    pub role_id: Option<Uuid>,
+    pub status: Option<UserStatus>,
+    pub department_id: Option<Uuid>,
+    pub live: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct DepartmentAnalyticsQuery {
     pub start_date: Option<NaiveDate>,
     pub end_date: Option<NaiveDate>,

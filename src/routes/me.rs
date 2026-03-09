@@ -1,8 +1,34 @@
 use axum::{Router, routing::get};
-use crate::{handlers::me::{get_my_administered_departments, get_my_permissions}, state::SharedState};
+use crate::{
+    handlers::me::{
+        get_my_administered_department_analytics,
+        get_my_administered_department_user_analytics,
+        get_my_administered_department_members,
+        get_my_administered_departments_list,
+        get_my_administered_departments_tree,
+        get_my_permissions,
+    },
+    state::SharedState,
+};
 
 pub fn me_routes() -> Router<SharedState> {
     Router::new()
         .route("/me/permissions", get(get_my_permissions))
-        .route("/me/administered-departments", get(get_my_administered_departments))
+        .route("/me/analytics/administered-departments", get(get_my_administered_department_analytics))
+        .route(
+            "/me/administered-departments",
+            get(get_my_administered_departments_list),
+        )
+        .route(
+            "/me/administered-departments/tree",
+            get(get_my_administered_departments_tree),
+        )
+        .route(
+            "/me/administered-departments/users",
+            get(get_my_administered_department_members),
+        )
+        .route(
+            "/me/analytics/administered-departments/users",
+            get(get_my_administered_department_user_analytics),
+        )
 }

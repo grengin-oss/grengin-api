@@ -41,7 +41,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, FromQueryResult)]
-pub struct DepartmentRow {
+pub(crate) struct DepartmentRow {
     pub id: Uuid,
     pub name: String,
     pub description: String,
@@ -62,7 +62,7 @@ pub struct DepartmentRow {
 }
 
 #[derive(Debug, Clone, FromQueryResult)]
-pub struct DepartmentTreeRow {
+pub(crate) struct DepartmentTreeRow {
     pub id: Uuid,
     pub name: String,
     pub description: String,
@@ -252,7 +252,7 @@ async fn sync_department_admin_assignments(
     Ok(())
 }
 
-async fn load_department_admin_ids_map(
+pub(crate) async fn load_department_admin_ids_map(
     db: &DatabaseConnection,
     department_ids: &[Uuid],
 ) -> Result<HashMap<Uuid, Vec<Uuid>>, AuthError> {
@@ -316,7 +316,7 @@ pub fn departments_base_select() -> sea_orm::Select<departments::Entity> {
         .column(departments::Column::UpdatedAt)
 }
 
-fn departments_tree_select() -> sea_orm::Select<departments::Entity> {
+pub(crate) fn departments_tree_select() -> sea_orm::Select<departments::Entity> {
     departments::Entity::find()
         .select_only()
         .column(departments::Column::Id)
@@ -331,7 +331,7 @@ fn departments_tree_select() -> sea_orm::Select<departments::Entity> {
         .column(departments::Column::UpdatedAt)
 }
 
-async fn department_budget_snapshot(
+pub(crate) async fn department_budget_snapshot(
     db: &sea_orm::DatabaseConnection,
     department_id: Uuid,
     budget_allocated: Decimal,
@@ -469,17 +469,17 @@ let (sql, values) = insert.build(PostgresQueryBuilder);
 }
 
 #[derive(Debug, FromQueryResult)]
-struct DeptCountRow {
+pub(crate) struct DeptCountRow {
     #[sea_orm(from_alias = "departmentId")]
-    department_id: Uuid,
-    cnt: i64,
+    pub(crate) department_id: Uuid,
+    pub(crate) cnt: i64,
 }
 
 #[derive(Debug, FromQueryResult)]
-struct ChildCountRow {
+pub(crate) struct ChildCountRow {
     #[sea_orm(from_alias = "parentId")]
-    parent_id: Uuid,
-    cnt: i64,
+    pub(crate) parent_id: Uuid,
+    pub(crate) cnt: i64,
 }
 
 #[utoipa::path(
