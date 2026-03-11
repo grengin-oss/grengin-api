@@ -15,12 +15,12 @@ use crate::{
     dto::{
         admin_user::UserDetails,
         admin_department::{
-            DepartmentListQuery, DepartmentMembersResponse, DepartmentResponse, DepartmentTreeNode,
-            DepartmentTreeQuery, DepartmentTreeResponse, DepartmentsListResponse,
+            DepartmentListQuery, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery,
+            DepartmentTreeResponse, DepartmentsListResponse,
         },
         analytics::{DepartmentAnalyticsQuery, DepartmentAnalyticsResponse, ScopedUserAnalyticsQuery, UserAnalyticsResponse},
         common::SortRule,
-        me::{AdministeredDepartmentUsersQuery, EffectivePermissionsResponse},
+        me::{AdministeredDepartmentUsersQuery, EffectivePermissionsResponse, MeDepartmentUsersResponse},
     },
     handlers::admin_department::{
         ChildCountRow, DepartmentRow, DepartmentTreeRow, DeptCountRow, department_budget_snapshot,
@@ -75,6 +75,16 @@ async fn load_administered_department_ids(
 
     let mut departments = Vec::new();
     if let Some(value) = user.effective_permissions {
+        let permissions = value.get("permissions").unwrap_or(&Value::Null);
+        let manage_scope = parse_permission_scope(permissions, "departments:manage");
+        let view_scope = parse_permission_scope(permissions, "departments:view");
+
+        if matches!(manage_scope, PermissionScope::Missing)
+            && matches!(view_scope, PermissionScope::Missing)
+        {
+            return Ok(Vec::new());
+        }
+
         if let Some(list) = value.get("administered_departments").and_then(|v| v.as_array()) {
             for item in list {
                 if let Some(id_str) = item.as_str() {
@@ -83,6 +93,18 @@ async fn load_administered_department_ids(
                     }
                 }
             }
+        }
+
+        if departments.is_empty() {
+            departments = match manage_scope {
+                PermissionScope::OrgWide => load_all_department_ids(&app_state.database).await?,
+                PermissionScope::Scoped(ids) if !ids.is_empty() => ids,
+                _ => match view_scope {
+                    PermissionScope::OrgWide => load_all_department_ids(&app_state.database).await?,
+                    PermissionScope::Scoped(ids) => ids,
+                    PermissionScope::Missing => Vec::new(),
+                },
+            };
         }
     }
 
@@ -99,6 +121,55 @@ fn needs_effective_permissions_refresh(value: &Option<Value>) -> bool {
         Some(_) => true,
         None => true,
     }
+}
+
+enum PermissionScope {
+    Missing,
+    OrgWide,
+    Scoped(Vec<Uuid>),
+}
+
+fn parse_permission_scope(permissions: &Value, key: &str) -> PermissionScope {
+    let value = match permissions.get(key) {
+        Some(value) => value,
+        None => return PermissionScope::Missing,
+    };
+
+    match value {
+        Value::String(text) => {
+            if text.is_empty() {
+                PermissionScope::Missing
+            } else {
+                PermissionScope::OrgWide
+            }
+        }
+        Value::Array(items) => {
+            let ids = items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .filter_map(|item| Uuid::parse_str(item).ok())
+                .collect::<Vec<_>>();
+            if ids.is_empty() {
+                PermissionScope::Missing
+            } else {
+                PermissionScope::Scoped(ids)
+            }
+        }
+        _ => PermissionScope::Missing,
+    }
+}
+
+async fn load_all_department_ids(db: &DatabaseConnection) -> Result<Vec<Uuid>, AuthError> {
+    departments::Entity::find()
+        .select_only()
+        .column(departments::Column::Id)
+        .into_tuple::<Uuid>()
+        .all(db)
+        .await
+        .map_err(|e| {
+            eprintln!("department list error: {e}");
+            AuthError::DbTimeout
+        })
 }
 
 async fn should_refresh_administered_departments(
@@ -785,7 +856,7 @@ pub async fn get_my_administered_departments_tree(
         ("sort" = Option<SortRule>, Query, description = "Sort by name,email,created_at,updated_at,last_login_at"),
     ),
     responses(
-       (status = 200, body = DepartmentMembersResponse),
+       (status = 200, body = MeDepartmentUsersResponse),
        (status = 401, content_type = "application/json", body = AuthErrorResponse),
        (status = 404, content_type = "application/json", body = AuthErrorResponse),
        (status = 503, content_type = "application/json", body = AuthErrorResponse)
@@ -795,15 +866,15 @@ pub async fn get_my_administered_department_members(
     claims: Claims,
     State(app_state): State<SharedState>,
     Query(query): Query<AdministeredDepartmentUsersQuery>,
-) -> Result<(StatusCode, Json<DepartmentMembersResponse>), AuthError> {
+) -> Result<(StatusCode, Json<MeDepartmentUsersResponse>), AuthError> {
     let include_sub_department = query.include_sub_department.unwrap_or(false);
     let department_id = query.department_id;
     let limit = query.limit.unwrap_or(30).max(1);
     let offset = query.offset.unwrap_or(0);
     let page = offset / limit;
-    let mut response = DepartmentMembersResponse {
+    let mut response = MeDepartmentUsersResponse {
         total: 0,
-        members: Vec::new(),
+        users: Vec::new(),
     };
 
     let authz = AuthorizationService::new(&app_state.database);
@@ -946,7 +1017,7 @@ pub async fn get_my_administered_department_members(
 
     let user_ids: Vec<Uuid> = users_row.iter().map(|u| u.id).collect();
     let roles_map = authz.user_roles_map(&user_ids).await?;
-    response.members = users_row
+    response.users = users_row
         .into_iter()
         .map(|user| {
             let roles = roles_map.get(&user.id).cloned().unwrap_or_default();

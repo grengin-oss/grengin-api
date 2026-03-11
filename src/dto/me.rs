@@ -20,6 +20,12 @@ pub struct EffectivePermissionsResponse {
     pub administered_departments: Vec<String>,
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct MeDepartmentUsersResponse {
+    pub total: i32,
+    pub users: Vec<crate::dto::admin_user::UserDetails>,
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct AdministeredDepartmentUsersQuery {
     pub department_id: Option<Uuid>,

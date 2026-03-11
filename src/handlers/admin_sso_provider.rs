@@ -3,7 +3,7 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, IntoActiveModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}, permissions::PERMISSION_SSO_PROVIDERS_MANAGE, sso_provider::{is_editable, sso_providers_list}}, dto::admin_sso_providers::{EditableField, SsoProviderEditableResponse, SsoProviderResponse, SsoProviderUpdateRequest}, models::sso_providers, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
+use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}, permissions::{PERMISSION_SSO_PROVIDERS_MANAGE, PERMISSION_SSO_PROVIDERS_VIEW}, sso_provider::{is_editable, sso_providers_list}}, dto::admin_sso_providers::{EditableField, SsoProviderEditableResponse, SsoProviderResponse, SsoProviderUpdateRequest}, models::sso_providers, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -25,7 +25,7 @@ pub async fn get_sso_providers(
      authz
         .ensure_permission(
             claims.user_id,
-            PERMISSION_SSO_PROVIDERS_MANAGE,
+            PERMISSION_SSO_PROVIDERS_VIEW,
             None,
             PermissionScopeMode::RequireOrgWide,
             None,
@@ -114,7 +114,7 @@ pub async fn get_sso_provider_by_id(
      authz
         .ensure_permission(
             claims.user_id,
-            PERMISSION_SSO_PROVIDERS_MANAGE,
+            PERMISSION_SSO_PROVIDERS_VIEW,
             None,
             PermissionScopeMode::RequireOrgWide,
             Some(provider_id),

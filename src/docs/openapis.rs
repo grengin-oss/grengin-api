@@ -4,6 +4,7 @@ use crate::auth::error::{AuthError,AuthErrorCode,AuthErrorDetailVariant,AuthErro
 use crate::dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel,AiEngineModelsResponse, AiModelCapabilities};
 use crate::dto::admin_department_budget::{DepartmentBudgetStatusDto, SubDepartmentBudgetDto};
 use crate::dto::admin_department::{DepartmentListQuery, DepartmentMembersResponse, DepartmentRequest, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery, DepartmentTreeResponse, DepartmentsListResponse, MoveDepartmentRequest};
+use crate::dto::me::MeDepartmentUsersResponse;
 use crate::dto::admin_mcp::{McpAccessDefaultRequest, McpAccessRuleDto, McpAccessRuleRequest, McpServerAccessResponse};
 use crate::dto::admin_roles::{PermissionDto, PermissionsResponse, RoleDto, RoleRequest, RoleUpdateRequest, RolesResponse, UserRoleAssignmentDto, UserRoleAssignmentRequest, UserRoleAssignmentsResponse};
 use crate::dto::analytics::{DepartmentAnalyticsQuery, DepartmentAnalyticsResponse, ScopedUserAnalyticsQuery, UserAnalyticsResponse};
@@ -169,6 +170,7 @@ use crate::models::users::UserStatus;
             SsoProviderEditableResponse,
             EditableField,
             DepartmentMembersResponse,
+            MeDepartmentUsersResponse,
             DepartmentAnalyticsResponse,
             DepartmentAnalyticsQuery,
             UserAnalyticsResponse,
