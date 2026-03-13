@@ -86,6 +86,7 @@ pub struct McpServerCreate {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct McpServerUpdate {
     pub name: Option<String>,
+    pub transport_type: Option<McpTransportType>,
     pub description: Option<String>,
     #[schema(value_type = Object)]
     pub connection_config: Option<JsonValue>,

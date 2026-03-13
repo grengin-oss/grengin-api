@@ -26,6 +26,7 @@ pub enum McpDefaultAccess {
 pub enum McpTransportType {
     Stdio,
     Http,
+    Sse,
     Websocket,
 }
 

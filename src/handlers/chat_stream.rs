@@ -1216,7 +1216,10 @@ pub async fn handle_chat_stream(
                                     let clients = app_state.mcp_clients.read().await;
                                     match clients.get(&tool_ref.server_id) {
                                         Some(client) => {
-                                            let requires_oauth = client.transport_type == McpTransportType::Http
+                                            let requires_oauth = matches!(
+                                                client.transport_type,
+                                                McpTransportType::Http | McpTransportType::Sse
+                                            )
                                                 && client.connection_config.get("oauth").is_some();
                                             (Some(client.clone()), requires_oauth)
                                         }

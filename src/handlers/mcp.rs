@@ -263,6 +263,9 @@ pub async fn update_mcp_server(
     if let Some(desc) = req.description {
         active.description = Set(Some(desc));
     }
+    if let Some(transport_type) = req.transport_type{
+        active.transport_type = Set(transport_type);
+    }
     if let Some(cfg) = req.connection_config {
         let mut cfg = cfg;
         encrypt_db_url_in_config(&state.settings.auth.app_key, &mut cfg)
@@ -427,7 +430,10 @@ pub async fn sync_mcp_server_tools(
     }
     .ok_or(AuthError::ResourceNotFound)?;
 
-    let requires_oauth = server.transport_type == mcp_servers::McpTransportType::Http
+    let requires_oauth = matches!(
+        server.transport_type,
+        mcp_servers::McpTransportType::Http | mcp_servers::McpTransportType::Sse
+    )
         && server.connection_config.get("oauth").is_some();
     let oauth_token = if requires_oauth {
         match resolve_mcp_oauth_token(&state, claims.user_id, server_id).await {
@@ -1052,7 +1058,10 @@ pub async fn authorize_mcp_connection(
         return Err(AppError::McpServerNotFound);
     }
 
-    if server.transport_type != mcp_servers::McpTransportType::Http {
+    if !matches!(
+        server.transport_type,
+        mcp_servers::McpTransportType::Http | mcp_servers::McpTransportType::Sse
+    ) {
         return Err(AppError::ServiceTemporarilyUnavailable);
     }
 

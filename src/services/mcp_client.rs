@@ -587,12 +587,11 @@ impl McpServerClient {
         }
 
         match self.transport_type {
-            McpTransportType::Http => {
-                let base_url = self
-                    .url
-                    .as_deref()
-                    .ok_or_else(|| McpClientError::Config("mcp http url missing".to_string()))?;
-                if self.connection_config.get("sse_url").is_some() {
+            McpTransportType::Http | McpTransportType::Sse => {
+                let base_url = self.http_url_for_transport()?;
+                if self.transport_type == McpTransportType::Http
+                    && self.connection_config.get("sse_url").is_some()
+                {
                     eprintln!("rmcp streamable http ignores sse_url; using base_url only");
                 }
                 let auth_header = extract_auth_header(&self.connection_config)?;
@@ -624,11 +623,8 @@ impl McpServerClient {
         auth_token: Option<String>,
     ) -> Result<CallToolResult, McpClientError> {
         match (self.transport_type, auth_token) {
-            (McpTransportType::Http, Some(token)) => {
-                let base_url = self
-                    .url
-                    .as_deref()
-                    .ok_or_else(|| McpClientError::Config("mcp http url missing".to_string()))?;
+            (McpTransportType::Http | McpTransportType::Sse, Some(token)) => {
+                let base_url = self.http_url_for_transport()?;
                 let mut clients = self.http_clients.lock().await;
                 if !clients.contains_key(&token) {
                     let service = connect_rmcp_http(base_url, Some(token.clone())).await?;
@@ -685,11 +681,8 @@ impl McpServerClient {
         auth_token: Option<String>,
     ) -> Result<Vec<Tool>, McpClientError> {
         match (self.transport_type, auth_token) {
-            (McpTransportType::Http, Some(token)) => {
-                let base_url = self
-                    .url
-                    .as_deref()
-                    .ok_or_else(|| McpClientError::Config("mcp http url missing".to_string()))?;
+            (McpTransportType::Http | McpTransportType::Sse, Some(token)) => {
+                let base_url = self.http_url_for_transport()?;
                 let mut clients = self.http_clients.lock().await;
                 if !clients.contains_key(&token) {
                     let service = connect_rmcp_http(base_url, Some(token.clone())).await?;
@@ -704,6 +697,26 @@ impl McpServerClient {
                     .map_err(|e| McpClientError::Rmcp(e.to_string()))
             }
             _ => self.list_tools().await,
+        }
+    }
+
+    fn http_url_for_transport(&self) -> Result<&str, McpClientError> {
+        match self.transport_type {
+            McpTransportType::Http => self
+                .url
+                .as_deref()
+                .ok_or_else(|| McpClientError::Config("mcp http url missing".to_string())),
+            McpTransportType::Sse => {
+                if let Some(sse_url) = self.connection_config.get("sse_url").and_then(Value::as_str) {
+                    return Ok(sse_url);
+                }
+                self.url
+                    .as_deref()
+                    .ok_or_else(|| McpClientError::Config("mcp sse url missing".to_string()))
+            }
+            _ => Err(McpClientError::Config(
+                "mcp transport does not support http".to_string(),
+            )),
         }
     }
 }
