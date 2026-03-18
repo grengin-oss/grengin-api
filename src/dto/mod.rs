@@ -17,3 +17,4 @@ pub mod admin_roles;
 pub mod admin_mcp;
 pub mod me;
 pub mod mcp;
+pub mod notifications;

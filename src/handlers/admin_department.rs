@@ -35,7 +35,13 @@ use crate::{
     services::{
         authorization::{AuthorizationService, PermissionScopeMode},
         auth_audit::{build_audit_payload, record_auth_event},
-        budget_allocation::{period_bounds, sum_child_allocations, sum_department_cost_in_range},
+        budget_allocation::{
+            period_bounds,
+            refresh_department_budget_available,
+            sum_child_allocations,
+            sum_department_cost_in_range,
+        },
+        notifications::emit_budget_alerts,
     },
     state::SharedState,
 };
@@ -1152,6 +1158,12 @@ pub async fn update_department(
             Some(department_id),
         )
         .await?;
+    }
+
+    if let Err(e) = refresh_department_budget_available(&app_state.database, department_id).await {
+        eprintln!("refresh budget available error: {e}");
+    } else if let Err(e) = emit_budget_alerts(&app_state, department_id).await {
+        eprintln!("emit budget alert error: {:?}", e);
     }
 
     if parent_changed {

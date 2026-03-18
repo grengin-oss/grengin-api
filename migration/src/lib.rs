@@ -32,6 +32,7 @@ mod m20260218_000001_fix_mcp_schema;
 mod m20260227_000001_drop_legacy_user_role;
 mod m20260227_000002_add_permission_description_key;
 mod m20260302_000001_create_mcp_oauth_states;
+mod m20260316_000001_create_notifications;
 
 pub struct Migrator;
 
@@ -71,6 +72,7 @@ impl MigratorTrait for Migrator {
           Box::new(m20260227_000001_drop_legacy_user_role::Migration),
           Box::new(m20260227_000002_add_permission_description_key::Migration),
           Box::new(m20260302_000001_create_mcp_oauth_states::Migration),
+          Box::new(m20260316_000001_create_notifications::Migration),
          ]
     }
 }

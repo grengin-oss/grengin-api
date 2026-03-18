@@ -262,3 +262,16 @@ pub struct McpAuthorizeResponse {
     pub authorization_url: Option<String>,
     pub message: Option<String>,
 }
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct McpDisconnectResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct McpOauthCallbackResponse {
+    pub success: bool,
+    pub server_id: Uuid,
+    pub status: String,
+}

@@ -28,6 +28,7 @@ use crate::{
         McpServerAccessUpdate, McpServerCreate, McpServerTestResult, McpServerUpdate, McpSyncResult,
         McpTool, McpToolAccessList, McpToolAccessUpdate, McpToolsList,
         McpUserConnection, McpUserConnectionsList, PaginatedMcpServers, PaginatedMcpToolExecutions,
+        McpDisconnectResponse, McpOauthCallbackResponse,
     },
     models::{
         mcp_access_policies,
@@ -554,6 +555,9 @@ pub async fn sync_mcp_server_tools(
     let mut server_active: mcp_servers::ActiveModel = server.into();
     server_active.tool_count = Set(total_tools);
     server_active.last_synced_at = Set(Some(Utc::now()));
+    server_active.status = Set(Some("connected".into()));
+    server_active.status_message = Set(None);
+    server_active.last_connected_at = Set(Some(Utc::now()));
     let _ = server_active.update(&state.database).await;
 
     Ok(Json(McpSyncResult {
@@ -750,6 +754,17 @@ pub async fn update_mcp_server_access(
     get_mcp_server_access(claims, State(state), Path(server_id)).await
 }
 
+#[utoipa::path(
+    get,
+    path = "/admin/mcp-servers/{server_id}/tools/access",
+    tag = "admin",
+    params(
+        ("server_id" = Uuid, Path, description = "MCP server id")
+    ),
+    responses(
+        (status = 200, body = Vec<McpToolAccessList>)
+    )
+)]
 pub async fn get_mcp_server_tools_access(
     claims: Claims,
     State(state): State<SharedState>,
@@ -795,6 +810,18 @@ pub async fn get_mcp_server_tools_access(
     Ok(Json(result))
 }
 
+#[utoipa::path(
+    put,
+    path = "/admin/mcp-servers/{server_id}/tools/access",
+    tag = "admin",
+    request_body = BulkToolAccessUpdate,
+    params(
+        ("server_id" = Uuid, Path, description = "MCP server id")
+    ),
+    responses(
+        (status = 200, body = BulkToolAccessUpdateResponse)
+    )
+)]
 pub async fn update_mcp_server_tools_access(
     claims: Claims,
     State(state): State<SharedState>,
@@ -880,6 +907,17 @@ pub async fn update_mcp_server_tools_access(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/admin/mcp-tools/{tool_id}/access",
+    tag = "admin",
+    params(
+        ("tool_id" = Uuid, Path, description = "MCP tool id")
+    ),
+    responses(
+        (status = 200, body = McpToolAccessList)
+    )
+)]
 pub async fn get_mcp_tool_access(
     claims: Claims,
     State(state): State<SharedState>,
@@ -918,6 +956,18 @@ pub async fn get_mcp_tool_access(
     }))
 }
 
+#[utoipa::path(
+    put,
+    path = "/admin/mcp-tools/{tool_id}/access",
+    tag = "admin",
+    request_body = McpToolAccessUpdate,
+    params(
+        ("tool_id" = Uuid, Path, description = "MCP tool id")
+    ),
+    responses(
+        (status = 200, body = McpToolAccessList)
+    )
+)]
 pub async fn update_mcp_tool_access(
     claims: Claims,
     State(state): State<SharedState>,
@@ -980,6 +1030,18 @@ pub async fn update_mcp_tool_access(
     get_mcp_tool_access(claims, State(state), Path(tool_id)).await
 }
 
+#[utoipa::path(
+    get,
+    path = "/mcp/tools",
+    tag = "mcp",
+    params(
+        ("server_id" = Option<Uuid>, Query, description = "Filter tools by server id"),
+        ("search" = Option<String>, Query, description = "Search by tool name or description")
+    ),
+    responses(
+        (status = 200, body = McpToolsList)
+    )
+)]
 pub async fn list_mcp_tools(
     State(state): State<SharedState>,
     Query(query): Query<ListToolsQuery>,
@@ -1010,6 +1072,14 @@ pub async fn list_mcp_tools(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/mcp/connections",
+    tag = "mcp",
+    responses(
+        (status = 200, body = McpUserConnectionsList)
+    )
+)]
 pub async fn list_mcp_connections(
     claims: Claims,
     State(state): State<SharedState>,
@@ -1039,6 +1109,18 @@ pub async fn list_mcp_connections(
     Ok(Json(McpUserConnectionsList { connections }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/mcp/connections/{server_id}/authorize",
+    tag = "mcp",
+    params(
+        ("server_id" = Uuid, Path, description = "MCP server id"),
+        ("redirect_uri" = Option<String>, Query, description = "Override callback redirect URI")
+    ),
+    responses(
+        (status = 200, body = McpAuthorizeResponse)
+    )
+)]
 pub async fn authorize_mcp_connection(
     claims: Claims,
     State(state): State<SharedState>,
@@ -1098,6 +1180,20 @@ pub async fn authorize_mcp_connection(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/mcp/oauth/callback",
+    tag = "mcp",
+    params(
+        ("code" = Option<String>, Query, description = "Authorization code"),
+        ("state" = String, Query, description = "OAuth state"),
+        ("error" = Option<String>, Query, description = "OAuth error code"),
+        ("error_description" = Option<String>, Query, description = "OAuth error description")
+    ),
+    responses(
+        (status = 200, body = McpOauthCallbackResponse)
+    )
+)]
 pub async fn mcp_oauth_callback(
     State(state): State<SharedState>,
     Query(query): Query<McpOauthCallbackQuery>,
@@ -1195,6 +1291,17 @@ fn build_oauth_callback_response(
     (StatusCode::OK, Json(body)).into_response()
 }
 
+#[utoipa::path(
+    post,
+    path = "/mcp/connections/{server_id}/disconnect",
+    tag = "mcp",
+    params(
+        ("server_id" = Uuid, Path, description = "MCP server id")
+    ),
+    responses(
+        (status = 200, body = McpDisconnectResponse)
+    )
+)]
 pub async fn disconnect_mcp_connection(
     claims: Claims,
     State(state): State<SharedState>,

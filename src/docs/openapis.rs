@@ -5,6 +5,15 @@ use crate::dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineVali
 use crate::dto::admin_department_budget::{DepartmentBudgetStatusDto, SubDepartmentBudgetDto};
 use crate::dto::admin_department::{DepartmentListQuery, DepartmentMembersResponse, DepartmentRequest, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery, DepartmentTreeResponse, DepartmentsListResponse, MoveDepartmentRequest};
 use crate::dto::me::MeDepartmentUsersResponse;
+use crate::dto::notifications::{NotificationDto, NotificationsListQuery, NotificationsListResponse};
+use crate::dto::mcp::{
+    BulkToolAccessUpdate, BulkToolAccessUpdateResponse, McpAccessRule, McpAccessRuleInput,
+    McpAuthorizeResponse, McpDisconnectResponse, McpOauthCallbackResponse, McpServer,
+    McpServerAccessList, McpServerAccessUpdate, McpServerCreate, McpServerTestResult,
+    McpServerUpdate, McpSyncResult, McpTool, McpToolAccessList, McpToolAccessUpdate,
+    McpToolExecution, McpToolsList, McpUserConnection, McpUserConnectionsList,
+    PaginatedMcpServers, PaginatedMcpToolExecutions,
+};
 use crate::dto::admin_mcp::{McpAccessDefaultRequest, McpAccessRuleDto, McpAccessRuleRequest, McpServerAccessResponse};
 use crate::dto::admin_roles::{PermissionDto, PermissionsResponse, RoleDto, RoleRequest, RoleUpdateRequest, RolesResponse, UserRoleAssignmentDto, UserRoleAssignmentRequest, UserRoleAssignmentsResponse};
 use crate::dto::analytics::{DepartmentAnalyticsQuery, DepartmentAnalyticsResponse, ScopedUserAnalyticsQuery, UserAnalyticsResponse};
@@ -21,11 +30,12 @@ use crate::dto::me::EffectivePermissionsResponse;
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::docs::{security::ApiSecurityAddon,app_error_catlog::AppErrorCatalogItem};
 use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, RefreshTokenRequest, TokenType, User};
-use crate::handlers::{auth,admin_department,admin_department_budgets,admin_analytics,admin_mcp,admin_roles,oidc,open_error,chat,chat_stream,file,message,admin_users,admin_sso_provider,branding,admin_ai,models,me,mcp};
+use crate::handlers::{auth,admin_department,admin_department_budgets,admin_analytics,admin_mcp,admin_roles,notifications,oidc,open_error,chat,chat_stream,file,message,admin_users,admin_sso_provider,branding,admin_ai,models,me,mcp};
 use crate::models::messages::ChatRole;
 use crate::models::departments::{ActionOnExceed, BudgetPeriod};
+use crate::models::mcp_access_policies::{McpAccessType, McpPermission};
 use crate::models::mcp_server_access_rules::{McpRuleType, McpSubjectType};
-use crate::models::mcp_servers::McpAccessDefault;
+use crate::models::mcp_servers::{McpAccessDefault, McpTransportType};
 use crate::models::users::UserStatus;
 
 #[derive(OpenApi)]
@@ -105,7 +115,19 @@ use crate::models::users::UserStatus;
         mcp::test_mcp_server,
         mcp::sync_mcp_server_tools,
         mcp::list_mcp_server_executions,
+        mcp::get_mcp_server_tools_access,
+        mcp::update_mcp_server_tools_access,
+        mcp::get_mcp_tool_access,
+        mcp::update_mcp_tool_access,
+        mcp::list_mcp_tools,
+        mcp::list_mcp_connections,
+        mcp::authorize_mcp_connection,
+        mcp::disconnect_mcp_connection,
+        mcp::mcp_oauth_callback,
         me::get_my_permissions,
+        notifications::list_my_notifications,
+        notifications::mark_notification_read,
+        notifications::stream_my_notifications,
         me::get_my_administered_department_analytics,
         me::get_my_administered_department_user_analytics,
         me::get_my_administered_department_members,
@@ -171,6 +193,9 @@ use crate::models::users::UserStatus;
             EditableField,
             DepartmentMembersResponse,
             MeDepartmentUsersResponse,
+            NotificationDto,
+            NotificationsListResponse,
+            NotificationsListQuery,
             DepartmentAnalyticsResponse,
             DepartmentAnalyticsQuery,
             UserAnalyticsResponse,
@@ -196,8 +221,34 @@ use crate::models::users::UserStatus;
             McpAccessRuleRequest,
             McpAccessDefaultRequest,
             McpServerAccessResponse,
+            McpServer,
+            McpServerCreate,
+            McpServerUpdate,
+            PaginatedMcpServers,
+            McpServerTestResult,
+            McpSyncResult,
+            McpTool,
+            McpToolsList,
+            McpToolExecution,
+            PaginatedMcpToolExecutions,
+            McpAccessRule,
+            McpAccessRuleInput,
+            McpServerAccessList,
+            McpServerAccessUpdate,
+            McpToolAccessList,
+            McpToolAccessUpdate,
+            BulkToolAccessUpdate,
+            BulkToolAccessUpdateResponse,
+            McpUserConnection,
+            McpUserConnectionsList,
+            McpAuthorizeResponse,
+            McpDisconnectResponse,
+            McpOauthCallbackResponse,
             EffectivePermissionsResponse,
             McpAccessDefault,
+            McpTransportType,
+            McpAccessType,
+            McpPermission,
             McpSubjectType,
             McpRuleType
         )
@@ -207,6 +258,7 @@ use crate::models::users::UserStatus;
         (name = "branding", description = "Branding configuration endpoints"),
         (name = "admin", description = "Admin endpoints"),
         (name = "me", description = "Current user permissions"),
+        (name = "mcp", description = "MCP tools & connections"),
         (name = "root", description = "Root / health"),
     ),
     modifiers(

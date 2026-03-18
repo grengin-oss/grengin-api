@@ -58,6 +58,7 @@ use crate::{
         budget_allocation::{get_department_budget_status, refresh_department_budget_available},
         mcp_helpers::resolve_mcp_oauth_token,
         mcp_tools::{load_openai_mcp_tools, McpServerSummary},
+        notifications::emit_budget_alerts,
     },
     state::SharedState,
     utils::chat_stream::{
@@ -1535,6 +1536,8 @@ pub async fn handle_chat_stream(
                         refresh_department_budget_available(&app_state.database, department_id).await
                     {
                         eprintln!("refresh budget available error: {e}");
+                    } else if let Err(e) = emit_budget_alerts(&app_state, department_id).await {
+                        eprintln!("emit budget alert error: {:?}", e);
                     }
                 }
             }

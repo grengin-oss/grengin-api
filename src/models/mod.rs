@@ -24,3 +24,4 @@ pub mod mcp_executions;
 pub mod mcp_connections;
 pub mod mcp_oauth_states;
 pub mod auth_audit_events;
+pub mod notifications;

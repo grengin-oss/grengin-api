@@ -1,6 +1,6 @@
 use anyhow::Error;
 use sea_orm::{Database, DatabaseConnection, EntityTrait};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 use std::{collections::HashMap, sync::Arc};
 use reqwest::Client as ReqwestClient;
 use crate::{
@@ -9,6 +9,7 @@ use crate::{
     dto::oauth::AuthProvider,
     models::{mcp_servers, users},
     services::mcp_client::McpServerClient,
+    services::notifications::NotificationEvent,
 };
 use uuid::Uuid;
 
@@ -19,6 +20,7 @@ pub struct AppState {
     pub req_client:ReqwestClient,
     pub settings:Settings,
     pub mcp_clients: RwLock<HashMap<Uuid, Arc<McpServerClient>>>,
+    pub notification_hub: broadcast::Sender<NotificationEvent>,
 }
 
 impl AppState {
@@ -38,6 +40,7 @@ impl AppState {
            .load_sso_providers_from_db(&database)
            .await
            .map_err(|e|eprintln!("Loading sso providers from db error: {e}"));
+         let (notification_hub, _) = broadcast::channel(256);
          let state =  Self { 
             database,
             google_client:RwLock::new(None),
@@ -45,6 +48,7 @@ impl AppState {
             req_client,
             settings,
             mcp_clients: RwLock::new(HashMap::new()),
+            notification_hub,
          };
          state.refresh_azure_client()
           .await?;
