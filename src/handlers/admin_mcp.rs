@@ -271,6 +271,9 @@ pub async fn create_mcp_access_rule(
 
     if req.subject_type == McpSubjectType::Department {
         let exists = departments::Entity::find_by_id(req.subject_id)
+            .select_only()
+            .column(departments::Column::Id)
+            .into_tuple::<Uuid>()
             .one(&app_state.database)
             .await
             .map_err(|e| {

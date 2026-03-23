@@ -422,7 +422,21 @@ impl<'a> AuthorizationService<'a> {
         server_id: Uuid,
         user_department_id: Uuid,
     ) -> Result<Option<McpAccessDecision>, AuthError> {
+        #[derive(Debug, FromQueryResult)]
+        struct DeptPathRow {
+            id: Uuid,
+            #[sea_orm(from_alias = "path")]
+            path: String,
+            #[sea_orm(from_alias = "depth")]
+            depth: i32,
+        }
+
         let user_department = departments::Entity::find_by_id(user_department_id)
+            .select_only()
+            .column(departments::Column::Id)
+            .column_as(Expr::cust("path::text"), "path")
+            .column_as(departments::Column::Depth, "depth")
+            .into_model::<DeptPathRow>()
             .one(self.db)
             .await
             .map_err(|e| {
@@ -433,15 +447,6 @@ impl<'a> AuthorizationService<'a> {
             Some(dept) => dept,
             None => return Ok(None),
         };
-
-        #[derive(Debug, FromQueryResult)]
-        struct DeptPathRow {
-            id: Uuid,
-            #[sea_orm(from_alias = "path")]
-            path: String,
-            #[sea_orm(from_alias = "depth")]
-            depth: i32,
-        }
 
         let dept_rules = mcp_server_access_rules::Entity::find()
             .filter(mcp_server_access_rules::Column::ServerId.eq(server_id))
