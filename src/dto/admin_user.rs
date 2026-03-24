@@ -57,6 +57,8 @@ pub struct UserUpdateRequest{
    pub email:Option<String>,
    pub name:Option<String>,
    pub department_id:Option<Uuid>,
+   /// When true, clear any existing department assignment.
+   pub unassign_department: Option<bool>,
 }
 
 #[derive(Deserialize,ToSchema)]

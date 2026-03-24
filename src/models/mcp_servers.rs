@@ -38,6 +38,7 @@ pub struct Model {
     pub id: Uuid,
     pub name: String,
     pub description: Option<String>,
+    pub icon: Option<String>,
     pub transport_type: McpTransportType,
     pub connection_config: JsonValue,
     pub client_id: Option<String>,

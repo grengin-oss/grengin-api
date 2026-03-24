@@ -12,6 +12,7 @@ use sea_orm::{
 use serde_json::json;
 use std::collections::HashMap;
 use uuid::Uuid;
+use crate::handlers::mcp::mcp_servers::McpTransportType;
 
 use crate::{
     auth::{
@@ -23,11 +24,12 @@ use crate::{
     error::AppError,
     dto::mcp::{
         BulkToolAccessUpdate, BulkToolAccessUpdateResponse, ListExecutionsQuery, ListServersQuery,
-        ListToolsQuery, McpAuthorizeQuery, McpAuthorizeResponse, McpOauthCallbackQuery, McpServer,
-        McpServerAccessList,
+        ListPublicMcpServersQuery, ListToolsQuery, McpAuthorizeQuery, McpAuthorizeResponse,
+        McpOauthCallbackQuery, McpServer, McpServerAccessList,
         McpServerAccessUpdate, McpServerCreate, McpServerTestResult, McpServerUpdate, McpSyncResult,
-        McpTool, McpToolAccessList, McpToolAccessUpdate, McpToolsList,
-        McpUserConnection, McpUserConnectionsList, PaginatedMcpServers, PaginatedMcpToolExecutions,
+        McpTool, McpToolAccessList, McpToolAccessUpdate, McpToolsList, McpToolSummary,
+        McpUserConnection, McpUserConnectionsList, McpServerCatalogResponse,
+        McpServerCatalogEntry, PaginatedMcpServers, PaginatedMcpToolExecutions,
         McpDisconnectResponse, McpOauthCallbackResponse,
     },
     models::{
@@ -53,6 +55,33 @@ use crate::{
     },
     state::SharedState,
 };
+
+async fn resolve_server_connected(
+    state: &SharedState,
+    server: &mcp_servers::Model,
+) -> Result<bool, AuthError> {
+    match server.transport_type {
+        mcp_servers::McpTransportType::Stdio => Ok(server.status.as_deref() == Some("connected")),
+        mcp_servers::McpTransportType::Http
+        | mcp_servers::McpTransportType::Sse
+        | mcp_servers::McpTransportType::Websocket => {
+            let now = Utc::now();
+            let connections = mcp_connections::Entity::find()
+                .filter(mcp_connections::Column::ServerId.eq(server.id))
+                .filter(mcp_connections::Column::Connected.eq(true))
+                .all(&state.database)
+                .await
+                .map_err(|e| {
+                    eprintln!("mcp connections lookup error: {e}");
+                    AuthError::DbTimeout
+                })?;
+            Ok(connections.into_iter().any(|row| {
+                let not_expired = row.expires_at.map(|exp| exp > now).unwrap_or(true);
+                row.connected && not_expired
+            }))
+        }
+    }
+}
 
 #[utoipa::path(
     get,
@@ -96,15 +125,161 @@ pub async fn list_mcp_servers(
             eprintln!("Db get error {}",e);
             AuthError::DbTimeout
         })?;
+    let now = Utc::now();
+    let server_ids: Vec<Uuid> = servers.iter().map(|server| server.id).collect();
+    let connections = if server_ids.is_empty() {
+        Vec::new()
+    } else {
+        mcp_connections::Entity::find()
+            .filter(mcp_connections::Column::ServerId.is_in(server_ids))
+            .filter(mcp_connections::Column::Connected.eq(true))
+            .all(&state.database)
+            .await
+            .map_err(|e| {
+                eprintln!("mcp connections lookup error: {e}");
+                AuthError::DbTimeout
+            })?
+    };
+    let mut connected_by_server: HashMap<Uuid, bool> = HashMap::new();
+    for connection in connections {
+        let not_expired = connection.expires_at.map(|exp| exp > now).unwrap_or(true);
+        if connection.connected && not_expired {
+            connected_by_server.insert(connection.server_id, true);
+        }
+    }
+
     let dtos: Vec<_> = servers
         .into_iter()
-        .map(|server| to_server_dto(&state, server))
+        .map(|server| {
+            let connected = match server.transport_type {
+                mcp_servers::McpTransportType::Stdio => {
+                    server.status.as_deref() == Some("connected")
+                }
+                mcp_servers::McpTransportType::Http
+                | mcp_servers::McpTransportType::Sse
+                | mcp_servers::McpTransportType::Websocket => connected_by_server
+                    .get(&server.id)
+                    .copied()
+                    .unwrap_or(false),
+            };
+            to_server_dto(&state, server, connected)
+        })
         .collect();
     let total = dtos.len() as i64;
     Ok(Json(PaginatedMcpServers {
         servers: dtos,
         total,
     }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/mcp-servers",
+    tag = "mcp",
+    params(
+        ("connected" = Option<bool>, Query, description = "Filter by connection status for the current user"),
+        ("transport_type" = Option<McpTransportType>, Query, description = "Filter by transport type")
+    ),
+    responses(
+        (status = 200, body = McpServerCatalogResponse)
+    )
+)]
+pub async fn list_public_mcp_servers(
+    claims: Claims,
+    State(state): State<SharedState>,
+    Query(query): Query<ListPublicMcpServersQuery>,
+) -> Result<Json<McpServerCatalogResponse>, AppError> {
+    let mut finder = mcp_servers::Entity::find().filter(mcp_servers::Column::Enabled.eq(true));
+    if let Some(transport_type) = query.transport_type {
+        finder = finder.filter(mcp_servers::Column::TransportType.eq(transport_type));
+    }
+    let servers = finder
+        .all(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp server lookup error: {e}");
+            AppError::DbTimeout
+        })?;
+
+    if servers.is_empty() {
+        return Ok(Json(McpServerCatalogResponse { servers: Vec::new() }));
+    }
+
+    let server_ids: Vec<Uuid> = servers.iter().map(|server| server.id).collect();
+    let tools = mcp_tools::Entity::find()
+        .filter(mcp_tools::Column::ServerId.is_in(server_ids.clone()))
+        .filter(mcp_tools::Column::Enabled.eq(true))
+        .all(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp tools lookup error: {e}");
+            AppError::DbTimeout
+        })?;
+
+    let mut tools_by_server: HashMap<Uuid, Vec<McpToolSummary>> = HashMap::new();
+    for tool in tools {
+        tools_by_server
+            .entry(tool.server_id)
+            .or_default()
+            .push(McpToolSummary {
+                name: tool.name,
+                description: tool.description,
+            });
+    }
+
+    let connections = mcp_connections::Entity::find()
+        .filter(mcp_connections::Column::UserId.eq(claims.user_id))
+        .filter(mcp_connections::Column::ServerId.is_in(server_ids))
+        .all(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp connections lookup error: {e}");
+            AppError::DbTimeout
+        })?;
+
+    let mut connections_by_server: HashMap<Uuid, mcp_connections::Model> = HashMap::new();
+    for connection in connections {
+        connections_by_server.insert(connection.server_id, connection);
+    }
+
+    let mut response = Vec::new();
+    let now = Utc::now();
+    for server in servers {
+        let connected = match server.transport_type {
+            mcp_servers::McpTransportType::Http
+            | mcp_servers::McpTransportType::Sse
+            | mcp_servers::McpTransportType::Websocket => connections_by_server
+                .get(&server.id)
+                .map(|connection| {
+                    let not_expired = connection.expires_at.map(|exp| exp > now).unwrap_or(true);
+                    connection.connected && not_expired
+                })
+                .unwrap_or(false),
+            mcp_servers::McpTransportType::Stdio => {
+                server.status.as_deref() == Some("connected")
+            }
+        };
+
+        if let Some(connected_filter) = query.connected {
+            if connected_filter != connected {
+                continue;
+            }
+        }
+
+        let mut tool_list = tools_by_server.remove(&server.id).unwrap_or_default();
+        tool_list.sort_by(|a, b| a.name.cmp(&b.name));
+        response.push(McpServerCatalogEntry {
+            id: server.id,
+            name: server.name,
+            description: server.description,
+            transport_type: server.transport_type,
+            icon: server.icon,
+            tools: tool_list,
+            connected,
+        });
+    }
+
+    Ok(Json(McpServerCatalogResponse { servers: response }))
 }
 
 #[utoipa::path(
@@ -148,6 +323,7 @@ pub async fn create_mcp_server(
         id: Set(Uuid::new_v4()),
         name: Set(req.name),
         description: Set(req.description),
+        icon: Set(req.icon.filter(|value| !value.is_empty())),
         transport_type: Set(req.transport_type),
         connection_config: Set(connection_config),
         client_id: Set(req.client_id),
@@ -181,7 +357,7 @@ pub async fn create_mcp_server(
             }
         })?;
     state.upsert_mcp_client(&saved).await;
-    Ok((StatusCode::CREATED, Json(to_server_dto(&state, saved))))
+    Ok((StatusCode::CREATED, Json(to_server_dto(&state, saved, false))))
 }
 
 #[utoipa::path(
@@ -219,7 +395,8 @@ pub async fn get_mcp_server(
             AuthError::DbTimeout
          })?
         .ok_or(AuthError::ResourceNotFound)?;
-    Ok(Json(to_server_dto(&state, server)))
+    let connected = resolve_server_connected(&state, &server).await?;
+    Ok(Json(to_server_dto(&state, server, connected)))
 }
 
 #[utoipa::path(
@@ -263,6 +440,13 @@ pub async fn update_mcp_server(
     }
     if let Some(desc) = req.description {
         active.description = Set(Some(desc));
+    }
+    if let Some(icon) = req.icon {
+        active.icon = if icon.is_empty() {
+            Set(None)
+        } else {
+            Set(Some(icon))
+        };
     }
     if let Some(transport_type) = req.transport_type{
         active.transport_type = Set(transport_type);
@@ -314,7 +498,8 @@ pub async fn update_mcp_server(
             }
         })?;
     state.upsert_mcp_client(&saved).await;
-    Ok(Json(to_server_dto(&state, saved)))
+    let connected = resolve_server_connected(&state, &saved).await?;
+    Ok(Json(to_server_dto(&state, saved, connected)))
 }
 
 #[utoipa::path(
@@ -454,7 +639,7 @@ pub async fn sync_mcp_server_tools(
     }
 
     let tools = client
-        .list_tools_with_auth(oauth_token)
+        .list_tools_with_auth(oauth_token, Some(claims.user_id))
         .await
         .map_err(|e| {
             eprintln!("mcp list tools error: {e}");

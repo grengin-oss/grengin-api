@@ -1250,6 +1250,7 @@ pub async fn handle_chat_stream(
                                                     &tool_ref.original_name,
                                                     args_for_call.clone(),
                                                     auth_token,
+                                                    Some(claims.user_id),
                                                 )
                                                 .await
                                                 .map_err(|e| e.to_string())

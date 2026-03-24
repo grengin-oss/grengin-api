@@ -399,6 +399,7 @@ pub async fn update_user(
 
     let original_department_id = model.department_id;
     let mut active: users::ActiveModel = model.into();
+    let mut department_changed = false;
 
     if let Some(email) = req.email {
         let email = email.trim().to_string();
@@ -409,7 +410,12 @@ pub async fn update_user(
     if let Some(name) = req.name {
         active.name = Set(Some(name));
     }
-    if let Some(dept) = req.department_id {
+    if req.unassign_department.unwrap_or(false) {
+        if original_department_id.is_some() {
+            department_changed = true;
+        }
+        active.department_id = Set(None);
+    } else if let Some(dept) = req.department_id {
         authz
           .ensure_permission(
             claims.user_id,
@@ -419,6 +425,9 @@ pub async fn update_user(
             Some(user_id),
           )
           .await?;
+        if Some(dept) != original_department_id {
+            department_changed = true;
+        }
         active.department_id = Set(Some(dept));
     }
     active.updated_at = Set(Utc::now());
@@ -435,10 +444,8 @@ pub async fn update_user(
             }
         })?;
 
-    if let Some(dept) = req.department_id {
-        if Some(dept) != original_department_id {
-            let _ = authz.recompute_effective_permissions(user_id).await;
-        }
+    if department_changed {
+        let _ = authz.recompute_effective_permissions(user_id).await;
     }
 
     Ok(StatusCode::OK)

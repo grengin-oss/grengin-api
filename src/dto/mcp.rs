@@ -14,6 +14,12 @@ pub struct ListServersQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ListPublicMcpServersQuery {
+    pub connected: Option<bool>,
+    pub transport_type: Option<McpTransportType>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ListExecutionsQuery {
     pub limit: Option<u64>,
     pub offset: Option<u64>,
@@ -46,6 +52,7 @@ pub struct McpServer {
     pub id: Uuid,
     pub name: String,
     pub description: Option<String>,
+    pub icon: Option<String>,
     pub transport_type: McpTransportType,
     #[schema(value_type = Object)]
     pub connection_config: JsonValue,
@@ -61,16 +68,40 @@ pub struct McpServer {
     pub status_message: Option<String>,
     pub tool_count: i32,
     pub default_access: McpDefaultAccess,
+    pub connected: bool,
     pub last_connected_at: Option<DateTime<Utc>>,
     pub last_synced_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct McpToolSummary {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct McpServerCatalogEntry {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub transport_type: McpTransportType,
+    pub icon: Option<String>,
+    pub tools: Vec<McpToolSummary>,
+    pub connected: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct McpServerCatalogResponse {
+    pub servers: Vec<McpServerCatalogEntry>,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct McpServerCreate {
     pub name: String,
     pub description: Option<String>,
+    pub icon: Option<String>,
     pub transport_type: McpTransportType,
     #[schema(value_type = Object)]
     pub connection_config: JsonValue,
@@ -88,6 +119,7 @@ pub struct McpServerUpdate {
     pub name: Option<String>,
     pub transport_type: Option<McpTransportType>,
     pub description: Option<String>,
+    pub icon: Option<String>,
     #[schema(value_type = Object)]
     pub connection_config: Option<JsonValue>,
     pub client_id: Option<String>,

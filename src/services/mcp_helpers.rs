@@ -39,11 +39,16 @@ pub fn encrypt_db_url_in_config(
     Ok(())
 }
 
-pub fn to_server_dto(state: &SharedState, model: mcp_servers::Model) -> McpServer {
+pub fn to_server_dto(
+    state: &SharedState,
+    model: mcp_servers::Model,
+    connected: bool,
+) -> McpServer {
     McpServer {
         id: model.id,
         name: model.name,
         description: model.description,
+        icon: model.icon,
         transport_type: model.transport_type,
         connection_config: model.connection_config,
         client_id: model.client_id,
@@ -55,6 +60,7 @@ pub fn to_server_dto(state: &SharedState, model: mcp_servers::Model) -> McpServe
         status_message: model.status_message,
         tool_count: model.tool_count,
         default_access: model.default_access,
+        connected,
         last_connected_at: model.last_connected_at,
         last_synced_at: model.last_synced_at,
         created_at: model.created_at,

@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, Query, State},
     response::{Sse, sse::{Event, KeepAlive}},
 };
-use chrono::{DateTime, Utc};
+use chrono::{Utc};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, PaginatorTrait, QuerySelect};
 use sea_orm::sea_query::Expr;
 use uuid::Uuid;

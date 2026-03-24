@@ -28,6 +28,8 @@ use crate::models::mcp_servers::McpTransportType;
 use thiserror::Error;
 use serde_json::Value;
 
+const MAX_USER_HTTP_CLIENTS: usize = 256;
+
 
 #[derive(Debug, Error)]
 pub enum McpClientError {
@@ -534,8 +536,13 @@ pub struct McpServerClient {
     pub connection_config: Value,
     pub db_url: Option<String>,
     client: Mutex<Option<rmcp::service::RunningService<rmcp::service::RoleClient, ()>>>,
-    http_clients: Mutex<HashMap<String, rmcp::service::RunningService<rmcp::service::RoleClient, ()>>>,
+    http_clients: Mutex<HashMap<Uuid, UserHttpClient>>,
     connected: Mutex<bool>,
+}
+
+struct UserHttpClient {
+    token: String,
+    client: rmcp::service::RunningService<rmcp::service::RoleClient, ()>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -621,20 +628,37 @@ impl McpServerClient {
         tool_name: &str,
         args: serde_json::Value,
         auth_token: Option<String>,
+        user_id: Option<Uuid>,
     ) -> Result<CallToolResult, McpClientError> {
-        match (self.transport_type, auth_token) {
-            (McpTransportType::Http | McpTransportType::Sse, Some(token)) => {
+        match (self.transport_type, auth_token, user_id) {
+            (McpTransportType::Http | McpTransportType::Sse, Some(token), Some(user_id)) => {
                 let base_url = self.http_url_for_transport()?;
                 let mut clients = self.http_clients.lock().await;
-                if !clients.contains_key(&token) {
+                let replace_client = match clients.get(&user_id) {
+                    Some(entry) => entry.token != token,
+                    None => true,
+                };
+                if replace_client {
+                    if clients.len() >= MAX_USER_HTTP_CLIENTS && !clients.contains_key(&user_id) {
+                        if let Some(oldest_key) = clients.keys().next().cloned() {
+                            clients.remove(&oldest_key);
+                        }
+                    }
                     let service = connect_rmcp_http(base_url, Some(token.clone())).await?;
-                    clients.insert(token.clone(), service);
+                    clients.insert(
+                        user_id,
+                        UserHttpClient {
+                            token: token.clone(),
+                            client: service,
+                        },
+                    );
                 }
-                let service = clients
-                    .get_mut(&token)
+                let entry = clients
+                    .get_mut(&user_id)
                     .ok_or_else(|| McpClientError::Rmcp("rmcp client not initialized".to_string()))?;
                 let arguments = rmcp_args_from_value(args)?;
-                service
+                entry
+                    .client
                     .call_tool(CallToolRequestParams {
                         meta: None,
                         name: tool_name.to_string().into(),
@@ -644,6 +668,9 @@ impl McpServerClient {
                     .await
                     .map_err(|e| McpClientError::Rmcp(e.to_string()))
             }
+            (McpTransportType::Http | McpTransportType::Sse, Some(_), None) => Err(
+                McpClientError::Config("user_id required for oauth mcp calls".to_string()),
+            ),
             _ => {
                 self.ensure_connected().await?;
                 let mut client = self.client.lock().await;
@@ -679,23 +706,43 @@ impl McpServerClient {
     pub async fn list_tools_with_auth(
         &self,
         auth_token: Option<String>,
+        user_id: Option<Uuid>,
     ) -> Result<Vec<Tool>, McpClientError> {
-        match (self.transport_type, auth_token) {
-            (McpTransportType::Http | McpTransportType::Sse, Some(token)) => {
+        match (self.transport_type, auth_token, user_id) {
+            (McpTransportType::Http | McpTransportType::Sse, Some(token), Some(user_id)) => {
                 let base_url = self.http_url_for_transport()?;
                 let mut clients = self.http_clients.lock().await;
-                if !clients.contains_key(&token) {
+                let replace_client = match clients.get(&user_id) {
+                    Some(entry) => entry.token != token,
+                    None => true,
+                };
+                if replace_client {
+                    if clients.len() >= MAX_USER_HTTP_CLIENTS && !clients.contains_key(&user_id) {
+                        if let Some(oldest_key) = clients.keys().next().cloned() {
+                            clients.remove(&oldest_key);
+                        }
+                    }
                     let service = connect_rmcp_http(base_url, Some(token.clone())).await?;
-                    clients.insert(token.clone(), service);
+                    clients.insert(
+                        user_id,
+                        UserHttpClient {
+                            token: token.clone(),
+                            client: service,
+                        },
+                    );
                 }
-                let service = clients
-                    .get_mut(&token)
+                let entry = clients
+                    .get_mut(&user_id)
                     .ok_or_else(|| McpClientError::Rmcp("rmcp client not initialized".to_string()))?;
-                service
+                entry
+                    .client
                     .list_all_tools()
                     .await
                     .map_err(|e| McpClientError::Rmcp(e.to_string()))
             }
+            (McpTransportType::Http | McpTransportType::Sse, Some(_), None) => Err(
+                McpClientError::Config("user_id required for oauth mcp calls".to_string()),
+            ),
             _ => self.list_tools().await,
         }
     }
