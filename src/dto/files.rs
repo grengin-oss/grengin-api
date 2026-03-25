@@ -26,7 +26,7 @@ impl Attachment {
     }
 }
 
-#[derive(Debug,Serialize, Deserialize, ToSchema, IntoParams)]
+#[derive(Debug,Serialize, Deserialize, ToSchema, IntoParams, Clone)]
 pub struct File {
     pub id:Uuid,
     pub size: Option<usize>,

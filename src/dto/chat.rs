@@ -11,7 +11,6 @@ pub struct ArchiveChatRequest{
 }
 
 #[derive(Serialize, ToSchema, IntoParams)]
-#[serde(rename_all = "camelCase")]
 pub struct ConversationResponse {
   pub id:Uuid,
    #[serde(skip_serializing_if = "Option::is_none")]
@@ -33,7 +32,6 @@ pub struct ConversationResponse {
 }
 
 #[derive(Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ConversationPaginatedResponse {
   pub total:u64,
   pub limit:u64,
@@ -42,7 +40,6 @@ pub struct ConversationPaginatedResponse {
 }
 
 #[derive(Serialize, ToSchema, IntoParams)]
-#[serde(rename_all = "camelCase")]
 pub struct MessageResponse {
   pub id:Uuid,
   pub role:ChatRole,
@@ -61,14 +58,12 @@ pub struct MessageResponse {
 
 
 #[derive(Serialize, ToSchema, IntoParams)]
-#[serde(rename_all = "camelCase")]
 pub struct MessageParts {
   pub text:String,
   pub files:Option<Vec<File>>,
 }
 
 #[derive(Serialize, ToSchema, IntoParams)]
-#[serde(rename_all = "camelCase")]
 pub struct TokenUsage {
    pub input_tokens:i32,
    pub output_tokens:i32,

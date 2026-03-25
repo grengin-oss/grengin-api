@@ -1,8 +1,18 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::dto::llm::anthropic::{AnthropicStreamEvent, AnthropicDelta, AnthropicContentBlockResponse};
-use super::{parse_web_search_action, StreamParser, StreamParseResult, StreamWebSearchAction, StreamWebSearchResult};
+use crate::dto::llm::anthropic::{AnthropicContentBlockResponse, AnthropicDelta, AnthropicStreamEvent};
+use super::{
+    build_tool_call,
+    build_tool_input_delta,
+    parse_web_search_action,
+    tool_name_is_web_search,
+    StreamParser,
+    StreamParseResult,
+    StreamWebSearchAction,
+    StreamWebSearchResult,
+    ToolInput,
+};
 
 /// Anthropic stream parser
 pub struct AnthropicStreamParser {
@@ -103,37 +113,27 @@ impl StreamParser for AnthropicStreamParser {
                         if let Ok(mut calls) = self.tool_calls.lock() {
                             calls.insert(index, (name.clone(), Some(id.clone())));
                         }
-                        let web_search = if name.contains("web_search") {
-                            parse_web_search_action(&input)
-                        } else {
-                            None
-                        };
-                        StreamParseResult::ToolCall {
-                            tool_name: name,
-                            tool_id: Some(id),
-                            input: Some(input),
-                            index: Some(index),
-                            raw: None,
-                            web_search,
-                        }
+                        let call = build_tool_call(
+                            name,
+                            Some(id),
+                            Some(ToolInput::Json(input)),
+                            Some(index),
+                            None,
+                        );
+                        StreamParseResult::ToolCall(call)
                     }
                     AnthropicContentBlockResponse::ServerToolUse { id, name, input } => {
                         if let Ok(mut calls) = self.tool_calls.lock() {
                             calls.insert(index, (name.clone(), Some(id.clone())));
                         }
-                        let web_search = if name.contains("web_search") {
-                            parse_web_search_action(&input)
-                        } else {
-                            None
-                        };
-                        StreamParseResult::ToolCall {
-                            tool_name: name,
-                            tool_id: Some(id),
-                            input: Some(input),
-                            index: Some(index),
-                            raw: None,
-                            web_search,
-                        }
+                        let call = build_tool_call(
+                            name,
+                            Some(id),
+                            Some(ToolInput::Json(input)),
+                            Some(index),
+                            None,
+                        );
+                        StreamParseResult::ToolCall(call)
                     }
                     AnthropicContentBlockResponse::WebSearchToolResult { tool_use_id, content } => {
                         let results = content
@@ -169,7 +169,7 @@ impl StreamParser for AnthropicStreamParser {
                             .unwrap_or((String::new(), None));
 
                         let mut web_search: Option<StreamWebSearchAction> = None;
-                        if !tool_name.is_empty() && tool_name.contains("web_search") {
+                        if !tool_name.is_empty() && tool_name_is_web_search(&tool_name) {
                             if let Ok(mut buffers) = self.tool_input_buffers.lock() {
                                 let buffer = buffers.entry(index).or_default();
                                 buffer.push_str(&partial_json);
@@ -179,13 +179,14 @@ impl StreamParser for AnthropicStreamParser {
                             }
                         }
 
-                        StreamParseResult::ToolInput {
+                        let delta = build_tool_input_delta(
                             partial_json,
-                            index: Some(index),
-                            tool_name: if tool_name.is_empty() { None } else { Some(tool_name) },
+                            Some(index),
+                            if tool_name.is_empty() { None } else { Some(tool_name) },
                             tool_id,
                             web_search,
-                        }
+                        );
+                        StreamParseResult::ToolInput(delta)
                     }
                 },
                 AnthropicStreamEvent::ContentBlockStop { index } => {

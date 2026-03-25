@@ -1,9 +1,17 @@
 use anyhow::Error;
-use sea_orm::{Database, DatabaseConnection};
-use tokio::sync::RwLock;
-use std::sync::Arc;
+use sea_orm::{Database, DatabaseConnection, EntityTrait};
+use tokio::sync::{RwLock, broadcast};
+use std::{collections::HashMap, sync::Arc};
 use reqwest::Client as ReqwestClient;
-use crate::{auth::{azure::build_azure_client, encryption::decrypt_key, google::build_google_client}, config::setting::{ConfigError, OidcClient, Settings}, dto::oauth::AuthProvider, models::users};
+use crate::{
+    auth::{azure::build_azure_client, encryption::decrypt_key, google::build_google_client},
+    config::setting::{ConfigError, OidcClient, Settings},
+    dto::oauth::AuthProvider,
+    models::{mcp_servers, users},
+    services::mcp_client::McpServerClient,
+    services::notifications::NotificationEvent,
+};
+use uuid::Uuid;
 
 pub struct AppState {
     pub database:DatabaseConnection,
@@ -11,6 +19,8 @@ pub struct AppState {
     pub azure_client:RwLock<Option<OidcClient>>,
     pub req_client:ReqwestClient,
     pub settings:Settings,
+    pub mcp_clients: RwLock<HashMap<Uuid, Arc<McpServerClient>>>,
+    pub notification_hub: broadcast::Sender<NotificationEvent>,
 }
 
 impl AppState {
@@ -30,16 +40,21 @@ impl AppState {
            .load_sso_providers_from_db(&database)
            .await
            .map_err(|e|eprintln!("Loading sso providers from db error: {e}"));
+         let (notification_hub, _) = broadcast::channel(256);
          let state =  Self { 
             database,
             google_client:RwLock::new(None),
             azure_client:RwLock::new(None),
-            req_client,settings
+            req_client,
+            settings,
+            mcp_clients: RwLock::new(HashMap::new()),
+            notification_hub,
          };
          state.refresh_azure_client()
           .await?;
          state.refresh_google_client()
           .await?;
+         let _ = state.load_mcp_servers_from_db().await;
         Ok(Arc::new(state))
     }
 
@@ -168,6 +183,47 @@ impl AppState {
         }
         Ok(())
     } 
+
+    pub async fn load_mcp_servers_from_db(&self) -> Result<(), Error> {
+        let servers = mcp_servers::Entity::find()
+            .all(&self.database)
+            .await
+            .map_err(|e| Error::msg(e.to_string()))?;
+        for server in servers {
+            self.load_mcp_server_in_state(&server).await;
+        }
+        Ok(())
+    }
+
+    async fn load_mcp_server_in_state(&self, server: &mcp_servers::Model) {
+        if !server.enabled {
+            self.remove_mcp_client(&server.id).await;
+            return;
+        }
+        let db_url = self.decrypt_mcp_db_url(&server.connection_config);
+        let client = McpServerClient::new(
+            server.id,
+            server.name.clone(),
+            server.transport_type,
+            server.url.clone(),
+            server.connection_config.clone(),
+            db_url,
+        );
+        let mut clients = self.mcp_clients.write().await;
+        clients.insert(server.id, Arc::new(client));
+        println!("{} mcp server loaded", server.name);
+    }
+
+    fn decrypt_mcp_db_url(&self, connection_config: &serde_json::Value) -> Option<String> {
+        let encrypted = connection_config.get("db_url")?.as_str()?;
+        match decrypt_key(&self.settings.auth.app_key, encrypted) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                eprintln!("mcp db_url decrypt failed: {:?}", error);
+                None
+            }
+        }
+    }
  
     async fn refresh_google_client(&self) -> Result<(),ConfigError> {
           let google = self
@@ -221,6 +277,17 @@ impl AppState {
     };
  return api_key_preview
 }
+
+    /// Update MCP client cache when server metadata changes.
+    pub async fn upsert_mcp_client(&self, server: &mcp_servers::Model) {
+        self.load_mcp_server_in_state(server).await;
+    }
+
+    /// Drop MCP client cache entry.
+    pub async fn remove_mcp_client(&self, server_id: &Uuid) {
+        let mut clients = self.mcp_clients.write().await;
+        clients.remove(server_id);
+    }
 
 
 }

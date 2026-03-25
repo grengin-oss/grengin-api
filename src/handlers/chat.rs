@@ -78,7 +78,7 @@ pub async fn get_chats(
     
     select = select
         .group_by(conversations::Column::Id)
-        .order_by_desc(conversations::Column::CreatedAt)
+        .order_by_desc(conversations::Column::UpdatedAt)
         .limit(limit)
         .offset(offset);
 

@@ -16,4 +16,6 @@ pub mod admin_department;
 pub mod admin_department_budgets;
 pub mod admin_roles;
 pub mod admin_mcp;
+pub mod mcp;
 pub mod me;
+pub mod notifications;

@@ -2,3 +2,4 @@
 /.env
 /files
 /data
+.grengin_auth_token

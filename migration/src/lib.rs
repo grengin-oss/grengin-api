@@ -25,6 +25,16 @@ mod m20260130_000003_create_analytics;
 mod m20260204_000001_add_department_budget_available;
 mod m20260209_000001_add_authorization_layer;
 mod m20260210_000001_update_permissions_ai_platform_sso;
+mod m20260216_000001_mcp_revamp;
+mod m20260217_000001_mcp_credentials;
+mod m20260217_000002_mcp_url_rename;
+mod m20260218_000001_fix_mcp_schema;
+mod m20260227_000001_drop_legacy_user_role;
+mod m20260227_000002_add_permission_description_key;
+mod m20260302_000001_create_mcp_oauth_states;
+mod m20260316_000001_create_notifications;
+mod m20260323_000001_add_mcp_connections_unique;
+mod m20260324_000001_add_mcp_servers_icon;
 
 pub struct Migrator;
 
@@ -57,6 +67,16 @@ impl MigratorTrait for Migrator {
           Box::new(m20260204_000001_add_department_budget_available::Migration),
           Box::new(m20260209_000001_add_authorization_layer::Migration),
           Box::new(m20260210_000001_update_permissions_ai_platform_sso::Migration),
+          Box::new(m20260216_000001_mcp_revamp::Migration),
+          Box::new(m20260217_000001_mcp_credentials::Migration),
+          Box::new(m20260217_000002_mcp_url_rename::Migration),
+          Box::new(m20260218_000001_fix_mcp_schema::Migration),
+          Box::new(m20260227_000001_drop_legacy_user_role::Migration),
+          Box::new(m20260227_000002_add_permission_description_key::Migration),
+          Box::new(m20260302_000001_create_mcp_oauth_states::Migration),
+          Box::new(m20260316_000001_create_notifications::Migration),
+          Box::new(m20260323_000001_add_mcp_connections_unique::Migration),
+          Box::new(m20260324_000001_add_mcp_servers_icon::Migration),
          ]
     }
 }

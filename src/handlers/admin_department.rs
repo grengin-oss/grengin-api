@@ -3,15 +3,51 @@ use axum::{Json, extract::{Path, Query, State}};
 use chrono::{DateTime, Utc};
 use migration::{Alias, BinOper, Func, SimpleExpr, extension::postgres::PgExpr};
 use rust_decimal::Decimal;
-use serde::Serialize;
 use sea_orm::{ActiveModelTrait, Condition, DatabaseConnection, EntityName as _, FromQueryResult, JoinType, Order, PaginatorTrait, QueryOrder, QuerySelect, RelationTrait, sea_query::{Expr, PostgresQueryBuilder,Query as SqlQuery}};
 use reqwest::StatusCode;
 use sea_orm::{ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait as _, QueryFilter, Statement, sqlx::postgres::types::{PgLTree, PgLTreeLabel}};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}, permissions::{PERMISSION_DEPARTMENTS_MANAGE, PERMISSION_DEPARTMENTS_VIEW, PERMISSION_ROLES_ASSIGN, PERMISSION_USERS_VIEW, ROLE_DEPARTMENT_ADMIN}}, dto::{admin_department::{DepartmentListQuery, DepartmentMembersResponse, DepartmentMemeberListQuery, DepartmentRequest, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery, DepartmentTreeResponse, DepartmentUpdateRequest, DepartmentsListResponse, MoveDepartmentRequest}, admin_user::UserDetails, common::SortRule}, models::{departments::{self, ActionOnExceed, BudgetPeriod}, roles, user_role_assignments, users::{self, UserRole, UserStatus}}, services::{authorization::{AuthorizationService, PermissionScopeMode}, auth_audit::record_auth_event, budget_allocation::{period_bounds, sum_child_allocations, sum_department_cost_in_range}}, state::SharedState};
+use crate::{
+    auth::{
+        claims::Claims,
+        error::{AuthError, AuthErrorResponse},
+        permissions::{
+            PERMISSION_DEPARTMENTS_MANAGE, PERMISSION_DEPARTMENTS_VIEW, PERMISSION_ROLES_ASSIGN,
+            PERMISSION_USERS_VIEW, ROLE_DEPARTMENT_ADMIN,
+        },
+    },
+    dto::{
+        admin_department::{
+            DepartmentListQuery, DepartmentMembersResponse, DepartmentMemeberListQuery,
+            DepartmentRequest, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery,
+            DepartmentTreeResponse, DepartmentUpdateRequest, DepartmentsListResponse,
+            MoveDepartmentRequest, RoleAssignmentPayload,
+        },
+        admin_user::UserDetails,
+        common::SortRule,
+    },
+    models::{
+        departments::{self, ActionOnExceed, BudgetPeriod},
+        roles,
+        user_role_assignments,
+        users::{self, UserStatus},
+    },
+    services::{
+        authorization::{AuthorizationService, PermissionScopeMode},
+        auth_audit::{build_audit_payload, record_auth_event},
+        budget_allocation::{
+            period_bounds,
+            refresh_department_budget_available,
+            sum_child_allocations,
+            sum_department_cost_in_range,
+        },
+        notifications::emit_budget_alerts,
+    },
+    state::SharedState,
+};
 
 #[derive(Debug, Clone, FromQueryResult)]
-pub struct DepartmentRow {
+pub(crate) struct DepartmentRow {
     pub id: Uuid,
     pub name: String,
     pub description: String,
@@ -32,7 +68,7 @@ pub struct DepartmentRow {
 }
 
 #[derive(Debug, Clone, FromQueryResult)]
-pub struct DepartmentTreeRow {
+pub(crate) struct DepartmentTreeRow {
     pub id: Uuid,
     pub name: String,
     pub description: String,
@@ -73,7 +109,6 @@ async fn sync_department_admin_assignments(
     authz: &AuthorizationService<'_>,
     db: &DatabaseConnection,
     actor_id: Uuid,
-    actor_role: UserRole,
     department_id: Uuid,
     department_admin_ids: &[Uuid],
     permission_scope: Option<Uuid>,
@@ -81,7 +116,6 @@ async fn sync_department_admin_assignments(
     authz
         .ensure_permission(
             actor_id,
-            actor_role,
             PERMISSION_ROLES_ASSIGN,
             permission_scope,
             PermissionScopeMode::RequireOrgWide,
@@ -168,7 +202,7 @@ async fn sync_department_admin_assignments(
                 }
             })?;
 
-        if let Some(payload) = audit_payload(RoleAssignmentPayload {
+        if let Some(payload) = build_audit_payload(RoleAssignmentPayload {
             assignment_id,
             user_id,
             role_id: role.id,
@@ -198,7 +232,7 @@ async fn sync_department_admin_assignments(
                 AuthError::DbTimeout
             })?;
 
-        if let Some(payload) = audit_payload(RoleAssignmentPayload {
+        if let Some(payload) = build_audit_payload(RoleAssignmentPayload {
             assignment_id,
             user_id,
             role_id: role.id,
@@ -224,7 +258,7 @@ async fn sync_department_admin_assignments(
     Ok(())
 }
 
-async fn load_department_admin_ids_map(
+pub(crate) async fn load_department_admin_ids_map(
     db: &DatabaseConnection,
     department_ids: &[Uuid],
 ) -> Result<HashMap<Uuid, Vec<Uuid>>, AuthError> {
@@ -270,21 +304,6 @@ async fn load_department_admin_ids_map(
     Ok(map)
 }
 
-#[derive(Serialize)]
-struct RoleAssignmentPayload {
-    assignment_id: Uuid,
-    user_id: Uuid,
-    role_id: Uuid,
-    scope_department_id: Option<Uuid>,
-}
-
-fn audit_payload<T: Serialize>(value: T) -> Option<serde_json::Value> {
-    serde_json::to_value(value)
-        .map_err(|e| {
-            eprintln!("audit payload error: {e}");
-        })
-        .ok()
-}
 
 // Selects all columns but casts path -> text so decoding works
 pub fn departments_base_select() -> sea_orm::Select<departments::Entity> {
@@ -303,7 +322,7 @@ pub fn departments_base_select() -> sea_orm::Select<departments::Entity> {
         .column(departments::Column::UpdatedAt)
 }
 
-fn departments_tree_select() -> sea_orm::Select<departments::Entity> {
+pub(crate) fn departments_tree_select() -> sea_orm::Select<departments::Entity> {
     departments::Entity::find()
         .select_only()
         .column(departments::Column::Id)
@@ -318,7 +337,7 @@ fn departments_tree_select() -> sea_orm::Select<departments::Entity> {
         .column(departments::Column::UpdatedAt)
 }
 
-async fn department_budget_snapshot(
+pub(crate) async fn department_budget_snapshot(
     db: &sea_orm::DatabaseConnection,
     department_id: Uuid,
     budget_allocated: Decimal,
@@ -370,7 +389,6 @@ pub async fn create_department(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_MANAGE,
             req.parent_id,
             PermissionScopeMode::RequireOrgWide,
@@ -446,35 +464,39 @@ let (sql, values) = insert.build(PostgresQueryBuilder);
             &authz,
             &app_state.database,
             claims.user_id,
-            claims.role,
             id,
             admin_ids,
             req.parent_id,
         )
         .await?;
     }
-  get_department_by_id(claims,State(app_state),Path(id))
-    .await
+    let (_, Json(response)) = get_department_by_id(claims, State(app_state), Path(id)).await?;
+    Ok((StatusCode::CREATED, Json(response)))
 }
 
 #[derive(Debug, FromQueryResult)]
-struct DeptCountRow {
+pub(crate) struct DeptCountRow {
     #[sea_orm(from_alias = "departmentId")]
-    department_id: Uuid,
-    cnt: i64,
+    pub(crate) department_id: Uuid,
+    pub(crate) cnt: i64,
 }
 
 #[derive(Debug, FromQueryResult)]
-struct ChildCountRow {
+pub(crate) struct ChildCountRow {
     #[sea_orm(from_alias = "parentId")]
-    parent_id: Uuid,
-    cnt: i64,
+    pub(crate) parent_id: Uuid,
+    pub(crate) cnt: i64,
 }
 
 #[utoipa::path(
     get,
     path = "/admin/departments",
     tag = "admin",
+    params(
+        ("parent_id" = Option<String>, Query, description = "Filter by parent department id (use \"root\" for top-level)"),
+        ("include_children" = Option<bool>, Query, description = "Include descendant departments when parent_id is set (default: false)"),
+        ("search" = Option<String>, Query, description = "Search by department name"),
+    ),
     responses(
        (status = 200, body = DepartmentsListResponse),
        (status = 401, content_type = "application/json", body = AuthErrorResponse),
@@ -501,7 +523,6 @@ pub async fn list_departments(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_VIEW,
             target_scope,
             PermissionScopeMode::RequireOrgWide,
@@ -541,6 +562,10 @@ pub async fn list_departments(
                 query = query.filter(departments::Column::ParentId.eq(parent_uuid));
             }
         }
+    }
+
+    if let Some(search) = q.search.as_deref() {
+        query = query.filter(departments::Column::Name.into_expr().ilike(format!("%{}%", search)));
     }
 
     let rows = query
@@ -674,7 +699,6 @@ pub async fn get_departments_tree(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_VIEW,
             q.root_id,
             PermissionScopeMode::RequireOrgWide,
@@ -865,7 +889,6 @@ pub async fn get_department_by_id(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_VIEW,
             Some(department_id),
             PermissionScopeMode::RequireOrgWide,
@@ -992,7 +1015,6 @@ pub async fn update_department(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_MANAGE,
             Some(department_id),
             PermissionScopeMode::RequireOrgWide,
@@ -1131,12 +1153,17 @@ pub async fn update_department(
             &authz,
             &app_state.database,
             claims.user_id,
-            claims.role,
             department_id,
             admin_ids,
             Some(department_id),
         )
         .await?;
+    }
+
+    if let Err(e) = refresh_department_budget_available(&app_state.database, department_id).await {
+        eprintln!("refresh budget available error: {e}");
+    } else if let Err(e) = emit_budget_alerts(&app_state, department_id).await {
+        eprintln!("emit budget alert error: {:?}", e);
     }
 
     if parent_changed {
@@ -1175,7 +1202,6 @@ pub async fn move_department(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_MANAGE,
             Some(department_id),
             PermissionScopeMode::RequireOrgWide,
@@ -1185,7 +1211,6 @@ pub async fn move_department(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_MANAGE,
             Some(req.new_parent_id),
             PermissionScopeMode::RequireOrgWide,
@@ -1322,13 +1347,21 @@ pub async fn delete_department(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_MANAGE,
             Some(department_id),
             PermissionScopeMode::RequireOrgWide,
             Some(department_id),
         )
         .await?;
+    // Remove scoped role assignments for this department to avoid FK set-null conflicts
+    let _ = user_role_assignments::Entity::delete_many()
+        .filter(user_role_assignments::Column::ScopeDepartmentId.eq(department_id))
+        .exec(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("role assignment delete error: {e}");
+            AuthError::DbTimeout
+        })?;
     let res = departments::Entity::delete_by_id(department_id)
         .exec(&app_state.database)
         .await
@@ -1368,7 +1401,6 @@ pub async fn add_users_in_department(
      authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_MANAGE,
             Some(department_id),
             PermissionScopeMode::RequireOrgWide,
@@ -1420,7 +1452,6 @@ pub async fn remove_users_from_department(
      authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_DEPARTMENTS_MANAGE,
             Some(department_id),
             PermissionScopeMode::RequireOrgWide,
@@ -1485,7 +1516,7 @@ app_state
         ("include_sub_department" = bool, Query, description = "Default value : false"),
         ("search" = Option<String>, Query, description = "Search by name,email,department"),
         ("status" = Option<UserStatus>, Query, description = "Account status"),
-        ("role" = Option<UserRole>, Query, description = "UserRole superadmin,admin,user,observer"),
+        ("role_id" = Option<Uuid>, Query, description = "Filter by RBAC role id"),
         ("sort" = Option<SortRule>, Query, description = "Sort by column example 'name','updated_at','created_at','email','last_login_at'"),
         ("order" = Option<String>, Query, description = "Sort order (asc/desc)"),
     ),
@@ -1508,7 +1539,6 @@ pub async fn get_users_from_department(
      authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_USERS_VIEW,
             Some(department_id),
             PermissionScopeMode::RequireOrgWide,
@@ -1543,8 +1573,22 @@ pub async fn get_users_from_department(
     let mut select = users::Entity::find()
         .filter(users::Column::Status.ne(UserStatus::Deleted))
         .join(JoinType::LeftJoin, users::Relation::Departments.def());
-    if let Some(role) = query.role  {
-       select = select.filter(users::Column::Role.eq(role));
+    if let Some(role_id) = query.role_id {
+        let role_user_ids: Vec<Uuid> = user_role_assignments::Entity::find()
+            .select_only()
+            .column(user_role_assignments::Column::UserId)
+            .filter(user_role_assignments::Column::RoleId.eq(role_id))
+            .into_tuple::<Uuid>()
+            .all(&app_state.database)
+            .await
+            .map_err(|e| {
+                eprintln!("role filter lookup error: {e}");
+                AuthError::DbTimeout
+            })?;
+        if role_user_ids.is_empty() {
+            return Ok((StatusCode::OK, Json(DepartmentMembersResponse { total: 0, members: Vec::new() })));
+        }
+        select = select.filter(users::Column::Id.is_in(role_user_ids));
     }
     if let Some(status) = query.status{
        select = select.filter(users::Column::Status.eq(status))
@@ -1587,27 +1631,33 @@ pub async fn get_users_from_department(
         .await
         .map_err(|e| { eprintln!("db error: {e}"); AuthError::DbTimeout })?
      };
+     let user_ids: Vec<Uuid> = users_row.iter().map(|u| u.id).collect();
+     let roles_map = authz.user_roles_map(&user_ids).await?;
      response.members = users_row
        .into_iter()
-       .map(|user| UserDetails{ 
-        id:user.id,
-        sub: user.azure_id.unwrap_or(user.google_id.unwrap_or(user.email.clone())),
-        email:user.email,
-        name: user.name,
-        picture:user.picture,
-        hd:user.hd,
-        role:user.role,
-        status:user.status,
-        department:None,
-        department_id:user.department_id,
-        is_super_admin:user.role == UserRole::SuperAdmin,
-        has_password:user.password.is_some(),
-        mfa_enabled:user.mfa_enabled,
-        last_login_at:Some(user.last_login_at),
-        password_changed_at:user.password_changed_at,
-        created_at:user.created_at,
-        updated_at:user.updated_at,
-        effective_permissions:user.effective_permissions,
+       .map(|user| {
+        let roles = roles_map.get(&user.id).cloned().unwrap_or_default();
+        let is_super_admin = roles.iter().any(|r| r == "Super Admin");
+        UserDetails{ 
+            id:user.id,
+            sub: user.azure_id.unwrap_or(user.google_id.unwrap_or(user.email.clone())),
+            email:user.email,
+            name: user.name,
+            picture:user.picture,
+            hd:user.hd,
+            roles,
+            status:user.status,
+            department:None,
+            department_id:user.department_id,
+            is_super_admin,
+            has_password:user.password.is_some(),
+            mfa_enabled:user.mfa_enabled,
+            last_login_at:Some(user.last_login_at),
+            password_changed_at:user.password_changed_at,
+            created_at:user.created_at,
+            updated_at:user.updated_at,
+            effective_permissions:user.effective_permissions,
+        }
     }).collect();
     response.total = response.members.len() as i32;
   Ok((StatusCode::OK,Json(response)))

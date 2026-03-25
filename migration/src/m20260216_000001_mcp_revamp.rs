@@ -1,0 +1,478 @@
+use sea_orm_migration::{prelude::*, sea_orm::JsonValue};
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // base mcp_servers
+        manager
+            .create_table(
+                Table::create()
+                    .table(McpServers::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(McpServers::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(McpServers::OrganizationId).uuid().null())
+                    .col(ColumnDef::new(McpServers::Name).string().not_null())
+                    .col(ColumnDef::new(McpServers::Description).text().null())
+                    .col(
+                        ColumnDef::new(McpServers::TransportType)
+                            .string()
+                            .not_null()
+                            .default("stdio"),
+                    )
+                    .col(
+                        ColumnDef::new(McpServers::ConnectionConfig)
+                            .json_binary()
+                            .not_null()
+                            .default(JsonValue::Object(Default::default())),
+                    )
+                    .col(
+                        ColumnDef::new(McpServers::Enabled)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(ColumnDef::new(McpServers::Status).string().null())
+                    .col(ColumnDef::new(McpServers::StatusMessage).text().null())
+                    .col(
+                        ColumnDef::new(McpServers::ToolCount)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(McpServers::DefaultAccess)
+                            .string()
+                            .not_null()
+                            .default("explicit_only"),
+                    )
+                    .col(
+                        ColumnDef::new(McpServers::LastConnectedAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(McpServers::LastSyncedAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(McpServers::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(McpServers::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // access policies
+        manager
+            .create_table(
+                Table::create()
+                    .table(McpAccessPolicies::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(McpAccessPolicies::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(McpAccessPolicies::TargetType)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(McpAccessPolicies::ServerId).uuid().null())
+                    .col(ColumnDef::new(McpAccessPolicies::ToolId).uuid().null())
+                    .col(
+                        ColumnDef::new(McpAccessPolicies::AccessType)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(McpAccessPolicies::Permission)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(McpAccessPolicies::RoleName).string().null())
+                    .col(
+                        ColumnDef::new(McpAccessPolicies::DepartmentId)
+                            .uuid()
+                            .null(),
+                    )
+                    .col(ColumnDef::new(McpAccessPolicies::UserId).uuid().null())
+                    .col(
+                        ColumnDef::new(McpAccessPolicies::InheritFromServer)
+                            .boolean()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(McpAccessPolicies::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(McpAccessPolicies::CreatedBy).uuid().null())
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(McpTools::Table)
+                    .if_not_exists()
+                    .col(ColumnDef::new(McpTools::Id).uuid().not_null().primary_key())
+                    .col(ColumnDef::new(McpTools::ServerId).uuid().not_null())
+                    .col(ColumnDef::new(McpTools::ServerName).string().not_null())
+                    .col(ColumnDef::new(McpTools::Name).string().not_null())
+                    .col(ColumnDef::new(McpTools::OriginalName).string().not_null())
+                    .col(ColumnDef::new(McpTools::Description).text().null())
+                    .col(
+                        ColumnDef::new(McpTools::InputSchema)
+                            .json_binary()
+                            .not_null()
+                            .default(JsonValue::Object(Default::default())),
+                    )
+                    .col(
+                        ColumnDef::new(McpTools::Parameters)
+                            .json_binary()
+                            .not_null()
+                            .default(JsonValue::Array(vec![])),
+                    )
+                    .col(
+                        ColumnDef::new(McpTools::Enabled)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(McpTools::IsReadOnly)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(McpTools::InheritAccessFromServer)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(McpTools::LastSyncedAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(McpTools::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(McpTools::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(McpServerTools::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(McpServerTools::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(McpServerTools::ServerId).uuid().not_null())
+                    .col(ColumnDef::new(McpServerTools::ToolId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(McpServerTools::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(McpServerTools::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(McpExecutions::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(McpExecutions::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(McpExecutions::ServerId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(McpExecutions::ServerName)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(McpExecutions::ToolName).string().not_null())
+                    .col(ColumnDef::new(McpExecutions::ConversationId).uuid().null())
+                    .col(ColumnDef::new(McpExecutions::UserId).uuid().null())
+                    .col(ColumnDef::new(McpExecutions::UserEmail).string().null())
+                    .col(
+                        ColumnDef::new(McpExecutions::Arguments)
+                            .json_binary()
+                            .null(),
+                    )
+                    .col(ColumnDef::new(McpExecutions::Result).json_binary().null())
+                    .col(
+                        ColumnDef::new(McpExecutions::IsError)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(ColumnDef::new(McpExecutions::DurationMs).integer().null())
+                    .col(
+                        ColumnDef::new(McpExecutions::ExecutedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(McpExecutions::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(McpConnections::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(McpConnections::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(McpConnections::UserId).uuid().not_null())
+                    .col(ColumnDef::new(McpConnections::ServerId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(McpConnections::ServerName)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(McpConnections::Connected)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(McpConnections::ConnectedAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(McpConnections::ExpiresAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(ColumnDef::new(McpConnections::Scopes).json_binary().null())
+                    .col(ColumnDef::new(McpConnections::AccessToken).text().null())
+                    .col(ColumnDef::new(McpConnections::RefreshToken).text().null())
+                    .col(ColumnDef::new(McpConnections::TokenType).string().null())
+                    .col(
+                        ColumnDef::new(McpConnections::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(McpConnections::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // helpful indexes
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx-mcp-tools-server")
+                    .table(McpTools::Table)
+                    .col(McpTools::ServerId)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx-mcp-executions-server")
+                    .table(McpExecutions::Table)
+                    .col(McpExecutions::ServerId)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx-mcp-connections-user")
+                    .table(McpConnections::Table)
+                    .col(McpConnections::UserId)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(McpConnections::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(McpExecutions::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(McpServerTools::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(McpTools::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(McpAccessPolicies::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(McpServers::Table).to_owned())
+            .await?;
+        Ok(())
+    }
+}
+
+#[derive(DeriveIden)]
+enum McpServers {
+    #[sea_orm(iden = "mcp_servers")]
+    Table,
+    Id,
+    OrganizationId,
+    Name,
+    Description,
+    TransportType,
+    ConnectionConfig,
+    Enabled,
+    Status,
+    StatusMessage,
+    ToolCount,
+    DefaultAccess,
+    LastConnectedAt,
+    LastSyncedAt,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+enum McpAccessPolicies {
+    #[sea_orm(iden = "mcp_access_policies")]
+    Table,
+    Id,
+    TargetType,
+    ServerId,
+    ToolId,
+    AccessType,
+    Permission,
+    RoleName,
+    DepartmentId,
+    UserId,
+    InheritFromServer,
+    CreatedAt,
+    CreatedBy,
+}
+
+#[derive(DeriveIden)]
+enum McpTools {
+    #[sea_orm(iden = "mcp_tools")]
+    Table,
+    Id,
+    ServerId,
+    ServerName,
+    Name,
+    OriginalName,
+    Description,
+    InputSchema,
+    Parameters,
+    Enabled,
+    IsReadOnly,
+    InheritAccessFromServer,
+    LastSyncedAt,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+enum McpServerTools {
+    #[sea_orm(iden = "mcp_server_tools")]
+    Table,
+    Id,
+    ServerId,
+    ToolId,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+enum McpExecutions {
+    #[sea_orm(iden = "mcp_executions")]
+    Table,
+    Id,
+    ServerId,
+    ServerName,
+    ToolName,
+    ConversationId,
+    UserId,
+    UserEmail,
+    Arguments,
+    Result,
+    IsError,
+    DurationMs,
+    ExecutedAt,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum McpConnections {
+    #[sea_orm(iden = "mcp_connections")]
+    Table,
+    Id,
+    UserId,
+    ServerId,
+    ServerName,
+    Connected,
+    ConnectedAt,
+    ExpiresAt,
+    Scopes,
+    AccessToken,
+    RefreshToken,
+    TokenType,
+    CreatedAt,
+    UpdatedAt,
+}

@@ -4,7 +4,7 @@ use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
 use std::collections::HashSet;
-use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}, permissions::PERMISSION_AI_PLATFORM_MANAGE}, dto::{admin_ai::{AiEngineModelsResponse, AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel, AiModelCapabilities}, models::ModelsResponse}, handlers::models::load_providers_cached, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}}, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
+use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}, permissions::{PERMISSION_AI_PLATFORM_MANAGE, PERMISSION_AI_PLATFORM_VIEW}}, dto::{admin_ai::{AiEngineModelsResponse, AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel, AiModelCapabilities}, models::ModelsResponse}, handlers::models::load_providers_cached, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}}, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
 
 async fn load_models_response(app_state: &SharedState) -> Result<ModelsResponse, AuthError> {
     let providers = load_providers_cached(&app_state.req_client)
@@ -34,8 +34,7 @@ pub async fn get_ai_engines(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
-            PERMISSION_AI_PLATFORM_MANAGE,
+            PERMISSION_AI_PLATFORM_VIEW,
             None,
             PermissionScopeMode::RequireOrgWide,
             None,
@@ -172,8 +171,7 @@ pub async fn get_ai_engines_by_key(
    authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
-            PERMISSION_AI_PLATFORM_MANAGE,
+            PERMISSION_AI_PLATFORM_VIEW,
             None,
             PermissionScopeMode::RequireOrgWide,
             None,
@@ -231,8 +229,7 @@ pub async fn get_ai_engine_models_by_key(
    authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
-            PERMISSION_AI_PLATFORM_MANAGE,
+            PERMISSION_AI_PLATFORM_VIEW,
             None,
             PermissionScopeMode::RequireOrgWide,
             None,
@@ -298,7 +295,6 @@ pub async fn update_ai_engines_by_key(
    authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_AI_PLATFORM_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -416,7 +412,6 @@ pub async fn delete_ai_engines_api_key_key(
    authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_AI_PLATFORM_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -501,7 +496,6 @@ pub async fn validate_ai_engines_by_key(
    authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_AI_PLATFORM_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,

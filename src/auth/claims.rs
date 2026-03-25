@@ -5,7 +5,7 @@ use jsonwebtoken::{Validation, decode};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
-use crate::{auth::jwt::KEYS, models::users::UserRole};
+use crate::auth::jwt::KEYS;
 use crate::auth::error::AuthError;
 
 pub trait Claiming:Serialize + for<'a> Deserialize<'a> {
@@ -50,14 +50,13 @@ pub struct Claims {
     pub sub: String, // Email Subject (user identifier)
     pub name:Option<String>,
     pub user_id:Uuid,//user id
-    pub role:UserRole,
     pub exp: usize,  // Expiration time
 }
 
 impl Claiming for Claims  {}
 
 impl Claims {
-    pub fn new_access_token<S: Into<String>>(sub:S,name:Option<S>,user_id:Uuid,role:UserRole) -> Self {
+    pub fn new_access_token<S: Into<String>>(sub:S,name:Option<S>,user_id:Uuid) -> Self {
         let exp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("Time went backwards")
@@ -66,7 +65,6 @@ impl Claims {
           sub:sub.into(),
           name:name.map(|v| v.into()),
           user_id,
-          role,
           exp:exp as usize,
         }
     }
@@ -76,7 +74,6 @@ impl Claims {
            sub:String::default(),
            name:None,
            user_id:Uuid::new_v4(),
-           role:UserRole::SuperAdmin,
            exp:0,
           }
     }

@@ -91,11 +91,6 @@ impl MigrationTrait for Migration {
                             .null(),
                     )
                     .col(
-                        ColumnDef::new(Users::Role)
-                            .string() // backing type of UserRole enum (rs_type = "String")
-                            .not_null(),
-                    )
-                    .col(
                         ColumnDef::new(Users::Hd)
                             .string()
                             .null(),
@@ -201,8 +196,6 @@ enum Users {
     LastLoginAt,
     #[sea_orm(iden = "passwordChangedAt")]
     PasswordChangedAt,
-    #[sea_orm(iden = "role")]
-    Role,
     #[sea_orm(iden = "hd")]
     Hd,
     #[sea_orm(iden = "department")]

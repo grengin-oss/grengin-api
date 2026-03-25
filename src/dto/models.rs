@@ -2,7 +2,6 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 #[derive(Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ModelsResponse {
     pub providers: Vec<ProviderInfo>,
 }
@@ -23,7 +22,6 @@ impl ModelsResponse {
 }
 
 #[derive(Serialize,Clone, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ProviderInfo {
     pub key: String,
     pub name: String,
@@ -33,7 +31,6 @@ pub struct ProviderInfo {
 }
 
 #[derive(Serialize,Clone, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub key: String,
     pub name: String,

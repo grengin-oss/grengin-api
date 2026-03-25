@@ -15,8 +15,11 @@ use crate::{
         AnalyticsQuery, DepartmentAnalyticsQuery, DepartmentAnalyticsResponse, OverviewResponse,
         TimeSeriesQuery, TimeSeriesResponse, UserAnalyticsQuery, UserAnalyticsResponse,
     },
-    models::users::{UserRole, UserStatus},
-    services::{analytics_cache, authorization::{AuthorizationService, PermissionScopeMode}},
+    models::users::UserStatus,
+    services::{
+        analytics_cache,
+        authorization::{AuthorizationService, PermissionScopeMode},
+    },
     state::SharedState,
 };
 
@@ -47,7 +50,6 @@ pub async fn get_analytics_overview(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_ANALYTICS_VIEW,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -83,7 +85,7 @@ pub async fn get_analytics_overview(
         ("order" = Option<String>, Query, description = "Sort order (asc/desc)"),
         ("search" = Option<String>, Query, description = "Search by name,email or department"),
         ("status" = Option<UserStatus>, Query, description = "Account status"),
-        ("role" = Option<UserRole>, Query, description = "UserRole superadmin,admin,user,observer"),
+        ("role_id" = Option<Uuid>, Query, description = "Filter by RBAC role id"),
         ("unassigned_department" = Option<bool>, Query, description = "Default false"),
         ("live" = Option<bool>, Query, description = "Bypass cache and fetch live data"),
     ),
@@ -104,7 +106,6 @@ pub async fn get_user_analytics(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_ANALYTICS_VIEW,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -151,7 +152,6 @@ pub async fn get_department_analytics(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_ANALYTICS_VIEW,
             query.department_id,
             PermissionScopeMode::RequireOrgWide,
@@ -197,7 +197,6 @@ pub async fn get_timeseries_analytics(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_ANALYTICS_VIEW,
             None,
             PermissionScopeMode::RequireOrgWide,

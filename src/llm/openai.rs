@@ -3,18 +3,40 @@ use async_trait::async_trait;
 use reqwest::{Client as ReqwestClient, RequestBuilder, multipart};
 use reqwest_eventsource::EventSource;
 use uuid::Uuid;
-use crate::{config::setting::OpenaiSettings, dto::{files::Attachment, llm::openai::{FileUploadResponse, OpenaiChatCompletionRequest, OpenaiChatCompletionResponse, OpenaiChatRequest, OpenaiListModelsResponse, OpenaiMessage, OpenaiModel, OpenaiTool}}, handlers::file::get_file_binary, llm::{prompt::{Prompt, PromptTitleResponse}, provider::{OpenaiApis, OpenaiHeaders}}};
+use crate::{
+    config::setting::OpenaiSettings,
+    dto::{
+        files::Attachment,
+        llm::openai::{
+            FileUploadResponse,
+            OpenaiChatCompletionRequest,
+            OpenaiChatCompletionResponse,
+            OpenaiChatRequest,
+            OpenaiInputItem,
+            OpenaiListModelsResponse,
+            OpenaiMessage,
+            OpenaiModel,
+            OpenaiTool,
+            OpenaiToolChoice,
+        },
+    },
+    handlers::file::get_file_binary,
+    llm::{
+        prompt::{Prompt, PromptTitleResponse},
+        provider::{OpenaiApis, OpenaiHeaders},
+    },
+};
 
 pub const OPENAI_API_URL:&str = "https://api.openai.com";
 
 impl OpenaiHeaders for RequestBuilder  {
     fn add_openai_headers(self,openai_sesstings: &OpenaiSettings) -> Self {
         let mut req_builder = self.bearer_auth(&openai_sesstings.api_key);
-        if let Some(openai_project_id) = &openai_sesstings.project_id{
-          req_builder = req_builder.header("OpenAI-Organization", openai_project_id);
+        if let Some(openai_org_id) = &openai_sesstings.org_id{
+          req_builder = req_builder.header("OpenAI-Organization", openai_org_id);
         }
-         if let Some(openai_org_id) = &openai_sesstings.org_id{
-          req_builder = req_builder.header("OpenAI-Project", openai_org_id);
+        if let Some(openai_project_id) = &openai_sesstings.project_id{
+          req_builder = req_builder.header("OpenAI-Project", openai_project_id);
         }
         req_builder
     }
@@ -47,35 +69,45 @@ impl OpenaiApis for ReqwestClient {
      Ok(res.id)
     }
 
-   async fn openai_chat_stream(&self,openai_settings:&OpenaiSettings,model_name:String,temperature:Option<f32>,mut prompts:Vec<Prompt>,user_id:&Uuid,web_search:bool) -> Result<EventSource,Error>{
-       for prompt in &mut prompts {
-         for file in &mut prompt.files {
-            if let Ok(attachment) = get_file_binary(&file, user_id){
-               file.openai_id = self
-                 .openai_upload_file(openai_settings, &attachment)
-                 .await
-                 .ok()
-            }
-         }
-       }
-       let tools = if web_search {
-         Some(vec![OpenaiTool::web_search()])
+   async fn openai_chat_stream(
+       &self,
+       openai_settings: &OpenaiSettings,
+       model_name: String,
+       temperature: Option<f32>,
+       mut prompts: Vec<Prompt>,
+       user_id: &Uuid,
+       tools: Option<Vec<OpenaiTool>>,
+       tool_choice: Option<OpenaiToolChoice>,
+       previous_response_id: Option<String>,
+       input: Option<Vec<OpenaiInputItem>>,
+   ) -> Result<EventSource, Error> {
+       let input_items = if let Some(input) = input {
+           input
        } else {
-         None
-       };
-       let tool_choice = if web_search {
-         Some(crate::dto::llm::openai::OpenaiToolChoice::String("auto".to_string()))
-       } else {
-         None
+           for prompt in &mut prompts {
+               for file in &mut prompt.files {
+                   if let Ok(attachment) = get_file_binary(&file, user_id) {
+                       file.openai_id = self
+                           .openai_upload_file(openai_settings, &attachment)
+                           .await
+                           .ok()
+                   }
+               }
+           }
+           OpenaiMessage::from_prompts(prompts)
+               .into_iter()
+               .map(OpenaiInputItem::Message)
+               .collect::<Vec<OpenaiInputItem>>()
        };
        let body = OpenaiChatRequest {
             model: model_name,
             stream: true,
             temperature,
-            input:OpenaiMessage::from_prompts(prompts),
+            input: input_items,
             tool_choice,
             tools,
             include:None,
+            previous_response_id,
         };
       let request = self
             .post(format!("{OPENAI_API_URL}/v1/responses"))

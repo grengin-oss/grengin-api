@@ -4,9 +4,19 @@ use chrono::Utc;
 use openidconnect::{AuthorizationCode, ClaimsVerificationError, CsrfToken, Nonce, OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, core::{CoreAuthenticationFlow, CoreUserInfoClaims}};
 use openidconnect::{TokenResponse as OidcTokenResponse};
 use axum::http::StatusCode;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, TryIntoModel};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
-use crate::{auth::{claims::{Claiming as _, Claims, RefreshClaims}, error::AuthErrorResponse}, dto::oauth::AuthProvider, models::{oauth_sessions, users::{self, UserRole, UserStatus}}};
+use crate::{
+    auth::{claims::{Claiming as _, Claims, RefreshClaims}, error::AuthErrorResponse},
+    dto::oauth::AuthProvider,
+    models::{
+        oauth_sessions,
+        roles,
+        user_role_assignments,
+        users::{self, UserStatus},
+    },
+    services::authorization::AuthorizationService,
+};
 use crate::{auth::error::{AuthError}, dto::{auth::{AuthTokenResponse, TokenType, User}, oauth::{OAuthCallback, StartParams}}, state::SharedState};
 
 #[utoipa::path(
@@ -306,6 +316,14 @@ async fn oidc_oauth_callback(
         }
     }
     if user.is_none() {
+        let is_first_user = users::Entity::find()
+            .count(&app_state.database)
+            .await
+            .map_err(|e| {
+                eprintln!("db error while counting users {:?}", e);
+                AuthError::ServiceTemporarilyUnavailable
+            })?
+            == 0;
         let new_user = users::ActiveModel{
             id: Set(Uuid::new_v4()),
             email: Set(email.clone().unwrap_or_else(|| format!("{sub}@users.noreply.oidc"))),
@@ -325,7 +343,6 @@ async fn oidc_oauth_callback(
             mfa_secret:Set(None),
             picture:Set(picture.clone()),
             password:Set(None),
-            role:Set(UserRole::SuperAdmin),
             metadata:Set(None),
             hd:Set(hd),
         };
@@ -335,16 +352,45 @@ async fn oidc_oauth_callback(
            .map_err(|e|{
              eprintln!("{:?}",e);
              AuthError::ServiceTemporarilyUnavailable})?;
-        user = Some(new_user.try_into_model()
+        let inserted_user = new_user.try_into_model()
            .map_err(|e|{
              eprintln!("db error while parsing user {:?}",e);
-             AuthError::ServiceTemporarilyUnavailable})?);
+             AuthError::ServiceTemporarilyUnavailable})?;
+        let role_name = if is_first_user { "Super Admin" } else { "User" };
+        if let Some(role) = roles::Entity::find()
+            .filter(roles::Column::Name.eq(role_name))
+            .one(&app_state.database)
+            .await
+            .map_err(|e| {
+                eprintln!("role lookup error: {e}");
+                AuthError::ServiceTemporarilyUnavailable
+            })?
+        {
+            let now = Utc::now();
+            let assignment = user_role_assignments::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                user_id: Set(inserted_user.id),
+                role_id: Set(role.id),
+                scope_department_id: Set(None),
+                assigned_by: Set(inserted_user.id),
+                created_at: Set(now),
+                updated_at: Set(now),
+            };
+            let _ = assignment.insert(&app_state.database).await;
+        }
+        let authz = AuthorizationService::new(&app_state.database);
+        let _ = authz.recompute_effective_permissions(inserted_user.id).await;
+        user = Some(inserted_user);
     };
     let user = user
       .ok_or(AuthError::EmailDoesNotExist)?;
 
-    let access_token_claims = Claims::new_access_token(user.email.clone(), user.name.clone(), user.id, user.role);
+    let access_token_claims = Claims::new_access_token(user.email.clone(), user.name.clone(), user.id);
     let refresh_token_claims = RefreshClaims::new_refresh_token(user.email.clone(), user.id);
+    let authz = AuthorizationService::new(&app_state.database);
+    let mut roles_map = authz.user_roles_map(&[user.id]).await?;
+    let roles = roles_map.remove(&user.id).unwrap_or_default();
+    let is_super_admin = roles.iter().any(|r| r == "Super Admin");
     let user_response = User {
         id: user.id,
         sub: sub.clone(),
@@ -352,10 +398,10 @@ async fn oidc_oauth_callback(
         name: user.name,
         picture: picture,
         hd: user.hd,
-        role: user.role, // TODO: Map from database if role field exists
+        roles,
         status: user.status,
         department_id: user.department_id,
-        is_super_admin: user.role == UserRole::SuperAdmin, // Default to false, update based on database field if available
+        is_super_admin,
         has_password: user.password.is_some(), // SSO-only users don't have password
         mfa_enabled: user.mfa_enabled,
         last_login_at: Some(user.last_login_at),

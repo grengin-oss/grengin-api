@@ -71,7 +71,6 @@ pub async fn get_department_budget(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_BUDGET_VIEW,
             Some(department_id),
             PermissionScopeMode::RequireOrgWide,

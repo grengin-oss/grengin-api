@@ -3,3 +3,7 @@ pub mod analytics_cache;
 pub mod budget_allocation;
 pub mod authorization;
 pub mod auth_audit;
+pub mod mcp_client;
+pub mod mcp_tools;
+pub mod mcp_helpers;
+pub mod notifications;

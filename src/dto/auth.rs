@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
-use crate::models::users::{UserRole, UserStatus};
+use crate::models::users::UserStatus;
 
 #[derive(Serialize, ToSchema)]
 pub struct AuthInitResponse {
@@ -60,7 +60,7 @@ pub struct User {
     /// Hosted domain (organization domain)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hd: Option<String>,
-    pub role:UserRole,
+    pub roles: Vec<String>,
     pub status:UserStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub department_id: Option<Uuid>,

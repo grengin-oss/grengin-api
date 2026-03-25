@@ -1,6 +1,10 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
+use crate::{
+    dto::common::SortRule,
+    models::users::UserStatus,
+};
 
 #[derive(Serialize, ToSchema)]
 pub struct AdministeredDepartmentsResponse {
@@ -14,4 +18,24 @@ pub struct EffectivePermissionsResponse {
     #[schema(value_type = Object)]
     pub mcp_access: serde_json::Value,
     pub administered_departments: Vec<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct MeDepartmentUsersResponse {
+    pub total: i32,
+    pub users: Vec<crate::dto::admin_user::UserDetails>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct AdministeredDepartmentUsersQuery {
+    pub department_id: Option<Uuid>,
+    #[serde(default)]
+    pub include_sub_department: Option<bool>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+    pub search: Option<String>,
+    pub order: Option<String>,
+    pub role_id: Option<Uuid>,
+    pub status: Option<UserStatus>,
+    pub sort: Option<SortRule>,
 }

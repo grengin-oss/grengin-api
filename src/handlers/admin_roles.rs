@@ -2,15 +2,15 @@ use axum::{extract::{Path, State}, Json};
 use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait, Set};
-use serde::Serialize;
+use sea_orm::sea_query::Expr;
 use uuid::Uuid;
 
 use crate::{
     auth::{claims::Claims, error::{AuthError, AuthErrorResponse}, permissions::{PERMISSION_ROLES_ASSIGN, PERMISSION_ROLES_MANAGE, PERMISSION_ROLES_VIEW, ROLE_DEPARTMENT_ADMIN}},
     dto::admin_roles::{
-        PermissionDto, PermissionsResponse, RoleDto, RoleRequest, RoleUpdateRequest,
-        RolesResponse, UserRoleAssignmentDto, UserRoleAssignmentRequest,
-        UserRoleAssignmentsResponse,
+        PermissionDto, PermissionsResponse, RoleAssignmentPayload, RoleCreatedPayload, RoleDeletedPayload,
+        RoleDto, RoleRequest, RoleUpdateRequest, RoleUpdatedPayload, RolesResponse,
+        UserRoleAssignmentDto, UserRoleAssignmentRequest, UserRoleAssignmentsResponse,
     },
     models::{
         permissions,
@@ -19,7 +19,10 @@ use crate::{
         user_role_assignments,
         users,
     },
-    services::{authorization::{AuthorizationService, PermissionScopeMode}, auth_audit::record_auth_event},
+    services::{
+        authorization::{AuthorizationService, PermissionScopeMode},
+        auth_audit::{build_audit_payload, record_auth_event},
+    },
     state::SharedState,
 };
 
@@ -31,41 +34,14 @@ struct RolePermissionRow {
     action: String,
 }
 
-#[derive(Serialize)]
-struct RoleCreatedPayload {
+#[derive(Debug, sea_orm::FromQueryResult)]
+struct RoleUserCountRow {
+    #[sea_orm(from_alias = "role_id")]
     role_id: Uuid,
-    name: String,
-    permissions: Vec<String>,
+    #[sea_orm(from_alias = "user_count")]
+    user_count: i64,
 }
 
-#[derive(Serialize)]
-struct RoleUpdatedPayload {
-    role_id: Uuid,
-    name: Option<String>,
-    permissions: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct RoleDeletedPayload {
-    role_id: Uuid,
-    name: String,
-}
-
-#[derive(Serialize)]
-struct RoleAssignmentPayload {
-    assignment_id: Uuid,
-    user_id: Uuid,
-    role_id: Uuid,
-    scope_department_id: Option<Uuid>,
-}
-
-fn audit_payload<T: Serialize>(value: T) -> Option<serde_json::Value> {
-    serde_json::to_value(value)
-        .map_err(|e| {
-            eprintln!("audit payload error: {e}");
-        })
-        .ok()
-}
 
 #[utoipa::path(
     get,
@@ -86,7 +62,6 @@ pub async fn get_permissions(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_ROLES_VIEW,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -109,6 +84,7 @@ pub async fn get_permissions(
             domain: perm.domain,
             action: perm.action,
             is_scopeable: perm.is_scopeable,
+            description_key: perm.description_key,
         })
         .collect();
 
@@ -134,7 +110,6 @@ pub async fn list_roles(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_ROLES_VIEW,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -172,6 +147,26 @@ pub async fn list_roles(
             .push(format!("{}:{}", row.domain, row.action));
     }
 
+    let role_user_counts = user_role_assignments::Entity::find()
+        .select_only()
+        .column_as(user_role_assignments::Column::RoleId, "role_id")
+        .column_as(
+            Expr::col(user_role_assignments::Column::UserId).count_distinct(),
+            "user_count",
+        )
+        .group_by(user_role_assignments::Column::RoleId)
+        .into_model::<RoleUserCountRow>()
+        .all(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("role user count lookup error: {e}");
+            AuthError::DbTimeout
+        })?;
+    let role_user_count_map: std::collections::HashMap<Uuid, u64> = role_user_counts
+        .into_iter()
+        .map(|row| (row.role_id, row.user_count.max(0) as u64))
+        .collect();
+
     let roles_response = roles_list
         .into_iter()
         .map(|role| RoleDto {
@@ -179,6 +174,7 @@ pub async fn list_roles(
             name: role.name,
             is_system: role.is_system,
             permissions: permission_map.remove(&role.id).unwrap_or_default(),
+            user_count: role_user_count_map.get(&role.id).copied().unwrap_or(0),
         })
         .collect();
 
@@ -207,7 +203,6 @@ pub async fn create_role(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_ROLES_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -287,7 +282,7 @@ pub async fn create_role(
             })?;
     }
 
-    if let Some(payload) = audit_payload(RoleCreatedPayload {
+    if let Some(payload) = build_audit_payload(RoleCreatedPayload {
         role_id,
         name: req.name.clone(),
         permissions: assigned_permissions.clone(),
@@ -308,6 +303,7 @@ pub async fn create_role(
             name: req.name,
             is_system: false,
             permissions: assigned_permissions,
+            user_count: 0,
         }),
     ))
 }
@@ -336,7 +332,6 @@ pub async fn get_role_by_id(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_ROLES_VIEW,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -372,6 +367,22 @@ pub async fn get_role_by_id(
         .into_iter()
         .map(|row| format!("{}:{}", row.domain, row.action))
         .collect();
+    let user_count = user_role_assignments::Entity::find()
+        .select_only()
+        .column_as(
+            Expr::col(user_role_assignments::Column::UserId).count_distinct(),
+            "user_count",
+        )
+        .filter(user_role_assignments::Column::RoleId.eq(role_id))
+        .into_tuple::<i64>()
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("role assignment count error: {e}");
+            AuthError::DbTimeout
+        })?
+        .unwrap_or(0)
+        .max(0) as u64;
 
     Ok((
         StatusCode::OK,
@@ -380,6 +391,7 @@ pub async fn get_role_by_id(
             name: role.name,
             is_system: role.is_system,
             permissions,
+            user_count,
         }),
     ))
 }
@@ -410,7 +422,6 @@ pub async fn update_role(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_ROLES_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -445,7 +456,7 @@ pub async fn update_role(
             AuthError::DbTimeout
         })?;
 
-    let mut permissions_list: Vec<String> = Vec::new();
+     let mut permissions_list: Vec<String> = Vec::new();
 
     if let Some(permission_keys) = permissions {
         role_permissions::Entity::delete_many()
@@ -498,7 +509,7 @@ pub async fn update_role(
             .column_as(permissions::Column::Action, "action")
             .join(JoinType::InnerJoin, role_permissions::Relation::Permissions.def())
             .filter(role_permissions::Column::RoleId.eq(role_id))
-            .into_model::<RolePermissionRow>()
+            .into_tuple::<(String, String)>()
             .all(&app_state.database)
             .await
             .map_err(|e| {
@@ -508,12 +519,12 @@ pub async fn update_role(
 
         permissions_list = permission_rows
             .into_iter()
-            .map(|row| format!("{}:{}", row.domain, row.action))
+            .map(|(domain, action)| format!("{}:{}", domain, action))
             .collect();
     }
 
     let response_name = name.clone().unwrap_or(role.name.clone());
-    if let Some(payload) = audit_payload(RoleUpdatedPayload {
+    if let Some(payload) = build_audit_payload(RoleUpdatedPayload {
         role_id,
         name: name.clone(),
         permissions: permissions_list.clone(),
@@ -527,6 +538,23 @@ pub async fn update_role(
         .await;
     }
 
+    let user_count = user_role_assignments::Entity::find()
+        .select_only()
+        .column_as(
+            Expr::col(user_role_assignments::Column::UserId).count_distinct(),
+            "user_count",
+        )
+        .filter(user_role_assignments::Column::RoleId.eq(role_id))
+        .into_tuple::<i64>()
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("role assignment count error: {e}");
+            AuthError::DbTimeout
+        })?
+        .unwrap_or(0)
+        .max(0) as u64;
+
     Ok((
         StatusCode::OK,
         Json(RoleDto {
@@ -534,6 +562,7 @@ pub async fn update_role(
             name: response_name,
             is_system: role.is_system,
             permissions: permissions_list,
+            user_count,
         }),
     ))
 }
@@ -562,7 +591,6 @@ pub async fn delete_role(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_ROLES_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -605,7 +633,7 @@ pub async fn delete_role(
 
     let _ = authz.recompute_effective_permissions_for_users(&assigned_users).await;
 
-    if let Some(payload) = audit_payload(RoleDeletedPayload {
+    if let Some(payload) = build_audit_payload(RoleDeletedPayload {
         role_id,
         name: role.name.clone(),
     }) {
@@ -645,7 +673,6 @@ pub async fn list_user_role_assignments(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_ROLES_VIEW,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -753,7 +780,6 @@ pub async fn assign_role_to_user(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_ROLES_ASSIGN,
             target_scope,
             PermissionScopeMode::RequireOrgWide,
@@ -765,7 +791,6 @@ pub async fn assign_role_to_user(
         authz
             .ensure_permission(
                 claims.user_id,
-                claims.role,
                 PERMISSION_ROLES_ASSIGN,
                 req.scope_department_id,
                 PermissionScopeMode::RequireOrgWide,
@@ -801,7 +826,7 @@ pub async fn assign_role_to_user(
 
     let _ = authz.recompute_effective_permissions(user_id).await;
 
-    if let Some(payload) = audit_payload(RoleAssignmentPayload {
+    if let Some(payload) = build_audit_payload(RoleAssignmentPayload {
         assignment_id,
         user_id,
         role_id: req.role_id,
@@ -870,7 +895,6 @@ pub async fn remove_role_from_user(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_ROLES_ASSIGN,
             target_scope,
             PermissionScopeMode::RequireOrgWide,
@@ -888,7 +912,7 @@ pub async fn remove_role_from_user(
 
     let _ = authz.recompute_effective_permissions(user_id).await;
 
-    if let Some(payload) = audit_payload(RoleAssignmentPayload {
+    if let Some(payload) = build_audit_payload(RoleAssignmentPayload {
         assignment_id,
         user_id,
         role_id: assignment.role_id,

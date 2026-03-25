@@ -14,16 +14,6 @@ pub enum UserStatus{
 }
 
 
-#[derive(Debug, Clone,Copy, PartialEq, Eq,EnumIter, DeriveActiveEnum, Serialize, Deserialize, ToSchema)]
-#[sea_orm(rs_type = "String",db_type = "String(StringLen::None)",rename_all = "lowercase")]
-#[serde(rename_all = "lowercase")]   
-pub enum UserRole {
-    SuperAdmin,
-    Admin,
-    User,
-    Observer,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "users", rename_all="camelCase")]
 #[serde(rename_all = "camelCase")]
@@ -47,7 +37,6 @@ pub struct Model {
   pub updated_at:DateTime<Utc>,
   pub last_login_at:DateTime<Utc>,
   pub password_changed_at:Option<DateTime<Utc>>,
-  pub role:UserRole,
   pub hd: Option<String>, //hosted domain of user email/website
   pub department_id:Option<Uuid>, // previously department Option<String>
   pub is_independent: bool,

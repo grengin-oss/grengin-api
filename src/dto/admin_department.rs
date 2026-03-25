@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
-use crate::{dto::{admin_user::UserDetails, common::SortRule}, models::{departments::{ActionOnExceed, BudgetPeriod}, users::{UserRole, UserStatus}}};
+use crate::{dto::{admin_user::UserDetails, common::SortRule}, models::{departments::{ActionOnExceed, BudgetPeriod}, users::UserStatus}};
 
 #[derive(Serialize,IntoParams,ToSchema)]
 pub struct DepartmentMembersResponse{
@@ -21,6 +21,7 @@ pub struct DepartmentListQuery {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub include_children: bool,
+    pub search: Option<String>,
 }
 
 #[derive(Deserialize, IntoParams, ToSchema)]
@@ -37,7 +38,7 @@ pub struct DepartmentMemeberListQuery {
     pub search:Option<String>,
     pub archived:Option<bool>,
     pub order:Option<String>,
-    pub role:Option<UserRole>,
+    pub role_id:Option<Uuid>,
     pub status:Option<UserStatus>,
     pub sort:Option<SortRule>,
 }
@@ -97,7 +98,6 @@ pub struct DepartmentRequest {
     pub description: String,
     pub parent_id: Option<Uuid>,
     pub admin_ids: Option<Vec<Uuid>>,
-    pub leader_ids: Vec<Uuid>,
 }
 
 #[derive(Deserialize,IntoParams,ToSchema)]
@@ -114,4 +114,12 @@ pub struct DepartmentUpdateRequest {
 #[derive(Deserialize, ToSchema)]
 pub struct MoveDepartmentRequest {
     pub new_parent_id: Uuid,
+}
+
+#[derive(Serialize)]
+pub struct RoleAssignmentPayload {
+    pub assignment_id: Uuid,
+    pub user_id: Uuid,
+    pub role_id: Uuid,
+    pub scope_department_id: Option<Uuid>,
 }

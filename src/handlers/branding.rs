@@ -91,7 +91,6 @@ pub async fn get_admin_branding(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_AI_PLATFORM_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,
@@ -124,7 +123,6 @@ pub async fn update_branding(
     authz
         .ensure_permission(
             claims.user_id,
-            claims.role,
             PERMISSION_AI_PLATFORM_MANAGE,
             None,
             PermissionScopeMode::RequireOrgWide,
