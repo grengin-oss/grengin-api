@@ -101,6 +101,7 @@ fn parse_provider_stub(value: &Value) -> Result<(ProviderInfo, Option<String>), 
     let key = get_str(value, "key")?;
     let name = get_str(value, "name")?;
     let icon = get_str(value, "icon")?;
+    let icon_dark = get_str(value, "iconDark")?;
     let status = get_str(value, "status")?;
 
     let text_models_url = value
@@ -115,6 +116,7 @@ fn parse_provider_stub(value: &Value) -> Result<(ProviderInfo, Option<String>), 
             key,
             name,
             icon,
+            icon_dark,
             status,
             models: Vec::new(),
         },
@@ -211,6 +213,7 @@ pub async fn get_list_models(
             key: provider.key,
             name: provider.name,
             icon: provider.icon,
+            icon_dark:provider.icon_dark,
             status: provider.status,
             models,
         });
