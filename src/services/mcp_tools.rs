@@ -8,7 +8,11 @@ use crate::{
     dto::llm::openai::OpenaiTool,
     error::AppError,
     llm::tooling::mcp_openai_tool_name,
-    models::{mcp_servers, mcp_tools},
+    models::{mcp_access_policies, mcp_servers, mcp_tools},
+    services::mcp_access::{
+        build_access_context, load_server_rules, load_tool_rules, resolve_server_access_with_rules,
+        resolve_tool_access_with_rules,
+    },
     state::SharedState,
 };
 
@@ -23,6 +27,7 @@ pub struct McpToolDescriptor {
     pub description: Option<String>,
     pub input_schema: Value,
     pub is_read_only: bool,
+    pub permission: mcp_access_policies::McpPermission,
 }
 
 #[derive(Debug, Clone)]
@@ -175,12 +180,15 @@ fn normalize_openai_parameters(schema: &Value) -> Value {
 
 pub async fn load_openai_mcp_tools(
     state: &SharedState,
+    user_id: Uuid,
     selected_server_ids: &[Uuid],
     selected_tools: &[String],
 ) -> Result<(Vec<OpenaiTool>, HashMap<String, McpToolDescriptor>, Vec<McpServerSummary>), AppError> {
     if selected_server_ids.is_empty() {
         return Ok((Vec::new(), HashMap::new(), Vec::new()));
     }
+
+    let access_context = build_access_context(&state.database, user_id).await?;
 
     let servers = mcp_servers::Entity::find()
         .filter(mcp_servers::Column::Id.is_in(selected_server_ids.to_vec()))
@@ -190,15 +198,12 @@ pub async fn load_openai_mcp_tools(
             eprintln!("mcp servers fetch error: {e}");
             AppError::DbTimeout
         })?;
-    let mut server_map: HashMap<Uuid, (String, Option<String>)> = HashMap::new();
-    let mut server_summaries = Vec::new();
+    let mut server_map: HashMap<Uuid, (String, Option<String>, mcp_servers::Model)> = HashMap::new();
     for server in servers {
-        server_map.insert(server.id, (server.name.clone(), server.description.clone()));
-        server_summaries.push(McpServerSummary {
-            server_id: server.id,
-            name: server.name,
-            description: server.description,
-        });
+        server_map.insert(
+            server.id,
+            (server.name.clone(), server.description.clone(), server),
+        );
     }
 
     let tools = mcp_tools::Entity::find()
@@ -211,17 +216,35 @@ pub async fn load_openai_mcp_tools(
             AppError::DbTimeout
         })?;
 
+    let server_ids: Vec<Uuid> = server_map.keys().copied().collect();
+    let server_rules = load_server_rules(&state.database, &server_ids).await?;
+    let mut server_rule_map: HashMap<Uuid, Vec<mcp_access_policies::Model>> = HashMap::new();
+    for rule in server_rules {
+        if let Some(server_id) = rule.server_id {
+            server_rule_map.entry(server_id).or_default().push(rule);
+        }
+    }
+
+    let tool_ids: Vec<Uuid> = tools.iter().map(|tool| tool.id).collect();
+    let tool_rules = load_tool_rules(&state.database, &tool_ids).await?;
+    let mut tool_rule_map: HashMap<Uuid, Vec<mcp_access_policies::Model>> = HashMap::new();
+    for rule in tool_rules {
+        if let Some(tool_id) = rule.tool_id {
+            tool_rule_map.entry(tool_id).or_default().push(rule);
+        }
+    }
+
     let selected_set: HashSet<String> = selected_tools.iter().cloned().collect();
     let filter_by_selected = !selected_set.is_empty();
 
     let mut openai_tools = Vec::new();
     let mut lookup = HashMap::new();
+    let mut allowed_servers: HashSet<Uuid> = HashSet::new();
 
     for tool in tools {
-        let (server_name, server_description) = server_map
-            .get(&tool.server_id)
-            .cloned()
-            .unwrap_or((tool.server_name.clone(), None));
+        let Some((server_name, server_description, server_model)) = server_map.get(&tool.server_id) else {
+            continue;
+        };
         let openai_name = mcp_openai_tool_name(&tool.server_id, &tool.name);
         if filter_by_selected
             && !selected_set.contains(&openai_name)
@@ -231,16 +254,49 @@ pub async fn load_openai_mcp_tools(
             continue;
         }
 
+        let server_rules = server_rule_map
+            .get(&tool.server_id)
+            .map(|rules| rules.as_slice())
+            .unwrap_or(&[]);
+        let server_access = resolve_server_access_with_rules(
+            &state.database,
+            &access_context,
+            server_model,
+            server_rules,
+        )
+        .await?;
+
+        let tool_rules = tool_rule_map
+            .get(&tool.id)
+            .map(|rules| rules.as_slice())
+            .unwrap_or(&[]);
+        let tool_access = resolve_tool_access_with_rules(
+            &state.database,
+            &access_context,
+            &tool,
+            &server_access,
+            tool_rules,
+        )
+        .await?;
+
+        if tool_access.permission == mcp_access_policies::McpPermission::Denied {
+            continue;
+        }
+        if tool_access.permission == mcp_access_policies::McpPermission::ReadOnly && !tool.is_read_only {
+            continue;
+        }
+
         let descriptor = McpToolDescriptor {
             openai_name: openai_name.clone(),
             server_id: tool.server_id,
-            server_name,
-            server_description,
+            server_name: server_name.clone(),
+            server_description: server_description.clone(),
             tool_id: tool.id,
             original_name: tool.original_name.clone(),
             description: tool.description.clone(),
             input_schema: tool.input_schema.clone(),
             is_read_only: tool.is_read_only,
+            permission: tool_access.permission,
         };
 
         openai_tools.push(OpenaiTool::Function {
@@ -250,6 +306,18 @@ pub async fn load_openai_mcp_tools(
             strict: None,
         });
         lookup.insert(openai_name, descriptor);
+        allowed_servers.insert(tool.server_id);
+    }
+
+    let mut server_summaries = Vec::new();
+    for server_id in allowed_servers {
+        if let Some((name, description, _)) = server_map.get(&server_id) {
+            server_summaries.push(McpServerSummary {
+                server_id,
+                name: name.clone(),
+                description: description.clone(),
+            });
+        }
     }
 
     Ok((openai_tools, lookup, server_summaries))

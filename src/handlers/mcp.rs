@@ -12,13 +12,12 @@ use sea_orm::{
 use serde_json::json;
 use std::collections::HashMap;
 use uuid::Uuid;
-use crate::handlers::mcp::mcp_servers::McpTransportType;
 
 use crate::{
     auth::{
         claims::Claims,
         encryption::encrypt_key,
-        error::AuthError,
+        error::{AuthError, AuthErrorResponse},
         permissions::{PERMISSION_MCP_ADMIN, PERMISSION_MCP_DELEGATE, PERMISSION_MCP_VIEW},
     },
     error::AppError,
@@ -30,24 +29,30 @@ use crate::{
         McpTool, McpToolAccessList, McpToolAccessUpdate, McpToolsList, McpToolSummary,
         McpUserConnection, McpUserConnectionsList, McpServerCatalogResponse,
         McpServerCatalogEntry, PaginatedMcpServers, PaginatedMcpToolExecutions,
-        McpDisconnectResponse, McpOauthCallbackResponse,
+        McpDisconnectResponse, McpOauthCallbackResponse, McpEffectiveAccessResponse,
+        McpEffectiveServerAccess, McpEffectiveToolAccess,
     },
     models::{
         mcp_access_policies,
         mcp_access_policies::McpAccessTarget,
         mcp_connections, mcp_executions, mcp_oauth_states, mcp_servers,
-        mcp_servers::McpDefaultAccess,
+        mcp_servers::{McpDefaultAccess, McpTransportType},
         mcp_tools,
+        roles,
     },
     llm::tooling::sanitize_tool_name,
     services::authorization::{AuthorizationService, PermissionScopeMode},
     services::mcp_client::{build_authorization_url, exchange_code},
+    services::mcp_access::{
+        build_access_context, load_server_rules, load_tool_rules,
+        resolve_server_access_with_rules, resolve_tool_access_with_rules,
+    },
     services::mcp_helpers::{
         build_oauth_config,
         encrypt_db_url_in_config,
         resolve_mcp_oauth_token,
         store_oauth_tokens,
-        to_access_rule_dto,
+        build_access_rule_dtos,
         to_execution_dto,
         to_server_dto,
         to_tool_dto,
@@ -333,7 +338,6 @@ pub async fn create_mcp_server(
         status: Set(Some("disconnected".into())),
         status_message: Set(None),
         tool_count: Set(0),
-        access_default: Set(mcp_servers::McpAccessDefault::Deny),
         default_access: Set(req.default_access.unwrap_or(McpDefaultAccess::ExplicitOnly)),
         last_connected_at: Set(None),
         last_synced_at: Set(None),
@@ -856,11 +860,14 @@ pub async fn get_mcp_server_access(
             eprintln!("Db get error {}",e);
             AuthError::DbTimeout
         })?;
+    let rule_dtos = build_access_rule_dtos(&state.database, rules)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
     Ok(Json(McpServerAccessList {
         server_id,
         server_name: server.name,
         default_access: server.default_access,
-        rules: rules.into_iter().map(to_access_rule_dto).collect(),
+        rules: rule_dtos,
     }))
 }
 
@@ -912,6 +919,13 @@ pub async fn update_mcp_server_access(
 
     if let Some(rules) = req.rules {
         for r in rules {
+            let (role_id, _) = resolve_role_reference(
+                &state.database,
+                r.access_type,
+                r.role_id,
+                r.role_name.clone(),
+            )
+            .await?;
             let model = mcp_access_policies::ActiveModel {
                 id: Set(Uuid::new_v4()),
                 target_type: Set(McpAccessTarget::Server),
@@ -919,9 +933,11 @@ pub async fn update_mcp_server_access(
                 tool_id: Set(None),
                 access_type: Set(r.access_type),
                 permission: Set(r.permission),
-                role_name: Set(r.role_name),
+                role_id: Set(role_id),
+                role_name: Set(None),
                 department_id: Set(r.department_id),
                 user_id: Set(r.user_id),
+                inherit_departments: Set(r.inherit_departments.unwrap_or(true)),
                 inherit_from_server: Set(None),
                 created_at: Set(Utc::now()),
                 created_by: Set(None),
@@ -984,12 +1000,15 @@ pub async fn get_mcp_server_tools_access(
                eprintln!("Db get error {}",e);
                AuthError::DbTimeout
         })?;
+        let rule_dtos = build_access_rule_dtos(&state.database, rules)
+            .await
+            .map_err(|_| AuthError::DbTimeout)?;
         result.push(McpToolAccessList {
             tool_id: tool.id,
             tool_name: tool.name.clone(),
             server_id: tool.server_id,
             inherit_from_server: tool.inherit_access_from_server,
-            rules: rules.into_iter().map(to_access_rule_dto).collect(),
+            rules: rule_dtos,
         });
     }
     Ok(Json(result))
@@ -1048,6 +1067,13 @@ pub async fn update_mcp_server_tools_access(
            })?;
             if let Some(rules) = item.rules {
                 for r in rules {
+                    let (role_id, _) = resolve_role_reference(
+                        &state.database,
+                        r.access_type,
+                        r.role_id,
+                        r.role_name.clone(),
+                    )
+                    .await?;
                     let model = mcp_access_policies::ActiveModel {
                         id: Set(Uuid::new_v4()),
                         target_type: Set(McpAccessTarget::Tool),
@@ -1055,9 +1081,11 @@ pub async fn update_mcp_server_tools_access(
                         tool_id: Set(Some(item.tool_id)),
                         access_type: Set(r.access_type),
                         permission: Set(r.permission),
-                        role_name: Set(r.role_name),
+                        role_id: Set(role_id),
+                        role_name: Set(None),
                         department_id: Set(r.department_id),
                         user_id: Set(r.user_id),
+                        inherit_departments: Set(r.inherit_departments.unwrap_or(true)),
                         inherit_from_server: Set(None),
                         created_at: Set(Utc::now()),
                         created_by: Set(None),
@@ -1069,20 +1097,21 @@ pub async fn update_mcp_server_tools_access(
                 }
             }
 
+            let rules = mcp_access_policies::Entity::find()
+                .filter(mcp_access_policies::Column::TargetType.eq(McpAccessTarget::Tool))
+                .filter(mcp_access_policies::Column::ToolId.eq(item.tool_id))
+                .all(&state.database)
+                .await
+                .map_err(|_| AuthError::DbUnavailable)?;
+            let rule_dtos = build_access_rule_dtos(&state.database, rules)
+                .await
+                .map_err(|_| AuthError::DbTimeout)?;
             updated.push(McpToolAccessList {
                 tool_id: tool.id,
                 tool_name: tool.name,
                 server_id: tool.server_id,
                 inherit_from_server: inherit_flag,
-                rules: mcp_access_policies::Entity::find()
-                    .filter(mcp_access_policies::Column::TargetType.eq(McpAccessTarget::Tool))
-                    .filter(mcp_access_policies::Column::ToolId.eq(item.tool_id))
-                    .all(&state.database)
-                    .await
-                    .map_err(|_| AuthError::DbUnavailable)?
-                    .into_iter()
-                    .map(to_access_rule_dto)
-                    .collect(),
+                rules: rule_dtos,
             });
         }
     }
@@ -1132,12 +1161,15 @@ pub async fn get_mcp_tool_access(
               eprintln!("Db get error {}",e);
               AuthError::DbTimeout
            })?;
+    let rule_dtos = build_access_rule_dtos(&state.database, rules)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
     Ok(Json(McpToolAccessList {
         tool_id,
         tool_name: tool.name,
         server_id: tool.server_id,
         inherit_from_server: tool.inherit_access_from_server,
-        rules: rules.into_iter().map(to_access_rule_dto).collect(),
+        rules: rule_dtos,
     }))
 }
 
@@ -1192,6 +1224,13 @@ pub async fn update_mcp_tool_access(
            })?;
     if let Some(rules) = req.rules {
         for r in rules {
+            let (role_id, _) = resolve_role_reference(
+                &state.database,
+                r.access_type,
+                r.role_id,
+                r.role_name.clone(),
+            )
+            .await?;
             let model = mcp_access_policies::ActiveModel {
                 id: Set(Uuid::new_v4()),
                 target_type: Set(McpAccessTarget::Tool),
@@ -1199,9 +1238,11 @@ pub async fn update_mcp_tool_access(
                 tool_id: Set(Some(tool_id)),
                 access_type: Set(r.access_type),
                 permission: Set(r.permission),
-                role_name: Set(r.role_name),
+                role_id: Set(role_id),
+                role_name: Set(None),
                 department_id: Set(r.department_id),
                 user_id: Set(r.user_id),
+                inherit_departments: Set(r.inherit_departments.unwrap_or(true)),
                 inherit_from_server: Set(None),
                 created_at: Set(Utc::now()),
                 created_by: Set(None),
@@ -1497,4 +1538,169 @@ pub async fn disconnect_mcp_connection(
         "success": true,
         "message": "Disconnected"
     })))
+}
+
+#[utoipa::path(
+    get,
+    path = "/mcp/effective-access",
+    tag = "mcp",
+    responses(
+        (status = 200, body = McpEffectiveAccessResponse),
+        (status = 401, content_type = "application/json", body = AuthErrorResponse),
+        (status = 403, content_type = "application/json", body = AuthErrorResponse),
+        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+    )
+)]
+pub async fn get_mcp_effective_access(
+    claims: Claims,
+    State(state): State<SharedState>,
+) -> Result<Json<McpEffectiveAccessResponse>, AuthError> {
+    let access_context = build_access_context(&state.database, claims.user_id)
+        .await
+        .map_err(map_mcp_access_error)?;
+
+    let servers = mcp_servers::Entity::find()
+        .all(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp servers lookup error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    let tools = mcp_tools::Entity::find()
+        .filter(mcp_tools::Column::Enabled.eq(true))
+        .all(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp tools lookup error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    let server_ids: Vec<Uuid> = servers.iter().map(|s| s.id).collect();
+    let tool_ids: Vec<Uuid> = tools.iter().map(|t| t.id).collect();
+    let server_rules = load_server_rules(&state.database, &server_ids)
+        .await
+        .map_err(map_mcp_access_error)?;
+    let tool_rules = load_tool_rules(&state.database, &tool_ids)
+        .await
+        .map_err(map_mcp_access_error)?;
+
+    let mut server_rule_map: HashMap<Uuid, Vec<mcp_access_policies::Model>> = HashMap::new();
+    for rule in server_rules {
+        if let Some(server_id) = rule.server_id {
+            server_rule_map.entry(server_id).or_default().push(rule);
+        }
+    }
+    let mut tool_rule_map: HashMap<Uuid, Vec<mcp_access_policies::Model>> = HashMap::new();
+    for rule in tool_rules {
+        if let Some(tool_id) = rule.tool_id {
+            tool_rule_map.entry(tool_id).or_default().push(rule);
+        }
+    }
+
+    let mut tools_by_server: HashMap<Uuid, Vec<mcp_tools::Model>> = HashMap::new();
+    for tool in tools {
+        tools_by_server.entry(tool.server_id).or_default().push(tool);
+    }
+
+    let mut servers_out = Vec::new();
+    for server in servers {
+        let rules = server_rule_map
+            .get(&server.id)
+            .map(|rules| rules.as_slice())
+            .unwrap_or(&[]);
+        let server_access = resolve_server_access_with_rules(
+            &state.database,
+            &access_context,
+            &server,
+            rules,
+        )
+        .await
+        .map_err(map_mcp_access_error)?;
+
+        let mut tools_out = Vec::new();
+        if let Some(server_tools) = tools_by_server.get(&server.id) {
+            for tool in server_tools {
+                let rules = tool_rule_map
+                    .get(&tool.id)
+                    .map(|rules| rules.as_slice())
+                    .unwrap_or(&[]);
+                let tool_access = resolve_tool_access_with_rules(
+                    &state.database,
+                    &access_context,
+                    tool,
+                    &server_access,
+                    rules,
+                )
+                .await
+                .map_err(map_mcp_access_error)?;
+
+                if tool_access.permission != server_access.permission {
+                    tools_out.push(McpEffectiveToolAccess {
+                        tool_id: tool.id,
+                        tool_name: tool.name.clone(),
+                        permission: tool_access.permission,
+                        resolved_via: tool_access.resolved_via,
+                    });
+                }
+            }
+        }
+
+        servers_out.push(McpEffectiveServerAccess {
+            server_id: server.id,
+            server_name: server.name.clone(),
+            permission: server_access.permission,
+            resolved_via: server_access.resolved_via,
+            tools: tools_out,
+        });
+    }
+
+    Ok(Json(McpEffectiveAccessResponse { servers: servers_out }))
+}
+
+fn map_mcp_access_error(err: AppError) -> AuthError {
+    match err {
+        AppError::DbTimeout => AuthError::DbTimeout,
+        AppError::DbUnavailable => AuthError::DbUnavailable,
+        AppError::ResourceNotFound => AuthError::ResourceNotFound,
+        _ => AuthError::ServiceTemporarilyUnavailable,
+    }
+}
+
+async fn resolve_role_reference(
+    db: &sea_orm::DatabaseConnection,
+    access_type: mcp_access_policies::McpAccessType,
+    role_id: Option<Uuid>,
+    role_name: Option<String>,
+) -> Result<(Option<Uuid>, Option<String>), AuthError> {
+    if access_type != mcp_access_policies::McpAccessType::Role {
+        return Ok((None, None));
+    }
+
+    if let Some(role_id) = role_id {
+        let role = roles::Entity::find_by_id(role_id)
+            .one(db)
+            .await
+            .map_err(|e| {
+                eprintln!("role lookup error: {e}");
+                AuthError::DbTimeout
+            })?
+            .ok_or(AuthError::ResourceNotFound)?;
+        return Ok((Some(role.id), Some(role.name)));
+    }
+
+    if let Some(role_name) = role_name {
+        let role = roles::Entity::find()
+            .filter(roles::Column::Name.eq(role_name))
+            .one(db)
+            .await
+            .map_err(|e| {
+                eprintln!("role lookup error: {e}");
+                AuthError::DbTimeout
+            })?
+            .ok_or(AuthError::ResourceNotFound)?;
+        return Ok((Some(role.id), Some(role.name)));
+    }
+
+    Err(AuthError::ResourceNotFound)
 }

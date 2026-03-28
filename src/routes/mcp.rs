@@ -5,6 +5,7 @@ use crate::{
         authorize_mcp_connection, create_mcp_server, delete_mcp_server, disconnect_mcp_connection,
         get_mcp_server, get_mcp_server_tools_access, get_mcp_tool_access, list_mcp_connections,
         list_mcp_server_executions, list_mcp_servers, list_mcp_tools, list_public_mcp_servers,
+        get_mcp_effective_access,
         mcp_oauth_callback, sync_mcp_server_tools, test_mcp_server, update_mcp_server,
         update_mcp_server_tools_access, update_mcp_tool_access,
     },
@@ -41,6 +42,7 @@ pub fn mcp_routes() -> Router<SharedState> {
             get(get_mcp_tool_access).put(update_mcp_tool_access),
         )
         .route("/mcp-servers", get(list_public_mcp_servers))
+        .route("/mcp/effective-access", get(get_mcp_effective_access))
         .route("/mcp/tools", get(list_mcp_tools))
         .route("/mcp/connections", get(list_mcp_connections))
         .route(

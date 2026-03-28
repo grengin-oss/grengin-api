@@ -9,7 +9,8 @@ use crate::{
     auth::{error::AuthError, permissions::{permission_key, split_permission_key}},
     models::{
         departments,
-        mcp_server_access_rules::{self, McpRuleType, McpSubjectType},
+        mcp_access_policies,
+        mcp_access_policies::{McpAccessTarget, McpAccessType, McpPermission},
         mcp_servers,
         permissions,
         role_permissions,
@@ -27,13 +28,7 @@ pub enum PermissionScopeMode {
     AllowAnyScope,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum McpAccessDecision {
-    Allow,
-    Deny,
-}
+pub type McpAccessDecision = McpPermission;
 
 #[derive(Debug, Clone)]
 pub struct AuthorizationService<'a> {
@@ -226,7 +221,11 @@ impl<'a> AuthorizationService<'a> {
             .ok_or(AuthError::DbNotFound)?;
 
         let permission_rows = self.user_permission_rows(user_id).await?;
+        let role_names = self.user_role_names(user_id).await?;
         let role_ids = self.user_role_ids(user_id).await?;
+        let has_mcp_admin = permission_rows
+            .iter()
+            .any(|row| row.domain == "mcp_servers" && row.action == "admin");
 
         let permissions_map = build_permissions_json(&permission_rows);
 
@@ -235,7 +234,7 @@ impl<'a> AuthorizationService<'a> {
             .await?;
 
         let mcp_access = self
-            .compute_mcp_access(user.id, user.department_id, &role_ids)
+            .compute_mcp_access(user.id, user.department_id, &role_ids, &role_names, has_mcp_admin)
             .await?;
 
         let effective_permissions = audit_payload(EffectivePermissionsPayload {
@@ -347,58 +346,67 @@ impl<'a> AuthorizationService<'a> {
         user_id: Uuid,
         user_department_id: Option<Uuid>,
         role_ids: &HashSet<Uuid>,
+        role_names: &HashSet<String>,
+        is_admin: bool,
         server_id: Uuid,
     ) -> Result<McpAccessDecision, AuthError> {
-        if let Some(rule) = mcp_server_access_rules::Entity::find()
-            .filter(mcp_server_access_rules::Column::ServerId.eq(server_id))
-            .filter(mcp_server_access_rules::Column::SubjectType.eq(McpSubjectType::User))
-            .filter(mcp_server_access_rules::Column::SubjectId.eq(user_id))
-            .one(self.db)
+        let rules = mcp_access_policies::Entity::find()
+            .filter(mcp_access_policies::Column::TargetType.eq(McpAccessTarget::Server))
+            .filter(mcp_access_policies::Column::ServerId.eq(server_id))
+            .all(self.db)
             .await
             .map_err(|e| {
-                eprintln!("mcp user rule error: {e}");
+                eprintln!("mcp access rules lookup error: {e}");
                 AuthError::DbTimeout
-            })?
+            })?;
+
+        if let Some(rule) = rules
+            .iter()
+            .filter(|rule| rule.access_type == McpAccessType::User)
+            .filter(|rule| rule.user_id == Some(user_id))
+            .max_by_key(|rule| rule.created_at)
         {
-            return Ok(match rule.rule_type {
-                McpRuleType::Allow => McpAccessDecision::Allow,
-                McpRuleType::Deny => McpAccessDecision::Deny,
-            });
+            return Ok(rule.permission);
         }
 
         if let Some(dept_id) = user_department_id {
-            if let Some(decision) =
-                self.resolve_mcp_department_rule(server_id, dept_id).await?
+            if let Some(permission) =
+                self.resolve_mcp_department_rule(&rules, dept_id).await?
             {
-                return Ok(decision);
+                return Ok(permission);
             }
         }
 
-        if !role_ids.is_empty() {
-            let role_rules = mcp_server_access_rules::Entity::find()
-                .filter(mcp_server_access_rules::Column::ServerId.eq(server_id))
-                .filter(mcp_server_access_rules::Column::SubjectType.eq(McpSubjectType::Role))
-                .filter(mcp_server_access_rules::Column::SubjectId.is_in(role_ids.iter().copied()))
-                .all(self.db)
-                .await
-                .map_err(|e| {
-                    eprintln!("mcp role rules error: {e}");
-                    AuthError::DbTimeout
-                })?;
-
-            let mut saw_allow = false;
-            let mut saw_deny = false;
-            for rule in role_rules {
-                match rule.rule_type {
-                    McpRuleType::Allow => saw_allow = true,
-                    McpRuleType::Deny => saw_deny = true,
+        if !role_ids.is_empty() || !role_names.is_empty() {
+            let mut saw_denied = false;
+            let mut saw_full = false;
+            let mut saw_read_only = false;
+            for rule in rules.iter().filter(|rule| rule.access_type == McpAccessType::Role) {
+                if let Some(role_id) = rule.role_id {
+                    if !role_ids.contains(&role_id) {
+                        continue;
+                    }
+                } else if let Some(role_name) = rule.role_name.as_ref() {
+                    if !role_names.contains(role_name) {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+                match rule.permission {
+                    McpPermission::Denied => saw_denied = true,
+                    McpPermission::Full => saw_full = true,
+                    McpPermission::ReadOnly => saw_read_only = true,
                 }
             }
-            if saw_deny {
-                return Ok(McpAccessDecision::Deny);
+            if saw_denied {
+                return Ok(McpPermission::Denied);
             }
-            if saw_allow {
-                return Ok(McpAccessDecision::Allow);
+            if saw_full {
+                return Ok(McpPermission::Full);
+            }
+            if saw_read_only {
+                return Ok(McpPermission::ReadOnly);
             }
         }
 
@@ -411,17 +419,20 @@ impl<'a> AuthorizationService<'a> {
             })?
             .ok_or(AuthError::DbNotFound)?;
 
-        Ok(match server.access_default {
-            mcp_servers::McpAccessDefault::Allow => McpAccessDecision::Allow,
-            mcp_servers::McpAccessDefault::Deny => McpAccessDecision::Deny,
+        Ok(match server.default_access {
+            mcp_servers::McpDefaultAccess::AllUsers => McpPermission::Full,
+            mcp_servers::McpDefaultAccess::AdminOnly => {
+                if is_admin { McpPermission::Full } else { McpPermission::Denied }
+            }
+            mcp_servers::McpDefaultAccess::ExplicitOnly => McpPermission::Denied,
         })
     }
 
     async fn resolve_mcp_department_rule(
         &self,
-        server_id: Uuid,
+        rules: &[mcp_access_policies::Model],
         user_department_id: Uuid,
-    ) -> Result<Option<McpAccessDecision>, AuthError> {
+    ) -> Result<Option<McpPermission>, AuthError> {
         #[derive(Debug, FromQueryResult)]
         struct DeptPathRow {
             id: Uuid,
@@ -448,21 +459,20 @@ impl<'a> AuthorizationService<'a> {
             None => return Ok(None),
         };
 
-        let dept_rules = mcp_server_access_rules::Entity::find()
-            .filter(mcp_server_access_rules::Column::ServerId.eq(server_id))
-            .filter(mcp_server_access_rules::Column::SubjectType.eq(McpSubjectType::Department))
-            .all(self.db)
-            .await
-            .map_err(|e| {
-                eprintln!("department rules lookup error: {e}");
-                AuthError::DbTimeout
-            })?;
+        let dept_rules: Vec<&mcp_access_policies::Model> = rules
+            .iter()
+            .filter(|rule| rule.access_type == McpAccessType::Department)
+            .filter(|rule| rule.department_id.is_some())
+            .collect();
 
         if dept_rules.is_empty() {
             return Ok(None);
         }
 
-        let dept_ids: Vec<Uuid> = dept_rules.iter().map(|rule| rule.subject_id).collect();
+        let dept_ids: Vec<Uuid> = dept_rules
+            .iter()
+            .filter_map(|rule| rule.department_id)
+            .collect();
         let dept_paths = departments::Entity::find()
             .select_only()
             .column(departments::Column::Id)
@@ -482,26 +492,20 @@ impl<'a> AuthorizationService<'a> {
             dept_lookup.insert(row.id, (row.path, row.depth));
         }
 
-        let mut best_rule: Option<(McpRuleType, i32)> = None;
+        let mut best_rule: Option<(&mcp_access_policies::Model, i32)> = None;
         for rule in dept_rules {
-            let Some((path, depth)) = dept_lookup.get(&rule.subject_id) else { continue };
-            if is_path_within_scope(path, &user_department.path) {
+            let Some(dept_id) = rule.department_id else { continue };
+            let Some((path, depth)) = dept_lookup.get(&dept_id) else { continue };
+            let is_direct = dept_id == user_department.id;
+            if is_direct || (rule.inherit_departments && is_path_within_scope(path, &user_department.path)) {
                 match best_rule {
                     Some((_, current_depth)) if current_depth >= *depth => {}
-                    _ => best_rule = Some((rule.rule_type, *depth)),
+                    _ => best_rule = Some((rule, *depth)),
                 }
             }
         }
 
-        if let Some((rule_type, _)) = best_rule {
-            let decision = match rule_type {
-                McpRuleType::Allow => McpAccessDecision::Allow,
-                McpRuleType::Deny => McpAccessDecision::Deny,
-            };
-            return Ok(Some(decision));
-        }
-
-        Ok(None)
+        Ok(best_rule.map(|(rule, _)| rule.permission))
     }
 
     async fn compute_mcp_access(
@@ -509,6 +513,8 @@ impl<'a> AuthorizationService<'a> {
         user_id: Uuid,
         user_department_id: Option<Uuid>,
         role_ids: &HashSet<Uuid>,
+        role_names: &HashSet<String>,
+        is_admin: bool,
     ) -> Result<HashMap<String, McpAccessDecision>, AuthError> {
         let servers = mcp_servers::Entity::find()
             .all(self.db)
@@ -521,7 +527,14 @@ impl<'a> AuthorizationService<'a> {
         let mut mcp_access = HashMap::new();
         for server in servers {
             let decision = self
-                .resolve_mcp_access(user_id, user_department_id, role_ids, server.id)
+                .resolve_mcp_access(
+                    user_id,
+                    user_department_id,
+                    role_ids,
+                    role_names,
+                    is_admin,
+                    server.id,
+                )
                 .await?;
             mcp_access.insert(server.id.to_string(), decision);
         }
@@ -576,6 +589,23 @@ impl<'a> AuthorizationService<'a> {
                 AuthError::DbTimeout
             })?;
         Ok(count > 0)
+    }
+
+    async fn user_role_names(&self, user_id: Uuid) -> Result<HashSet<String>, AuthError> {
+        let role_names = user_role_assignments::Entity::find()
+            .select_only()
+            .column_as(roles::Column::Name, "role_name")
+            .join(JoinType::InnerJoin, user_role_assignments::Relation::Roles.def())
+            .filter(user_role_assignments::Column::UserId.eq(user_id))
+            .into_tuple::<String>()
+            .all(self.db)
+            .await
+            .map_err(|e| {
+                eprintln!("role name lookup error: {e}");
+                AuthError::DbTimeout
+            })?;
+
+        Ok(role_names.into_iter().collect())
     }
 
     async fn user_role_ids(&self, user_id: Uuid) -> Result<HashSet<Uuid>, AuthError> {
@@ -755,60 +785,6 @@ struct UserPermissionRow {
 
 pub fn is_path_within_scope(scope_path: &str, target_path: &str) -> bool {
     target_path == scope_path || target_path.starts_with(&format!("{scope_path}."))
-}
-
-fn select_department_rule(
-    user_department_path: &str,
-    dept_rules: &[(String, i32, McpRuleType)],
-) -> Option<McpRuleType> {
-    let mut best: Option<(McpRuleType, i32)> = None;
-    for (path, depth, rule_type) in dept_rules {
-        if is_path_within_scope(path, user_department_path) {
-            match best {
-                Some((_, best_depth)) if best_depth >= *depth => {}
-                _ => best = Some((*rule_type, *depth)),
-            }
-        }
-    }
-    best.map(|(rule_type, _)| rule_type)
-}
-
-fn resolve_mcp_access_from_components(
-    user_rule: Option<McpRuleType>,
-    dept_rule: Option<McpRuleType>,
-    role_rules: &[McpRuleType],
-    default: McpAccessDecision,
-) -> McpAccessDecision {
-    if let Some(rule) = user_rule {
-        return match rule {
-            McpRuleType::Allow => McpAccessDecision::Allow,
-            McpRuleType::Deny => McpAccessDecision::Deny,
-        };
-    }
-
-    if let Some(rule) = dept_rule {
-        return match rule {
-            McpRuleType::Allow => McpAccessDecision::Allow,
-            McpRuleType::Deny => McpAccessDecision::Deny,
-        };
-    }
-
-    let mut saw_allow = false;
-    let mut saw_deny = false;
-    for rule in role_rules {
-        match rule {
-            McpRuleType::Allow => saw_allow = true,
-            McpRuleType::Deny => saw_deny = true,
-        }
-    }
-    if saw_deny {
-        return McpAccessDecision::Deny;
-    }
-    if saw_allow {
-        return McpAccessDecision::Allow;
-    }
-
-    default
 }
 
 // #[cfg(test)]

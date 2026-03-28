@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{
     config::setting::AnthropicSettings, dto::llm::anthropic::{
         AnthropicChatRequest, AnthropicChatResponse, AnthropicContentBlockResponse, AnthropicListModelsResponse, AnthropicMessage, AnthropicRole, AnthropicToolUnion
-    }, handlers::file::get_file_binary, llm::{prompt::{Prompt, PromptTitleResponse}, provider::{AnthropicApis, AnthropicHeaders}}
+    }, handlers::file::get_file_binary, llm::{prompt::{Prompt, PromptTitleResponse, PromptTextResponse}, provider::{AnthropicApis, AnthropicHeaders}}
 };
 
 pub const ANTHROPIC_API_URL: &str = "https://api.anthropic.com";
@@ -163,6 +163,52 @@ impl AnthropicApis for ReqwestClient {
             .usage
             .output_tokens;
         Ok(PromptTitleResponse { title, input_tokens, output_tokens })
+    }
+
+    async fn anthropic_generate_text(
+        &self,
+        anthropic_settings: &AnthropicSettings,
+        model_name: String,
+        max_tokens: i32,
+        messages: Vec<AnthropicMessage>,
+        system: Option<String>,
+        temperature: Option<f32>,
+    ) -> Result<PromptTextResponse, Error> {
+        let body = AnthropicChatRequest {
+            model: model_name,
+            max_tokens,
+            messages,
+            stream: false,
+            temperature,
+            system,
+            tools: None,
+            stop_sequences: None,
+        };
+
+        let response: AnthropicChatResponse = self
+            .post(format!("{ANTHROPIC_API_URL}/v1/messages"))
+            .add_anthropic_headers(anthropic_settings)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        let text = response
+            .content
+            .first()
+            .and_then(|block| match block {
+                AnthropicContentBlockResponse::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .ok_or(anyhow!("anthropic response content is empty"))?;
+
+        Ok(PromptTextResponse {
+            text,
+            input_tokens: response.usage.input_tokens,
+            output_tokens: response.usage.output_tokens,
+        })
     }
 
     async fn anthropic_get_models(

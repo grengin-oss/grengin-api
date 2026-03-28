@@ -1,5 +1,6 @@
 use chrono::Utc;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect, Set};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
@@ -7,11 +8,14 @@ use crate::{
     dto::mcp::{McpAccessRule, McpServer, McpTool, McpToolExecution},
     error::AppError,
     models::{
+        departments,
         mcp_access_policies,
         mcp_connections,
         mcp_executions,
         mcp_servers,
         mcp_tools,
+        roles,
+        users,
     },
     services::mcp_client::{refresh_token, McpOAuthConfig, McpOAuthTokens, oauth_config_from_connection},
     state::SharedState,
@@ -103,14 +107,109 @@ pub fn to_execution_dto(model: mcp_executions::Model) -> McpToolExecution {
 }
 
 pub fn to_access_rule_dto(model: mcp_access_policies::Model) -> McpAccessRule {
+    let priority = match model.access_type {
+        mcp_access_policies::McpAccessType::User => 300,
+        mcp_access_policies::McpAccessType::Department => 200,
+        mcp_access_policies::McpAccessType::Role => 100,
+    };
     McpAccessRule {
         id: Some(model.id),
         access_type: model.access_type,
+        role_id: model.role_id,
         role_name: model.role_name,
         department_id: model.department_id,
+        department_name: None,
         user_id: model.user_id,
+        user_email: None,
         permission: model.permission,
+        inherit_departments: model.inherit_departments,
+        priority,
     }
+}
+
+pub async fn build_access_rule_dtos(
+    db: &DatabaseConnection,
+    rules: Vec<mcp_access_policies::Model>,
+) -> Result<Vec<McpAccessRule>, AppError> {
+    let user_ids: Vec<Uuid> = rules.iter().filter_map(|rule| rule.user_id).collect();
+    let department_ids: Vec<Uuid> = rules
+        .iter()
+        .filter_map(|rule| rule.department_id)
+        .collect();
+    let role_ids: Vec<Uuid> = rules.iter().filter_map(|rule| rule.role_id).collect();
+
+    let mut user_email_map: HashMap<Uuid, String> = HashMap::new();
+    if !user_ids.is_empty() {
+        let rows = users::Entity::find()
+            .select_only()
+            .column(users::Column::Id)
+            .column(users::Column::Email)
+            .filter(users::Column::Id.is_in(user_ids))
+            .into_tuple::<(Uuid, String)>()
+            .all(db)
+            .await
+            .map_err(|e| {
+                eprintln!("user lookup error: {e}");
+                AppError::DbTimeout
+            })?;
+        for (id, email) in rows {
+            user_email_map.insert(id, email);
+        }
+    }
+
+    let mut department_name_map: HashMap<Uuid, String> = HashMap::new();
+    if !department_ids.is_empty() {
+        let rows = departments::Entity::find()
+            .select_only()
+            .column(departments::Column::Id)
+            .column(departments::Column::Name)
+            .filter(departments::Column::Id.is_in(department_ids))
+            .into_tuple::<(Uuid, String)>()
+            .all(db)
+            .await
+            .map_err(|e| {
+                eprintln!("department lookup error: {e}");
+                AppError::DbTimeout
+            })?;
+        for (id, name) in rows {
+            department_name_map.insert(id, name);
+        }
+    }
+
+    let mut role_name_map: HashMap<Uuid, String> = HashMap::new();
+    if !role_ids.is_empty() {
+        let rows = roles::Entity::find()
+            .select_only()
+            .column(roles::Column::Id)
+            .column(roles::Column::Name)
+            .filter(roles::Column::Id.is_in(role_ids))
+            .into_tuple::<(Uuid, String)>()
+            .all(db)
+            .await
+            .map_err(|e| {
+                eprintln!("role lookup error: {e}");
+                AppError::DbTimeout
+            })?;
+        for (id, name) in rows {
+            role_name_map.insert(id, name);
+        }
+    }
+
+    let dtos = rules
+        .into_iter()
+        .map(|rule| {
+            let user_id = rule.user_id;
+            let department_id = rule.department_id;
+            let role_id = rule.role_id;
+            let mut dto = to_access_rule_dto(rule);
+            dto.user_email = user_id.and_then(|id| user_email_map.get(&id).cloned());
+            dto.department_name = department_id.and_then(|id| department_name_map.get(&id).cloned());
+            dto.role_name = role_id.and_then(|id| role_name_map.get(&id).cloned()).or(dto.role_name);
+            dto
+        })
+        .collect();
+
+    Ok(dtos)
 }
 
 pub async fn upsert_connection(

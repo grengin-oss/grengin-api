@@ -7,6 +7,7 @@ pub mod admin_user;
 pub mod branding;
 pub mod admin_sso_providers;
 pub mod admin_ai;
+pub mod admin_embedding;
 pub mod models;
 pub mod files;
 pub mod llm;

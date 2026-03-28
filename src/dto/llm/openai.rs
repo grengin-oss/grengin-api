@@ -51,6 +51,33 @@ pub struct OpenaiChatCompletionRequest {
     pub temperature: Option<f32>,
 }
 
+// Embeddings API request (/v1/embeddings)
+#[derive(Serialize, Deserialize)]
+pub struct OpenaiEmbeddingRequest {
+    pub model: String,
+    pub input: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenaiEmbeddingResponse {
+    pub data: Vec<OpenaiEmbeddingData>,
+    pub model: String,
+    #[serde(default)]
+    pub usage: Option<OpenaiEmbeddingUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenaiEmbeddingData {
+    pub embedding: Vec<f32>,
+    pub index: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenaiEmbeddingUsage {
+    pub prompt_tokens: i32,
+    pub total_tokens: i32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenaiChatStreamOptions {
     #[serde(default)]

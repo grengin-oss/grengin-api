@@ -210,19 +210,27 @@ pub struct PaginatedMcpToolExecutions {
 pub struct McpAccessRule {
     pub id: Option<Uuid>,
     pub access_type: McpAccessType,
+    pub role_id: Option<Uuid>,
     pub role_name: Option<String>,
     pub department_id: Option<Uuid>,
+    pub department_name: Option<String>,
     pub user_id: Option<Uuid>,
+    pub user_email: Option<String>,
     pub permission: McpPermission,
+    pub inherit_departments: bool,
+    /// Computed priority for display (read-only).
+    pub priority: i32,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct McpAccessRuleInput {
     pub access_type: McpAccessType,
+    pub role_id: Option<Uuid>,
     pub role_name: Option<String>,
     pub department_id: Option<Uuid>,
     pub user_id: Option<Uuid>,
     pub permission: McpPermission,
+    pub inherit_departments: Option<bool>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -264,6 +272,40 @@ pub struct ToolAccessUpdateItem {
     pub tool_id: Uuid,
     pub inherit_from_server: Option<bool>,
     pub rules: Option<Vec<McpAccessRuleInput>>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpResolvedVia {
+    UserRule,
+    DepartmentRule,
+    DepartmentInherited,
+    RoleRule,
+    ServerDefault,
+    ToolDefault,
+    InheritedFromServer,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct McpEffectiveToolAccess {
+    pub tool_id: Uuid,
+    pub tool_name: String,
+    pub permission: McpPermission,
+    pub resolved_via: McpResolvedVia,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct McpEffectiveServerAccess {
+    pub server_id: Uuid,
+    pub server_name: String,
+    pub permission: McpPermission,
+    pub resolved_via: McpResolvedVia,
+    pub tools: Vec<McpEffectiveToolAccess>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct McpEffectiveAccessResponse {
+    pub servers: Vec<McpEffectiveServerAccess>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

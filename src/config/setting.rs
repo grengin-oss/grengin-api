@@ -4,7 +4,7 @@ use sea_orm::{DatabaseConnection, EntityTrait, QueryOrder};
 use thiserror::Error;
 use tokio::sync::RwLock;
 use std::collections::HashMap;
-use crate::{auth::{encryption::{decrypt_key, key_from_b64}, jwt::{KEYS, Keys}}, models::{ai_engines, sso_providers}};
+use crate::{auth::{encryption::{decrypt_key, key_from_b64}, jwt::{KEYS, Keys}}, models::{ai_engines, embedding_configs, sso_providers}};
 
 pub type OidcClient = CoreClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointMaybeSet, EndpointMaybeSet>;
 
@@ -16,6 +16,8 @@ pub struct Settings {
     pub openai:RwLock<Option<OpenaiSettings>>,
     pub anthropic:RwLock<Option<AnthropicSettings>>,
     pub ai_engines_cache:RwLock<HashMap<String, AiEngineStateCache>>,
+    pub embedding:RwLock<Option<EmbeddingSettings>>,
+    pub rag:RagSettings,
 }
 
 pub struct ServerSettings {
@@ -65,6 +67,24 @@ pub struct AnthropicSettings {
     pub is_enabled:bool,
 }
 
+#[derive(Clone)]
+pub struct EmbeddingSettings {
+    pub provider: String,
+    pub model: String,
+    pub dimensions: Option<i32>,
+    pub is_enabled: bool,
+}
+
+#[derive(Clone)]
+pub struct RagSettings {
+    pub enabled: bool,
+    pub recent_message_pairs: usize,
+    pub retrieval_top_k: usize,
+    pub max_context_tokens: usize,
+    pub summary_model_openai: Option<String>,
+    pub summary_model_anthropic: Option<String>,
+}
+
 #[derive(Clone, Default)]
 pub struct AiEngineStateCache {
     pub api_key: Option<String>,
@@ -93,6 +113,25 @@ impl Settings {
             .await?;
         }
      Ok(())
+    }
+
+    pub async fn load_embedding_config_from_db(
+        &mut self,
+        database: &DatabaseConnection,
+    ) -> Result<(), ConfigError> {
+        let config = embedding_configs::Entity::find()
+            .order_by_desc(embedding_configs::Column::UpdatedAt)
+            .one(database)
+            .await
+            .map_err(|e| ConfigError::DbError(e.to_string()))?;
+        let embedding_config = config.map(|config| EmbeddingSettings {
+            provider: config.provider,
+            model: config.model,
+            dimensions: config.dimensions,
+            is_enabled: config.is_enabled,
+        });
+        *self.embedding.write().await = embedding_config;
+        Ok(())
     }
 
     pub async fn get_ai_engine_api_key<S: Into<String>>(&self,provider:S) -> Option<String> {
@@ -186,6 +225,14 @@ impl Settings {
         cache.get(&key).map(|entry| entry.whitelist_models.clone())
     }
 
+    pub async fn set_embedding_config_in_state(&self, config: EmbeddingSettings) {
+        *self.embedding.write().await = Some(config);
+    }
+
+    pub async fn get_embedding_config(&self) -> Option<EmbeddingSettings> {
+        self.embedding.read().await.clone()
+    }
+
     pub async fn load_sso_providers_from_db(&mut self,database:&DatabaseConnection) -> Result<(), ConfigError> {
       let sso_providers = sso_providers::Entity::find()
          .order_by_desc(sso_providers::Column::CreatedAt)
@@ -256,6 +303,8 @@ impl Settings {
             openai:RwLock::new(OpenaiSettings::from_env().ok()),
             anthropic:RwLock::new(AnthropicSettings::from_env().ok()),
             ai_engines_cache:RwLock::new(HashMap::new()),
+            embedding:RwLock::new(None),
+            rag:RagSettings::from_env(),
         })
     }
 }
@@ -320,6 +369,37 @@ impl AnthropicSettings {
     pub fn from_env() -> Result<Self, ConfigError> {
         let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| ConfigError::Missing("ANTHROPIC_API_KEY"))?;
         Ok(Self { api_key,is_enabled:true })
+    }
+}
+
+impl RagSettings {
+    pub fn from_env() -> Self {
+        let enabled = std::env::var("RAG_ENABLED")
+            .ok()
+            .and_then(|val| val.parse::<bool>().ok())
+            .unwrap_or(true);
+        let recent_message_pairs = std::env::var("RAG_RECENT_MESSAGE_PAIRS")
+            .ok()
+            .and_then(|val| val.parse::<usize>().ok())
+            .unwrap_or(3);
+        let retrieval_top_k = std::env::var("RAG_RETRIEVAL_TOP_K")
+            .ok()
+            .and_then(|val| val.parse::<usize>().ok())
+            .unwrap_or(4);
+        let max_context_tokens = std::env::var("RAG_MAX_CONTEXT_TOKENS")
+            .ok()
+            .and_then(|val| val.parse::<usize>().ok())
+            .unwrap_or(8000);
+        let summary_model_openai = std::env::var("RAG_SUMMARY_MODEL_OPENAI").ok();
+        let summary_model_anthropic = std::env::var("RAG_SUMMARY_MODEL_ANTHROPIC").ok();
+        Self {
+            enabled,
+            recent_message_pairs,
+            retrieval_top_k,
+            max_context_tokens,
+            summary_model_openai,
+            summary_model_anthropic,
+        }
     }
 }
 

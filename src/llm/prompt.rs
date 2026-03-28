@@ -13,3 +13,10 @@ pub struct PromptTitleResponse {
    pub input_tokens:i32,
    pub output_tokens:i32,
 }
+
+#[derive(Debug)]
+pub struct PromptTextResponse {
+   pub text:String,
+   pub input_tokens:i32,
+   pub output_tokens:i32,
+}

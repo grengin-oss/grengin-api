@@ -40,6 +40,10 @@ impl AppState {
            .load_sso_providers_from_db(&database)
            .await
            .map_err(|e|eprintln!("Loading sso providers from db error: {e}"));
+        let _ = settings
+           .load_embedding_config_from_db(&database)
+           .await
+           .map_err(|e|eprintln!("Loading embedding config from db error: {e}"));
          let (notification_hub, _) = broadcast::channel(256);
          let state =  Self { 
             database,

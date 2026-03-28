@@ -35,6 +35,13 @@ mod m20260302_000001_create_mcp_oauth_states;
 mod m20260316_000001_create_notifications;
 mod m20260323_000001_add_mcp_connections_unique;
 mod m20260324_000001_add_mcp_servers_icon;
+mod m20260326_000001_create_embedding_configs;
+mod m20260326_000002_add_conversation_summaries_and_embeddings;
+mod m20260326_000003_fix_embedding_configs_columns;
+mod m20260326_000004_fix_rag_column_names;
+mod m20260327_000001_mcp_access_refactor;
+mod m20260327_000002_drop_legacy_mcp_access;
+mod m20260327_000003_add_mcp_access_role_id;
 
 pub struct Migrator;
 
@@ -77,6 +84,13 @@ impl MigratorTrait for Migrator {
           Box::new(m20260316_000001_create_notifications::Migration),
           Box::new(m20260323_000001_add_mcp_connections_unique::Migration),
           Box::new(m20260324_000001_add_mcp_servers_icon::Migration),
+          Box::new(m20260326_000001_create_embedding_configs::Migration),
+          Box::new(m20260326_000002_add_conversation_summaries_and_embeddings::Migration),
+          Box::new(m20260326_000003_fix_embedding_configs_columns::Migration),
+          Box::new(m20260326_000004_fix_rag_column_names::Migration),
+          Box::new(m20260327_000001_mcp_access_refactor::Migration),
+          Box::new(m20260327_000002_drop_legacy_mcp_access::Migration),
+          Box::new(m20260327_000003_add_mcp_access_role_id::Migration),
          ]
     }
 }

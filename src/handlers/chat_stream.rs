@@ -53,12 +53,21 @@ use crate::{
         openai::OpenaiStreamParser,
     },
     llm::{prompt::Prompt, provider::{AnthropicApis, OpenaiApis, get_title_generation_model}, tooling::mcp_server_short_id},
-    models::{conversations, departments::ActionOnExceed, messages::{self, ChatRole}, users, mcp_executions, mcp_servers::McpTransportType},
+    models::{conversations, departments::ActionOnExceed, messages::{self, ChatRole}, users, mcp_executions, mcp_servers::McpTransportType, mcp_access_policies::McpPermission},
     services::{
         budget_allocation::{get_department_budget_status, refresh_department_budget_available},
         mcp_helpers::resolve_mcp_oauth_token,
         mcp_tools::{load_openai_mcp_tools, McpServerSummary},
         notifications::emit_budget_alerts,
+        rag::{
+            assemble_prompts_with_budget,
+            build_retrieval_prompt,
+            embed_messages,
+            load_recent_prompts,
+            load_summary,
+            update_conversation_summary,
+            EmbeddingTarget,
+        },
     },
     state::SharedState,
     utils::chat_stream::{
@@ -387,19 +396,23 @@ pub async fn handle_chat_stream(
     "webSearch":req.web_search,
     "selectedTools":selected_tools.clone()
  });
- let (conversation_id,mut previous_prompts,title) = if let Some(Path(conversation_id)) = chat_id {
-    let (conversation, previous_messages) = conversations::Entity::find_by_id(conversation_id.clone())
+ let retrieval_query = req
+    .messages
+    .last()
+    .map(|message| message.content.clone())
+    .unwrap_or_default();
+ let mut summary_prompt: Option<Prompt> = None;
+ let mut retrieval_prompt: Option<Prompt> = None;
+ let mut recent_prompts: Vec<Prompt> = Vec::new();
+ let mut recent_boundary: Option<chrono::DateTime<Utc>> = None;
+ let (conversation_id,title) = if let Some(Path(conversation_id)) = chat_id {
+    let conversation = conversations::Entity::find_by_id(conversation_id.clone())
        .filter(conversations::Column::ArchivedAt.is_null())
-       .find_with_related(messages::Entity)
-       .order_by_asc(messages::Column::CreatedAt)
-       .filter(messages::Column::Deleted.eq(false))
-       .all(&app_state.database)
+       .one(&app_state.database)
        .await
        .map_err(|e| {
-          eprintln!("DB get one with many error {:?}", e);
+          eprintln!("DB get one error {:?}", e);
           AppError::DbTimeout})?
-       .into_iter()
-       .next()
        .ok_or(AppError::DbNotFound)?;
     let mut conversation_active = conversation
       .clone()
@@ -423,20 +436,60 @@ pub async fn handle_chat_stream(
           eprintln!("Db update one error {:?}", e);
           AppError::DbTimeout
        })?;
-    println!("Chat updated timestamp updated");
-   let previous_prompts = previous_messages
-     .into_iter()
-     .map(|message| Prompt {
-        text: message.message_content,
-        role: message.role,
-        files: message
-            .metadata
-            .and_then(|json| json.get("files").cloned())
-            .and_then(|files_val| serde_json::from_value::<Vec<File>>(files_val).ok())
-            .unwrap_or_default(), // Vec::new()
-    })
-    .collect::<Vec<Prompt>>();
-  (conversation_id,previous_prompts,None)
+   println!("Chat updated timestamp updated");
+   if app_state.settings.rag.enabled {
+        let recent = load_recent_prompts(
+            &app_state.database,
+            conversation_id,
+            app_state.settings.rag.recent_message_pairs,
+        )
+        .await?;
+        recent_boundary = recent.boundary;
+        recent_prompts = recent.prompts;
+        if let Some(summary) = load_summary(&app_state.database, conversation_id).await? {
+            if !summary.summary.trim().is_empty() {
+                summary_prompt = Some(Prompt {
+                    role: ChatRole::System,
+                    text: format!("Conversation summary:\n{}", summary.summary),
+                    files: Vec::new(),
+                });
+            }
+        }
+        if let Some(retrieval_text) =
+            build_retrieval_prompt(&app_state, conversation_id, &retrieval_query, recent_boundary)
+                .await?
+        {
+            retrieval_prompt = Some(Prompt {
+                role: ChatRole::System,
+                text: retrieval_text,
+                files: Vec::new(),
+            });
+        }
+   } else {
+        let previous_messages = messages::Entity::find()
+            .filter(messages::Column::ConversationId.eq(conversation_id))
+            .filter(messages::Column::Deleted.eq(false))
+            .order_by_asc(messages::Column::CreatedAt)
+            .all(&app_state.database)
+            .await
+            .map_err(|e| {
+                eprintln!("DB get messages error {:?}", e);
+                AppError::DbTimeout
+            })?;
+        recent_prompts = previous_messages
+            .into_iter()
+            .map(|message| Prompt {
+                text: message.message_content,
+                role: message.role,
+                files: message
+                    .metadata
+                    .and_then(|json| json.get("files").cloned())
+                    .and_then(|files_val| serde_json::from_value::<Vec<File>>(files_val).ok())
+                    .unwrap_or_default(),
+            })
+            .collect::<Vec<Prompt>>();
+   }
+  (conversation_id,None)
  }else{
   let first_prompt = req.messages
     .first()
@@ -486,11 +539,13 @@ pub async fn handle_chat_stream(
     .map_err(|e| {
        eprintln!("Db insert one error {:?}", e);
        AppError::DbTimeout})?;
-    (new_conversation_id,Vec::new(),Some(prompt_title_response.title))
+    (new_conversation_id,Some(prompt_title_response.title))
  };
  let mut previous_message_id = None;
+ let mut embedding_targets: Vec<EmbeddingTarget> = Vec::new();
  for message in &req.messages {
    let new_message_id = Uuid::new_v4();
+   let created_at = Utc::now();
    metadata["files"] = message.files
      .iter()
      .map(|f| serde_json::to_value(f).unwrap()).collect::<Vec<serde_json::Value>>().into();
@@ -508,8 +563,8 @@ pub async fn handle_chat_stream(
      response_tokens:Set(0),
      tools_calls:Set(Vec::new()),
      tools_results:Set(Vec::new()),
-     created_at:Set(Utc::now()),
-     updated_at:Set(Utc::now()),
+     created_at:Set(created_at),
+     updated_at:Set(created_at),
      total_tokens:Set(0),
      latency:Set(start.elapsed().as_millis() as i32),
      cost:Set(Decimal::from(0)),
@@ -523,6 +578,15 @@ pub async fn handle_chat_stream(
    .map_err(|e| {
         eprintln!("Db one insert error {:?}", e);
         AppError::DbTimeout})?;
+   if matches!(message.role, ChatRole::User | ChatRole::Assistant) {
+        embedding_targets.push(EmbeddingTarget {
+            message_id: new_message_id,
+            conversation_id,
+            role: message.role,
+            content: message.content.clone(),
+            created_at,
+        });
+   }
  }
  
  let current_prompts:Vec<Prompt> = req.messages
@@ -531,12 +595,24 @@ pub async fn handle_chat_stream(
       Prompt { text:message.content, role:message.role, files:message.files
     })
    .collect();
- previous_prompts.extend(current_prompts);
+ let mut previous_prompts = if app_state.settings.rag.enabled {
+    assemble_prompts_with_budget(
+        summary_prompt,
+        retrieval_prompt,
+        recent_prompts,
+        current_prompts.clone(),
+        app_state.settings.rag.max_context_tokens,
+    )
+ } else {
+    let mut prompts = recent_prompts;
+    prompts.extend(current_prompts.clone());
+    prompts
+ };
  let provider_is_openai = provider.to_lowercase() == "openai";
  let provider_is_anthropic = provider.to_lowercase() == "anthropic";
  let supports_mcp_tools = provider_is_openai || provider_is_anthropic;
  let (mcp_openai_tools, mcp_tool_lookup, mcp_server_summaries) = if supports_mcp_tools {
-     load_openai_mcp_tools(&app_state, &selected_mcp_servers, &selected_tools).await?
+     load_openai_mcp_tools(&app_state, claims.user_id, &selected_mcp_servers, &selected_tools).await?
  } else {
      (Vec::new(), HashMap::new(), Vec::new())
  };
@@ -683,6 +759,7 @@ pub async fn handle_chat_stream(
         yield Event::default().event(ChatStreamEvents::DepartmentBudgetWarning.to_string()).data(data);
      }
      let new_message_id = Uuid::new_v4();
+     let assistant_created_at = Utc::now();
      let mut new_llm_message = messages::ActiveModel {
         id: Set(new_message_id.clone()),
         conversation_id: Set(conversation_id.clone()),
@@ -697,8 +774,8 @@ pub async fn handle_chat_stream(
         response_tokens: Set(response_tokens),
         tools_calls: Set(Vec::new()),
         tools_results: Set(Vec::new()),
-        created_at: Set(Utc::now()),
-        updated_at: Set(Utc::now()),
+        created_at: Set(assistant_created_at),
+        updated_at: Set(assistant_created_at),
         total_tokens: Set(total_tokens),
         latency: Set(latency),
         cost: Set(Decimal::from(0)),
@@ -1211,8 +1288,17 @@ pub async fn handle_chat_stream(
                                 other => json!({ "value": other }),
                             };
 
+                            let access_error = match tool_ref.permission {
+                                McpPermission::Denied => Some("mcp access denied".to_string()),
+                                McpPermission::ReadOnly if !tool_ref.is_read_only => {
+                                    Some("mcp access read_only: tool is not read-only".to_string())
+                                }
+                                _ => None,
+                            };
                             let exec_start = Instant::now();
-                            let call_result = {
+                            let call_result = if let Some(error) = access_error {
+                                Err(error)
+                            } else {
                                 let (client, requires_oauth) = {
                                     let clients = app_state.mcp_clients.read().await;
                                     match clients.get(&tool_ref.server_id) {
@@ -1541,6 +1627,25 @@ pub async fn handle_chat_stream(
                         eprintln!("emit budget alert error: {:?}", e);
                     }
                 }
+            }
+            if !message_content.trim().is_empty() {
+                embedding_targets.push(EmbeddingTarget {
+                    message_id: new_message_id,
+                    conversation_id,
+                    role: ChatRole::Assistant,
+                    content: message_content.clone(),
+                    created_at: assistant_created_at,
+                });
+            }
+            if app_state.settings.rag.enabled {
+                let targets = std::mem::take(&mut embedding_targets);
+                let state = app_state.clone();
+                let provider_clone = provider.clone();
+                let model_clone = model_name.clone();
+                tokio::spawn(async move {
+                    let _ = embed_messages(&state, targets).await;
+                    let _ = update_conversation_summary(&state, conversation_id, &provider_clone, &model_clone).await;
+                });
             }
             yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
             break;
