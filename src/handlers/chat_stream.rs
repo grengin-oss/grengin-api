@@ -3,10 +3,11 @@ use std::{
     convert::Infallible,
 };
 use axum::{Json, extract::{Path, State}, response::{Sse, sse::{Event, KeepAlive}}};
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use futures_util::StreamExt;
 use num_traits::ToPrimitive;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, prelude::Decimal};
+use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -53,11 +54,22 @@ use crate::{
         openai::OpenaiStreamParser,
     },
     llm::{prompt::Prompt, provider::{AnthropicApis, OpenaiApis, get_title_generation_model}, tooling::mcp_server_short_id},
-    models::{conversations, departments::ActionOnExceed, messages::{self, ChatRole}, users, mcp_executions, mcp_servers::McpTransportType, mcp_access_policies::McpPermission},
+    models::{
+        conversations,
+        departments::ActionOnExceed,
+        messages::{self, ChatRole},
+        users,
+        mcp_executions,
+        mcp_oauth_states,
+        mcp_servers,
+        mcp_servers::McpTransportType,
+        mcp_access_policies::McpPermission,
+    },
     services::{
         budget_allocation::{get_department_budget_status, refresh_department_budget_available},
-        mcp_helpers::resolve_mcp_oauth_token,
-        mcp_tools::{load_openai_mcp_tools, McpServerSummary},
+        mcp_helpers::{build_oauth_config, resolve_mcp_oauth_token},
+        mcp_client::build_authorization_url,
+        mcp_tools::{load_auto_mcp_server_ids, load_openai_mcp_tools, McpServerSummary},
         notifications::emit_budget_alerts,
         rag::{
             assemble_prompts_with_budget,
@@ -83,6 +95,31 @@ use reqwest_eventsource::Event as ReqwestEvent;
 enum LlmProviderConfig {
     OpenAI(OpenaiSettings),
     Anthropic(AnthropicSettings),
+}
+
+#[derive(Clone)]
+struct McpOauthPrompt {
+    authorization_url: String,
+    server_name: String,
+}
+
+#[derive(Serialize)]
+struct McpOauthRequiredEvent {
+    text: String,
+    server_id: Uuid,
+    server_name: String,
+    authorization_url: String,
+    tool_name: String,
+    tool_call_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct McpOauthErrorPayload {
+    error: String,
+    is_error: bool,
+    authorization_url: String,
+    server_id: Uuid,
+    server_name: String,
 }
 
 fn calculate_cost_decimal(
@@ -126,6 +163,57 @@ fn build_mcp_server_context(servers: &[McpServerSummary]) -> Option<String> {
         "Tools starting with mcp__<short>__ map to the corresponding server above.".to_string(),
     );
     Some(lines.join("\n"))
+}
+
+async fn build_mcp_oauth_prompt(
+    state: &SharedState,
+    server_id: Uuid,
+    user_id: Uuid,
+) -> Result<McpOauthPrompt, AppError> {
+    let server = mcp_servers::Entity::find_by_id(server_id)
+        .one(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp server lookup error: {e}");
+            AppError::DbTimeout
+        })?
+        .ok_or(AppError::McpServerNotFound)?;
+
+    if !server.enabled {
+        return Err(AppError::McpServerNotFound);
+    }
+
+    if !matches!(server.transport_type, McpTransportType::Http | McpTransportType::Sse) {
+        return Err(AppError::ServiceTemporarilyUnavailable);
+    }
+
+    let oauth_config = build_oauth_config(state, &server)?;
+    let authorization = build_authorization_url(&oauth_config).map_err(|e| {
+        eprintln!("mcp oauth authorize url error: {e}");
+        AppError::ServiceTemporarilyUnavailable
+    })?;
+
+    let now = Utc::now();
+    let expires_at = now + Duration::minutes(10);
+    let model = mcp_oauth_states::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        server_id: Set(server_id),
+        user_id: Set(user_id),
+        state: Set(authorization.state.clone()),
+        pkce_verifier: Set(authorization.pkce_verifier.clone()),
+        redirect_uri: Set(None),
+        expires_at: Set(Some(expires_at)),
+        created_at: Set(now),
+    };
+    model.insert(&state.database).await.map_err(|e| {
+        eprintln!("mcp oauth state insert error: {e}");
+        AppError::DbTimeout
+    })?;
+
+    Ok(McpOauthPrompt {
+        authorization_url: authorization.authorization_url,
+        server_name: server.name,
+    })
 }
 
 #[utoipa::path(
@@ -305,7 +393,7 @@ pub async fn handle_chat_stream(
  let start = Instant::now();
  let provider = req.provider.clone().unwrap_or_else(|| "openai".to_string());
  let selected_tools = req.selected_tools.clone().unwrap_or_default();
- let selected_mcp_servers = req.selected_mcp_servers.clone().unwrap_or_default();
+ let mut selected_mcp_servers = req.selected_mcp_servers.clone().unwrap_or_default();
  let web_search = req.web_search;
  let openai_settings = app_state
     .settings
@@ -611,6 +699,9 @@ pub async fn handle_chat_stream(
  let provider_is_openai = provider.to_lowercase() == "openai";
  let provider_is_anthropic = provider.to_lowercase() == "anthropic";
  let supports_mcp_tools = provider_is_openai || provider_is_anthropic;
+ if supports_mcp_tools && selected_mcp_servers.is_empty() {
+     selected_mcp_servers = load_auto_mcp_server_ids(&app_state).await?;
+ }
  let (mcp_openai_tools, mcp_tool_lookup, mcp_server_summaries) = if supports_mcp_tools {
      load_openai_mcp_tools(&app_state, claims.user_id, &selected_mcp_servers, &selected_tools).await?
  } else {
@@ -724,6 +815,8 @@ pub async fn handle_chat_stream(
     let mut tool_input_buffers: HashMap<String, String> = HashMap::new();
     let mut tool_inputs: HashMap<String, Value> = HashMap::new();
     let mut web_search_state: HashMap<String, StreamWebSearchState> = HashMap::new();
+    let mut oauth_prompt_urls: HashMap<Uuid, McpOauthPrompt> = HashMap::new();
+    let mut oauth_required_seen = false;
     let mut last_web_search_call_id: Option<String> = None;
     let mcp_tooling_enabled = supports_mcp_tools && !mcp_tool_lookup.is_empty();
     let openai_tooling_enabled = provider_is_openai && mcp_tooling_enabled;
@@ -1295,6 +1388,8 @@ pub async fn handle_chat_stream(
                                 }
                                 _ => None,
                             };
+                            let mut oauth_prompt: Option<McpOauthPrompt> = None;
+                            let mut oauth_prompt_event: Option<McpOauthPrompt> = None;
                             let exec_start = Instant::now();
                             let call_result = if let Some(error) = access_error {
                                 Err(error)
@@ -1329,7 +1424,53 @@ pub async fn handle_chat_stream(
                                 match client {
                                     Some(client) => {
                                         if requires_oauth && auth_token.is_none() {
-                                            Err("mcp oauth connection missing; authorize via /mcp/connections/{server_id}/authorize".to_string())
+                                            let prompt = if let Some(existing) =
+                                                oauth_prompt_urls.get(&tool_ref.server_id)
+                                            {
+                                                Some(existing.clone())
+                                            } else {
+                                                match build_mcp_oauth_prompt(
+                                                    &app_state,
+                                                    tool_ref.server_id,
+                                                    claims.user_id,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(prompt) => {
+                                                        oauth_prompt_urls
+                                                            .insert(tool_ref.server_id, prompt.clone());
+                                                        oauth_prompt_event = Some(prompt.clone());
+                                                        Some(prompt)
+                                                    }
+                                                    Err(err) => {
+                                                        eprintln!("mcp oauth prompt error: {:?}", err);
+                                                        None
+                                                    }
+                                                }
+                                            };
+                                            if let Some(prompt) = prompt.clone() {
+                                                oauth_prompt = Some(prompt);
+                                                oauth_required_seen = true;
+                                            }
+                                            if let Some(prompt) = oauth_prompt_event.clone() {
+                                                let payload = McpOauthRequiredEvent {
+                                                    text: format!(
+                                                        "Connect {} account to continue.",
+                                                        prompt.server_name
+                                                    ),
+                                                    server_id: tool_ref.server_id,
+                                                    server_name: prompt.server_name.clone(),
+                                                    authorization_url: prompt.authorization_url.clone(),
+                                                    tool_name: tool_ref.original_name.clone(),
+                                                    tool_call_id: call.tool_id.clone(),
+                                                };
+                                                let data = serde_json::to_string(&payload)
+                                                    .unwrap_or_else(|_| "{}".to_string());
+                                                yield Event::default()
+                                                    .event("mcp_oauth_required")
+                                                    .data(data);
+                                            }
+                                            Err("mcp oauth connection required".to_string())
                                         } else {
                                             client
                                                 .call_tool(
@@ -1362,10 +1503,22 @@ pub async fn handle_chat_stream(
                                     (output_payload, result_value, is_error)
                                 }
                                 Err(error) => {
-                                    let error_payload = json!({
-                                        "error": error,
-                                        "is_error": true
-                                    });
+                                    let error_payload = if let Some(prompt) = oauth_prompt.clone() {
+                                        let payload = McpOauthErrorPayload {
+                                            error,
+                                            is_error: true,
+                                            authorization_url: prompt.authorization_url,
+                                            server_id: tool_ref.server_id,
+                                            server_name: prompt.server_name,
+                                        };
+                                        serde_json::to_value(payload)
+                                            .unwrap_or_else(|_| json!({"error":"mcp oauth connection required","is_error":true}))
+                                    } else {
+                                        json!({
+                                            "error": error,
+                                            "is_error": true
+                                        })
+                                    };
                                     (error_payload.clone(), error_payload, true)
                                 }
                             };
@@ -1454,7 +1607,9 @@ pub async fn handle_chat_stream(
                             }
                         }
 
-                        if openai_tooling_enabled {
+                        if oauth_required_seen {
+                            stream_finished = true;
+                        } else if openai_tooling_enabled {
                             if tool_outputs.is_empty() || openai_response_id.is_none() {
                                 stream_finished = true;
                             } else {

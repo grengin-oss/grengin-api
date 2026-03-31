@@ -15,7 +15,7 @@ impl ModelsResponse {
       let icon = provider
        .map(|provider| provider.icon.clone());
       let icon_dark = provider
-       .map(|provider| provider.icon.clone());
+       .map(|provider| provider.icon_dark.clone());
       (icon,icon_dark)
     }
 

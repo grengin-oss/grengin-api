@@ -37,6 +37,41 @@ pub struct McpServerSummary {
     pub description: Option<String>,
 }
 
+pub async fn load_auto_mcp_server_ids(state: &SharedState) -> Result<Vec<Uuid>, AppError> {
+    let tools = mcp_tools::Entity::find()
+        .filter(mcp_tools::Column::Enabled.eq(true))
+        .all(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp tools fetch error: {e}");
+            AppError::DbTimeout
+        })?;
+    if tools.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut server_ids: HashSet<Uuid> = HashSet::new();
+    for tool in tools {
+        server_ids.insert(tool.server_id);
+    }
+    let server_ids: Vec<Uuid> = server_ids.into_iter().collect();
+    if server_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let servers = mcp_servers::Entity::find()
+        .filter(mcp_servers::Column::Enabled.eq(true))
+        .filter(mcp_servers::Column::Id.is_in(server_ids))
+        .all(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp servers fetch error: {e}");
+            AppError::DbTimeout
+        })?;
+
+    Ok(servers.into_iter().map(|server| server.id).collect())
+}
+
 fn normalize_openai_parameters(schema: &Value) -> Value {
     fn sanitize_schema(schema: &Value) -> Value {
         let Value::Object(map) = schema else {

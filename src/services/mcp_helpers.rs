@@ -295,7 +295,7 @@ pub async fn resolve_mcp_oauth_token(
     }
 
     let Some(refresh_token_value) = connection.refresh_token.clone() else {
-        return Ok(Some(access_token));
+        return Ok(None);
     };
 
     let server = mcp_servers::Entity::find_by_id(server_id)
