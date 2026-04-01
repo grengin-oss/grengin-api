@@ -227,6 +227,16 @@ pub async fn upsert_connection(
     {
         let mut active: mcp_connections::ActiveModel = existing.into();
         active.connected = Set(connected);
+        if connected {
+            active.connected_at = Set(Some(Utc::now()));
+        } else {
+            active.connected_at = Set(None);
+            active.expires_at = Set(None);
+            active.scopes = Set(None);
+            active.access_token = Set(None);
+            active.refresh_token = Set(None);
+            active.token_type = Set(None);
+        }
         active.updated_at = Set(Utc::now());
         active
             .update(&state.database)
@@ -280,6 +290,9 @@ pub async fn resolve_mcp_oauth_token(
     let Some(connection) = connection else {
         return Ok(None);
     };
+    if !connection.connected {
+        return Ok(None);
+    }
 
     let Some(access_token) = connection.access_token.clone() else {
         return Ok(None);
