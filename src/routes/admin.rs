@@ -1,5 +1,5 @@
 use axum::{Router, routing::{delete, get, patch, post, put}};
-use crate::{handlers::{admin_ai::{delete_ai_engines_api_key_key, get_ai_engine_models_by_key, get_ai_engines, get_ai_engines_by_key, update_ai_engines_by_key, validate_ai_engines_by_key}, admin_analytics::{get_analytics_overview, get_department_analytics, get_timeseries_analytics, get_user_analytics}, admin_department::{add_users_in_department, create_department, delete_department, get_department_by_id, get_departments_tree, get_users_from_department, list_departments, move_department, remove_users_from_department, update_department}, admin_department_budgets::get_department_budget, admin_mcp::{create_mcp_access_rule, delete_mcp_access_rule, get_mcp_server_access, update_mcp_server_default}, admin_roles::{assign_role_to_user, create_role, delete_role, get_permissions, get_role_by_id, list_roles, list_user_role_assignments, remove_role_from_user, update_role}, admin_sso_provider::{delete_sso_provider_by_id, get_sso_provider_by_id, get_sso_providers, update_sso_provider_by_id}, admin_users::{add_new_user, delete_user, get_user_by_id, get_users, patch_user_status, update_user}, branding::{get_admin_branding, update_branding}}, state::SharedState};
+use crate::{handlers::{admin_ai::{delete_ai_engines_api_key_key, get_ai_engine_models_by_key, get_ai_engines, get_ai_engines_by_key, update_ai_engines_by_key, validate_ai_engines_by_key}, admin_analytics::{get_analytics_overview, get_department_analytics, get_timeseries_analytics, get_user_analytics}, admin_department::{add_users_in_department, create_department, delete_department, get_department_by_id, get_departments_tree, get_users_from_department, list_departments, move_department, remove_users_from_department, update_department}, admin_department_budgets::get_department_budget, admin_embedding::{get_embedding_config, update_embedding_config}, admin_mcp::{create_mcp_access_rule, delete_mcp_access_rule, get_mcp_server_access, update_mcp_server_access, update_mcp_server_default}, admin_roles::{assign_role_to_user, create_role, delete_role, get_permissions, get_role_by_id, list_roles, list_user_role_assignments, remove_role_from_user, update_role}, admin_sso_provider::{delete_sso_provider_by_id, get_sso_provider_by_id, get_sso_providers, update_sso_provider_by_id}, admin_users::{add_new_user, delete_user, get_user_by_id, get_users, patch_user_status, update_user}, branding::{get_admin_branding, update_branding}}, state::SharedState};
 
 pub fn admin_routes() -> Router<SharedState> {
    Router::new()
@@ -7,6 +7,7 @@ pub fn admin_routes() -> Router<SharedState> {
      .route("/admin/users/{user_id}",put(update_user).delete(delete_user).get(get_user_by_id))
      .route("/admin/users/{user_id}/status", patch(patch_user_status))
      .route("/admin/branding", get(get_admin_branding).put(update_branding))
+     .route("/admin/embedding-config", get(get_embedding_config).put(update_embedding_config))
      .route("/admin/ai-engines", get(get_ai_engines))
      .route("/admin/ai-engines/{engine_key}", put(update_ai_engines_by_key).get(get_ai_engines_by_key))
      .route("/admin/ai-engines/{engine-key}/validate",post(validate_ai_engines_by_key))
@@ -29,7 +30,7 @@ pub fn admin_routes() -> Router<SharedState> {
      .route("/admin/roles/{role_id}", get(get_role_by_id).put(update_role).delete(delete_role))
      .route("/admin/users/{user_id}/roles", get(list_user_role_assignments).post(assign_role_to_user))
      .route("/admin/users/{user_id}/roles/{assignment_id}", delete(remove_role_from_user))
-     .route("/admin/mcp-servers/{server_id}/access", get(get_mcp_server_access))
+     .route("/admin/mcp-servers/{server_id}/access", get(get_mcp_server_access).put(update_mcp_server_access))
      .route("/admin/mcp-servers/{server_id}/access/default", put(update_mcp_server_default))
      .route("/admin/mcp-servers/{server_id}/access/rules", post(create_mcp_access_rule))
      .route("/admin/mcp-servers/{server_id}/access/rules/{rule_id}", delete(delete_mcp_access_rule))

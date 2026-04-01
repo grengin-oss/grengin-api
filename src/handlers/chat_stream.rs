@@ -2,11 +2,13 @@ use std::{
     collections::HashMap,
     convert::Infallible,
 };
+use reqwest::StatusCode;
 use axum::{Json, extract::{Path, State}, response::{Sse, sse::{Event, KeepAlive}}};
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use futures_util::StreamExt;
 use num_traits::ToPrimitive;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, prelude::Decimal};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -39,7 +41,7 @@ use crate::{
         },
         llm::openai::{OpenaiFunctionCallOutput, OpenaiInputItem, OpenaiTool},
     },
-    error::{AppError, ErrorResponse},
+    error::{AppError, ErrorDetailVariant, ErrorResponse},
     handlers::models::get_model_info_cached,
     handlers::llm::{
         StreamParseResult,
@@ -53,12 +55,32 @@ use crate::{
         openai::OpenaiStreamParser,
     },
     llm::{prompt::Prompt, provider::{AnthropicApis, OpenaiApis, get_title_generation_model}, tooling::mcp_server_short_id},
-    models::{conversations, departments::ActionOnExceed, messages::{self, ChatRole}, users, mcp_executions, mcp_servers::McpTransportType},
+    models::{
+        conversations,
+        departments::ActionOnExceed,
+        messages::{self, ChatRole},
+        users,
+        mcp_executions,
+        mcp_oauth_states,
+        mcp_servers,
+        mcp_servers::McpTransportType,
+        mcp_access_policies::McpPermission,
+    },
     services::{
         budget_allocation::{get_department_budget_status, refresh_department_budget_available},
-        mcp_helpers::resolve_mcp_oauth_token,
-        mcp_tools::{load_openai_mcp_tools, McpServerSummary},
+        mcp_helpers::{build_oauth_config, resolve_mcp_oauth_token},
+        mcp_client::build_authorization_url,
+        mcp_tools::{load_auto_mcp_server_ids, load_openai_mcp_tools, McpServerSummary},
         notifications::emit_budget_alerts,
+        rag::{
+            assemble_prompts_with_budget,
+            build_retrieval_prompt,
+            embed_messages,
+            load_recent_prompts,
+            load_summary,
+            update_conversation_summary,
+            EmbeddingTarget,
+        },
     },
     state::SharedState,
     utils::chat_stream::{
@@ -74,6 +96,45 @@ use reqwest_eventsource::Event as ReqwestEvent;
 enum LlmProviderConfig {
     OpenAI(OpenaiSettings),
     Anthropic(AnthropicSettings),
+}
+
+#[derive(Clone)]
+struct McpOauthPrompt {
+    authorization_url: String,
+    server_name: String,
+}
+
+#[derive(Serialize)]
+struct McpOauthRequiredEvent {
+    text: String,
+    server_id: Uuid,
+    server_name: String,
+    authorization_url: String,
+    tool_name: String,
+    tool_call_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct McpOauthErrorPayload {
+    error: String,
+    is_error: bool,
+    authorization_url: String,
+    server_id: Uuid,
+    server_name: String,
+}
+
+#[derive(Deserialize)]
+struct LlmErrorObject {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    code: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LlmErrorEnvelope {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    error: Option<LlmErrorObject>,
 }
 
 fn calculate_cost_decimal(
@@ -117,6 +178,75 @@ fn build_mcp_server_context(servers: &[McpServerSummary]) -> Option<String> {
         "Tools starting with mcp__<short>__ map to the corresponding server above.".to_string(),
     );
     Some(lines.join("\n"))
+}
+
+fn is_rate_limit_error(body: &str) -> bool {
+    let Ok(parsed) = serde_json::from_str::<LlmErrorEnvelope>(body) else {
+        return false;
+    };
+    if parsed.kind.as_deref() == Some("rate_limit_error") {
+        return true;
+    }
+    if let Some(error) = parsed.error {
+        if error.kind.as_deref() == Some("rate_limit_error") {
+            return true;
+        }
+        if error.code.as_deref() == Some("rate_limit_error") {
+            return true;
+        }
+    }
+    false
+}
+
+async fn build_mcp_oauth_prompt(
+    state: &SharedState,
+    server_id: Uuid,
+    user_id: Uuid,
+) -> Result<McpOauthPrompt, AppError> {
+    let server = mcp_servers::Entity::find_by_id(server_id)
+        .one(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp server lookup error: {e}");
+            AppError::DbTimeout
+        })?
+        .ok_or(AppError::McpServerNotFound)?;
+
+    if !server.enabled {
+        return Err(AppError::McpServerNotFound);
+    }
+
+    if !matches!(server.transport_type, McpTransportType::Http | McpTransportType::Sse) {
+        return Err(AppError::ServiceTemporarilyUnavailable);
+    }
+
+    let oauth_config = build_oauth_config(state, &server)?;
+    let authorization = build_authorization_url(&oauth_config).map_err(|e| {
+        eprintln!("mcp oauth authorize url error: {e}");
+        AppError::ServiceTemporarilyUnavailable
+    })?;
+
+    let now = Utc::now();
+    let expires_at = now + Duration::minutes(10);
+    let model = mcp_oauth_states::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        server_id: Set(server_id),
+        user_id: Set(user_id),
+        state: Set(authorization.state.clone()),
+        pkce_verifier: Set(authorization.pkce_verifier.clone()),
+        redirect_uri: Set(None),
+        expires_at: Set(Some(expires_at)),
+        created_at: Set(now),
+    };
+    model.insert(&state.database).await.map_err(|e| {
+        eprintln!("mcp oauth state insert error: {e}");
+        AppError::DbTimeout
+    })?;
+
+    Ok(McpOauthPrompt {
+        authorization_url: authorization.authorization_url,
+        server_name: server.name,
+    })
 }
 
 #[utoipa::path(
@@ -296,7 +426,7 @@ pub async fn handle_chat_stream(
  let start = Instant::now();
  let provider = req.provider.clone().unwrap_or_else(|| "openai".to_string());
  let selected_tools = req.selected_tools.clone().unwrap_or_default();
- let selected_mcp_servers = req.selected_mcp_servers.clone().unwrap_or_default();
+ let mut selected_mcp_servers = req.selected_mcp_servers.clone().unwrap_or_default();
  let web_search = req.web_search;
  let openai_settings = app_state
     .settings
@@ -387,19 +517,23 @@ pub async fn handle_chat_stream(
     "webSearch":req.web_search,
     "selectedTools":selected_tools.clone()
  });
- let (conversation_id,mut previous_prompts,title) = if let Some(Path(conversation_id)) = chat_id {
-    let (conversation, previous_messages) = conversations::Entity::find_by_id(conversation_id.clone())
+ let retrieval_query = req
+    .messages
+    .last()
+    .map(|message| message.content.clone())
+    .unwrap_or_default();
+ let mut summary_prompt: Option<Prompt> = None;
+ let mut retrieval_prompt: Option<Prompt> = None;
+ let mut recent_prompts: Vec<Prompt> = Vec::new();
+ let mut recent_boundary: Option<chrono::DateTime<Utc>> = None;
+ let (conversation_id,title) = if let Some(Path(conversation_id)) = chat_id {
+    let conversation = conversations::Entity::find_by_id(conversation_id.clone())
        .filter(conversations::Column::ArchivedAt.is_null())
-       .find_with_related(messages::Entity)
-       .order_by_asc(messages::Column::CreatedAt)
-       .filter(messages::Column::Deleted.eq(false))
-       .all(&app_state.database)
+       .one(&app_state.database)
        .await
        .map_err(|e| {
-          eprintln!("DB get one with many error {:?}", e);
+          eprintln!("DB get one error {:?}", e);
           AppError::DbTimeout})?
-       .into_iter()
-       .next()
        .ok_or(AppError::DbNotFound)?;
     let mut conversation_active = conversation
       .clone()
@@ -423,20 +557,60 @@ pub async fn handle_chat_stream(
           eprintln!("Db update one error {:?}", e);
           AppError::DbTimeout
        })?;
-    println!("Chat updated timestamp updated");
-   let previous_prompts = previous_messages
-     .into_iter()
-     .map(|message| Prompt {
-        text: message.message_content,
-        role: message.role,
-        files: message
-            .metadata
-            .and_then(|json| json.get("files").cloned())
-            .and_then(|files_val| serde_json::from_value::<Vec<File>>(files_val).ok())
-            .unwrap_or_default(), // Vec::new()
-    })
-    .collect::<Vec<Prompt>>();
-  (conversation_id,previous_prompts,None)
+   println!("Chat updated timestamp updated");
+   if app_state.settings.rag.enabled {
+        let recent = load_recent_prompts(
+            &app_state.database,
+            conversation_id,
+            app_state.settings.rag.recent_message_pairs,
+        )
+        .await?;
+        recent_boundary = recent.boundary;
+        recent_prompts = recent.prompts;
+        if let Some(summary) = load_summary(&app_state.database, conversation_id).await? {
+            if !summary.summary.trim().is_empty() {
+                summary_prompt = Some(Prompt {
+                    role: ChatRole::System,
+                    text: format!("Conversation summary:\n{}", summary.summary),
+                    files: Vec::new(),
+                });
+            }
+        }
+        if let Some(retrieval_text) =
+            build_retrieval_prompt(&app_state, conversation_id, &retrieval_query, recent_boundary)
+                .await?
+        {
+            retrieval_prompt = Some(Prompt {
+                role: ChatRole::System,
+                text: retrieval_text,
+                files: Vec::new(),
+            });
+        }
+   } else {
+        let previous_messages = messages::Entity::find()
+            .filter(messages::Column::ConversationId.eq(conversation_id))
+            .filter(messages::Column::Deleted.eq(false))
+            .order_by_asc(messages::Column::CreatedAt)
+            .all(&app_state.database)
+            .await
+            .map_err(|e| {
+                eprintln!("DB get messages error {:?}", e);
+                AppError::DbTimeout
+            })?;
+        recent_prompts = previous_messages
+            .into_iter()
+            .map(|message| Prompt {
+                text: message.message_content,
+                role: message.role,
+                files: message
+                    .metadata
+                    .and_then(|json| json.get("files").cloned())
+                    .and_then(|files_val| serde_json::from_value::<Vec<File>>(files_val).ok())
+                    .unwrap_or_default(),
+            })
+            .collect::<Vec<Prompt>>();
+   }
+  (conversation_id,None)
  }else{
   let first_prompt = req.messages
     .first()
@@ -486,11 +660,13 @@ pub async fn handle_chat_stream(
     .map_err(|e| {
        eprintln!("Db insert one error {:?}", e);
        AppError::DbTimeout})?;
-    (new_conversation_id,Vec::new(),Some(prompt_title_response.title))
+    (new_conversation_id,Some(prompt_title_response.title))
  };
  let mut previous_message_id = None;
+ let mut embedding_targets: Vec<EmbeddingTarget> = Vec::new();
  for message in &req.messages {
    let new_message_id = Uuid::new_v4();
+   let created_at = Utc::now();
    metadata["files"] = message.files
      .iter()
      .map(|f| serde_json::to_value(f).unwrap()).collect::<Vec<serde_json::Value>>().into();
@@ -508,8 +684,8 @@ pub async fn handle_chat_stream(
      response_tokens:Set(0),
      tools_calls:Set(Vec::new()),
      tools_results:Set(Vec::new()),
-     created_at:Set(Utc::now()),
-     updated_at:Set(Utc::now()),
+     created_at:Set(created_at),
+     updated_at:Set(created_at),
      total_tokens:Set(0),
      latency:Set(start.elapsed().as_millis() as i32),
      cost:Set(Decimal::from(0)),
@@ -523,6 +699,15 @@ pub async fn handle_chat_stream(
    .map_err(|e| {
         eprintln!("Db one insert error {:?}", e);
         AppError::DbTimeout})?;
+   if matches!(message.role, ChatRole::User | ChatRole::Assistant) {
+        embedding_targets.push(EmbeddingTarget {
+            message_id: new_message_id,
+            conversation_id,
+            role: message.role,
+            content: message.content.clone(),
+            created_at,
+        });
+   }
  }
  
  let current_prompts:Vec<Prompt> = req.messages
@@ -531,12 +716,27 @@ pub async fn handle_chat_stream(
       Prompt { text:message.content, role:message.role, files:message.files
     })
    .collect();
- previous_prompts.extend(current_prompts);
+ let mut previous_prompts = if app_state.settings.rag.enabled {
+    assemble_prompts_with_budget(
+        summary_prompt,
+        retrieval_prompt,
+        recent_prompts,
+        current_prompts.clone(),
+        app_state.settings.rag.max_context_tokens,
+    )
+ } else {
+    let mut prompts = recent_prompts;
+    prompts.extend(current_prompts.clone());
+    prompts
+ };
  let provider_is_openai = provider.to_lowercase() == "openai";
  let provider_is_anthropic = provider.to_lowercase() == "anthropic";
  let supports_mcp_tools = provider_is_openai || provider_is_anthropic;
+ if supports_mcp_tools && selected_mcp_servers.is_empty() {
+     selected_mcp_servers = load_auto_mcp_server_ids(&app_state).await?;
+ }
  let (mcp_openai_tools, mcp_tool_lookup, mcp_server_summaries) = if supports_mcp_tools {
-     load_openai_mcp_tools(&app_state, &selected_mcp_servers, &selected_tools).await?
+     load_openai_mcp_tools(&app_state, claims.user_id, &selected_mcp_servers, &selected_tools).await?
  } else {
      (Vec::new(), HashMap::new(), Vec::new())
  };
@@ -648,6 +848,8 @@ pub async fn handle_chat_stream(
     let mut tool_input_buffers: HashMap<String, String> = HashMap::new();
     let mut tool_inputs: HashMap<String, Value> = HashMap::new();
     let mut web_search_state: HashMap<String, StreamWebSearchState> = HashMap::new();
+    let mut oauth_prompt_urls: HashMap<Uuid, McpOauthPrompt> = HashMap::new();
+    let mut oauth_required_seen = false;
     let mut last_web_search_call_id: Option<String> = None;
     let mcp_tooling_enabled = supports_mcp_tools && !mcp_tool_lookup.is_empty();
     let openai_tooling_enabled = provider_is_openai && mcp_tooling_enabled;
@@ -683,6 +885,7 @@ pub async fn handle_chat_stream(
         yield Event::default().event(ChatStreamEvents::DepartmentBudgetWarning.to_string()).data(data);
      }
      let new_message_id = Uuid::new_v4();
+     let assistant_created_at = Utc::now();
      let mut new_llm_message = messages::ActiveModel {
         id: Set(new_message_id.clone()),
         conversation_id: Set(conversation_id.clone()),
@@ -697,8 +900,8 @@ pub async fn handle_chat_stream(
         response_tokens: Set(response_tokens),
         tools_calls: Set(Vec::new()),
         tools_results: Set(Vec::new()),
-        created_at: Set(Utc::now()),
-        updated_at: Set(Utc::now()),
+        created_at: Set(assistant_created_at),
+        updated_at: Set(assistant_created_at),
         total_tokens: Set(total_tokens),
         latency: Set(latency),
         cost: Set(Decimal::from(0)),
@@ -1211,8 +1414,19 @@ pub async fn handle_chat_stream(
                                 other => json!({ "value": other }),
                             };
 
+                            let access_error = match tool_ref.permission {
+                                McpPermission::Denied => Some("mcp access denied".to_string()),
+                                McpPermission::ReadOnly if !tool_ref.is_read_only => {
+                                    Some("mcp access read_only: tool is not read-only".to_string())
+                                }
+                                _ => None,
+                            };
+                            let mut oauth_prompt: Option<McpOauthPrompt> = None;
+                            let mut oauth_prompt_event: Option<McpOauthPrompt> = None;
                             let exec_start = Instant::now();
-                            let call_result = {
+                            let call_result = if let Some(error) = access_error {
+                                Err(error)
+                            } else {
                                 let (client, requires_oauth) = {
                                     let clients = app_state.mcp_clients.read().await;
                                     match clients.get(&tool_ref.server_id) {
@@ -1243,7 +1457,53 @@ pub async fn handle_chat_stream(
                                 match client {
                                     Some(client) => {
                                         if requires_oauth && auth_token.is_none() {
-                                            Err("mcp oauth connection missing; authorize via /mcp/connections/{server_id}/authorize".to_string())
+                                            let prompt = if let Some(existing) =
+                                                oauth_prompt_urls.get(&tool_ref.server_id)
+                                            {
+                                                Some(existing.clone())
+                                            } else {
+                                                match build_mcp_oauth_prompt(
+                                                    &app_state,
+                                                    tool_ref.server_id,
+                                                    claims.user_id,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(prompt) => {
+                                                        oauth_prompt_urls
+                                                            .insert(tool_ref.server_id, prompt.clone());
+                                                        oauth_prompt_event = Some(prompt.clone());
+                                                        Some(prompt)
+                                                    }
+                                                    Err(err) => {
+                                                        eprintln!("mcp oauth prompt error: {:?}", err);
+                                                        None
+                                                    }
+                                                }
+                                            };
+                                            if let Some(prompt) = prompt.clone() {
+                                                oauth_prompt = Some(prompt);
+                                                oauth_required_seen = true;
+                                            }
+                                            if let Some(prompt) = oauth_prompt_event.clone() {
+                                                let payload = McpOauthRequiredEvent {
+                                                    text: format!(
+                                                        "Connect {} account to continue.",
+                                                        prompt.server_name
+                                                    ),
+                                                    server_id: tool_ref.server_id,
+                                                    server_name: prompt.server_name.clone(),
+                                                    authorization_url: prompt.authorization_url.clone(),
+                                                    tool_name: tool_ref.original_name.clone(),
+                                                    tool_call_id: call.tool_id.clone(),
+                                                };
+                                                let data = serde_json::to_string(&payload)
+                                                    .unwrap_or_else(|_| "{}".to_string());
+                                                yield Event::default()
+                                                    .event("mcp_oauth_required")
+                                                    .data(data);
+                                            }
+                                            Err("mcp oauth connection required".to_string())
                                         } else {
                                             client
                                                 .call_tool(
@@ -1276,10 +1536,22 @@ pub async fn handle_chat_stream(
                                     (output_payload, result_value, is_error)
                                 }
                                 Err(error) => {
-                                    let error_payload = json!({
-                                        "error": error,
-                                        "is_error": true
-                                    });
+                                    let error_payload = if let Some(prompt) = oauth_prompt.clone() {
+                                        let payload = McpOauthErrorPayload {
+                                            error,
+                                            is_error: true,
+                                            authorization_url: prompt.authorization_url,
+                                            server_id: tool_ref.server_id,
+                                            server_name: prompt.server_name,
+                                        };
+                                        serde_json::to_value(payload)
+                                            .unwrap_or_else(|_| json!({"error":"mcp oauth connection required","is_error":true}))
+                                    } else {
+                                        json!({
+                                            "error": error,
+                                            "is_error": true
+                                        })
+                                    };
                                     (error_payload.clone(), error_payload, true)
                                 }
                             };
@@ -1368,7 +1640,9 @@ pub async fn handle_chat_stream(
                             }
                         }
 
-                        if openai_tooling_enabled {
+                        if oauth_required_seen {
+                            stream_finished = true;
+                        } else if openai_tooling_enabled {
                             if tool_outputs.is_empty() || openai_response_id.is_none() {
                                 stream_finished = true;
                             } else {
@@ -1417,6 +1691,22 @@ pub async fn handle_chat_stream(
                             .text()
                             .await
                             .unwrap_or_else(|_| "<failed to read response body>".to_string());
+                        if status == StatusCode::TOO_MANY_REQUESTS
+                            && is_rate_limit_error(&body)
+                        {
+                            let (_, detail) = AppError::LlmTokenExhausted {
+                                provider: provider.clone(),
+                            }
+                            .to_detail();
+                            let payload = ErrorResponse {
+                                detail: ErrorDetailVariant::Rich(detail),
+                            };
+                            let data = serde_json::to_string(&payload)
+                                .unwrap_or_else(|_| "{}".to_string());
+                            yield Event::default()
+                                .event(ChatStreamEvents::LlmTokenExhausted.to_string())
+                                .data(data);
+                        }
                         eprintln!(
                             "Streaming error for provider:{} status:{} body:{}",
                             provider, status, body
@@ -1541,6 +1831,25 @@ pub async fn handle_chat_stream(
                         eprintln!("emit budget alert error: {:?}", e);
                     }
                 }
+            }
+            if !message_content.trim().is_empty() {
+                embedding_targets.push(EmbeddingTarget {
+                    message_id: new_message_id,
+                    conversation_id,
+                    role: ChatRole::Assistant,
+                    content: message_content.clone(),
+                    created_at: assistant_created_at,
+                });
+            }
+            if app_state.settings.rag.enabled {
+                let targets = std::mem::take(&mut embedding_targets);
+                let state = app_state.clone();
+                let provider_clone = provider.clone();
+                let model_clone = model_name.clone();
+                tokio::spawn(async move {
+                    let _ = embed_messages(&state, targets).await;
+                    let _ = update_conversation_summary(&state, conversation_id, &provider_clone, &model_clone).await;
+                });
             }
             yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
             break;

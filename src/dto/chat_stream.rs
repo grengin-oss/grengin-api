@@ -24,6 +24,8 @@ pub enum ChatStreamEvents{
   Done,
   #[serde(rename = "budget_warning")]
   DepartmentBudgetWarning,
+  #[serde(rename = "llm_token_exhausted")]
+  LlmTokenExhausted,
 }
 
 impl ChatStreamEvents {

@@ -14,6 +14,7 @@ use crate::models::ai_engines::ApiKeyStatus;
 #[derive(Serialize,ToSchema)]
  pub struct AiEngineResponse{
      pub icon:Option<String>,
+     pub icon_dark:Option<String>,
      pub engine_key:String,
      pub display_name:String,
      pub is_enabled:bool,

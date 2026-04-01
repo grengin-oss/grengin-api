@@ -131,7 +131,8 @@ pub async fn get_ai_engines(
       .into_iter()
       .map(|model|{
         AiEngineResponse{
-            icon:ai_models.get_icon(&model.engine_key),
+            icon:ai_models.get_icons(&model.engine_key).0,
+            icon_dark:ai_models.get_icons(&model.engine_key).1,
             engine_key:model.engine_key,
             display_name:model.display_name,
             is_enabled:model.is_enabled,
@@ -189,7 +190,8 @@ pub async fn get_ai_engines_by_key(
       })?
       .ok_or(AuthError::ResourceNotFound)?;
     let response = AiEngineResponse{
-            icon:ai_models.get_icon(&model.engine_key),
+            icon:ai_models.get_icons(&model.engine_key).0,
+            icon_dark:ai_models.get_icons(&model.engine_key).1,
             engine_key:model.engine_key,
             display_name:model.display_name,
             is_enabled:model.is_enabled,
@@ -373,7 +375,8 @@ pub async fn update_ai_engines_by_key(
         })?;
     let _ = validate_ai_engines_by_key(claims,Path(ai_engine_key),State(app_state.clone()));
     let response = AiEngineResponse{
-            icon:ai_models.get_icon(&model.engine_key),
+            icon:ai_models.get_icons(&model.engine_key).0,
+            icon_dark:ai_models.get_icons(&model.engine_key).1,
             engine_key:model.engine_key,
             display_name:model.display_name,
             is_enabled:model.is_enabled,
@@ -459,7 +462,8 @@ pub async fn delete_ai_engines_api_key_key(
         AuthError::DbTimeout
       })?;
       let response = AiEngineResponse{
-            icon:ai_models.get_icon(&model.engine_key),
+            icon:ai_models.get_icons(&model.engine_key).0,
+            icon_dark:ai_models.get_icons(&model.engine_key).1,
             engine_key:model.engine_key,
             display_name:model.display_name,
             is_enabled:model.is_enabled,

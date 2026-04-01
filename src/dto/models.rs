@@ -7,13 +7,16 @@ pub struct ModelsResponse {
 }
 
 impl ModelsResponse {
-    pub fn get_icon<S: Into<String>>(&self,provider:S) -> Option<String>{
+    pub fn get_icons<S: Into<String>>(&self,provider:S) -> (Option<String>,Option<String>){
       let provider_key = provider.into();
-      let icon = self.providers
+      let provider = self.providers
        .iter()
-       .find(|provider | provider.key == provider_key)
+       .find(|provider | provider.key == provider_key);
+      let icon = provider
        .map(|provider| provider.icon.clone());
-      icon
+      let icon_dark = provider
+       .map(|provider| provider.icon_dark.clone());
+      (icon,icon_dark)
     }
 
     pub fn default() -> Self {

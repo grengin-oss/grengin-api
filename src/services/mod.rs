@@ -6,4 +6,6 @@ pub mod auth_audit;
 pub mod mcp_client;
 pub mod mcp_tools;
 pub mod mcp_helpers;
+pub mod mcp_access;
 pub mod notifications;
+pub mod rag;

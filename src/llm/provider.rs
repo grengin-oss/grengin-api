@@ -13,7 +13,7 @@ use crate::{
             openai::OpenaiModel,
         },
     },
-    llm::prompt::{Prompt, PromptTitleResponse},
+    llm::prompt::{Prompt, PromptTitleResponse, PromptTextResponse},
 };
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -50,6 +50,19 @@ pub trait OpenaiApis {
     async fn openai_chat_stream_text(&self,openai_settings:&OpenaiSettings,model_name:String,temperature:Option<f32>,prompt:Vec<String>) -> Result<EventSource,Error>;
     async fn openai_upload_file(&self,openai_settings:&OpenaiSettings,attachment:&Attachment) -> Result<String,Error>;
     async fn openai_get_title(&self,openai_settings:&OpenaiSettings,prompt:String) -> Result<PromptTitleResponse,Error>;
+    async fn openai_generate_text(
+        &self,
+        openai_settings: &OpenaiSettings,
+        model_name: String,
+        messages: Vec<crate::dto::llm::openai::OpenaiMessage>,
+        temperature: Option<f32>,
+    ) -> Result<PromptTextResponse, Error>;
+    async fn openai_create_embedding(
+        &self,
+        openai_settings: &OpenaiSettings,
+        model_name: String,
+        input: Vec<String>,
+    ) -> Result<crate::dto::llm::openai::OpenaiEmbeddingResponse, Error>;
     async fn openai_list_models(&self,openai_settings: &OpenaiSettings) -> Result<Vec<OpenaiModel>, Error>;
 } 
 
@@ -98,6 +111,15 @@ pub trait AnthropicApis {
         anthropic_settings: &AnthropicSettings,
         prompt: String,
     ) -> Result<PromptTitleResponse, Error>;
+    async fn anthropic_generate_text(
+        &self,
+        anthropic_settings: &AnthropicSettings,
+        model_name: String,
+        max_tokens: i32,
+        messages: Vec<AnthropicMessage>,
+        system: Option<String>,
+        temperature: Option<f32>,
+    ) -> Result<PromptTextResponse, Error>;
 
     async fn anthropic_get_models(
         &self,

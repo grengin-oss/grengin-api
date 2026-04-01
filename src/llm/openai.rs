@@ -11,6 +11,8 @@ use crate::{
             FileUploadResponse,
             OpenaiChatCompletionRequest,
             OpenaiChatCompletionResponse,
+            OpenaiEmbeddingRequest,
+            OpenaiEmbeddingResponse,
             OpenaiChatRequest,
             OpenaiInputItem,
             OpenaiListModelsResponse,
@@ -22,7 +24,7 @@ use crate::{
     },
     handlers::file::get_file_binary,
     llm::{
-        prompt::{Prompt, PromptTitleResponse},
+        prompt::{Prompt, PromptTitleResponse, PromptTextResponse},
         provider::{OpenaiApis, OpenaiHeaders},
     },
 };
@@ -160,6 +162,66 @@ impl OpenaiApis for ReqwestClient {
           .map(|usage| (usage.prompt_tokens as i32,usage.completion_tokens as i32))
           .unwrap_or((0,0)); 
      Ok(PromptTitleResponse{title,input_tokens,output_tokens})      
+    }
+
+    async fn openai_generate_text(
+        &self,
+        openai_settings: &OpenaiSettings,
+        model_name: String,
+        messages: Vec<OpenaiMessage>,
+        temperature: Option<f32>,
+    ) -> Result<PromptTextResponse, Error> {
+        let body = OpenaiChatCompletionRequest {
+            model: model_name,
+            stream: false,
+            temperature,
+            messages,
+        };
+        let response: OpenaiChatCompletionResponse = self
+            .post(format!("{OPENAI_API_URL}/v1/chat/completions"))
+            .add_openai_headers(openai_settings)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let text = response
+            .choices
+            .first()
+            .and_then(|choice| choice.message.content.clone())
+            .ok_or(anyhow!("openai response choices is empty"))?;
+        let (input_tokens, output_tokens) = response
+            .usage
+            .map(|usage| (usage.prompt_tokens as i32, usage.completion_tokens as i32))
+            .unwrap_or((0, 0));
+        Ok(PromptTextResponse {
+            text,
+            input_tokens,
+            output_tokens,
+        })
+    }
+
+    async fn openai_create_embedding(
+        &self,
+        openai_settings: &OpenaiSettings,
+        model_name: String,
+        input: Vec<String>,
+    ) -> Result<OpenaiEmbeddingResponse, Error> {
+        let body = OpenaiEmbeddingRequest {
+            model: model_name,
+            input,
+        };
+        let response: OpenaiEmbeddingResponse = self
+            .post(format!("{OPENAI_API_URL}/v1/embeddings"))
+            .add_openai_headers(openai_settings)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(response)
     }
 
     async fn openai_list_models(&self,openai_settings: &OpenaiSettings) -> Result<Vec<OpenaiModel>, Error> {
