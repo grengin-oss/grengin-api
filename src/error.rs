@@ -35,6 +35,7 @@ pub enum ErrorCode {
     InvalidLlmProvider = 4001,
     LlmProviderNotConfigured = 4002,
     LlmProviderDisabledByAdmin = 4003,
+    LlmTokenExhausted = 4004,
 
     // 6000-6999: budgets
     DepartmentBudgetExceeded = 6001,
@@ -108,6 +109,7 @@ pub enum AppError {
     InvalidLlmProvider { provider: String },
     LlmProviderNotConfigured { provider: String },
     LlmProviderDisabledByAdmin { provider: String },
+    LlmTokenExhausted { provider: String },
 
     DepartmentBudgetExceeded,
     McpServerNotFound,
@@ -450,6 +452,32 @@ impl AppError {
                     StatusCode::FORBIDDEN,
                     ErrorDetail {
                         code: ErrorCode::LlmProviderDisabledByAdmin,
+                        description: Self::render(description_tpl, &params),
+                        solution: Self::render(solution_tpl, &params),
+                        description_key,
+                        solution_key,
+                        params,
+                        external_code: None,
+                    },
+                )
+            }
+
+            AppError::LlmTokenExhausted { provider } => {
+                let mut params = Self::base_params();
+                params.insert("provider".to_string(), provider.clone());
+
+                let description_key = "error.llm.token_exhausted.description".to_string();
+                let solution_key = "error.llm.token_exhausted.solution".to_string();
+
+                let description_tpl =
+                    "The {provider} request exceeded the available token budget.";
+                let solution_tpl =
+                    "Try shortening the input, reducing context, or selecting a model with a larger context window.";
+
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    ErrorDetail {
+                        code: ErrorCode::LlmTokenExhausted,
                         description: Self::render(description_tpl, &params),
                         solution: Self::render(solution_tpl, &params),
                         description_key,

@@ -2,12 +2,13 @@ use std::{
     collections::HashMap,
     convert::Infallible,
 };
+use reqwest::StatusCode;
 use axum::{Json, extract::{Path, State}, response::{Sse, sse::{Event, KeepAlive}}};
 use chrono::{Duration, Utc};
 use futures_util::StreamExt;
 use num_traits::ToPrimitive;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, prelude::Decimal};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -40,7 +41,7 @@ use crate::{
         },
         llm::openai::{OpenaiFunctionCallOutput, OpenaiInputItem, OpenaiTool},
     },
-    error::{AppError, ErrorResponse},
+    error::{AppError, ErrorDetailVariant, ErrorResponse},
     handlers::models::get_model_info_cached,
     handlers::llm::{
         StreamParseResult,
@@ -122,6 +123,20 @@ struct McpOauthErrorPayload {
     server_name: String,
 }
 
+#[derive(Deserialize)]
+struct LlmErrorObject {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    code: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LlmErrorEnvelope {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    error: Option<LlmErrorObject>,
+}
+
 fn calculate_cost_decimal(
     input_tokens: i32,
     output_tokens: i32,
@@ -163,6 +178,24 @@ fn build_mcp_server_context(servers: &[McpServerSummary]) -> Option<String> {
         "Tools starting with mcp__<short>__ map to the corresponding server above.".to_string(),
     );
     Some(lines.join("\n"))
+}
+
+fn is_rate_limit_error(body: &str) -> bool {
+    let Ok(parsed) = serde_json::from_str::<LlmErrorEnvelope>(body) else {
+        return false;
+    };
+    if parsed.kind.as_deref() == Some("rate_limit_error") {
+        return true;
+    }
+    if let Some(error) = parsed.error {
+        if error.kind.as_deref() == Some("rate_limit_error") {
+            return true;
+        }
+        if error.code.as_deref() == Some("rate_limit_error") {
+            return true;
+        }
+    }
+    false
 }
 
 async fn build_mcp_oauth_prompt(
@@ -1658,6 +1691,22 @@ pub async fn handle_chat_stream(
                             .text()
                             .await
                             .unwrap_or_else(|_| "<failed to read response body>".to_string());
+                        if status == StatusCode::TOO_MANY_REQUESTS
+                            && is_rate_limit_error(&body)
+                        {
+                            let (_, detail) = AppError::LlmTokenExhausted {
+                                provider: provider.clone(),
+                            }
+                            .to_detail();
+                            let payload = ErrorResponse {
+                                detail: ErrorDetailVariant::Rich(detail),
+                            };
+                            let data = serde_json::to_string(&payload)
+                                .unwrap_or_else(|_| "{}".to_string());
+                            yield Event::default()
+                                .event(ChatStreamEvents::LlmTokenExhausted.to_string())
+                                .data(data);
+                        }
                         eprintln!(
                             "Streaming error for provider:{} status:{} body:{}",
                             provider, status, body
