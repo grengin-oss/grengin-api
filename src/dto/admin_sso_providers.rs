@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-pub struct SsoProvider {
+pub struct SsoProviderTemplate {
    pub name:String,
    pub provider:String,
    pub issuer_url:String,
@@ -12,7 +12,7 @@ pub struct SsoProvider {
 }
 
 #[derive(Serialize,ToSchema)]
-pub struct SsoProviderResponse {
+pub struct SsoProvider {
    pub id: Uuid,
    pub provider:String,
    pub name: String,
@@ -37,7 +37,7 @@ pub struct EditableField{
 }
 
 #[derive(Serialize,ToSchema)]
-pub struct SsoProviderEditableResponse {
+pub struct SsoProviderEditable {
    pub id: Uuid,
    pub provider:EditableField,
    pub name: EditableField,
@@ -55,7 +55,7 @@ pub struct SsoProviderEditableResponse {
 }
 
 #[derive(Deserialize,ToSchema)]
-pub struct SsoProviderUpdateRequest {
+pub struct SsoProviderUpdate {
    pub provider:Option<String>,
    pub tenant_id:Option<String>,
    pub name: Option<String>,
@@ -66,4 +66,3 @@ pub struct SsoProviderUpdateRequest {
    pub allowed_domains:Option<Vec<String>>,
    pub is_enabled:Option<bool>,
 }
-

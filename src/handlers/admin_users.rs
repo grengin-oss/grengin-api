@@ -7,11 +7,11 @@ use uuid::Uuid;
 use crate::{
     auth::{
         claims::Claims,
-        error::{AuthError, AuthErrorResponse},
+        error::{AuthError, Error},
         permissions::{PERMISSION_USERS_MANAGE, PERMISSION_USERS_VIEW},
     },
     dto::{
-        admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest},
+        admin_user::{User, UserPatchRequest, UserCreate, PaginatedUsers, UserUpdate},
         common::{PaginationQuery, SortRule},
     },
     models::{
@@ -32,17 +32,17 @@ use crate::{
         ("user_id" = Uuid, Path, description = "User id")
     ),
     responses(
-       (status = 200, body = UserDetails),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "User not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+       (status = 200, body = User),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = Error, description = "User not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn get_user_by_id(
     claims: Claims,
     State(app_state): State<SharedState>,
     Path(user_id): Path<Uuid>,
-) -> Result<(StatusCode,Json<UserDetails>), AuthError> {
+) -> Result<(StatusCode,Json<User>), AuthError> {
     let user = users::Entity::find_by_id(user_id)
       .one(&app_state.database)
       .await
@@ -64,7 +64,7 @@ pub async fn get_user_by_id(
      let mut roles_map = authz.user_roles_map(&[user.id]).await?;
      let roles = roles_map.remove(&user.id).unwrap_or_default();
      let is_super_admin = roles.iter().any(|r| r == "Super Admin");
-     let user_response = UserDetails {
+     let user_response = User {
          id: user.id,
          sub: user.google_id.unwrap_or(user.azure_id.unwrap_or(user.email.clone())),
          email: user.email,
@@ -121,10 +121,10 @@ pub struct UserDepartmentRow {
         ("sort" = Option<SortRule>, Query, description = "Sort by column example 'name','updated_at','created_at','email','last_login_at'"),
     ),
     responses(
-       (status = 200, body = UserResponse),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "User not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+       (status = 200, body = PaginatedUsers),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = Error, description = "User not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
      
     )
 )]
@@ -132,7 +132,7 @@ pub async fn get_users(
   claims:Claims,
   Query(query):Query<PaginationQuery>,
   State(app_state): State<SharedState>,
-) -> Result<(StatusCode,Json<UserResponse>),AuthError>{
+) -> Result<(StatusCode,Json<PaginatedUsers>),AuthError>{
    let authz = AuthorizationService::new(&app_state.database);
    authz
      .ensure_permission(
@@ -146,7 +146,7 @@ pub async fn get_users(
    let limit = query.limit.unwrap_or(30);
    let offset = query.offset.unwrap_or(0);
    let page = offset / limit;
-   let mut response = UserResponse { 
+   let mut response = PaginatedUsers { 
      users:Vec::new(),
      total:0,
      limit,
@@ -191,7 +191,7 @@ pub async fn get_users(
                AuthError::DbTimeout
            })?;
        if role_user_ids.is_empty() {
-           return Ok((StatusCode::OK, Json(UserResponse {
+           return Ok((StatusCode::OK, Json(PaginatedUsers {
                users: Vec::new(),
                total: 0,
                limit,
@@ -242,7 +242,7 @@ pub async fn get_users(
        .map(|user| {
          let roles = roles_map.get(&user.id).cloned().unwrap_or_default();
          let is_super_admin = roles.iter().any(|r| r == "Super Admin");
-         UserDetails {
+         User {
            id: user.id,
            sub: user.google_id.unwrap_or(user.azure_id.unwrap_or(user.email.clone())),
            email: user.email,
@@ -271,20 +271,20 @@ pub async fn get_users(
     post,
     path = "/admin/users",
     tag = "admin",
-    request_body = UserRequest,
+    request_body = UserCreate,
     responses(
        (status = 201, description = "User added successfully"),
-       (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "Email already exists (code=6106)"),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "User not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+       (status = 409, content_type = "application/json", body = Error, description = "Email already exists (code=6106)"),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = Error, description = "User not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
      
     )
 )]
 pub async fn add_new_user(
   claims:Claims,
   State(app_state): State<SharedState>,
-  Json(req):Json<UserRequest>
+  Json(req):Json<UserCreate>
 ) -> Result<(StatusCode,&'static str),AuthError>{
    let authz = AuthorizationService::new(&app_state.database);
    authz
@@ -363,20 +363,20 @@ pub async fn add_new_user(
     params(
         ("user_id" = Uuid, Path, description = "User id")
     ),
-    request_body = UserUpdateRequest,
+    request_body = UserUpdate,
     responses(
        (status = 200, description = "User updated"),
-       (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "Email already exists (code=6106)"),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "User not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+       (status = 409, content_type = "application/json", body = Error, description = "Email already exists (code=6106)"),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = Error, description = "User not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn update_user(
     claims: Claims,
     State(app_state): State<SharedState>,
     Path(user_id): Path<Uuid>,
-    Json(req): Json<UserUpdateRequest>,
+    Json(req): Json<UserUpdate>,
 ) -> Result<StatusCode, AuthError> {
     let model = users::Entity::find_by_id(user_id)
         .one(&app_state.database)
@@ -461,10 +461,10 @@ pub async fn update_user(
     request_body = UserPatchRequest,
     responses(
        (status = 200, description = "User status updated successfully"),
-       (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "Super admin cannot deactivate/suspend/delete their own account"),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "User not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+       (status = 409, content_type = "application/json", body = Error, description = "Super admin cannot deactivate/suspend/delete their own account"),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = Error, description = "User not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
 
     )
 )]
@@ -529,9 +529,9 @@ pub async fn patch_user_status(
     ),
     responses(
         (status = 204, description = "User deleted"),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "User not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = Error, description = "User not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn delete_user(

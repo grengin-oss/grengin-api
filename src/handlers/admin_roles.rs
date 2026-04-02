@@ -6,11 +6,11 @@ use sea_orm::sea_query::Expr;
 use uuid::Uuid;
 
 use crate::{
-    auth::{claims::Claims, error::{AuthError, AuthErrorResponse}, permissions::{PERMISSION_ROLES_ASSIGN, PERMISSION_ROLES_MANAGE, PERMISSION_ROLES_VIEW, ROLE_DEPARTMENT_ADMIN}},
+    auth::{claims::Claims, error::{AuthError, Error}, permissions::{PERMISSION_ROLES_ASSIGN, PERMISSION_ROLES_MANAGE, PERMISSION_ROLES_VIEW, ROLE_DEPARTMENT_ADMIN}},
     dto::admin_roles::{
         PermissionDto, PermissionsResponse, RoleAssignmentPayload, RoleCreatedPayload, RoleDeletedPayload,
         RoleDto, RoleRequest, RoleUpdateRequest, RoleUpdatedPayload, RolesResponse,
-        UserRoleAssignmentDto, UserRoleAssignmentRequest, UserRoleAssignmentsResponse,
+        UserRoleAssignmentDto, UserRoleAssignmentInput, UserRoleAssignmentsResponse,
     },
     models::{
         permissions,
@@ -49,9 +49,9 @@ struct RoleUserCountRow {
     tag = "admin",
     responses(
         (status = 200, body = PermissionsResponse),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn get_permissions(
@@ -97,9 +97,9 @@ pub async fn get_permissions(
     tag = "admin",
     responses(
         (status = 200, body = RolesResponse),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn list_roles(
@@ -188,10 +188,10 @@ pub async fn list_roles(
     request_body = RoleRequest,
     responses(
         (status = 201, body = RoleDto),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse),
-        (status = 409, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error),
+        (status = 409, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn create_role(
@@ -317,10 +317,10 @@ pub async fn create_role(
     ),
     responses(
         (status = 200, body = RoleDto),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error),
+        (status = 404, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn get_role_by_id(
@@ -406,10 +406,10 @@ pub async fn get_role_by_id(
     ),
     responses(
         (status = 200, body = RoleDto),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error),
+        (status = 404, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn update_role(
@@ -576,10 +576,10 @@ pub async fn update_role(
     ),
     responses(
         (status = 204),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error),
+        (status = 404, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn delete_role(
@@ -658,10 +658,10 @@ pub async fn delete_role(
     ),
     responses(
         (status = 200, body = UserRoleAssignmentsResponse),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error),
+        (status = 404, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn list_user_role_assignments(
@@ -730,24 +730,24 @@ pub async fn list_user_role_assignments(
     post,
     path = "/admin/users/{user_id}/roles",
     tag = "admin",
-    request_body = UserRoleAssignmentRequest,
+    request_body = UserRoleAssignmentInput,
     params(
         ("user_id" = Uuid, Path, description = "User id")
     ),
     responses(
         (status = 201, body = UserRoleAssignmentDto),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse),
-        (status = 409, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error),
+        (status = 404, content_type = "application/json", body = Error),
+        (status = 409, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn assign_role_to_user(
     claims: Claims,
     State(app_state): State<SharedState>,
     Path(user_id): Path<Uuid>,
-    Json(req): Json<UserRoleAssignmentRequest>,
+    Json(req): Json<UserRoleAssignmentInput>,
 ) -> Result<(StatusCode, Json<UserRoleAssignmentDto>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
 
@@ -864,10 +864,10 @@ pub async fn assign_role_to_user(
     ),
     responses(
         (status = 204),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error),
+        (status = 404, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn remove_role_from_user(

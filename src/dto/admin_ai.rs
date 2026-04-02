@@ -4,7 +4,7 @@ use utoipa::ToSchema;
 use crate::models::ai_engines::ApiKeyStatus;
 
 #[derive(Deserialize,ToSchema)]
- pub struct AiEngineUpdateRequest{
+pub struct AIEngineUpdate {
     pub is_enabled:Option<bool>,
     pub api_key:Option<String>,
     pub whitelisted_models:Option<Vec<String>>,
@@ -12,7 +12,7 @@ use crate::models::ai_engines::ApiKeyStatus;
 }
 
 #[derive(Serialize,ToSchema)]
- pub struct AiEngineResponse{
+pub struct AIEngineDetail{
      pub icon:Option<String>,
      pub icon_dark:Option<String>,
      pub engine_key:String,
@@ -29,7 +29,7 @@ use crate::models::ai_engines::ApiKeyStatus;
   }
 
 #[derive(Serialize,ToSchema)]
- pub struct AiEngineValidationResponse {
+pub struct AIEngineValidation {
      pub valid:bool,
      pub message:String,
      pub models_available:i64,
@@ -37,7 +37,7 @@ use crate::models::ai_engines::ApiKeyStatus;
 
 
 #[derive(Serialize,ToSchema)]
-pub struct AiEngineModelsResponse {
+pub struct AIEngineModels {
     pub models: Vec<AiModel>,
 }
 

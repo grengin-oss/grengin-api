@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::{
     auth::{
         claims::Claims,
-        error::{AuthError, AuthErrorResponse},
+        error::{AuthError, Error},
         permissions::PERMISSION_AI_PLATFORM_MANAGE,
     },
     dto::admin_embedding::{EmbeddingConfigResponse, EmbeddingConfigUpdateRequest},
@@ -90,9 +90,9 @@ async fn model_to_response(
     tag = "admin",
     responses(
        (status = 200, body = EmbeddingConfigResponse),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Permission denied"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 403, content_type = "application/json", body = Error, description = "Permission denied"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn get_embedding_config(
@@ -121,9 +121,9 @@ pub async fn get_embedding_config(
     request_body = EmbeddingConfigUpdateRequest,
     responses(
        (status = 200, body = EmbeddingConfigResponse),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Permission denied"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 403, content_type = "application/json", body = Error, description = "Permission denied"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn update_embedding_config(

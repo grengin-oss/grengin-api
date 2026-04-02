@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use crate::models::users::UserStatus;
 
 #[derive(Serialize, ToSchema)]
-pub struct AuthInitResponse {
+pub struct AuthInit {
     /// URL to redirect user for authentication
     #[schema(format = "uri")]
     pub auth_url: String,
@@ -14,13 +14,13 @@ pub struct AuthInitResponse {
 }
 
 #[derive(Serialize,Deserialize, IntoParams, ToSchema)]
-pub struct RefreshTokenRequest {
+pub struct RefreshToken {
     pub refresh_token: String,
 }
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct AuthTokenResponse {
+pub struct AuthToken {
     /// JWT access token
     pub access_token: String,
     /// Always "Bearer"
@@ -32,6 +32,7 @@ pub struct AuthTokenResponse {
     pub refresh_token: Option<String>,
     /// User profile
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(inline)]
     pub user: Option<User>,
 }
 

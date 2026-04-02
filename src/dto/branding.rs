@@ -3,7 +3,7 @@ use utoipa::ToSchema;
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct BrandingResponse {
+pub struct Branding {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logo_url: Option<String>,

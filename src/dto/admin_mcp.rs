@@ -7,14 +7,14 @@ use crate::models::mcp_access_policies::{McpAccessType, McpPermission};
 use crate::models::mcp_servers::McpDefaultAccess;
 
 #[derive(Serialize, ToSchema)]
-pub struct McpServerAccessResponse {
+pub struct McpServerAccess {
     pub server_id: Uuid,
     pub default_access: McpDefaultAccess,
     pub rules: Vec<McpAccessRule>,
 }
 
 #[derive(Deserialize, ToSchema)]
-pub struct McpAccessDefaultRequest {
+pub struct McpAccessDefault {
     pub default_access: McpDefaultAccess,
 }
 

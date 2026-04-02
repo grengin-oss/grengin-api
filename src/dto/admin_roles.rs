@@ -59,7 +59,7 @@ pub struct UserRoleAssignmentsResponse {
 }
 
 #[derive(Deserialize, ToSchema)]
-pub struct UserRoleAssignmentRequest {
+pub struct UserRoleAssignmentInput {
     pub role_id: Uuid,
     pub scope_department_id: Option<Uuid>,
 }

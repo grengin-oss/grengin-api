@@ -11,7 +11,7 @@ use sea_orm::sea_query::Expr;
 use uuid::Uuid;
 
 use crate::{
-    auth::{claims::Claims, error::{AuthError, AuthErrorResponse}},
+    auth::{claims::Claims, error::{AuthError, Error}},
     dto::notifications::{NotificationDto, NotificationsListQuery, NotificationsListResponse},
     error::AppError,
     models::notifications,
@@ -32,8 +32,8 @@ use crate::{
     ),
     responses(
         (status = 200, body = NotificationsListResponse),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse),
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error),
     )
 )]
 pub async fn list_my_notifications(
@@ -93,9 +93,9 @@ pub async fn list_my_notifications(
     ),
     responses(
         (status = 204, description = "Marked as read"),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse),
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 404, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error),
     )
 )]
 pub async fn mark_notification_read(
@@ -127,7 +127,7 @@ pub async fn mark_notification_read(
     tag = "me",
     responses(
         (status = 200, content_type = "text/event-stream", body = NotificationDto),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse)
+        (status = 401, content_type = "application/json", body = Error)
     )
 )]
 pub async fn stream_my_notifications(

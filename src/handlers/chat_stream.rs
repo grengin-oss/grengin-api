@@ -14,12 +14,12 @@ use tokio::time::Instant;
 use uuid::Uuid;
 use rust_decimal::prelude::FromPrimitive;
 use crate::{
-    auth::{claims::Claims, error::AuthErrorResponse},
+    auth::{claims::Claims, error::Error},
     config::setting::{AnthropicSettings, OpenaiSettings},
     dto::{
         chat_stream::{
             BudgetWarningPayload,
-            ChatInitRequest,
+            ChatInput,
             ChatStream,
             ChatStreamEvents,
             ChatStreamEvent,
@@ -256,7 +256,7 @@ async fn build_mcp_oauth_prompt(
     params(
         ("chat_id" = Option<Uuid>, Path, description = "Optional Chat id to stream messages for exiting chat"),
     ),
-    request_body = ChatInitRequest,
+    request_body = ChatInput,
     responses(
     (status = 200, content_type = "text/event-stream", body = ChatStream,
       examples(
@@ -325,7 +325,7 @@ async fn build_mcp_oauth_prompt(
     ))
    )
    ),
-    (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+    (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
     (status = 400, content_type = "application/json", body = ErrorResponse, description = "Validation error (code=2002 empty messages)"),
     (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003) or budget exceeded (code=6001)"),
     (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found / DB not found (code=5003)"),
@@ -339,7 +339,7 @@ pub async fn handle_chat_stream_path_doc(){}
     post,
     path = "/chat/stream",
     tag = "chat",
-    request_body = ChatInitRequest,
+    request_body = ChatInput,
     responses(
     (status = 200, content_type = "text/event-stream", body = ChatStream,
       examples(
@@ -408,7 +408,7 @@ pub async fn handle_chat_stream_path_doc(){}
     ))
    )
    ),
-    (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+    (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
     (status = 400, content_type = "application/json", body = ErrorResponse, description = "Validation error (code=2002 empty messages)"),
     (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003) or budget exceeded (code=6001)"),
     (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found / DB not found (code=5003)"),
@@ -421,7 +421,7 @@ pub async fn handle_chat_stream(
   claims:Claims,
   mut chat_id:Option<Path<Uuid>>,
   State(app_state): State<SharedState>,
-  Json(req):Json<ChatInitRequest>
+  Json(req):Json<ChatInput>
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>,AppError>{
  let start = Instant::now();
  let provider = req.provider.clone().unwrap_or_else(|| "openai".to_string());

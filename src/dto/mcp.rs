@@ -175,7 +175,7 @@ pub struct McpTool {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct McpToolsList {
+pub struct McpTools {
     pub tools: Vec<McpTool>,
     pub total: i64,
 }
@@ -248,7 +248,7 @@ pub struct McpServerAccessUpdate {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct McpToolAccessList {
+pub struct McpToolAccess {
     pub tool_id: Uuid,
     pub tool_name: String,
     pub server_id: Uuid,
@@ -311,11 +311,11 @@ pub struct McpEffectiveAccessResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BulkToolAccessUpdateResponse {
     pub updated_count: usize,
-    pub tools: Vec<McpToolAccessList>,
+    pub tools: Vec<McpToolAccess>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct McpUserConnectionsList {
+pub struct McpUserConnections {
     pub connections: Vec<McpUserConnection>,
 }
 
@@ -331,20 +331,20 @@ pub struct McpUserConnection {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct McpAuthorizeResponse {
+pub struct McpAuthorize {
     pub success: bool,
     pub authorization_url: Option<String>,
     pub message: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct McpDisconnectResponse {
+pub struct McpDisconnect {
     pub success: bool,
     pub message: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct McpOauthCallbackResponse {
+pub struct McpOauthCallback {
     pub success: bool,
     pub server_id: Uuid,
     pub status: String,

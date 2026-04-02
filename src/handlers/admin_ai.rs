@@ -4,7 +4,7 @@ use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
 use std::collections::HashSet;
-use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}, permissions::{PERMISSION_AI_PLATFORM_MANAGE, PERMISSION_AI_PLATFORM_VIEW}}, dto::{admin_ai::{AiEngineModelsResponse, AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel, AiModelCapabilities}, models::ModelsResponse}, handlers::models::load_providers_cached, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}}, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
+use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, Error}, permissions::{PERMISSION_AI_PLATFORM_MANAGE, PERMISSION_AI_PLATFORM_VIEW}}, dto::{admin_ai::{AIEngineModels, AIEngineDetail, AIEngineUpdate, AIEngineValidation, AiModel, AiModelCapabilities}, models::ModelsResponse}, handlers::models::load_providers_cached, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}}, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
 
 async fn load_models_response(app_state: &SharedState) -> Result<ModelsResponse, AuthError> {
     let providers = load_providers_cached(&app_state.req_client)
@@ -21,15 +21,15 @@ async fn load_models_response(app_state: &SharedState) -> Result<ModelsResponse,
     path = "/admin/ai-engines",
     tag = "admin",
     responses(
-       (status = 200, body = Vec<AiEngineResponse>),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+       (status = 200, body = Vec<AIEngineDetail>),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn get_ai_engines(
     claims:Claims,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode,Json<Vec<AiEngineResponse>>),AuthError>{
+) -> Result<(StatusCode,Json<Vec<AIEngineDetail>>),AuthError>{
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(
@@ -130,7 +130,7 @@ pub async fn get_ai_engines(
     let response = ai_engines
       .into_iter()
       .map(|model|{
-        AiEngineResponse{
+        AIEngineDetail{
             icon:ai_models.get_icons(&model.engine_key).0,
             icon_dark:ai_models.get_icons(&model.engine_key).1,
             engine_key:model.engine_key,
@@ -157,17 +157,17 @@ pub async fn get_ai_engines(
         ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
     ),
     responses(
-       (status = 200, body = AiEngineResponse),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Ai Engine not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+       (status = 200, body = AIEngineDetail),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = Error, description = "Ai Engine not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn get_ai_engines_by_key(
     claims:Claims,
     Path(ai_engine_key):Path<String>,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode,Json<AiEngineResponse>),AuthError>{
+) -> Result<(StatusCode,Json<AIEngineDetail>),AuthError>{
    let authz = AuthorizationService::new(&app_state.database);
    authz
         .ensure_permission(
@@ -189,7 +189,7 @@ pub async fn get_ai_engines_by_key(
         AuthError::DbTimeout
       })?
       .ok_or(AuthError::ResourceNotFound)?;
-    let response = AiEngineResponse{
+    let response = AIEngineDetail{
             icon:ai_models.get_icons(&model.engine_key).0,
             icon_dark:ai_models.get_icons(&model.engine_key).1,
             engine_key:model.engine_key,
@@ -215,10 +215,10 @@ pub async fn get_ai_engines_by_key(
         ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
     ),
     responses(
-       (status = 200, body = AiEngineModelsResponse),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Ai Engine not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+       (status = 200, body = AIEngineModels),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = Error, description = "Ai Engine not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
 
     )
 )]
@@ -226,7 +226,7 @@ pub async fn get_ai_engine_models_by_key(
     claims:Claims,
     Path(ai_engine_key):Path<String>,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode,Json<AiEngineModelsResponse>),AuthError>{
+) -> Result<(StatusCode,Json<AIEngineModels>),AuthError>{
    let authz = AuthorizationService::new(&app_state.database);
    authz
         .ensure_permission(
@@ -247,7 +247,7 @@ pub async fn get_ai_engine_models_by_key(
         AuthError::DbTimeout
       })?
       .ok_or(AuthError::ResourceNotFound)?;
-    let mut response = AiEngineModelsResponse{ 
+    let mut response = AIEngineModels{ 
       models:Vec::new()
     };
    let ai_models = load_models_response(&app_state).await?;
@@ -280,10 +280,10 @@ pub async fn get_ai_engine_models_by_key(
         ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
     ),
     responses(
-        (status = 200, body = AiEngineResponse),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Ai Engine not found (code=5003)"),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+        (status = 200, body = AIEngineDetail),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+        (status = 404, content_type = "application/json", body = Error, description = "Ai Engine not found (code=5003)"),
+        (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
 
     )
 )]
@@ -291,8 +291,8 @@ pub async fn update_ai_engines_by_key(
     claims:Claims,
     Path(ai_engine_key):Path<String>,
     State(app_state): State<SharedState>,
-    Json(req):Json<AiEngineUpdateRequest>
-) -> Result<(StatusCode,Json<AiEngineResponse>),AuthError>{
+    Json(req):Json<AIEngineUpdate>
+) -> Result<(StatusCode,Json<AIEngineDetail>),AuthError>{
    let authz = AuthorizationService::new(&app_state.database);
    authz
         .ensure_permission(
@@ -374,7 +374,7 @@ pub async fn update_ai_engines_by_key(
             AuthError::DbTimeout
         })?;
     let _ = validate_ai_engines_by_key(claims,Path(ai_engine_key),State(app_state.clone()));
-    let response = AiEngineResponse{
+    let response = AIEngineDetail{
             icon:ai_models.get_icons(&model.engine_key).0,
             icon_dark:ai_models.get_icons(&model.engine_key).1,
             engine_key:model.engine_key,
@@ -400,17 +400,17 @@ pub async fn update_ai_engines_by_key(
         ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
     ),
     responses(
-       (status = 200, body = AiEngineResponse),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Ai Engine not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+       (status = 200, body = AIEngineDetail),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = Error, description = "Ai Engine not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn delete_ai_engines_api_key_key(
     claims:Claims,
     Path(ai_engine_key):Path<String>,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode,Json<AiEngineResponse>),AuthError>{
+) -> Result<(StatusCode,Json<AIEngineDetail>),AuthError>{
    let authz = AuthorizationService::new(&app_state.database);
    authz
         .ensure_permission(
@@ -461,7 +461,7 @@ pub async fn delete_ai_engines_api_key_key(
         eprintln!("db error model parse error {e}");
         AuthError::DbTimeout
       })?;
-      let response = AiEngineResponse{
+      let response = AIEngineDetail{
             icon:ai_models.get_icons(&model.engine_key).0,
             icon_dark:ai_models.get_icons(&model.engine_key).1,
             engine_key:model.engine_key,
@@ -487,7 +487,7 @@ pub async fn delete_ai_engines_api_key_key(
         ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
     ),
     responses(
-        (status = 200, body = AiEngineValidationResponse),
+        (status = 200, body = AIEngineValidation),
         (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
     )
 )]
@@ -495,7 +495,7 @@ pub async fn validate_ai_engines_by_key(
     claims:Claims,
     Path(ai_engine_key):Path<String>,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode,Json<AiEngineValidationResponse>),AuthError>{
+) -> Result<(StatusCode,Json<AIEngineValidation>),AuthError>{
    let authz = AuthorizationService::new(&app_state.database);
    authz
         .ensure_permission(
@@ -574,7 +574,7 @@ pub async fn validate_ai_engines_by_key(
    }else{
      (false,format!("API key is incorrect for {ai_engine_key}."))
    };
-   let response = AiEngineValidationResponse{ 
+   let response = AIEngineValidation{ 
       valid,
       message,
       models_available:ai_engine.whitelist_models.len() as i64,

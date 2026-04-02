@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     auth::{
         claims::Claims,
-        error::{AuthError, AuthErrorResponse},
+        error::{AuthError, Error},
         permissions::{
             PERMISSION_DEPARTMENTS_MANAGE, PERMISSION_DEPARTMENTS_VIEW, PERMISSION_ROLES_ASSIGN,
             PERMISSION_USERS_VIEW, ROLE_DEPARTMENT_ADMIN,
@@ -19,11 +19,11 @@ use crate::{
     dto::{
         admin_department::{
             DepartmentListQuery, DepartmentMembersResponse, DepartmentMemeberListQuery,
-            DepartmentRequest, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery,
-            DepartmentTreeResponse, DepartmentUpdateRequest, DepartmentsListResponse,
-            MoveDepartmentRequest, RoleAssignmentPayload,
+            DepartmentCreate, Department, DepartmentTreeNode, DepartmentTreeQuery,
+            DepartmentTree, DepartmentUpdate, DepartmentsListResponse,
+            DepartmentMove, RoleAssignmentPayload,
         },
-        admin_user::UserDetails,
+        admin_user::User,
         common::SortRule,
     },
     models::{
@@ -372,19 +372,19 @@ pub(crate) async fn department_budget_snapshot(
     post,
     path = "/admin/departments",
     tag = "admin",
-    request_body = DepartmentRequest,
+    request_body = DepartmentCreate,
     responses(
-       (status = 201, body = DepartmentResponse),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Parent department not found"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse),
+       (status = 201, body = Department),
+       (status = 401, content_type = "application/json", body = Error),
+       (status = 404, content_type = "application/json", body = Error, description = "Parent department not found"),
+       (status = 503, content_type = "application/json", body = Error),
     )
 )]
 pub async fn create_department(
     claims: Claims,
     State(app_state): State<SharedState>,
-    Json(req): Json<DepartmentRequest>,
-) -> Result<(StatusCode,Json<DepartmentResponse>), AuthError> {
+    Json(req): Json<DepartmentCreate>,
+) -> Result<(StatusCode,Json<Department>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(
@@ -499,9 +499,9 @@ pub(crate) struct ChildCountRow {
     ),
     responses(
        (status = 200, body = DepartmentsListResponse),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse),
+       (status = 401, content_type = "application/json", body = Error),
+       (status = 404, content_type = "application/json", body = Error),
+       (status = 503, content_type = "application/json", body = Error),
     )
 )]
 pub async fn list_departments(
@@ -650,7 +650,7 @@ pub async fn list_departments(
         .await?;
         let admin_ids = admin_map.get(&d.id).cloned().unwrap_or_default();
 
-        departments.push(DepartmentResponse {
+        departments.push(Department {
             id: d.id,
             name: d.name,
             description: d.description,
@@ -683,18 +683,18 @@ pub async fn list_departments(
         ("max_depth" = Option<i32>, Query, description = "Default value : 10")
     ),
     responses(
-       (status = 200, body = DepartmentTreeResponse, description = "Department tree"),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Unauthorized"),
-       (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Forbidden - Admin role required"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Resource not found"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable")
+       (status = 200, body = DepartmentTree, description = "Department tree"),
+       (status = 401, content_type = "application/json", body = Error, description = "Unauthorized"),
+       (status = 403, content_type = "application/json", body = Error, description = "Forbidden - Admin role required"),
+       (status = 404, content_type = "application/json", body = Error, description = "Resource not found"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable")
     )
 )]
 pub async fn get_departments_tree(
     claims: Claims,
     State(app_state): State<SharedState>,
     Query(q): Query<DepartmentTreeQuery>,
-) -> Result<(StatusCode, Json<DepartmentTreeResponse>), AuthError> {
+) -> Result<(StatusCode, Json<DepartmentTree>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(
@@ -749,7 +749,7 @@ pub async fn get_departments_tree(
         })?;
 
     if rows.is_empty() {
-        return Ok((StatusCode::OK, Json(DepartmentTreeResponse { tree: vec![] })));
+        return Ok((StatusCode::OK, Json(DepartmentTree { tree: vec![] })));
     }
 
     let dept_ids: Vec<Uuid> = rows.iter().map(|d| d.id).collect();
@@ -863,28 +863,28 @@ pub async fn get_departments_tree(
         }
     }
 
-    Ok((StatusCode::OK, Json(DepartmentTreeResponse { tree })))
+    Ok((StatusCode::OK, Json(DepartmentTree { tree })))
 }
 
 #[utoipa::path(
     get,
-    path = "/admin/department/{department_id}",
+    path = "/admin/departments/{department_id}",
     tag = "admin",
     params(
         ("department_id" = Uuid, Path, description = "Department id")
     ),
     responses(
-       (status = 200, body = DepartmentResponse),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse),
+       (status = 200, body = Department),
+       (status = 401, content_type = "application/json", body = Error),
+       (status = 404, content_type = "application/json", body = Error),
+       (status = 503, content_type = "application/json", body = Error),
     )
 )]
 pub async fn get_department_by_id(
     claims: Claims,
     State(app_state): State<SharedState>,
     Path(department_id): Path<Uuid>,
-) -> Result<(StatusCode, Json<DepartmentResponse>), AuthError> {
+) -> Result<(StatusCode, Json<Department>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(
@@ -971,7 +971,7 @@ pub async fn get_department_by_id(
     )
     .await?;
 
-    let resp = DepartmentResponse {
+    let resp = Department {
         id: dept.id,
         name: dept.name,
         description: dept.description,
@@ -997,20 +997,20 @@ pub async fn get_department_by_id(
 #[utoipa::path( 
     put, path = "/admin/departments/{department_id}",
     tag = "admin", params( ("department_id" = Uuid, Path, description = "Department id") ),
-    request_body = DepartmentUpdateRequest,
+    request_body = DepartmentUpdate,
     responses( 
-        (status = 200, body = DepartmentResponse),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse), 
+        (status = 200, body = Department),
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 404, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error), 
     ) 
 )]
 pub async fn update_department(
     claims: Claims,
     State(app_state): State<SharedState>,
     Path(department_id): Path<Uuid>,
-    Json(req): Json<DepartmentUpdateRequest>,
-) -> Result<(StatusCode, Json<DepartmentResponse>), AuthError> {
+    Json(req): Json<DepartmentUpdate>,
+) -> Result<(StatusCode, Json<Department>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(
@@ -1182,22 +1182,22 @@ pub async fn update_department(
     params(
         ("department_id" = Uuid, Path, description = "Department id")
     ),
-    request_body = MoveDepartmentRequest,
+    request_body = DepartmentMove,
     responses(
-        (status = 200, body = DepartmentResponse, description = "Department moved successfully"),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Forbidden - Admin role required"),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse),
-        (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "Invalid move target"),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse),
+        (status = 200, body = Department, description = "Department moved successfully"),
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error, description = "Forbidden - Admin role required"),
+        (status = 404, content_type = "application/json", body = Error),
+        (status = 409, content_type = "application/json", body = Error, description = "Invalid move target"),
+        (status = 503, content_type = "application/json", body = Error),
     )
 )]
 pub async fn move_department(
     claims: Claims,
     State(app_state): State<SharedState>,
     Path(department_id): Path<Uuid>,
-    Json(req): Json<MoveDepartmentRequest>,
-) -> Result<(StatusCode, Json<DepartmentResponse>), AuthError> {
+    Json(req): Json<DepartmentMove>,
+) -> Result<(StatusCode, Json<Department>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(
@@ -1333,9 +1333,9 @@ pub async fn move_department(
     ),
     responses(
        (status = 204, description = "Deleted"),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse),
+       (status = 401, content_type = "application/json", body = Error),
+       (status = 404, content_type = "application/json", body = Error),
+       (status = 503, content_type = "application/json", body = Error),
     )
 )]
 pub async fn delete_department(
@@ -1385,10 +1385,10 @@ pub async fn delete_department(
         ("department_id" = Uuid, Path, description = "Department id")
     ),
     responses(
-       (status = 200, body = DepartmentResponse),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse),
+       (status = 200, body = Department),
+       (status = 401, content_type = "application/json", body = Error),
+       (status = 404, content_type = "application/json", body = Error),
+       (status = 503, content_type = "application/json", body = Error),
     )
 )]
 pub async fn add_users_in_department(
@@ -1396,7 +1396,7 @@ pub async fn add_users_in_department(
     State(app_state): State<SharedState>,
     Path(department_id): Path<Uuid>,
     Json(user_ids):Json<Vec<Uuid>>,
-) -> Result<(StatusCode,Json<DepartmentResponse>), AuthError> {
+) -> Result<(StatusCode,Json<Department>), AuthError> {
      let authz = AuthorizationService::new(&app_state.database);
      authz
         .ensure_permission(
@@ -1435,10 +1435,10 @@ pub async fn add_users_in_department(
         ("department_id" = Uuid, Path, description = "Department id"),
     ),
     responses(
-       (status = 200, body = DepartmentResponse),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse),
+       (status = 200, body = Department),
+       (status = 401, content_type = "application/json", body = Error),
+       (status = 404, content_type = "application/json", body = Error),
+       (status = 503, content_type = "application/json", body = Error),
     )
 )]
 pub async fn remove_users_from_department(
@@ -1447,7 +1447,7 @@ pub async fn remove_users_from_department(
     Path(department_id): Path<Uuid>,
     Query(query):Query<DepartmentMemeberListQuery>,
     Json(user_ids):Json<Vec<Uuid>>,
-) -> Result<(StatusCode,Json<DepartmentResponse>), AuthError> {
+) -> Result<(StatusCode,Json<Department>), AuthError> {
      let authz = AuthorizationService::new(&app_state.database);
      authz
         .ensure_permission(
@@ -1522,9 +1522,9 @@ app_state
     ),
     responses(
        (status = 200, body = DepartmentMembersResponse),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse),
+       (status = 401, content_type = "application/json", body = Error),
+       (status = 404, content_type = "application/json", body = Error),
+       (status = 503, content_type = "application/json", body = Error),
     )
 )]
 pub async fn get_users_from_department(
@@ -1638,7 +1638,7 @@ pub async fn get_users_from_department(
        .map(|user| {
         let roles = roles_map.get(&user.id).cloned().unwrap_or_default();
         let is_super_admin = roles.iter().any(|r| r == "Super Admin");
-        UserDetails{ 
+        User{ 
             id:user.id,
             sub: user.azure_id.unwrap_or(user.google_id.unwrap_or(user.email.clone())),
             email:user.email,

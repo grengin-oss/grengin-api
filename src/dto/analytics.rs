@@ -65,7 +65,7 @@ pub struct TimeSeriesQuery {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct OverviewResponse {
+pub struct AnalyticsOverview {
     pub total_users: i64,
     pub active_users: i64,
     pub total_requests: i64,
@@ -88,7 +88,7 @@ pub struct ModelUsage {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct UserAnalytics {
+pub struct UserAnalyticsItem {
     pub user_id: Uuid,
     pub user_email: String,
     pub user_name: Option<String>,
@@ -104,8 +104,9 @@ pub struct UserAnalytics {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct UserAnalyticsResponse {
-    pub users: Vec<UserAnalytics>,
+pub struct UserAnalytics {
+    #[schema(inline)]
+    pub users: Vec<UserAnalyticsItem>,
     pub total: i64,
     pub page: u64,
     pub limit: u64,
@@ -113,7 +114,7 @@ pub struct UserAnalyticsResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct DepartmentAnalytics {
+pub struct DepartmentAnalyticsItem {
     pub department: String,
     pub total_users: i64,
     pub total_requests: i64,
@@ -125,8 +126,9 @@ pub struct DepartmentAnalytics {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct DepartmentAnalyticsResponse {
-    pub departments: Vec<DepartmentAnalytics>,
+pub struct DepartmentAnalytics {
+    #[schema(inline)]
+    pub departments: Vec<DepartmentAnalyticsItem>,
     pub total: i64,
     pub limit: u64,
     pub offset: u64,
@@ -145,7 +147,7 @@ pub struct TimeSeriesDataPoint {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct TimeSeriesResponse {
+pub struct AnalyticsTimeSeries {
     pub data: Vec<TimeSeriesDataPoint>,
     pub granularity: String,
 }

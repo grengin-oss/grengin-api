@@ -8,12 +8,12 @@ use sea_orm::DatabaseConnection;
 use crate::{
     auth::{
         claims::Claims,
-        error::{AuthError, AuthErrorResponse},
+        error::{AuthError, Error},
         permissions::PERMISSION_ANALYTICS_VIEW,
     },
     dto::analytics::{
-        AnalyticsQuery, DepartmentAnalyticsQuery, DepartmentAnalyticsResponse, OverviewResponse,
-        TimeSeriesQuery, TimeSeriesResponse, UserAnalyticsQuery, UserAnalyticsResponse,
+        AnalyticsQuery, DepartmentAnalyticsQuery, DepartmentAnalytics, AnalyticsOverview,
+        TimeSeriesQuery, AnalyticsTimeSeries, UserAnalyticsQuery, UserAnalytics,
     },
     models::users::UserStatus,
     services::{
@@ -33,19 +33,19 @@ use crate::{
         ("live" = Option<bool>, Query, description = "Bypass cache and fetch live data"),
     ),
     responses(
-        (status = 200, description = "Dashboard overview statistics", body = OverviewResponse),
+        (status = 200, description = "Dashboard overview statistics", body = AnalyticsOverview),
 
-        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Missing credentials (code=6102)"),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired access token (code=6103)"),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Permission denied (code=6300)"),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
+        (status = 400, content_type = "application/json", body = Error, description = "Missing credentials (code=6102)"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired access token (code=6103)"),
+        (status = 403, content_type = "application/json", body = Error, description = "Permission denied (code=6300)"),
+        (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn get_analytics_overview(
     claims: Claims,
     Query(query): Query<AnalyticsQuery>,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode, Json<OverviewResponse>), AuthError> {
+) -> Result<(StatusCode, Json<AnalyticsOverview>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(
@@ -90,18 +90,18 @@ pub async fn get_analytics_overview(
         ("live" = Option<bool>, Query, description = "Bypass cache and fetch live data"),
     ),
     responses(
-        (status = 200, description = "User analytics with pagination", body = UserAnalyticsResponse),
-        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Missing credentials (code=6102)"),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired access token (code=6103)"),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Permission denied (code=6300)"),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
+        (status = 200, description = "User analytics with pagination", body = UserAnalytics),
+        (status = 400, content_type = "application/json", body = Error, description = "Missing credentials (code=6102)"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired access token (code=6103)"),
+        (status = 403, content_type = "application/json", body = Error, description = "Permission denied (code=6300)"),
+        (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn get_user_analytics(
     claims: Claims,
     Query(query): Query<UserAnalyticsQuery>,
     State(app_state): State<SharedState>,
-) -> Result<(axum::http::StatusCode, Json<UserAnalyticsResponse>), AuthError> {
+) -> Result<(axum::http::StatusCode, Json<UserAnalytics>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(
@@ -135,19 +135,19 @@ pub async fn get_user_analytics(
         ("live" = Option<bool>, Query, description = "Bypass cache and fetch live data"),
     ),
     responses(
-        (status = 200, description = "Department analytics", body = DepartmentAnalyticsResponse),
+        (status = 200, description = "Department analytics", body = DepartmentAnalytics),
 
-        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Missing credentials (code=6102)"),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired access token (code=6103)"),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Permission denied (code=6300)"),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
+        (status = 400, content_type = "application/json", body = Error, description = "Missing credentials (code=6102)"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired access token (code=6103)"),
+        (status = 403, content_type = "application/json", body = Error, description = "Permission denied (code=6300)"),
+        (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn get_department_analytics(
     claims: Claims,
     Query(query): Query<DepartmentAnalyticsQuery>,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode, Json<DepartmentAnalyticsResponse>), AuthError> {
+) -> Result<(StatusCode, Json<DepartmentAnalytics>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(
@@ -181,18 +181,18 @@ pub async fn get_department_analytics(
         ("live" = Option<bool>, Query, description = "Bypass cache and fetch live data"),
     ),
     responses(
-        (status = 200, description = "Time series analytics data", body = TimeSeriesResponse),
-        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Missing credentials (code=6102)"),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired access token (code=6103)"),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Permission denied (code=6300)"),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
+        (status = 200, description = "Time series analytics data", body = AnalyticsTimeSeries),
+        (status = 400, content_type = "application/json", body = Error, description = "Missing credentials (code=6102)"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired access token (code=6103)"),
+        (status = 403, content_type = "application/json", body = Error, description = "Permission denied (code=6300)"),
+        (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn get_timeseries_analytics(
     claims: Claims,
     Query(query): Query<TimeSeriesQuery>,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode, Json<TimeSeriesResponse>), AuthError> {
+) -> Result<(StatusCode, Json<AnalyticsTimeSeries>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(

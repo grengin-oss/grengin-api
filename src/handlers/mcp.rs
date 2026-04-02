@@ -17,19 +17,19 @@ use crate::{
     auth::{
         claims::Claims,
         encryption::encrypt_key,
-        error::{AuthError, AuthErrorResponse},
+        error::{AuthError, Error},
         permissions::{PERMISSION_MCP_ADMIN, PERMISSION_MCP_DELEGATE, PERMISSION_MCP_VIEW},
     },
     error::AppError,
     dto::mcp::{
         BulkToolAccessUpdate, BulkToolAccessUpdateResponse, ListExecutionsQuery, ListServersQuery,
-        ListPublicMcpServersQuery, ListToolsQuery, McpAuthorizeQuery, McpAuthorizeResponse,
+        ListPublicMcpServersQuery, ListToolsQuery, McpAuthorizeQuery, McpAuthorize,
         McpOauthCallbackQuery, McpServer, McpServerAccessList,
         McpServerAccessUpdate, McpServerCreate, McpServerTestResult, McpServerUpdate, McpSyncResult,
-        McpTool, McpToolAccessList, McpToolAccessUpdate, McpToolsList, McpToolSummary,
-        McpUserConnection, McpUserConnectionsList, McpServerCatalogResponse,
+        McpTool, McpToolAccess, McpToolAccessUpdate, McpTools, McpToolSummary,
+        McpUserConnection, McpUserConnections, McpServerCatalogResponse,
         McpServerCatalogEntry, PaginatedMcpServers, PaginatedMcpToolExecutions,
-        McpDisconnectResponse, McpOauthCallbackResponse, McpEffectiveAccessResponse,
+        McpDisconnect, McpOauthCallback, McpEffectiveAccessResponse,
         McpEffectiveServerAccess, McpEffectiveToolAccess,
     },
     models::{
@@ -963,14 +963,14 @@ pub async fn update_mcp_server_access(
         ("server_id" = Uuid, Path, description = "MCP server id")
     ),
     responses(
-        (status = 200, body = Vec<McpToolAccessList>)
+        (status = 200, body = Vec<McpToolAccess>)
     )
 )]
 pub async fn get_mcp_server_tools_access(
     claims: Claims,
     State(state): State<SharedState>,
     Path(server_id): Path<Uuid>,
-) -> Result<Json<Vec<McpToolAccessList>>, AuthError> {
+) -> Result<Json<Vec<McpToolAccess>>, AuthError> {
     let authz = AuthorizationService::new(&state.database);
     authz
         .ensure_permission(
@@ -1003,7 +1003,7 @@ pub async fn get_mcp_server_tools_access(
         let rule_dtos = build_access_rule_dtos(&state.database, rules)
             .await
             .map_err(|_| AuthError::DbTimeout)?;
-        result.push(McpToolAccessList {
+        result.push(McpToolAccess {
             tool_id: tool.id,
             tool_name: tool.name.clone(),
             server_id: tool.server_id,
@@ -1106,7 +1106,7 @@ pub async fn update_mcp_server_tools_access(
             let rule_dtos = build_access_rule_dtos(&state.database, rules)
                 .await
                 .map_err(|_| AuthError::DbTimeout)?;
-            updated.push(McpToolAccessList {
+            updated.push(McpToolAccess {
                 tool_id: tool.id,
                 tool_name: tool.name,
                 server_id: tool.server_id,
@@ -1129,14 +1129,14 @@ pub async fn update_mcp_server_tools_access(
         ("tool_id" = Uuid, Path, description = "MCP tool id")
     ),
     responses(
-        (status = 200, body = McpToolAccessList)
+        (status = 200, body = McpToolAccess)
     )
 )]
 pub async fn get_mcp_tool_access(
     claims: Claims,
     State(state): State<SharedState>,
     Path(tool_id): Path<Uuid>,
-) -> Result<Json<McpToolAccessList>, AuthError> {
+) -> Result<Json<McpToolAccess>, AuthError> {
     let authz = AuthorizationService::new(&state.database);
     authz
         .ensure_permission(
@@ -1164,7 +1164,7 @@ pub async fn get_mcp_tool_access(
     let rule_dtos = build_access_rule_dtos(&state.database, rules)
         .await
         .map_err(|_| AuthError::DbTimeout)?;
-    Ok(Json(McpToolAccessList {
+    Ok(Json(McpToolAccess {
         tool_id,
         tool_name: tool.name,
         server_id: tool.server_id,
@@ -1182,7 +1182,7 @@ pub async fn get_mcp_tool_access(
         ("tool_id" = Uuid, Path, description = "MCP tool id")
     ),
     responses(
-        (status = 200, body = McpToolAccessList)
+        (status = 200, body = McpToolAccess)
     )
 )]
 pub async fn update_mcp_tool_access(
@@ -1190,7 +1190,7 @@ pub async fn update_mcp_tool_access(
     State(state): State<SharedState>,
     Path(tool_id): Path<Uuid>,
     Json(req): Json<McpToolAccessUpdate>,
-) -> Result<Json<McpToolAccessList>, AuthError> {
+) -> Result<Json<McpToolAccess>, AuthError> {
     let authz = AuthorizationService::new(&state.database);
     authz
         .ensure_permission(
@@ -1265,13 +1265,13 @@ pub async fn update_mcp_tool_access(
         ("search" = Option<String>, Query, description = "Search by tool name or description")
     ),
     responses(
-        (status = 200, body = McpToolsList)
+        (status = 200, body = McpTools)
     )
 )]
 pub async fn list_mcp_tools(
     State(state): State<SharedState>,
     Query(query): Query<ListToolsQuery>,
-) -> Result<Json<McpToolsList>, AppError> {
+) -> Result<Json<McpTools>, AppError> {
     let mut finder = mcp_tools::Entity::find().filter(mcp_tools::Column::Enabled.eq(true));
     if let Some(server) = query.server_id {
         finder = finder.filter(mcp_tools::Column::ServerId.eq(server));
@@ -1292,7 +1292,7 @@ pub async fn list_mcp_tools(
               AppError::DbTimeout
            })?;
     let dto_tools: Vec<McpTool> = tools.iter().map(to_tool_dto).collect();
-    Ok(Json(McpToolsList {
+    Ok(Json(McpTools {
         tools: dto_tools,
         total: tools.len() as i64,
     }))
@@ -1303,13 +1303,13 @@ pub async fn list_mcp_tools(
     path = "/mcp/connections",
     tag = "mcp",
     responses(
-        (status = 200, body = McpUserConnectionsList)
+        (status = 200, body = McpUserConnections)
     )
 )]
 pub async fn list_mcp_connections(
     claims: Claims,
     State(state): State<SharedState>,
-) -> Result<Json<McpUserConnectionsList>, AppError> {
+) -> Result<Json<McpUserConnections>, AppError> {
     let rows = mcp_connections::Entity::find()
         .filter(mcp_connections::Column::UserId.eq(claims.user_id))
         .all(&state.database)
@@ -1332,7 +1332,7 @@ pub async fn list_mcp_connections(
                 .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok()),
         })
         .collect();
-    Ok(Json(McpUserConnectionsList { connections }))
+    Ok(Json(McpUserConnections { connections }))
 }
 
 #[utoipa::path(
@@ -1344,7 +1344,7 @@ pub async fn list_mcp_connections(
         ("redirect_uri" = Option<String>, Query, description = "Override callback redirect URI")
     ),
     responses(
-        (status = 200, body = McpAuthorizeResponse)
+        (status = 200, body = McpAuthorize)
     )
 )]
 pub async fn authorize_mcp_connection(
@@ -1352,7 +1352,7 @@ pub async fn authorize_mcp_connection(
     State(state): State<SharedState>,
     Path(server_id): Path<Uuid>,
     Query(query): Query<McpAuthorizeQuery>,
-) -> Result<Json<McpAuthorizeResponse>, AppError> {
+) -> Result<Json<McpAuthorize>, AppError> {
     let server = mcp_servers::Entity::find_by_id(server_id)
         .one(&state.database)
         .await
@@ -1399,7 +1399,7 @@ pub async fn authorize_mcp_connection(
             AppError::DbTimeout
         })?;
 
-    Ok(Json(McpAuthorizeResponse {
+    Ok(Json(McpAuthorize {
         success: true,
         authorization_url: Some(authorization.authorization_url),
         message: Some("Authorize via provided URL".into()),
@@ -1417,7 +1417,7 @@ pub async fn authorize_mcp_connection(
         ("error_description" = Option<String>, Query, description = "OAuth error description")
     ),
     responses(
-        (status = 200, body = McpOauthCallbackResponse)
+        (status = 200, body = McpOauthCallback)
     )
 )]
 pub async fn mcp_oauth_callback(
@@ -1525,7 +1525,7 @@ fn build_oauth_callback_response(
         ("server_id" = Uuid, Path, description = "MCP server id")
     ),
     responses(
-        (status = 200, body = McpDisconnectResponse)
+        (status = 200, body = McpDisconnect)
     )
 )]
 pub async fn disconnect_mcp_connection(
@@ -1546,9 +1546,9 @@ pub async fn disconnect_mcp_connection(
     tag = "mcp",
     responses(
         (status = 200, body = McpEffectiveAccessResponse),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn get_mcp_effective_access(

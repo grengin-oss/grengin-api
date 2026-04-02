@@ -13,7 +13,7 @@ pub struct SubDepartmentBudgetDto {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct DepartmentBudgetStatusDto {
+pub struct DepartmentBudgetStatus {
     pub department_id: Uuid,
     pub budget_allocated: f32,
     pub budget_distributed: f32,

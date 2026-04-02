@@ -62,7 +62,7 @@ impl Serialize for AuthErrorCode {
 }
 
 #[derive(Debug, SerdeSerialize, ToSchema)]
-pub struct AuthErrorResponse {
+pub struct Error {
     pub detail: AuthErrorDetailVariant,
 }
 
@@ -746,7 +746,7 @@ impl AuthError {
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let (status, detail) = self.to_detail();
-        let body = AuthErrorResponse {
+        let body = Error {
             detail: AuthErrorDetailVariant::Rich(detail),
         };
         (status, Json(body)).into_response()

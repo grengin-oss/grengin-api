@@ -6,8 +6,8 @@ use serde::{de::DeserializeOwned, Serialize};
 use uuid::Uuid;
 use crate::{
     dto::analytics::{
-        DepartmentAnalyticsQuery, DepartmentAnalyticsResponse, OverviewResponse, TimeSeriesQuery,
-        TimeSeriesResponse, UserAnalyticsQuery, UserAnalyticsResponse,
+        DepartmentAnalyticsQuery, DepartmentAnalytics, AnalyticsOverview, TimeSeriesQuery,
+        AnalyticsTimeSeries, UserAnalyticsQuery, UserAnalytics,
     },
     models::analytics,
     services::analytics as analytics_service,
@@ -206,7 +206,7 @@ pub async fn get_overview_cached(
     start_date: Option<NaiveDate>,
     end_date: Option<NaiveDate>,
     live: bool,
-) -> Result<OverviewResponse, DbErr> {
+) -> Result<AnalyticsOverview, DbErr> {
     if let Some(window) = cache_window_for_query(start_date, end_date) {
         let key = cache_key(CACHE_CATEGORY_OVERVIEW, &window.key, "");
         if !live {
@@ -231,7 +231,7 @@ pub async fn get_overview_cached(
 pub async fn get_user_analytics_cached(
     db: &DatabaseConnection,
     query: UserAnalyticsQuery,
-) -> Result<UserAnalyticsResponse, DbErr> {
+) -> Result<UserAnalytics, DbErr> {
     let page = query.page.unwrap_or(0);
     let limit = query.limit.unwrap_or(20);
     let live = query.live.unwrap_or(false);
@@ -257,7 +257,7 @@ pub async fn get_user_analytics_cached(
 pub async fn get_department_analytics_cached(
     db: &DatabaseConnection,
     query: DepartmentAnalyticsQuery,
-) -> Result<DepartmentAnalyticsResponse, DbErr> {
+) -> Result<DepartmentAnalytics, DbErr> {
     let mut limit = query.limit.unwrap_or(20);
     if limit == 0 {
         limit = 20;
@@ -301,7 +301,7 @@ pub async fn get_department_analytics_cached(
 pub async fn get_timeseries_analytics_cached(
     db: &DatabaseConnection,
     query: TimeSeriesQuery,
-) -> Result<TimeSeriesResponse, DbErr> {
+) -> Result<AnalyticsTimeSeries, DbErr> {
     let granularity = query.granularity.clone().unwrap_or_else(|| "day".to_string());
     let live = query.live.unwrap_or(false);
 

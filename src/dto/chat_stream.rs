@@ -162,7 +162,7 @@ pub struct ChatStreamWebSearchResultItem {
 }
 
 #[derive(Deserialize, ToSchema, IntoParams)]
-pub struct ChatInitRequest{
+pub struct ChatInput{
   pub provider: Option<String>,
   pub model_name: Option<String>,
   pub config: Option<serde_json::Value>,

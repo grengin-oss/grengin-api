@@ -1,15 +1,15 @@
-use crate::dto::{admin_sso_providers::SsoProvider};
+use crate::dto::{admin_sso_providers::SsoProviderTemplate};
 
-pub fn sso_providers_list() -> Vec<SsoProvider>{
+pub fn sso_providers_list() -> Vec<SsoProviderTemplate>{
    vec![
-      SsoProvider{ 
+      SsoProviderTemplate{ 
         name:"Google".to_string(),
         provider:"google".to_string(),
         issuer_url:"https://accounts.google.com".to_string(),
         tenant_id:None,
         redirect_url:format!("{}/auth/google/callback",std::env::var("REDIRECT_URL").unwrap_or("http://localhost:8080".to_string())), 
      },
-      SsoProvider{ 
+      SsoProviderTemplate{ 
         name:"Azure".to_string(),
         provider:"azure".to_string(),
         tenant_id:Some("common".to_string()),

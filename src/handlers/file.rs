@@ -6,7 +6,7 @@ use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TryIntoModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::AuthErrorResponse}, dto::{common::{PaginationQuery, SortRule}, files::{Attachment, File as FileLocal, FilePaginatedResponse, FileResponse, FileUploadRequest}}, error::{AppError, ErrorResponse}, models::files::{self, FileUploadStatus}, state::SharedState};
+use crate::{auth::{claims::Claims, error::Error as AuthErrorResponse}, dto::{common::{PaginationQuery, SortRule}, files::{Attachment, File as FileLocal, FilePaginatedResponse, FileResponse, FileUploadRequest}}, error::{AppError, ErrorResponse}, models::files::{self, FileUploadStatus}, state::SharedState};
 
 pub const LOCAL_FOLDER:&str = "/data/files";
 
