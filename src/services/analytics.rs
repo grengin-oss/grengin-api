@@ -5,9 +5,9 @@ use sea_orm::{ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, Fr
 use uuid::Uuid;
 use crate::{
     dto::analytics::{
-        DepartmentAnalytics, DepartmentAnalyticsQuery, DepartmentAnalyticsResponse, ModelUsage,
-        OverviewResponse, ScopedUserAnalyticsQuery, TimeSeriesDataPoint, TimeSeriesResponse,
-        UserAnalytics, UserAnalyticsQuery, UserAnalyticsResponse,
+        AnalyticsOverview, AnalyticsTimeSeries, DepartmentAnalytics, DepartmentAnalyticsItem,
+        DepartmentAnalyticsQuery, ModelUsage, ScopedUserAnalyticsQuery, TimeSeriesDataPoint,
+        UserAnalytics, UserAnalyticsItem, UserAnalyticsQuery,
     },
     models::{conversations, departments, messages::{self, ChatRole}, users::{self}},
     services::authorization::is_path_within_scope,
@@ -26,8 +26,8 @@ fn scope_condition(scope_paths: &[String]) -> Condition {
     cond
 }
 
-fn empty_user_analytics_response(page: u64, limit: u64) -> UserAnalyticsResponse {
-    UserAnalyticsResponse {
+fn empty_user_analytics_response(page: u64, limit: u64) -> UserAnalytics {
+    UserAnalytics {
         users: Vec::new(),
         total: 0,
         page,
@@ -36,8 +36,8 @@ fn empty_user_analytics_response(page: u64, limit: u64) -> UserAnalyticsResponse
     }
 }
 
-fn empty_department_analytics_response(limit: u64, offset: u64) -> DepartmentAnalyticsResponse {
-    DepartmentAnalyticsResponse {
+fn empty_department_analytics_response(limit: u64, offset: u64) -> DepartmentAnalytics {
+    DepartmentAnalytics {
         departments: Vec::new(),
         total: 0,
         limit,
@@ -90,7 +90,7 @@ pub async fn calculate_user_analytics(
     query: UserAnalyticsQuery,
     page: u64,
     limit: u64,
-) -> Result<UserAnalyticsResponse, DbErr> {
+) -> Result<UserAnalytics, DbErr> {
     // active_message = (deleted = false) AND created_at between dates (if provided)
     let mut active_msg_cond =
         Expr::col((messages::Entity, messages::Column::Deleted)).eq(false);
@@ -226,7 +226,7 @@ pub async fn calculate_user_analytics(
 
     let users = rows
         .into_iter()
-        .map(|r| UserAnalytics {
+        .map(|r| UserAnalyticsItem {
             user_id: r.user_id,
             user_email: r.user_email,
             user_name: r.user_name,
@@ -242,7 +242,7 @@ pub async fn calculate_user_analytics(
         })
         .collect();
 
-    Ok(UserAnalyticsResponse {
+    Ok(UserAnalytics {
         users,
         total: stats.number_of_items as i64,
         page,
@@ -257,7 +257,7 @@ pub async fn calculate_user_analytics_scoped(
     page: u64,
     limit: u64,
     scope_paths: &[String],
-) -> Result<UserAnalyticsResponse, DbErr> {
+) -> Result<UserAnalytics, DbErr> {
     if scope_paths.is_empty() {
         return Ok(empty_user_analytics_response(page, limit));
     }
@@ -413,7 +413,7 @@ pub async fn calculate_user_analytics_scoped(
 
     let users = rows
         .into_iter()
-        .map(|r| UserAnalytics {
+        .map(|r| UserAnalyticsItem {
             user_id: r.user_id,
             user_email: r.user_email,
             user_name: r.user_name,
@@ -429,7 +429,7 @@ pub async fn calculate_user_analytics_scoped(
         })
         .collect();
 
-    Ok(UserAnalyticsResponse {
+    Ok(UserAnalytics {
         users,
         total: stats.number_of_items as i64,
         page,
@@ -472,7 +472,7 @@ pub async fn get_department_analytics(
     limit: Option<u64>,
     offset: Option<u64>,
     search: Option<String>,
-) -> Result<DepartmentAnalyticsResponse, DbErr> {
+) -> Result<DepartmentAnalytics, DbErr> {
     let mut limit = limit.unwrap_or(20);
     if limit == 0 {
         limit = 20;
@@ -596,7 +596,7 @@ pub async fn get_department_analytics(
                 .parse::<f64>()
                 .unwrap_or(0.0);
 
-            DepartmentAnalytics {
+            DepartmentAnalyticsItem {
                 department: r.department,
                 total_users: r.total_users.unwrap_or(0),
                 total_requests: r.total_requests.unwrap_or(0),
@@ -609,7 +609,7 @@ pub async fn get_department_analytics(
         })
         .collect::<Vec<_>>();
 
-    Ok(DepartmentAnalyticsResponse {
+    Ok(DepartmentAnalytics {
         total: stats.number_of_items as i64,
         limit,
         offset,
@@ -622,7 +622,7 @@ pub async fn get_department_analytics_scoped(
     db: &DatabaseConnection,
     query: DepartmentAnalyticsQuery,
     scope_paths: &[String],
-) -> Result<DepartmentAnalyticsResponse, DbErr> {
+) -> Result<DepartmentAnalytics, DbErr> {
     let mut limit = query.limit.unwrap_or(20);
     if limit == 0 {
         limit = 20;
@@ -767,7 +767,7 @@ pub async fn get_department_analytics_scoped(
                 .parse::<f64>()
                 .unwrap_or(0.0);
 
-            DepartmentAnalytics {
+            DepartmentAnalyticsItem {
                 department: r.department,
                 total_users: r.total_users.unwrap_or(0),
                 total_requests: r.total_requests.unwrap_or(0),
@@ -780,7 +780,7 @@ pub async fn get_department_analytics_scoped(
         })
         .collect::<Vec<_>>();
 
-    Ok(DepartmentAnalyticsResponse {
+    Ok(DepartmentAnalytics {
         total: stats.number_of_items as i64,
         limit,
         offset,
@@ -847,7 +847,7 @@ pub async fn get_overview_analytics(
     db: &DatabaseConnection,
     start_date: Option<NaiveDate>,
     end_date: Option<NaiveDate>,
-) -> Result<OverviewResponse, DbErr> {
+) -> Result<AnalyticsOverview, DbErr> {
     // total users (all rows)
     let total_users = users::Entity::find().count(db).await? as i64;
 
@@ -988,7 +988,7 @@ pub async fn get_overview_analytics(
         (0.0, 0.0, 0.0)
     };
 
-    Ok(OverviewResponse {
+    Ok(AnalyticsOverview {
         total_users,
         active_users,
         total_requests,
@@ -1036,7 +1036,7 @@ pub async fn get_timeseries_analytics(
     start_date: Option<NaiveDate>,
     end_date: Option<NaiveDate>,
     granularity: String,
-) -> Result<TimeSeriesResponse, DbErr> {
+) -> Result<AnalyticsTimeSeries, DbErr> {
 
     // Filter used in WHERE (this endpoint is timeseries, so it’s fine to filter rows directly)
     let mut cond = sea_orm::Condition::all()
@@ -1133,7 +1133,7 @@ let bucket_expr: SimpleExpr = Expr::cust(format!(
         })
         .collect();
 
-    Ok(TimeSeriesResponse {
+    Ok(AnalyticsTimeSeries {
         data,
         granularity: gran.to_string(),
     })

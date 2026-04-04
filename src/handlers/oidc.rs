@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
 use crate::{
-    auth::{claims::{Claiming as _, Claims, RefreshClaims}, error::AuthErrorResponse},
+    auth::{claims::{Claiming as _, Claims, RefreshClaims}, error::Error},
     dto::oauth::AuthProvider,
     models::{
         oauth_sessions,
@@ -17,7 +17,7 @@ use crate::{
     },
     services::authorization::AuthorizationService,
 };
-use crate::{auth::error::{AuthError}, dto::{auth::{AuthTokenResponse, TokenType, User}, oauth::{OAuthCallback, StartParams}}, state::SharedState};
+use crate::{auth::error::{AuthError}, dto::{auth::{AuthToken, TokenType, User}, oauth::{AuthCallback, StartParams}}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -28,16 +28,16 @@ use crate::{auth::error::{AuthError}, dto::{auth::{AuthTokenResponse, TokenType,
         ("provider" = String, Path, description = "Auth provider identifier (e.g., google, azure, keycloak)"),
         ("redirect_uri" = Option<String>, Query, description = "Optional post-login redirect target", format = "uri")),
     responses(
-        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Invalid auth provider (code=6200)"),
-        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Invalid redirect URI (code=6202)"),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Account deactivated (code=6105)"),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "SSO provider disabled by admin (code=6401)"),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Email does not exist (code=6101)"),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Organization not found (code=6301)"),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
-        (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "SSO provider not configured (code=6400)"),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
+        (status = 400, content_type = "application/json", body = Error, description = "Invalid auth provider (code=6200)"),
+        (status = 400, content_type = "application/json", body = Error, description = "Invalid redirect URI (code=6202)"),
+        (status = 401, content_type = "application/json", body = Error, description = "Account deactivated (code=6105)"),
+        (status = 403, content_type = "application/json", body = Error, description = "SSO provider disabled by admin (code=6401)"),
+        (status = 404, content_type = "application/json", body = Error, description = "Email does not exist (code=6101)"),
+        (status = 404, content_type = "application/json", body = Error, description = "Organization not found (code=6301)"),
+        (status = 404, content_type = "application/json", body = Error, description = "DB not found (code=5003)"),
+        (status = 409, content_type = "application/json", body = Error, description = "SSO provider not configured (code=6400)"),
+        (status = 503, content_type = "application/json", body = Error, description = "Auth service temporarily unavailable (code=6000)"),
+        (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn oidc_login_start(
@@ -109,35 +109,35 @@ pub async fn oidc_login_start(
         ("error_description" = Option<String>, Query, description = "Error description from provider")
     ),
     responses(
-        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Missing credentials (code=6102)"),
-        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Invalid auth provider (code=6200)"),
-        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Invalid callback parameters (code=6201)"),
-        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Invalid redirect URI (code=6202)"),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid credentials (code=6100)"),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Account deactivated (code=6105)"),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Email domain not allowed (code=6303)"),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "SSO provider disabled by admin (code=6401)"),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Email does not exist (code=6101)"),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
-        (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "Email already exists (code=6106)"),
-        (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "SSO provider not configured (code=6400)"),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
+        (status = 400, content_type = "application/json", body = Error, description = "Missing credentials (code=6102)"),
+        (status = 400, content_type = "application/json", body = Error, description = "Invalid auth provider (code=6200)"),
+        (status = 400, content_type = "application/json", body = Error, description = "Invalid callback parameters (code=6201)"),
+        (status = 400, content_type = "application/json", body = Error, description = "Invalid redirect URI (code=6202)"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid credentials (code=6100)"),
+        (status = 401, content_type = "application/json", body = Error, description = "Account deactivated (code=6105)"),
+        (status = 401, content_type = "application/json", body = Error, description = "Email domain not allowed (code=6303)"),
+        (status = 403, content_type = "application/json", body = Error, description = "SSO provider disabled by admin (code=6401)"),
+        (status = 404, content_type = "application/json", body = Error, description = "Email does not exist (code=6101)"),
+        (status = 404, content_type = "application/json", body = Error, description = "DB not found (code=5003)"),
+        (status = 409, content_type = "application/json", body = Error, description = "Email already exists (code=6106)"),
+        (status = 409, content_type = "application/json", body = Error, description = "SSO provider not configured (code=6400)"),
+        (status = 503, content_type = "application/json", body = Error, description = "Auth service temporarily unavailable (code=6000)"),
+        (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn oidc_oauth_callback_get(
     Path(provider): Path<AuthProvider>,
-    Query(cb): Query<OAuthCallback>,
+    Query(cb): Query<AuthCallback>,
     State(app_state): State<SharedState>
-) -> Result<(StatusCode, Json<AuthTokenResponse>), AuthError> {
+) -> Result<(StatusCode, Json<AuthToken>), AuthError> {
     oidc_oauth_callback(provider, cb, app_state).await
 }
 
 async fn oidc_oauth_callback(
     provider: AuthProvider,
-    cb: OAuthCallback,
+    cb: AuthCallback,
     app_state: SharedState,
-) -> Result<(StatusCode, Json<AuthTokenResponse>), AuthError> {
+) -> Result<(StatusCode, Json<AuthToken>), AuthError> {
     // Check for OAuth error responses
     if let Some(error) = cb.error {
         eprintln!("OAuth error: {} - {:?}", error, cb.error_description);
@@ -411,7 +411,7 @@ async fn oidc_oauth_callback(
         effective_permissions: user.effective_permissions,
     };
 
-    let resp = AuthTokenResponse {
+    let resp = AuthToken {
         access_token:access_token_claims.get_token_string(),
         token_type: TokenType::Bearer,
         expires_in: 3600, // 1 hour - match your JWT expiry
@@ -429,28 +429,28 @@ async fn oidc_oauth_callback(
     params(
         ("provider" = String, Path, description = "Auth provider identifier (e.g., google, azure, keycloak)"),
     ),
-    request_body(content = OAuthCallback, description = "OAuth callback parameters"),
+    request_body(content = AuthCallback, description = "OAuth callback parameters"),
     responses(
-        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Missing credentials (code=6102)"),
-        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Invalid auth provider (code=6200)"),
-        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Invalid callback parameters (code=6201)"),
-        (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Invalid redirect URI (code=6202)"),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid credentials (code=6100)"),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Account deactivated (code=6105)"),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Email domain not allowed (code=6303)"),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "SSO provider disabled by admin (code=6401)"),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Email does not exist (code=6101)"),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "DB not found (code=5003)"),
-        (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "Email already exists (code=6106)"),
-        (status = 409, content_type = "application/json", body = AuthErrorResponse, description = "SSO provider not configured (code=6400)"),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "Auth service temporarily unavailable (code=6000)"),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
+        (status = 400, content_type = "application/json", body = Error, description = "Missing credentials (code=6102)"),
+        (status = 400, content_type = "application/json", body = Error, description = "Invalid auth provider (code=6200)"),
+        (status = 400, content_type = "application/json", body = Error, description = "Invalid callback parameters (code=6201)"),
+        (status = 400, content_type = "application/json", body = Error, description = "Invalid redirect URI (code=6202)"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid credentials (code=6100)"),
+        (status = 401, content_type = "application/json", body = Error, description = "Account deactivated (code=6105)"),
+        (status = 401, content_type = "application/json", body = Error, description = "Email domain not allowed (code=6303)"),
+        (status = 403, content_type = "application/json", body = Error, description = "SSO provider disabled by admin (code=6401)"),
+        (status = 404, content_type = "application/json", body = Error, description = "Email does not exist (code=6101)"),
+        (status = 404, content_type = "application/json", body = Error, description = "DB not found (code=5003)"),
+        (status = 409, content_type = "application/json", body = Error, description = "Email already exists (code=6106)"),
+        (status = 409, content_type = "application/json", body = Error, description = "SSO provider not configured (code=6400)"),
+        (status = 503, content_type = "application/json", body = Error, description = "Auth service temporarily unavailable (code=6000)"),
+        (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn oidc_oauth_callback_post(
     Path(provider): Path<AuthProvider>,
     State(app_state): State<SharedState>,
-    Json(cb): Json<OAuthCallback>,
-) -> Result<(StatusCode, Json<AuthTokenResponse>), AuthError> {
+    Json(cb): Json<AuthCallback>,
+) -> Result<(StatusCode, Json<AuthToken>), AuthError> {
     oidc_oauth_callback(provider, cb, app_state).await
 }

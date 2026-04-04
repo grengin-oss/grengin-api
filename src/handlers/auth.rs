@@ -4,9 +4,9 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use crate::{
     auth::{
         claims::{Claiming, Claims, RefreshClaims},
-        error::{AuthError, AuthErrorResponse},
+        error::{AuthError, Error},
     },
-    dto::auth::{AuthTokenResponse, RefreshTokenRequest, TokenType, User},
+    dto::auth::{AuthToken, RefreshToken, TokenType, User},
     models::users::{self, UserStatus},
     services::authorization::AuthorizationService,
     state::SharedState,
@@ -16,19 +16,19 @@ use crate::{
     post,
     path = "/auth/refresh",
     tag = "admin",
-    request_body = RefreshTokenRequest,
+    request_body = RefreshToken,
     responses(
-       (status = 400, content_type = "application/json", body = AuthErrorResponse, description = "Missing credentials (code=6102)"),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired refresh token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Email does not exist (code=6101)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "User not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
+       (status = 400, content_type = "application/json", body = Error, description = "Missing credentials (code=6102)"),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired refresh token (code=6103)"),
+       (status = 404, content_type = "application/json", body = Error, description = "Email does not exist (code=6101)"),
+       (status = 404, content_type = "application/json", body = Error, description = "User not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn handle_refresh_token(
      State(app_state): State<SharedState>,
-     Json(req): Json<RefreshTokenRequest>
-) -> Result<(StatusCode,Json<AuthTokenResponse>), AuthError> {
+     Json(req): Json<RefreshToken>
+) -> Result<(StatusCode,Json<AuthToken>), AuthError> {
    let refresh_claims = RefreshClaims::from_token_string(&req.refresh_token)
       .map_err(|e|{
         eprintln!("Refresh token decoding error: {e}");
@@ -71,7 +71,7 @@ pub async fn handle_refresh_token(
         updated_at: user.updated_at,
         effective_permissions: user.effective_permissions,
     };
-    let resp = AuthTokenResponse {
+    let resp = AuthToken {
         access_token:access_token_claims.get_token_string(),
         token_type: TokenType::Bearer,
         expires_in: 3600, // 1 hour - match your JWT expiry

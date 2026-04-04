@@ -6,10 +6,10 @@ use sea_orm::sea_query::{Alias, BinOper, Expr};
 use uuid::Uuid;
 
 use crate::{
-    auth::{claims::Claims, error::{AuthError, AuthErrorResponse}, permissions::{PERMISSION_MCP_ADMIN, PERMISSION_MCP_DELEGATE, PERMISSION_MCP_VIEW}},
+    auth::{claims::Claims, error::{AuthError, Error}, permissions::{PERMISSION_MCP_ADMIN, PERMISSION_MCP_DELEGATE, PERMISSION_MCP_VIEW}},
     dto::admin_mcp::{
-        McpAccessDefaultChangedPayload, McpAccessDefaultRequest, McpAccessRuleCreatedPayload,
-        McpAccessRuleDeletedPayload, McpAccessRuleRequest, McpServerAccessResponse,
+        McpAccessDefaultChangedPayload, McpAccessDefault, McpAccessRuleCreatedPayload,
+        McpAccessRuleDeletedPayload, McpAccessRuleRequest, McpServerAccess,
     },
     dto::mcp::{McpAccessRule, McpAccessRuleInput, McpServerAccessUpdate},
     models::{
@@ -37,18 +37,18 @@ use crate::{
         ("server_id" = Uuid, Path, description = "MCP server id")
     ),
     responses(
-        (status = 200, body = McpServerAccessResponse),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 200, body = McpServerAccess),
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error),
+        (status = 404, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn get_mcp_server_access(
     claims: Claims,
     State(app_state): State<SharedState>,
     Path(server_id): Path<Uuid>,
-) -> Result<(StatusCode, Json<McpServerAccessResponse>), AuthError> {
+) -> Result<(StatusCode, Json<McpServerAccess>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(
@@ -85,7 +85,7 @@ pub async fn get_mcp_server_access(
 
     Ok((
         StatusCode::OK,
-        Json(McpServerAccessResponse {
+        Json(McpServerAccess {
             server_id: server.id,
             default_access: server.default_access,
             rules: rule_dtos,
@@ -102,11 +102,11 @@ pub async fn get_mcp_server_access(
         ("server_id" = Uuid, Path, description = "MCP server id")
     ),
     responses(
-        (status = 200, body = McpServerAccessResponse),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 200, body = McpServerAccess),
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error),
+        (status = 404, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn update_mcp_server_access(
@@ -114,7 +114,7 @@ pub async fn update_mcp_server_access(
     State(app_state): State<SharedState>,
     Path(server_id): Path<Uuid>,
     Json(req): Json<McpServerAccessUpdate>,
-) -> Result<(StatusCode, Json<McpServerAccessResponse>), AuthError> {
+) -> Result<(StatusCode, Json<McpServerAccess>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(
@@ -207,24 +207,24 @@ pub async fn update_mcp_server_access(
     put,
     path = "/admin/mcp-servers/{server_id}/access/default",
     tag = "admin",
-    request_body = McpAccessDefaultRequest,
+    request_body = McpAccessDefault,
     params(
         ("server_id" = Uuid, Path, description = "MCP server id")
     ),
     responses(
-        (status = 200, body = McpServerAccessResponse),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 200, body = McpServerAccess),
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error),
+        (status = 404, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn update_mcp_server_default(
     claims: Claims,
     State(app_state): State<SharedState>,
     Path(server_id): Path<Uuid>,
-    Json(req): Json<McpAccessDefaultRequest>,
-) -> Result<(StatusCode, Json<McpServerAccessResponse>), AuthError> {
+    Json(req): Json<McpAccessDefault>,
+) -> Result<(StatusCode, Json<McpServerAccess>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(
@@ -287,7 +287,7 @@ pub async fn update_mcp_server_default(
 
     Ok((
         StatusCode::OK,
-        Json(McpServerAccessResponse {
+        Json(McpServerAccess {
             server_id: server_id,
             default_access: req.default_access,
             rules: rule_dtos,
@@ -305,11 +305,11 @@ pub async fn update_mcp_server_default(
     ),
     responses(
         (status = 201, body = McpAccessRule),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse),
-        (status = 409, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error),
+        (status = 404, content_type = "application/json", body = Error),
+        (status = 409, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn create_mcp_access_rule(
@@ -552,10 +552,10 @@ pub async fn create_mcp_access_rule(
     ),
     responses(
         (status = 204),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error),
+        (status = 404, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn delete_mcp_access_rule(

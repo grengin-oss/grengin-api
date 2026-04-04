@@ -3,7 +3,7 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, IntoActiveModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}, permissions::PERMISSION_AI_PLATFORM_MANAGE}, dto::branding::{BrandingResponse, BrandingUpdate}, models::branding, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
+use crate::{auth::{claims::Claims, error::{AuthError, Error}, permissions::PERMISSION_AI_PLATFORM_MANAGE}, dto::branding::{Branding, BrandingUpdate}, models::branding, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
 
 fn create_default_branding() -> branding::Model {
     branding::Model {
@@ -18,8 +18,8 @@ fn create_default_branding() -> branding::Model {
     }
 }
 
-fn model_to_response(model: &branding::Model) -> BrandingResponse {
-    BrandingResponse {
+fn model_to_response(model: &branding::Model) -> Branding {
+    Branding {
         name: model.name.clone(),
         logo_url: model.logo_url.clone(),
         color_primary: model.color_primary.clone(),
@@ -60,13 +60,13 @@ async fn get_or_create_branding(app_state: &SharedState) -> Result<branding::Mod
     path = "/branding",
     tag = "branding",
     responses(
-       (status = 200, body = BrandingResponse),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
+       (status = 200, body = Branding),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn get_branding(
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode, Json<BrandingResponse>), AuthError> {
+) -> Result<(StatusCode, Json<Branding>), AuthError> {
     let branding = get_or_create_branding(&app_state).await?;
     Ok((StatusCode::OK, Json(model_to_response(&branding))))
 }
@@ -77,16 +77,16 @@ pub async fn get_branding(
     path = "/admin/branding",
     tag = "admin",
     responses(
-       (status = 200, body = BrandingResponse),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Permission denied"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
+       (status = 200, body = Branding),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 403, content_type = "application/json", body = Error, description = "Permission denied"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn get_admin_branding(
     claims: Claims,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode, Json<BrandingResponse>), AuthError> {
+) -> Result<(StatusCode, Json<Branding>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(
@@ -108,17 +108,17 @@ pub async fn get_admin_branding(
     tag = "admin",
     request_body = BrandingUpdate,
     responses(
-       (status = 200, body = BrandingResponse),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Permission denied"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000)"),
+       (status = 200, body = Branding),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 403, content_type = "application/json", body = Error, description = "Permission denied"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]
 pub async fn update_branding(
     claims: Claims,
     State(app_state): State<SharedState>,
     Json(req): Json<BrandingUpdate>,
-) -> Result<(StatusCode, Json<BrandingResponse>), AuthError> {
+) -> Result<(StatusCode, Json<Branding>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(

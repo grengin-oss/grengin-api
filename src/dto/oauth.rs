@@ -11,7 +11,7 @@ pub struct StartParams {
 }
 
 #[derive(Deserialize, ToSchema)]
-pub struct OAuthCallback {
+pub struct AuthCallback {
     pub code: Option<String>,
     pub state: String,
     pub error: Option<String>,

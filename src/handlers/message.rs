@@ -4,7 +4,7 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, sea_query};
 use uuid::Uuid;
-use crate::{auth::claims::Claims, dto::chat_stream::{ChatInitRequest, ChatStream}, error::AppError, handlers::chat_stream::handle_chat_stream, models::{conversations, messages}, state::SharedState};
+use crate::{auth::claims::Claims, dto::chat_stream::{ChatInput, ChatStream}, error::AppError, handlers::chat_stream::handle_chat_stream, models::{conversations, messages}, state::SharedState};
 
 #[utoipa::path(
     delete,
@@ -60,7 +60,7 @@ pub async fn delete_chat_message_by_id(
         ("chat_id" = Uuid, Path, description = "Unique identifier for the conversation"),
         ("message_id" = Uuid, Path, description = "Unique identifier for the message"),
     ),
-    request_body = ChatInitRequest,
+    request_body = ChatInput,
     responses(
         (status = 200, content_type = "text/event-stream", body = ChatStream),
         (status = 503, description = "Oops! We're experiencing some technical issues. Please try again later."),
@@ -71,7 +71,7 @@ pub async fn edit_chat_message_by_id_and_stream(
   claims:Claims,
   Path((chat_id,message_id)):Path<(Uuid,Uuid)>,
   State(app_state): State<SharedState>,
-  Json(req):Json<ChatInitRequest>,
+  Json(req):Json<ChatInput>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>,AppError> {
      let message = conversations::Entity::find()
        .filter(conversations::Column::Id.eq(chat_id))

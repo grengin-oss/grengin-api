@@ -32,7 +32,7 @@ pub struct ConversationResponse {
 }
 
 #[derive(Serialize, ToSchema)]
-pub struct ConversationPaginatedResponse {
+pub struct PaginatedConversations {
   pub total:u64,
   pub limit:u64,
   pub offset:u64,

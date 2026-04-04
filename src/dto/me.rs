@@ -23,7 +23,7 @@ pub struct EffectivePermissionsResponse {
 #[derive(Serialize, ToSchema)]
 pub struct MeDepartmentUsersResponse {
     pub total: i32,
-    pub users: Vec<crate::dto::admin_user::UserDetails>,
+    pub users: Vec<crate::dto::admin_user::User>,
 }
 
 #[derive(Deserialize, ToSchema)]

@@ -5,7 +5,7 @@ use migration::Expr;
 use rust_decimal::Decimal;
 use sea_orm::{ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QuerySelect};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::{AuthError, AuthErrorResponse}, permissions::PERMISSION_BUDGET_VIEW}, dto::admin_department_budget::{DepartmentBudgetStatusDto, SubDepartmentBudgetDto}, models::{departments::{self, ActionOnExceed, BudgetPeriod}}, services::{authorization::{AuthorizationService, PermissionScopeMode}, budget_allocation::{period_bounds, sum_child_allocations, sum_department_cost_in_range, sum_department_cost_total}}, state::SharedState};
+use crate::{auth::{claims::Claims, error::{AuthError, Error}, permissions::PERMISSION_BUDGET_VIEW}, dto::admin_department_budget::{DepartmentBudgetStatus, SubDepartmentBudgetDto}, models::{departments::{self, ActionOnExceed, BudgetPeriod}}, services::{authorization::{AuthorizationService, PermissionScopeMode}, budget_allocation::{period_bounds, sum_child_allocations, sum_department_cost_in_range, sum_department_cost_total}}, state::SharedState};
 
 #[derive(Debug, Clone, FromQueryResult)]
 pub struct DepartmentBudgetRow {
@@ -55,18 +55,18 @@ pub fn departments_budget_select() -> sea_orm::Select<departments::Entity> {
         ("department_id" = Uuid, Path, description = "Unique identifier for the department")
     ),
     responses(
-        (status = 200, content_type = "application/json", body = DepartmentBudgetStatusDto, description = "Budget status"),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse, description = "Forbidden - Admin role required"),
-        (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Resource not found"),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)")
+        (status = 200, content_type = "application/json", body = DepartmentBudgetStatus, description = "Budget status"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+        (status = 403, content_type = "application/json", body = Error, description = "Forbidden - Admin role required"),
+        (status = 404, content_type = "application/json", body = Error, description = "Resource not found"),
+        (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)")
     )
 )]
 pub async fn get_department_budget(
     claims: Claims,
     State(app_state): State<SharedState>,
     Path(department_id): Path<uuid::Uuid>,
-) -> Result<(StatusCode, Json<DepartmentBudgetStatusDto>), AuthError> {
+) -> Result<(StatusCode, Json<DepartmentBudgetStatus>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(
@@ -145,7 +145,7 @@ pub async fn get_department_budget(
 
     Ok((
         StatusCode::OK,
-        Json(DepartmentBudgetStatusDto {
+        Json(DepartmentBudgetStatus {
             department_id: dept.id,
             budget_allocated: dept.budget_allocated.to_string().parse().unwrap(),
             budget_distributed:budget_distributed.to_string().parse().unwrap(),

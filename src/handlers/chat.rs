@@ -4,7 +4,7 @@ use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, Iterable, PaginatorTrait as _, QueryFilter, QueryOrder, QuerySelect};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::AuthErrorResponse}, dto::{chat::{ArchiveChatRequest, ConversationPaginatedResponse, ConversationResponse, MessageParts, MessageResponse, TokenUsage}, common::PaginationQuery, files::File}, error::{AppError, ErrorResponse}, models::{conversations::{self, ConversationWithCount}, messages::{self}}, state::SharedState};
+use crate::{auth::{claims::Claims, error::Error}, dto::{chat::{ArchiveChatRequest, PaginatedConversations, ConversationResponse, MessageParts, MessageResponse, TokenUsage}, common::PaginationQuery, files::File}, error::{AppError, ErrorResponse}, models::{conversations::{self, ConversationWithCount}, messages::{self}}, state::SharedState};
 use num_traits::cast::ToPrimitive;
 
 fn resolve_web_search_enabled(metadata: Option<&serde_json::Value>) -> bool {
@@ -25,8 +25,8 @@ fn resolve_web_search_enabled(metadata: Option<&serde_json::Value>) -> bool {
         ("search" = Option<String>, Query, description = "Search in conversation titles (case-insensitive)"),
     ),
     responses(
-        (status = 200, body = ConversationPaginatedResponse),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+        (status = 200, body = PaginatedConversations),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
         (status = 503, content_type = "application/json", body = ErrorResponse, description = "Database timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
@@ -34,7 +34,7 @@ pub async fn get_chats(
   claims:Claims,
   Query(query):Query<PaginationQuery>,
   State(app_state): State<SharedState>
-) -> Result<(StatusCode,Json<ConversationPaginatedResponse>),AppError>{
+) -> Result<(StatusCode,Json<PaginatedConversations>),AppError>{
     let mut response = Vec::new();
     let limit = query.limit.unwrap_or(20).min(100); // Cap at 100
     let offset = query.offset.unwrap_or(0);
@@ -118,7 +118,7 @@ pub async fn get_chats(
         };
         response.push(conversation_response);
      }
-    let payload = ConversationPaginatedResponse {
+    let payload = PaginatedConversations {
         total,
         limit,
         offset,
@@ -136,7 +136,7 @@ pub async fn get_chats(
     ),
     responses(
         (status = 200, body = ConversationResponse),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
         (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found (code=1001)"),
         (status = 503, content_type = "application/json", body = ErrorResponse, description = "Database timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
@@ -231,7 +231,7 @@ pub async fn get_chat_by_id(
     ),
     responses(
         (status = 200, body = ConversationResponse),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
         (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found in database (code=5003)"),
         (status = 503, content_type = "application/json", body = ErrorResponse, description = "Database timeout/unavailable (code=5001/5000)"),
     )
@@ -301,7 +301,7 @@ pub async fn update_chat_by_id(
     ),
     responses(
        (status = 204, description = "Deleted successfully"),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
        (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found in database (code=5003)"),
        (status = 503, content_type = "application/json", body = ErrorResponse, description = "Database timeout/unavailable (code=5001/5000)"),
     )

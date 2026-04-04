@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::models::users::UserStatus;
 
 #[derive(Serialize, ToSchema)]
-pub struct UserDetails {
+pub struct User {
     pub id: Uuid,
     pub sub: String,
     #[schema(format = "email")]
@@ -37,15 +37,15 @@ pub struct UserDetails {
 }
 
 #[derive(Serialize,ToSchema)]
-pub struct UserResponse{
-  pub users:Vec<UserDetails>,
+pub struct PaginatedUsers{
+  pub users:Vec<User>,
   pub total:u64,
   pub limit:u64,
   pub offset:u64
 }
 
 #[derive(Deserialize,ToSchema)]
-pub struct UserRequest{
+pub struct UserCreate{
    pub email:String,
    pub name:String,
    pub department_id:Option<Uuid>,
@@ -53,7 +53,7 @@ pub struct UserRequest{
 
 
 #[derive(Deserialize,ToSchema)]
-pub struct UserUpdateRequest{
+pub struct UserUpdate{
    pub email:Option<String>,
    pub name:Option<String>,
    pub department_id:Option<Uuid>,

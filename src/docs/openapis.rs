@@ -1,38 +1,44 @@
 use utoipa::OpenApi;
 use crate::auth::claims::Claims;
-use crate::auth::error::{AuthError,AuthErrorCode,AuthErrorDetailVariant,AuthErrorResponse};
-use crate::dto::admin_ai::{AiEngineResponse, AiEngineUpdateRequest, AiEngineValidationResponse, AiModel,AiEngineModelsResponse, AiModelCapabilities};
+use crate::auth::error::{AuthError,AuthErrorCode,AuthErrorDetailVariant,Error};
+use crate::dto::admin_ai::{AIEngineDetail, AIEngineUpdate, AIEngineValidation, AiModel,AIEngineModels, AiModelCapabilities};
 use crate::dto::admin_embedding::{EmbeddingConfigResponse, EmbeddingConfigUpdateRequest};
-use crate::dto::admin_department_budget::{DepartmentBudgetStatusDto, SubDepartmentBudgetDto};
-use crate::dto::admin_department::{DepartmentListQuery, DepartmentMembersResponse, DepartmentRequest, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery, DepartmentTreeResponse, DepartmentsListResponse, MoveDepartmentRequest};
+use crate::dto::admin_department_budget::{DepartmentBudgetStatus, SubDepartmentBudgetDto};
+use crate::dto::admin_department::{DepartmentListQuery, DepartmentMembersResponse, DepartmentCreate, Department, DepartmentTreeNode, DepartmentTreeQuery, DepartmentTree, DepartmentsListResponse, DepartmentMove};
 use crate::dto::me::MeDepartmentUsersResponse;
 use crate::dto::notifications::{NotificationDto, NotificationsListQuery, NotificationsListResponse};
 use crate::dto::mcp::{
     BulkToolAccessUpdate, BulkToolAccessUpdateResponse, McpAccessRule, McpAccessRuleInput,
-    McpAuthorizeResponse, McpDisconnectResponse, McpOauthCallbackResponse, McpServer,
+    McpAuthorize, McpDisconnect, McpOauthCallback, McpServer,
     McpServerAccessList, McpServerAccessUpdate, McpServerCatalogEntry,
     McpServerCatalogResponse, McpServerCreate, McpServerTestResult, McpServerUpdate,
-    McpSyncResult, McpTool, McpToolAccessList, McpToolAccessUpdate, McpToolExecution,
-    McpToolSummary, McpToolsList, McpUserConnection, McpUserConnectionsList,
+    McpSyncResult, McpTool, McpToolAccess, McpToolAccessUpdate, McpToolExecution,
+    McpToolSummary, McpTools, McpUserConnection, McpUserConnections,
     PaginatedMcpServers, PaginatedMcpToolExecutions, McpEffectiveAccessResponse,
     McpEffectiveServerAccess, McpEffectiveToolAccess, McpResolvedVia,
 };
-use crate::dto::admin_mcp::{McpAccessDefaultRequest, McpServerAccessResponse};
-use crate::dto::admin_roles::{PermissionDto, PermissionsResponse, RoleDto, RoleRequest, RoleUpdateRequest, RolesResponse, UserRoleAssignmentDto, UserRoleAssignmentRequest, UserRoleAssignmentsResponse};
-use crate::dto::analytics::{DepartmentAnalyticsQuery, DepartmentAnalyticsResponse, ScopedUserAnalyticsQuery, UserAnalyticsResponse};
-use crate::dto::branding::{BrandingResponse, BrandingUpdate};
-use crate::dto::admin_sso_providers::{EditableField, SsoProviderEditableResponse, SsoProviderResponse, SsoProviderUpdateRequest};
-use crate::dto::admin_user::{UserDetails, UserPatchRequest, UserRequest, UserResponse, UserUpdateRequest};
-use crate::dto::chat::{ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse, TokenUsage};
-use crate::dto::chat_stream::{ChatInitRequest, ChatStream};
+use crate::dto::admin_mcp::{McpAccessDefault, McpServerAccess};
+use crate::dto::admin_roles::{PermissionDto, PermissionsResponse, RoleDto, RoleRequest, RoleUpdateRequest, RolesResponse, UserRoleAssignmentDto, UserRoleAssignmentInput, UserRoleAssignmentsResponse};
+use crate::dto::analytics::{
+    AnalyticsOverview, AnalyticsTimeSeries, DepartmentAnalytics, DepartmentAnalyticsQuery,
+    ScopedUserAnalyticsQuery, UserAnalytics,
+};
+use crate::dto::branding::{Branding, BrandingUpdate};
+use crate::dto::admin_sso_providers::{SsoProvider, SsoProviderUpdate};
+use crate::dto::admin_user::{User, UserPatchRequest, UserCreate, PaginatedUsers, UserUpdate};
+use crate::dto::chat::{
+    ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse, PaginatedConversations,
+    TokenUsage,
+};
+use crate::dto::chat_stream::{ChatInput, ChatStream};
 use crate::dto::common::{PaginationQuery, SortRule};
 use crate::dto::files::{Attachment, File, FileResponse, FileUploadRequest};
 use crate::dto::models::{ModelInfo, ProviderInfo};
-use crate::dto::oauth::OAuthCallback;
+use crate::dto::oauth::AuthCallback;
 use crate::dto::me::EffectivePermissionsResponse;
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::docs::{security::ApiSecurityAddon,app_error_catlog::AppErrorCatalogItem};
-use crate::dto::auth::{AuthInitResponse, AuthTokenResponse, RefreshTokenRequest, TokenType, User};
+use crate::dto::auth::{AuthInit, AuthToken, RefreshToken, TokenType};
 use crate::handlers::{auth,admin_department,admin_department_budgets,admin_analytics,admin_mcp,admin_roles,notifications,oidc,open_error,chat,chat_stream,file,message,admin_users,admin_sso_provider,branding,admin_ai,admin_embedding,models,me,mcp};
 use crate::models::messages::ChatRole;
 use crate::models::departments::{ActionOnExceed, BudgetPeriod};
@@ -144,10 +150,9 @@ use crate::models::users::UserStatus;
     ),
     components(
         schemas(
-            AuthInitResponse,
-            AuthTokenResponse,
+            AuthInit,
+            AuthToken,
             TokenType,
-            User,
             UserStatus,
             ChatRole,
             Claims,
@@ -157,66 +162,67 @@ use crate::models::users::UserStatus;
             ArchiveChatRequest,
             MessageResponse,
             ConversationResponse,
+            PaginatedConversations,
             File,
             MessageParts,
             TokenUsage,
             ChatStream,
-            ChatInitRequest,
+            ChatInput,
             Attachment,
-            OAuthCallback,
+            AuthCallback,
             SortRule,
             PaginationQuery,
-            UserResponse,
-            UserUpdateRequest,
-            UserRequest,
-            BrandingResponse,
+            PaginatedUsers,
+            UserUpdate,
+            UserCreate,
+            Branding,
             BrandingUpdate,
-            UserDetails,
+            User,
             UserPatchRequest,
-            AiEngineResponse,
-            AiEngineUpdateRequest,
+            AIEngineDetail,
+            AIEngineUpdate,
             EmbeddingConfigResponse,
             EmbeddingConfigUpdateRequest,
             FileResponse,
             FileUploadRequest,
             ProviderInfo,
             ModelInfo,
-            AiEngineValidationResponse,
-            AiEngineModelsResponse,
+            AIEngineValidation,
+            AIEngineModels,
             AiModel,
             AiModelCapabilities,
-            SsoProviderResponse,
-            SsoProviderUpdateRequest,
+            SsoProvider,
+            SsoProviderUpdate,
             AuthError,
             AppError,
             AuthErrorCode,
             AuthErrorDetailVariant,
-            AuthErrorResponse,
-            RefreshTokenRequest,
+            Error,
+            RefreshToken,
             AppErrorCatalogItem,
             DepartmentListQuery,
-            DepartmentResponse,
+            Department,
             DepartmentsListResponse,
-            DepartmentRequest,
-            SsoProviderEditableResponse,
-            EditableField,
+            DepartmentCreate,
             DepartmentMembersResponse,
             MeDepartmentUsersResponse,
             NotificationDto,
             NotificationsListResponse,
             NotificationsListQuery,
-            DepartmentAnalyticsResponse,
+            AnalyticsOverview,
+            DepartmentAnalytics,
             DepartmentAnalyticsQuery,
-            UserAnalyticsResponse,
+            AnalyticsTimeSeries,
+            UserAnalytics,
             ScopedUserAnalyticsQuery,
             BudgetPeriod,
             ActionOnExceed,
             DepartmentTreeQuery,
             DepartmentTreeNode,
-            DepartmentTreeResponse,
-            MoveDepartmentRequest,
+            DepartmentTree,
+            DepartmentMove,
             SubDepartmentBudgetDto,
-            DepartmentBudgetStatusDto,
+            DepartmentBudgetStatus,
             PermissionDto,
             PermissionsResponse,
             RoleDto,
@@ -224,10 +230,10 @@ use crate::models::users::UserStatus;
             RoleUpdateRequest,
             RolesResponse,
             UserRoleAssignmentDto,
-            UserRoleAssignmentRequest,
+            UserRoleAssignmentInput,
             UserRoleAssignmentsResponse,
-            McpAccessDefaultRequest,
-            McpServerAccessResponse,
+            McpAccessDefault,
+            McpServerAccess,
             McpServer,
             McpServerCreate,
             McpServerUpdate,
@@ -236,7 +242,7 @@ use crate::models::users::UserStatus;
             McpSyncResult,
             McpTool,
             McpToolSummary,
-            McpToolsList,
+            McpTools,
             McpToolExecution,
             PaginatedMcpToolExecutions,
             McpServerCatalogEntry,
@@ -245,15 +251,15 @@ use crate::models::users::UserStatus;
             McpAccessRuleInput,
             McpServerAccessList,
             McpServerAccessUpdate,
-            McpToolAccessList,
+            McpToolAccess,
             McpToolAccessUpdate,
             BulkToolAccessUpdate,
             BulkToolAccessUpdateResponse,
             McpUserConnection,
-            McpUserConnectionsList,
-            McpAuthorizeResponse,
-            McpDisconnectResponse,
-            McpOauthCallbackResponse,
+            McpUserConnections,
+            McpAuthorize,
+            McpDisconnect,
+            McpOauthCallback,
             EffectivePermissionsResponse,
             McpEffectiveAccessResponse,
             McpEffectiveServerAccess,

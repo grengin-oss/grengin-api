@@ -11,14 +11,14 @@ use serde_json::{Map, Value};
 use sea_orm::sea_query::{Alias, BinOper, Expr, Func};
 
 use crate::{
-    auth::{claims::Claims, error::{AuthError, AuthErrorResponse}},
+    auth::{claims::Claims, error::{AuthError, Error}},
     dto::{
-        admin_user::UserDetails,
+        admin_user::User,
         admin_department::{
-            DepartmentListQuery, DepartmentResponse, DepartmentTreeNode, DepartmentTreeQuery,
-            DepartmentTreeResponse, DepartmentsListResponse,
+            DepartmentListQuery, Department, DepartmentTreeNode, DepartmentTreeQuery,
+            DepartmentTree, DepartmentsListResponse,
         },
-        analytics::{DepartmentAnalyticsQuery, DepartmentAnalyticsResponse, ScopedUserAnalyticsQuery, UserAnalyticsResponse},
+        analytics::{DepartmentAnalyticsQuery, DepartmentAnalytics, ScopedUserAnalyticsQuery, UserAnalytics},
         common::SortRule,
         me::{AdministeredDepartmentUsersQuery, EffectivePermissionsResponse, MeDepartmentUsersResponse},
     },
@@ -252,8 +252,8 @@ fn scope_condition(scope_paths: &[String]) -> Condition {
     tag = "me",
     responses(
         (status = 200, content_type = "application/json", body = EffectivePermissionsResponse),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn get_my_permissions(
@@ -346,17 +346,17 @@ pub async fn get_my_permissions(
         ("live" = Option<bool>, Query, description = "Bypass cache and fetch live data"),
     ),
     responses(
-        (status = 200, body = DepartmentAnalyticsResponse),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 200, body = DepartmentAnalytics),
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn get_my_administered_department_analytics(
     claims: Claims,
     State(app_state): State<SharedState>,
     Query(query): Query<DepartmentAnalyticsQuery>,
-) -> Result<(StatusCode, Json<DepartmentAnalyticsResponse>), AuthError> {
+) -> Result<(StatusCode, Json<DepartmentAnalytics>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(
@@ -402,17 +402,17 @@ pub async fn get_my_administered_department_analytics(
         ("department_id" = Option<Uuid>, Query, description = "Filter by department (must be within scope)"),
     ),
     responses(
-        (status = 200, body = UserAnalyticsResponse),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 403, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 200, body = UserAnalytics),
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn get_my_administered_department_user_analytics(
     claims: Claims,
     State(app_state): State<SharedState>,
     Query(query): Query<ScopedUserAnalyticsQuery>,
-) -> Result<(StatusCode, Json<UserAnalyticsResponse>), AuthError> {
+) -> Result<(StatusCode, Json<UserAnalytics>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(
@@ -457,8 +457,8 @@ pub async fn get_my_administered_department_user_analytics(
     ),
     responses(
         (status = 200, body = DepartmentsListResponse),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn get_my_administered_departments_list(
@@ -620,7 +620,7 @@ pub async fn get_my_administered_departments_list(
         .await?;
         let admin_ids = admin_map.get(&d.id).cloned().unwrap_or_default();
 
-        departments.push(DepartmentResponse {
+        departments.push(Department {
             id: d.id,
             name: d.name,
             description: d.description,
@@ -653,24 +653,24 @@ pub async fn get_my_administered_departments_list(
         ("max_depth" = Option<i32>, Query, description = "Default value : 10")
     ),
     responses(
-        (status = 200, body = DepartmentTreeResponse),
-        (status = 401, content_type = "application/json", body = AuthErrorResponse),
-        (status = 503, content_type = "application/json", body = AuthErrorResponse)
+        (status = 200, body = DepartmentTree),
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn get_my_administered_departments_tree(
     claims: Claims,
     State(app_state): State<SharedState>,
     Query(q): Query<DepartmentTreeQuery>,
-) -> Result<(StatusCode, Json<DepartmentTreeResponse>), AuthError> {
+) -> Result<(StatusCode, Json<DepartmentTree>), AuthError> {
     let administered_ids = load_administered_department_ids(claims, &app_state).await?;
     if administered_ids.is_empty() {
-        return Ok((StatusCode::OK, Json(DepartmentTreeResponse { tree: vec![] })));
+        return Ok((StatusCode::OK, Json(DepartmentTree { tree: vec![] })));
     }
 
     let scope_paths = load_administered_department_paths(&app_state, &administered_ids).await?;
     if scope_paths.is_empty() {
-        return Ok((StatusCode::OK, Json(DepartmentTreeResponse { tree: vec![] })));
+        return Ok((StatusCode::OK, Json(DepartmentTree { tree: vec![] })));
     }
 
     let max_depth = q.max_depth.unwrap_or(10).max(0);
@@ -691,7 +691,7 @@ pub async fn get_my_administered_departments_tree(
             .iter()
             .any(|scope| is_path_within_scope(scope, &root_dept.path));
         if !in_scope {
-            return Ok((StatusCode::OK, Json(DepartmentTreeResponse { tree: vec![] })));
+            return Ok((StatusCode::OK, Json(DepartmentTree { tree: vec![] })));
         }
 
         Some(root_dept)
@@ -724,7 +724,7 @@ pub async fn get_my_administered_departments_tree(
         })?;
 
     if rows.is_empty() {
-        return Ok((StatusCode::OK, Json(DepartmentTreeResponse { tree: vec![] })));
+        return Ok((StatusCode::OK, Json(DepartmentTree { tree: vec![] })));
     }
 
     let dept_ids: Vec<Uuid> = rows.iter().map(|d| d.id).collect();
@@ -837,7 +837,7 @@ pub async fn get_my_administered_departments_tree(
         }
     }
 
-    Ok((StatusCode::OK, Json(DepartmentTreeResponse { tree })))
+    Ok((StatusCode::OK, Json(DepartmentTree { tree })))
 }
 
 #[utoipa::path(
@@ -857,9 +857,9 @@ pub async fn get_my_administered_departments_tree(
     ),
     responses(
        (status = 200, body = MeDepartmentUsersResponse),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse)
+       (status = 401, content_type = "application/json", body = Error),
+       (status = 404, content_type = "application/json", body = Error),
+       (status = 503, content_type = "application/json", body = Error)
     )
 )]
 pub async fn get_my_administered_department_members(
@@ -1022,7 +1022,7 @@ pub async fn get_my_administered_department_members(
         .map(|user| {
             let roles = roles_map.get(&user.id).cloned().unwrap_or_default();
             let is_super_admin = roles.iter().any(|r| r == "Super Admin");
-            UserDetails {
+            User {
                 id: user.id,
                 sub: user.azure_id.unwrap_or(user.google_id.unwrap_or(user.email.clone())),
                 email: user.email,

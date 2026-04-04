@@ -3,24 +3,24 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, IntoActiveModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, AuthErrorResponse}, permissions::{PERMISSION_SSO_PROVIDERS_MANAGE, PERMISSION_SSO_PROVIDERS_VIEW}, sso_provider::{is_editable, sso_providers_list}}, dto::admin_sso_providers::{EditableField, SsoProviderEditableResponse, SsoProviderResponse, SsoProviderUpdateRequest}, models::sso_providers, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
+use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, Error}, permissions::{PERMISSION_SSO_PROVIDERS_MANAGE, PERMISSION_SSO_PROVIDERS_VIEW}, sso_provider::{is_editable, sso_providers_list}}, dto::admin_sso_providers::{EditableField, SsoProviderEditable, SsoProvider, SsoProviderUpdate}, models::sso_providers, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
 
 #[utoipa::path(
     get,
     path = "/admin/sso-providers",
     tag = "admin",
     responses(
-       (status = 200, body = Vec<SsoProviderResponse>),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Email does not exist (code=6101)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Sso Provider not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+       (status = 200, body = Vec<SsoProvider>),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = Error, description = "Email does not exist (code=6101)"),
+       (status = 404, content_type = "application/json", body = Error, description = "Sso Provider not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn get_sso_providers(
     claims: Claims,
      State(app_state): State<SharedState>,
-) -> Result<(StatusCode,Json<Vec<SsoProviderResponse>>), AuthError> {
+) -> Result<(StatusCode,Json<Vec<SsoProvider>>), AuthError> {
      let authz = AuthorizationService::new(&app_state.database);
      authz
         .ensure_permission(
@@ -75,7 +75,7 @@ pub async fn get_sso_providers(
         .map(|model|{
             let decrypted_client_secret = decrypt_key(&app_state.settings.auth.app_key,&model.client_secret)
               .ok();
-           SsoProviderResponse{
+           SsoProvider{
              id:model.id,
              redirect_url:model.redirect_url, 
              provider:model.provider,
@@ -99,17 +99,17 @@ pub async fn get_sso_providers(
     path = "/admin/sso-providers/{provider_id}",
     tag = "admin",
     responses(
-       (status = 200, body = SsoProviderEditableResponse),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Sso Provider not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+       (status = 200, body = inline(SsoProviderEditable)),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = Error, description = "Sso Provider not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn get_sso_provider_by_id(
      claims: Claims,
      Path(provider_id):Path<Uuid>,
      State(app_state): State<SharedState>,
-) -> Result<(StatusCode,Json<SsoProviderEditableResponse>), AuthError> {
+) -> Result<(StatusCode,Json<SsoProviderEditable>), AuthError> {
      let authz = AuthorizationService::new(&app_state.database);
      authz
         .ensure_permission(
@@ -132,7 +132,7 @@ pub async fn get_sso_provider_by_id(
            let decrypted_client_secret = decrypt_key(&app_state.settings.auth.app_key,&model.client_secret)
              .ok();
             let editable = is_editable(&model.provider);
-            SsoProviderEditableResponse{
+            SsoProviderEditable{
               id:model.id, 
               provider:EditableField { editable, value: model.provider },
               name:EditableField { editable, value:model.name },
@@ -155,10 +155,10 @@ pub async fn get_sso_provider_by_id(
     path = "/admin/sso-providers/{provider_id}",
     tag = "admin",
     responses(
-       (status = 200, body = SsoProviderResponse),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Sso Provider not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+       (status = 200, body = SsoProvider),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = Error, description = "Sso Provider not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn delete_sso_provider_by_id(
@@ -207,18 +207,18 @@ pub async fn delete_sso_provider_by_id(
     path = "/admin/sso-providers/{provider_id}",
     tag = "admin",
     responses(
-       (status = 200, body = SsoProviderResponse),
-       (status = 401, content_type = "application/json", body = AuthErrorResponse, description = "Invalid/expired token (code=6103)"),
-       (status = 404, content_type = "application/json", body = AuthErrorResponse, description = "Sso Provider not found (code=5003)"),
-       (status = 503, content_type = "application/json", body = AuthErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+       (status = 200, body = SsoProvider),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = Error, description = "Sso Provider not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
     )
 )]
 pub async fn update_sso_provider_by_id(
      claims: Claims,
      Path(provider_id):Path<Uuid>,
      State(app_state): State<SharedState>,
-     Json(req):Json<SsoProviderUpdateRequest>
-) -> Result<(StatusCode,Json<SsoProviderResponse>), AuthError> {
+     Json(req):Json<SsoProviderUpdate>
+) -> Result<(StatusCode,Json<SsoProvider>), AuthError> {
      let authz = AuthorizationService::new(&app_state.database);
      authz
         .ensure_permission(
@@ -290,7 +290,7 @@ pub async fn update_sso_provider_by_id(
         .refresh_oidc_client(&updated_model.provider)
         .await;
      }
-     let response = SsoProviderResponse { 
+     let response = SsoProvider { 
         id:updated_model.id,
         provider:updated_model.provider,
         name:updated_model.name,
