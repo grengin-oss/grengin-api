@@ -42,6 +42,7 @@ mod m20260326_000004_fix_rag_column_names;
 mod m20260327_000001_mcp_access_refactor;
 mod m20260327_000002_drop_legacy_mcp_access;
 mod m20260327_000003_add_mcp_access_role_id;
+mod m20260407_000001_create_system_prompts;
 
 pub struct Migrator;
 
@@ -91,6 +92,7 @@ impl MigratorTrait for Migrator {
           Box::new(m20260327_000001_mcp_access_refactor::Migration),
           Box::new(m20260327_000002_drop_legacy_mcp_access::Migration),
           Box::new(m20260327_000003_add_mcp_access_role_id::Migration),
+          Box::new(m20260407_000001_create_system_prompts::Migration),
          ]
     }
 }

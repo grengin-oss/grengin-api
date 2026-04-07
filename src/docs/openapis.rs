@@ -36,10 +36,16 @@ use crate::dto::files::{Attachment, File, FileResponse, FileUploadRequest};
 use crate::dto::models::{ModelInfo, ProviderInfo};
 use crate::dto::oauth::AuthCallback;
 use crate::dto::me::EffectivePermissionsResponse;
+use crate::dto::prompts::{
+    DepartmentPromptAssignmentCreate, DepartmentPromptAssignmentListQuery,
+    DepartmentPromptAssignmentResponse, DepartmentPromptAssignmentUpdate, PromptFeedbackRequest,
+    PromptMetricsQuery, PromptMetricsResponse, PromptSource, RolePromptCreate, RolePromptListQuery,
+    RolePromptResponse, RolePromptUpdate, SystemPromptResponse, UserPromptPreferenceRequest,
+};
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::docs::{security::ApiSecurityAddon,app_error_catlog::AppErrorCatalogItem};
 use crate::dto::auth::{AuthInit, AuthToken, RefreshToken, TokenType};
-use crate::handlers::{auth,admin_department,admin_department_budgets,admin_analytics,admin_mcp,admin_roles,notifications,oidc,open_error,chat,chat_stream,file,message,admin_users,admin_sso_provider,branding,admin_ai,admin_embedding,models,me,mcp};
+use crate::handlers::{auth,admin_department,admin_department_budgets,admin_analytics,admin_mcp,admin_prompts,admin_roles,notifications,oidc,open_error,chat,chat_stream,file,message,admin_users,admin_sso_provider,branding,admin_ai,admin_embedding,models,me,me_prompts,mcp};
 use crate::models::messages::ChatRole;
 use crate::models::departments::{ActionOnExceed, BudgetPeriod};
 use crate::models::mcp_access_policies::{McpAccessType, McpPermission};
@@ -118,6 +124,20 @@ use crate::models::users::UserStatus;
         admin_mcp::update_mcp_server_default,
         admin_mcp::create_mcp_access_rule,
         admin_mcp::delete_mcp_access_rule,
+        admin_prompts::list_role_prompts,
+        admin_prompts::get_role_prompt,
+        admin_prompts::create_role_prompt,
+        admin_prompts::update_role_prompt,
+        admin_prompts::delete_role_prompt,
+        admin_prompts::list_department_prompts,
+        admin_prompts::assign_department_prompt,
+        admin_prompts::update_department_prompt,
+        admin_prompts::delete_department_prompt,
+        admin_prompts::get_prompt_metrics,
+        me_prompts::get_my_system_prompt,
+        me_prompts::set_my_system_prompt,
+        me_prompts::reset_my_system_prompt,
+        me_prompts::submit_prompt_feedback,
         mcp::list_mcp_servers,
         mcp::list_public_mcp_servers,
         mcp::create_mcp_server,
@@ -268,7 +288,21 @@ use crate::models::users::UserStatus;
             McpDefaultAccess,
             McpTransportType,
             McpAccessType,
-            McpPermission
+            McpPermission,
+            RolePromptResponse,
+            RolePromptCreate,
+            RolePromptUpdate,
+            RolePromptListQuery,
+            DepartmentPromptAssignmentResponse,
+            DepartmentPromptAssignmentCreate,
+            DepartmentPromptAssignmentUpdate,
+            DepartmentPromptAssignmentListQuery,
+            PromptMetricsResponse,
+            PromptMetricsQuery,
+            SystemPromptResponse,
+            UserPromptPreferenceRequest,
+            PromptFeedbackRequest,
+            PromptSource
         )
     ),
     tags(

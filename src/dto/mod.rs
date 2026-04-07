@@ -19,3 +19,4 @@ pub mod admin_mcp;
 pub mod me;
 pub mod mcp;
 pub mod notifications;
+pub mod prompts;

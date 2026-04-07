@@ -81,6 +81,7 @@ use crate::{
             update_conversation_summary,
             EmbeddingTarget,
         },
+        system_prompts,
     },
     state::SharedState,
     utils::chat_stream::{
@@ -525,7 +526,6 @@ pub async fn handle_chat_stream(
  let mut summary_prompt: Option<Prompt> = None;
  let mut retrieval_prompt: Option<Prompt> = None;
  let mut recent_prompts: Vec<Prompt> = Vec::new();
- let mut recent_boundary: Option<chrono::DateTime<Utc>> = None;
  let (conversation_id,title) = if let Some(Path(conversation_id)) = chat_id {
     let conversation = conversations::Entity::find_by_id(conversation_id.clone())
        .filter(conversations::Column::ArchivedAt.is_null())
@@ -565,7 +565,7 @@ pub async fn handle_chat_stream(
             app_state.settings.rag.recent_message_pairs,
         )
         .await?;
-        recent_boundary = recent.boundary;
+        let recent_boundary = recent.boundary;
         recent_prompts = recent.prompts;
         if let Some(summary) = load_summary(&app_state.database, conversation_id).await? {
             if !summary.summary.trim().is_empty() {
@@ -729,6 +729,20 @@ pub async fn handle_chat_stream(
     prompts.extend(current_prompts.clone());
     prompts
  };
+ if let Ok(Some(system_prompt)) =
+     system_prompts::resolve_system_prompt(&app_state.database, claims.user_id).await
+ {
+     if !system_prompt.prompt_text.trim().is_empty() {
+         previous_prompts.insert(
+             0,
+             Prompt {
+                 role: ChatRole::System,
+                 text: system_prompt.prompt_text,
+                 files: Vec::new(),
+             },
+         );
+     }
+ }
  let provider_is_openai = provider.to_lowercase() == "openai";
  let provider_is_anthropic = provider.to_lowercase() == "anthropic";
  let supports_mcp_tools = provider_is_openai || provider_is_anthropic;

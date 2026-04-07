@@ -4,7 +4,7 @@ use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, Iterable, PaginatorTrait as _, QueryFilter, QueryOrder, QuerySelect};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::Error}, dto::{chat::{ArchiveChatRequest, PaginatedConversations, ConversationResponse, MessageParts, MessageResponse, TokenUsage}, common::PaginationQuery, files::File}, error::{AppError, ErrorResponse}, models::{conversations::{self, ConversationWithCount}, messages::{self}}, state::SharedState};
+use crate::{auth::{claims::Claims, error::Error}, dto::{chat::{ArchiveChatRequest, PaginatedConversations, ConversationResponse, MessageParts, MessageResponse, TokenUsage, SemanticResult}, common::PaginationQuery, files::File}, error::{AppError, ErrorResponse}, models::{conversations::{self, ConversationWithCount}, messages::{self}}, services::search, state::SharedState};
 use num_traits::cast::ToPrimitive;
 
 fn resolve_web_search_enabled(metadata: Option<&serde_json::Value>) -> bool {
@@ -22,7 +22,8 @@ fn resolve_web_search_enabled(metadata: Option<&serde_json::Value>) -> bool {
         ("limit" = Option<u64>, Query, description = "Number of items per page (default: 20, max: 100)"),
         ("offset" = Option<u64>, Query, description = "Number of items to skip (default: 0)"),
         ("archived" = Option<bool>, Query, description = "Filter by archived status. If not provided, returns only non-archived conversations"),
-        ("search" = Option<String>, Query, description = "Search in conversation titles (case-insensitive)"),
+        ("search" = Option<String>, Query, description = "Search text (title match by default; use semantic=true to enable semantic search)"),
+        ("semantic" = Option<bool>, Query, description = "Enable semantic search for query text (default: false)"),
     ),
     responses(
         (status = 200, body = PaginatedConversations),
@@ -38,8 +39,121 @@ pub async fn get_chats(
     let mut response = Vec::new();
     let limit = query.limit.unwrap_or(20).min(100); // Cap at 100
     let offset = query.offset.unwrap_or(0);
-    let search = query.search.clone();
+    let search = query
+        .search
+        .clone()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let enable_semantic = query.semantic.unwrap_or(false);
     let archived = query.archived.unwrap_or(false);
+
+    let semantic_results_fallback = if enable_semantic && search.is_some() {
+        Some(std::collections::HashMap::new())
+    } else {
+        None
+    };
+
+    if enable_semantic {
+        if let Some(search_text) = search.as_ref() {
+        if let Some(page) = search::semantic_conversation_search(
+            &app_state,
+            claims.user_id,
+            search_text,
+            archived,
+            limit,
+            offset,
+        )
+        .await?
+        {
+            if page.total > 0 {
+                let mut select = conversations::Entity::find()
+                    .select_only()
+                    .columns(conversations::Column::iter())
+                    .column_as(messages::Column::Id.count(), "messageCount")
+                    .left_join(messages::Entity)
+                    .filter(conversations::Column::UserId.eq(claims.user_id))
+                    .filter(conversations::Column::Id.is_in(page.conversation_ids.clone()));
+
+                if archived {
+                    select = select.filter(conversations::Column::ArchivedAt.is_not_null());
+                } else {
+                    select = select.filter(conversations::Column::ArchivedAt.is_null());
+                }
+
+                let rows: Vec<ConversationWithCount> = select
+                    .group_by(conversations::Column::Id)
+                    .into_model::<ConversationWithCount>()
+                    .all(&app_state.database)
+                    .await
+                    .map_err(|e| {
+                        eprintln!("conversation semantic query error -> {e}");
+                        AppError::DbTimeout
+                    })?;
+
+                let mut row_map = std::collections::HashMap::new();
+                for row in rows {
+                    row_map.insert(row.id, row);
+                }
+
+                for conversation_id in page.conversation_ids {
+                    let Some(conversation_with_count) = row_map.remove(&conversation_id) else {
+                        continue;
+                    };
+                    let message_count = messages::Entity::find()
+                        .filter(messages::Column::ConversationId.eq(conversation_with_count.id))
+                        .count(&app_state.database)
+                        .await
+                        .map_err(|e| {
+                            eprintln!("conversation in count error {}", e);
+                            AppError::DbTimeout
+                        })?;
+                    let web_search_enabled =
+                        resolve_web_search_enabled(conversation_with_count.metadata.as_ref());
+                    let conversation_response = ConversationResponse {
+                        id: conversation_with_count.id,
+                        title: conversation_with_count.title,
+                        web_search_enabled,
+                        archived: conversation_with_count.archived_at.is_some(),
+                        archived_at: conversation_with_count.archived_at,
+                        model: conversation_with_count.model_name,
+                        total_tokens: conversation_with_count.total_tokens,
+                        total_cost: conversation_with_count.total_cost.to_f32().unwrap_or_default(),
+                        created_at: conversation_with_count.created_at,
+                        updated_at: conversation_with_count.updated_at,
+                        last_message_at: conversation_with_count.last_message_at,
+                        message_count,
+                        messages: None,
+                    };
+                    response.push(conversation_response);
+                }
+
+                let semantic_results = Some(
+                    page.snippets
+                        .into_iter()
+                        .map(|(conversation_id, snippet)| {
+                            (
+                                conversation_id,
+                                SemanticResult {
+                                    message_id: snippet.message_id,
+                                    snippet: snippet.snippet,
+                                    distance: snippet.distance,
+                                },
+                            )
+                        })
+                        .collect(),
+                );
+                let payload = PaginatedConversations {
+                    total: page.total,
+                    limit,
+                    offset,
+                    conversations: response,
+                    semantic_results,
+                };
+                return Ok((StatusCode::OK, Json(payload)));
+            }
+        }
+        }
+    }
 
     let mut count_query = conversations::Entity::find()
         .filter(conversations::Column::UserId.eq(claims.user_id));
@@ -123,6 +237,7 @@ pub async fn get_chats(
         limit,
         offset,
         conversations: response,
+        semantic_results: semantic_results_fallback,
     };
   Ok((StatusCode::OK,Json(payload)))
 }

@@ -456,7 +456,7 @@ pub async fn update_role(
             AuthError::DbTimeout
         })?;
 
-     let mut permissions_list: Vec<String> = Vec::new();
+     let permissions_list: Vec<String>;
 
     if let Some(permission_keys) = permissions {
         role_permissions::Entity::delete_many()

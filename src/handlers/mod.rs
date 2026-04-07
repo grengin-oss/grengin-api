@@ -20,3 +20,5 @@ pub mod admin_mcp;
 pub mod mcp;
 pub mod me;
 pub mod notifications;
+pub mod admin_prompts;
+pub mod me_prompts;

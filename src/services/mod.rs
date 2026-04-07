@@ -9,3 +9,5 @@ pub mod mcp_helpers;
 pub mod mcp_access;
 pub mod notifications;
 pub mod rag;
+pub mod search;
+pub mod system_prompts;
