@@ -4,8 +4,15 @@ use anyhow::{anyhow, Error};
 use reqwest::StatusCode;
 use serde_json::Value;
 use tokio::sync::{OnceCell, RwLock};
+use sea_orm::EntityTrait;
 
-use crate::{dto::models::{ModelInfo, ModelsResponse, ProviderInfo}, state::SharedState};
+use crate::{
+    auth::claims::Claims,
+    dto::models::{ModelInfo, ModelsResponse, ProviderInfo},
+    models::users,
+    services::department_policies::effective_allowed_models,
+    state::SharedState,
+};
 
 const PROVIDERS_URL: &str = "https://meta.grengin.com/providers.json";
 
@@ -171,11 +178,37 @@ fn get_str(value: &Value, field: &str) -> Result<String, Error> {
     tag = "models",
     responses(
         (status = 200, body = ModelsResponse, description = "List of providers and models"),
+        (status = 401),
     )
 )]
 pub async fn get_list_models(
+    claims: Claims,
     State(app_state):State<SharedState>,
 ) -> (StatusCode, Json<ModelsResponse>) {
+    let user = users::Entity::find_by_id(claims.user_id)
+        .one(&app_state.database)
+        .await
+        .ok()
+        .flatten();
+    let allowed_models = if let Some(user) = &user {
+        if let Some(dept_id) = user.department_id {
+            effective_allowed_models(&app_state.database, dept_id)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let allowed_set = allowed_models.map(|models| {
+        models
+            .into_iter()
+            .map(|m| (m.provider.to_lowercase(), m.model.to_lowercase()))
+            .collect::<std::collections::HashSet<(String, String)>>()
+    });
+
     let (status, providers) = match load_providers_cached(&app_state.req_client).await {
         Ok(providers) => (StatusCode::OK, providers),
         Err(error) => {
@@ -201,11 +234,21 @@ pub async fn get_list_models(
         if whitelist.is_empty() {
             continue;
         }
-        let models = provider
+        let mut models = provider
             .models
             .into_iter()
             .filter(|model| whitelist.contains(&model.name) || whitelist.contains(&model.key))
             .collect::<Vec<ModelInfo>>();
+        if let Some(allowed) = &allowed_set {
+            let provider_key = provider.key.to_lowercase();
+            models = models
+                .into_iter()
+                .filter(|model| {
+                    allowed.contains(&(provider_key.clone(), model.key.to_lowercase()))
+                        || allowed.contains(&(provider_key.clone(), model.name.to_lowercase()))
+                })
+                .collect();
+        }
         if models.is_empty() {
             continue;
         }

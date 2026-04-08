@@ -60,6 +60,9 @@ pub struct Department {
     pub budget_available: f64,
     pub budget_used: f64,
     pub budget_period: BudgetPeriod,
+    pub retention_days: Option<i32>,
+    #[serde(default)]
+    pub allowed_models: Vec<DepartmentModelKey>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -81,6 +84,9 @@ pub struct DepartmentTreeNode {
     pub budget_available: f64,
     pub budget_used: f64,
     pub budget_period: BudgetPeriod,
+    pub retention_days: Option<i32>,
+    #[serde(default)]
+    pub allowed_models: Vec<DepartmentModelKey>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[schema(no_recursion)]
@@ -98,6 +104,8 @@ pub struct DepartmentCreate {
     pub description: String,
     pub parent_id: Option<Uuid>,
     pub admin_ids: Option<Vec<Uuid>>,
+    pub retention_days: Option<i32>,
+    pub allowed_models: Option<Vec<DepartmentModelKey>>,
 }
 
 #[derive(Deserialize,IntoParams,ToSchema)]
@@ -109,6 +117,14 @@ pub struct DepartmentUpdate {
     pub budget_allocated: Option<f32>,
     pub budget_period: Option<BudgetPeriod>,
     pub action_on_exceed: Option<ActionOnExceed>,
+    pub retention_days: Option<i32>,
+    pub allowed_models: Option<Vec<DepartmentModelKey>>,
+}
+
+#[derive(Serialize, Deserialize, ToSchema, IntoParams, Clone, PartialEq, Eq, Hash)]
+pub struct DepartmentModelKey {
+    pub provider: String,
+    pub model: String,
 }
 
 #[derive(Deserialize, ToSchema)]

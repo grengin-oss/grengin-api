@@ -81,6 +81,7 @@ use crate::{
             update_conversation_summary,
             EmbeddingTarget,
         },
+        department_policies::check_model_allowed,
         system_prompts,
     },
     state::SharedState,
@@ -474,6 +475,24 @@ pub async fn handle_chat_stream(
         AppError::DbTimeout
     })?;
  if let Some(user) = user {
+    let allowed = check_model_allowed(
+        &app_state.database,
+        user.department_id,
+        &provider,
+        &model_name,
+    )
+    .await
+    .map_err(|e| {
+        eprintln!("department model check error: {e}");
+        AppError::DbTimeout
+    })?;
+    if !allowed {
+        return Err(AppError::DepartmentModelNotAllowed {
+            provider: provider.clone(),
+            model: model_name.clone(),
+        });
+    }
+
     if let Some(department_id) = user.department_id {
         let (budget_available, action_on_exceed) =
             get_department_budget_status(&app_state.database, department_id)

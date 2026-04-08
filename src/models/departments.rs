@@ -44,6 +44,7 @@ pub struct Model {
     pub budget_available: Decimal,
     pub budget_period: BudgetPeriod,
     pub action_on_exceed: ActionOnExceed,
+    pub retention_days: Option<i32>,
     
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -52,12 +53,20 @@ pub struct Model {
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
     #[sea_orm(has_many = "super::users::Entity")]
-    Users
+    Users,
+    #[sea_orm(has_many = "super::department_allowed_models::Entity")]
+    DepartmentAllowedModels,
 }
 
 impl Related<super::messages::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Users.def()
+    }
+}
+
+impl Related<super::department_allowed_models::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::DepartmentAllowedModels.def()
     }
 }
 

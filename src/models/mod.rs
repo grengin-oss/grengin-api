@@ -15,6 +15,7 @@ pub mod files;
 pub mod usage_logs;
 pub mod usage_summary_daily;
 pub mod departments;
+pub mod department_allowed_models;
 pub mod analytics;
 pub mod conversation_summaries;
 pub mod message_embeddings;

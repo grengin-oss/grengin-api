@@ -39,6 +39,7 @@ pub enum ErrorCode {
 
     // 6000-6999: budgets
     DepartmentBudgetExceeded = 6001,
+    DepartmentModelNotAllowed = 6002,
 }
 
 impl Serialize for ErrorCode {
@@ -112,6 +113,7 @@ pub enum AppError {
     LlmTokenExhausted { provider: String },
 
     DepartmentBudgetExceeded,
+    DepartmentModelNotAllowed { provider: String, model: String },
     McpServerNotFound,
     McpAccessUpdateFailed,
 }
@@ -502,6 +504,31 @@ impl AppError {
                     StatusCode::FORBIDDEN,
                     ErrorDetail {
                         code: ErrorCode::DepartmentBudgetExceeded,
+                        description: Self::render(description_tpl, &params),
+                        solution: Self::render(solution_tpl, &params),
+                        description_key,
+                        solution_key,
+                        params,
+                        external_code: None,
+                    },
+                )
+            }
+
+            AppError::DepartmentModelNotAllowed { provider, model } => {
+                let mut params = Self::base_params();
+                params.insert("provider".to_string(), provider.clone());
+                params.insert("model".to_string(), model.clone());
+                let description_key = "error.department_model_not_allowed.description".to_string();
+                let solution_key = "error.department_model_not_allowed.solution".to_string();
+                let description_tpl =
+                    "The model `{model}` from provider `{provider}` is not allowed for your department.";
+                let solution_tpl =
+                    "Choose a model allowed by your department or contact your admin.";
+
+                (
+                    StatusCode::FORBIDDEN,
+                    ErrorDetail {
+                        code: ErrorCode::DepartmentModelNotAllowed,
                         description: Self::render(description_tpl, &params),
                         solution: Self::render(solution_tpl, &params),
                         description_key,
