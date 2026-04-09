@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
+use std::collections::HashMap;
 use crate::{dto::files::File, models::messages::ChatRole};
 
 #[derive(Deserialize, ToSchema, IntoParams)]
@@ -37,6 +38,15 @@ pub struct PaginatedConversations {
   pub limit:u64,
   pub offset:u64,
   pub conversations:Vec<ConversationResponse>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub semantic_results: Option<HashMap<Uuid, SemanticResult>>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SemanticResult {
+  pub message_id: Uuid,
+  pub snippet: String,
+  pub distance: f64,
 }
 
 #[derive(Serialize, ToSchema, IntoParams)]

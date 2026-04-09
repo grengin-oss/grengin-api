@@ -1,7 +1,7 @@
 use anyhow::Error;
 use sea_orm::{Database, DatabaseConnection, EntityTrait};
-use tokio::sync::{RwLock, broadcast};
-use std::{collections::HashMap, sync::Arc};
+use tokio::sync::{RwLock, broadcast, Notify};
+use std::{collections::HashMap, sync::{Arc, atomic::{AtomicBool, Ordering}}};
 use reqwest::Client as ReqwestClient;
 use crate::{
     auth::{azure::build_azure_client, encryption::decrypt_key, google::build_google_client},
@@ -21,6 +21,34 @@ pub struct AppState {
     pub settings:Settings,
     pub mcp_clients: RwLock<HashMap<Uuid, Arc<McpServerClient>>>,
     pub notification_hub: broadcast::Sender<NotificationEvent>,
+    pub stream_cancellations: RwLock<HashMap<Uuid, Arc<StreamCancel>>>,
+}
+
+pub struct StreamCancel {
+    cancelled: AtomicBool,
+    notify: Notify,
+}
+
+impl StreamCancel {
+    pub fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        self.notify.notify_waiters();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
+    pub async fn cancelled(&self) {
+        self.notify.notified().await;
+    }
 }
 
 impl AppState {
@@ -53,6 +81,7 @@ impl AppState {
             settings,
             mcp_clients: RwLock::new(HashMap::new()),
             notification_hub,
+            stream_cancellations: RwLock::new(HashMap::new()),
          };
          state.refresh_azure_client()
           .await?;
@@ -151,6 +180,28 @@ impl AppState {
             },
             _ => None
         }
+    }
+
+    pub async fn register_stream_cancel(&self, message_id: Uuid) -> Arc<StreamCancel> {
+        let mut guard = self.stream_cancellations.write().await;
+        let handle = Arc::new(StreamCancel::new());
+        guard.insert(message_id, handle.clone());
+        handle
+    }
+
+    pub async fn cancel_stream(&self, message_id: Uuid) -> bool {
+        let guard = self.stream_cancellations.read().await;
+        if let Some(handle) = guard.get(&message_id) {
+            handle.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn clear_stream_cancel(&self, message_id: Uuid) {
+        let mut guard = self.stream_cancellations.write().await;
+        guard.remove(&message_id);
     }
 
     pub async fn get_oidc_client_and_column_and_redirect_uri(&self, provider: &AuthProvider) -> Result<(&RwLock<Option<OidcClient>>, users::Column,Option<String>), ConfigError> {

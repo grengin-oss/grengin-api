@@ -1,6 +1,7 @@
 pub mod analytics;
 pub mod analytics_cache;
 pub mod budget_allocation;
+pub mod department_policies;
 pub mod authorization;
 pub mod auth_audit;
 pub mod mcp_client;
@@ -9,3 +10,5 @@ pub mod mcp_helpers;
 pub mod mcp_access;
 pub mod notifications;
 pub mod rag;
+pub mod search;
+pub mod system_prompts;

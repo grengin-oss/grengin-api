@@ -19,6 +19,7 @@ pub struct PaginationQuery {
    pub limit:Option<u64>,
    pub offset:Option<u64>,
    pub search:Option<String>,
+   pub semantic:Option<bool>,
    pub archived:Option<bool>,
    pub ascending:Option<bool>,
    pub role_id:Option<Uuid>,

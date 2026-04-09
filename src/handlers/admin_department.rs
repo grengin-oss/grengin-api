@@ -20,13 +20,14 @@ use crate::{
         admin_department::{
             DepartmentListQuery, DepartmentMembersResponse, DepartmentMemeberListQuery,
             DepartmentCreate, Department, DepartmentTreeNode, DepartmentTreeQuery,
-            DepartmentTree, DepartmentUpdate, DepartmentsListResponse,
+            DepartmentTree, DepartmentUpdate, DepartmentsListResponse, DepartmentModelKey,
             DepartmentMove, RoleAssignmentPayload,
         },
         admin_user::User,
         common::SortRule,
     },
     models::{
+        department_allowed_models,
         departments::{self, ActionOnExceed, BudgetPeriod},
         roles,
         user_role_assignments,
@@ -41,6 +42,7 @@ use crate::{
             sum_child_allocations,
             sum_department_cost_in_range,
         },
+        department_policies::{load_allowed_models_map, validate_allowed_models_subset, validate_retention_days},
         notifications::emit_budget_alerts,
     },
     state::SharedState,
@@ -61,6 +63,8 @@ pub(crate) struct DepartmentRow {
     pub budget_period: BudgetPeriod,
     #[sea_orm(from_alias = "actionOnExceed")]
     pub action_on_exceed: ActionOnExceed,
+    #[sea_orm(from_alias = "retentionDays")]
+    pub retention_days: Option<i32>,
     #[sea_orm(from_alias = "createdAt")]
     pub created_at: DateTime<Utc>,
     #[sea_orm(from_alias = "updatedAt")]
@@ -80,6 +84,8 @@ pub(crate) struct DepartmentTreeRow {
     pub budget_allocated: Decimal,
     #[sea_orm(from_alias = "budgetPeriod")]
     pub budget_period: BudgetPeriod,
+    #[sea_orm(from_alias = "retentionDays")]
+    pub retention_days: Option<i32>,
     #[sea_orm(from_alias = "createdAt")]
     pub created_at: DateTime<Utc>,
     #[sea_orm(from_alias = "updatedAt")]
@@ -103,6 +109,30 @@ fn build_ltree_path(parent_path: Option<&str>, id: uuid::Uuid) -> Result<String,
     tree.push(label);
 
     Ok(tree.to_string())
+}
+
+async fn max_subtree_depth(
+    db: &DatabaseConnection,
+    path: &str,
+) -> Result<i32, AuthError> {
+    let row = departments::Entity::find()
+        .select_only()
+        .expr_as(Func::max(Expr::col(departments::Column::Depth)), "max_depth")
+        .filter(
+            Expr::col(departments::Column::Path).binary(
+                BinOper::Custom("<@".into()),
+                Expr::val(path.to_string()).cast_as(Alias::new("ltree")),
+            ),
+        )
+        .into_tuple::<(Option<i32>,)>()
+        .one(db)
+        .await
+        .map_err(|e| {
+            eprintln!("subtree depth query error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    Ok(row.and_then(|(value,)| value).unwrap_or(0))
 }
 
 async fn sync_department_admin_assignments(
@@ -258,6 +288,52 @@ async fn sync_department_admin_assignments(
     Ok(())
 }
 
+async fn sync_department_allowed_models(
+    db: &DatabaseConnection,
+    department_id: Uuid,
+    models: Option<&[DepartmentModelKey]>,
+) -> Result<(), AuthError> {
+    let Some(models) = models else {
+        return Ok(());
+    };
+
+    department_allowed_models::Entity::delete_many()
+        .filter(department_allowed_models::Column::DepartmentId.eq(department_id))
+        .exec(db)
+        .await
+        .map_err(|e| {
+            eprintln!("department allowed models delete error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    if models.is_empty() {
+        return Ok(());
+    }
+
+    let now = Utc::now();
+    let inserts = models
+        .iter()
+        .map(|model| department_allowed_models::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            department_id: Set(department_id),
+            provider: Set(model.provider.clone()),
+            model: Set(model.model.clone()),
+            created_at: Set(now),
+            updated_at: Set(now),
+        })
+        .collect::<Vec<_>>();
+
+    department_allowed_models::Entity::insert_many(inserts)
+        .exec(db)
+        .await
+        .map_err(|e| {
+            eprintln!("department allowed models insert error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    Ok(())
+}
+
 pub(crate) async fn load_department_admin_ids_map(
     db: &DatabaseConnection,
     department_ids: &[Uuid],
@@ -318,6 +394,7 @@ pub fn departments_base_select() -> sea_orm::Select<departments::Entity> {
         .column(departments::Column::BudgetAllocated)
         .column(departments::Column::BudgetPeriod)
         .column(departments::Column::ActionOnExceed)
+        .column(departments::Column::RetentionDays)
         .column(departments::Column::CreatedAt)
         .column(departments::Column::UpdatedAt)
 }
@@ -333,6 +410,7 @@ pub(crate) fn departments_tree_select() -> sea_orm::Select<departments::Entity> 
         .expr_as(Expr::cust("path::text"), "path")
         .column(departments::Column::BudgetAllocated)
         .column(departments::Column::BudgetPeriod)
+        .column(departments::Column::RetentionDays)
         .column(departments::Column::CreatedAt)
         .column(departments::Column::UpdatedAt)
 }
@@ -400,6 +478,22 @@ pub async fn create_department(
     let created_at = Utc::now();
     let updated_at = created_at;
 
+    if let Some(models) = req.allowed_models.as_deref() {
+        validate_allowed_models_subset(&app_state.database, req.parent_id, models)
+            .await
+            .map_err(|e| {
+                eprintln!("allowed models validation error: {e}");
+                AuthError::DbConflict
+            })?;
+    }
+
+    validate_retention_days(&app_state.database, req.parent_id, req.retention_days)
+        .await
+        .map_err(|e| {
+            eprintln!("retention_days validation error: {e}");
+            AuthError::DbConflict
+        })?;
+
     // Fetch parent (if any) to compute path/depth
     let (parent_path, depth) = if let Some(parent_id) = req.parent_id {
         let parent = departments_base_select()
@@ -420,6 +514,10 @@ pub async fn create_department(
 
     let path_str = build_ltree_path(parent_path.as_deref(), id)?;
 
+    if depth > 9 {
+        return Err(AuthError::ServiceTemporarilyUnavailable);
+    }
+
    let insert = SqlQuery::insert()
     .into_table(departments::Entity)
     .columns([
@@ -429,6 +527,7 @@ pub async fn create_department(
         departments::Column::ParentId,
         departments::Column::Depth,
         departments::Column::Path,
+        departments::Column::RetentionDays,
         departments::Column::CreatedAt,
         departments::Column::UpdatedAt,
     ])
@@ -441,6 +540,7 @@ pub async fn create_department(
         Expr::val(path_str.clone())
             .cast_as(Alias::new("ltree"))
             .into(),
+        req.retention_days.into(),
         created_at.into(),
         updated_at.into(),
     ])
@@ -458,6 +558,8 @@ let (sql, values) = insert.build(PostgresQueryBuilder);
         eprintln!("insert error: {e}");
         AuthError::DbTimeout
     })?;
+
+    sync_department_allowed_models(&app_state.database, id, req.allowed_models.as_deref()).await?;
 
     if let Some(admin_ids) = req.admin_ids.as_deref() {
         sync_department_admin_assignments(
@@ -635,6 +737,12 @@ pub async fn list_departments(
         .collect();
 
     let admin_map = load_department_admin_ids_map(&app_state.database, &dept_ids).await?;
+    let allowed_models_map = load_allowed_models_map(&app_state.database, &dept_ids)
+        .await
+        .map_err(|e| {
+            eprintln!("allowed models load error: {e}");
+            AuthError::DbTimeout
+        })?;
 
     // Build response
     let mut departments = Vec::with_capacity(rows.len());
@@ -649,6 +757,7 @@ pub async fn list_departments(
         )
         .await?;
         let admin_ids = admin_map.get(&d.id).cloned().unwrap_or_default();
+        let allowed_models = allowed_models_map.get(&d.id).cloned().unwrap_or_default();
 
         departments.push(Department {
             id: d.id,
@@ -666,6 +775,8 @@ pub async fn list_departments(
             budget_available,
             budget_used,
             budget_period: d.budget_period,
+            retention_days: d.retention_days,
+            allowed_models,
             created_at: d.created_at,
             updated_at: d.updated_at,
         });
@@ -775,6 +886,12 @@ pub async fn get_departments_tree(
         .collect();
 
     let admin_map = load_department_admin_ids_map(&app_state.database, &dept_ids).await?;
+    let allowed_models_map = load_allowed_models_map(&app_state.database, &dept_ids)
+        .await
+        .map_err(|e| {
+            eprintln!("allowed models load error: {e}");
+            AuthError::DbTimeout
+        })?;
 
     let mut nodes: HashMap<Uuid, DepartmentTreeNode> = HashMap::with_capacity(rows.len());
     let mut children_map: HashMap<Uuid, Vec<Uuid>> = HashMap::with_capacity(rows.len());
@@ -782,6 +899,7 @@ pub async fn get_departments_tree(
     for d in rows {
         let member_count = *direct_map.get(&d.id).unwrap_or(&0) as i32;
         let admin_ids = admin_map.get(&d.id).cloned().unwrap_or_default();
+        let allowed_models = allowed_models_map.get(&d.id).cloned().unwrap_or_default();
 
         if let Some(pid) = d.parent_id {
             children_map.entry(pid).or_default().push(d.id);
@@ -805,6 +923,8 @@ pub async fn get_departments_tree(
                 budget_available: 0.0,
                 budget_used: 0.0,
                 budget_period: d.budget_period,
+                retention_days: d.retention_days,
+                allowed_models,
                 created_at: d.created_at,
                 updated_at: d.updated_at,
                 children: vec![],
@@ -971,6 +1091,14 @@ pub async fn get_department_by_id(
     )
     .await?;
 
+    let allowed_models_map = load_allowed_models_map(&app_state.database, &[dept.id])
+        .await
+        .map_err(|e| {
+            eprintln!("allowed models load error: {e}");
+            AuthError::DbTimeout
+        })?;
+    let allowed_models = allowed_models_map.get(&dept.id).cloned().unwrap_or_default();
+
     let resp = Department {
         id: dept.id,
         name: dept.name,
@@ -987,6 +1115,8 @@ pub async fn get_department_by_id(
         budget_available,
         budget_used,
         budget_period: dept.budget_period,
+        retention_days: dept.retention_days,
+        allowed_models,
         created_at: dept.created_at,
         updated_at: dept.updated_at,
     };
@@ -1039,6 +1169,7 @@ pub async fn update_department(
     let parent_changed = parent_id != dept.parent_id;
     let budget_period = req.budget_period.unwrap_or(dept.budget_period);
     let action_on_exceed = req.action_on_exceed.unwrap_or(dept.action_on_exceed);
+    let retention_days = req.retention_days.or(dept.retention_days);
     let budget_allocated = if let Some(value) = req.budget_allocated {
         Decimal::from_f32_retain(value).ok_or(AuthError::ServiceTemporarilyUnavailable)?
     } else {
@@ -1086,6 +1217,37 @@ pub async fn update_department(
         }
     }
 
+    if let Some(models) = req.allowed_models.as_deref() {
+        validate_allowed_models_subset(&app_state.database, parent_id, models)
+            .await
+            .map_err(|e| {
+                eprintln!("allowed models validation error: {e}");
+                AuthError::DbConflict
+            })?;
+    } else if parent_changed {
+        let current_allowed = load_allowed_models_map(&app_state.database, &[department_id])
+            .await
+            .map_err(|e| {
+                eprintln!("allowed models load error: {e}");
+                AuthError::DbTimeout
+            })?
+            .remove(&department_id)
+            .unwrap_or_default();
+        validate_allowed_models_subset(&app_state.database, parent_id, &current_allowed)
+            .await
+            .map_err(|e| {
+                eprintln!("allowed models validation error: {e}");
+                AuthError::DbConflict
+            })?;
+    }
+
+    validate_retention_days(&app_state.database, parent_id, retention_days)
+        .await
+        .map_err(|e| {
+            eprintln!("retention_days validation error: {e}");
+            AuthError::DbConflict
+        })?;
+
     // Recompute path/depth if parent changes
     let (path, depth) = if parent_changed {
         if let Some(parent_id) = parent_id {
@@ -1109,6 +1271,15 @@ pub async fn update_department(
         (dept.path.clone(), dept.depth)
     };
 
+    if parent_changed {
+        let subtree_max = max_subtree_depth(&app_state.database, &dept.path).await?;
+        let new_root_depth = depth;
+        let subtree_height = subtree_max - dept.depth;
+        if new_root_depth + subtree_height > 9 {
+            return Err(AuthError::ServiceTemporarilyUnavailable);
+        }
+    }
+
     let updated_at = Utc::now();
 
     // ✅ SeaQuery UPDATE with CAST(... AS ltree)
@@ -1125,6 +1296,7 @@ pub async fn update_department(
                     .cast_as(Alias::new("ltree"))
                     .into(),
             ),
+            (departments::Column::RetentionDays, retention_days.into()),
             (departments::Column::BudgetAllocated, budget_allocated.into()),
             (departments::Column::BudgetPeriod, budget_period.into()),
             (departments::Column::ActionOnExceed, action_on_exceed.into()),
@@ -1147,6 +1319,15 @@ pub async fn update_department(
             eprintln!("update error: {e}");
             AuthError::DbTimeout
         })?;
+
+    if req.allowed_models.is_some() {
+        sync_department_allowed_models(
+            &app_state.database,
+            department_id,
+            req.allowed_models.as_deref(),
+        )
+        .await?;
+    }
 
     if let Some(admin_ids) = req.admin_ids.as_deref() {
         sync_department_admin_assignments(
@@ -1239,6 +1420,34 @@ pub async fn move_department(
             AuthError::DbTimeout
         })?
         .ok_or(AuthError::DbNotFound)?;
+
+    let current_allowed = load_allowed_models_map(&app_state.database, &[department_id])
+        .await
+        .map_err(|e| {
+            eprintln!("allowed models load error: {e}");
+            AuthError::DbTimeout
+        })?
+        .remove(&department_id)
+        .unwrap_or_default();
+    validate_allowed_models_subset(&app_state.database, Some(new_parent.id), &current_allowed)
+        .await
+        .map_err(|e| {
+            eprintln!("allowed models validation error: {e}");
+            AuthError::DbConflict
+        })?;
+    validate_retention_days(&app_state.database, Some(new_parent.id), dept.retention_days)
+        .await
+        .map_err(|e| {
+            eprintln!("retention_days validation error: {e}");
+            AuthError::DbConflict
+        })?;
+
+    let subtree_max = max_subtree_depth(&app_state.database, &dept.path).await?;
+    let new_root_depth = new_parent.depth + 1;
+    let subtree_height = subtree_max - dept.depth;
+    if new_root_depth + subtree_height > 9 {
+        return Err(AuthError::ServiceTemporarilyUnavailable);
+    }
 
     // Prevent moving under itself or one of its descendants.
     if req.new_parent_id == department_id || new_parent.path.starts_with(&dept.path) {

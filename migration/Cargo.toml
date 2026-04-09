@@ -13,3 +13,4 @@ path = "src/lib.rs"
 sea-orm-migration = { version = "1.1.19", features = ["runtime-tokio-rustls","with-json", "with-uuid", "with-chrono", "sqlx-postgres"] }
 tokio = { version = "1", features = ["full", "macros", "rt", "rt-multi-thread"] }
 uuid = { version = "1.18.1", features = ["v4"] }
+serde_json = "1.0"

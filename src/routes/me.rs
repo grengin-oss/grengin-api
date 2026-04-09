@@ -8,6 +8,12 @@ use crate::{
         get_my_administered_departments_tree,
         get_my_permissions,
     },
+    handlers::me_prompts::{
+        get_my_system_prompt,
+        reset_my_system_prompt,
+        set_my_system_prompt,
+        submit_prompt_feedback,
+    },
     handlers::notifications::{
         list_my_notifications,
         mark_notification_read,
@@ -39,4 +45,6 @@ pub fn me_routes() -> Router<SharedState> {
             "/me/analytics/administered-departments/users",
             get(get_my_administered_department_user_analytics),
         )
+        .route("/me/system-prompt", get(get_my_system_prompt).put(set_my_system_prompt).delete(reset_my_system_prompt))
+        .route("/me/system-prompt/feedback", post(submit_prompt_feedback))
 }

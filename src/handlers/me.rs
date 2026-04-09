@@ -636,6 +636,8 @@ pub async fn get_my_administered_departments_list(
             budget_available,
             budget_used,
             budget_period: d.budget_period,
+            retention_days: d.retention_days,
+            allowed_models: Vec::new(),
             created_at: d.created_at,
             updated_at: d.updated_at,
         });
@@ -780,6 +782,8 @@ pub async fn get_my_administered_departments_tree(
                 budget_available: 0.0,
                 budget_used: 0.0,
                 budget_period: d.budget_period,
+                retention_days: d.retention_days,
+                allowed_models: Vec::new(),
                 created_at: d.created_at,
                 updated_at: d.updated_at,
                 children: vec![],
