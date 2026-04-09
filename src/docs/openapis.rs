@@ -65,6 +65,7 @@ use crate::models::users::UserStatus;
         chat::update_chat_by_id,
         chat_stream::handle_chat_stream_doc,
         chat_stream::handle_chat_stream_path_doc,
+        chat_stream::cancel_chat_stream,
         message::delete_chat_message_by_id,
         message::edit_chat_message_by_id_and_stream,
         admin_users::add_new_user,

@@ -21,6 +21,7 @@ pub enum ChatStreamEvents{
   Event,
   ToolCall,
   ToolResult,
+  Cancelled,
   Done,
   #[serde(rename = "budget_warning")]
   DepartmentBudgetWarning,

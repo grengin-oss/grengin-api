@@ -419,6 +419,55 @@ pub async fn handle_chat_stream_path_doc(){}
 )]
 pub async fn handle_chat_stream_doc(){}
 
+#[utoipa::path(
+    post,
+    path = "/chat/stream/{message_id}/cancel",
+    tag = "chat",
+    params(
+        ("message_id" = Uuid, Path, description = "Assistant message id to cancel")
+    ),
+    responses(
+        (status = 202),
+        (status = 204),
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 404, content_type = "application/json", body = ErrorResponse),
+        (status = 503, content_type = "application/json", body = ErrorResponse),
+    )
+)]
+pub async fn cancel_chat_stream(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Path(message_id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    let message = messages::Entity::find_by_id(message_id)
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("cancel stream message lookup error: {e}");
+            AppError::DbTimeout
+        })?
+        .ok_or(AppError::ResourceNotFound)?;
+
+    let conversation = conversations::Entity::find_by_id(message.conversation_id)
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("cancel stream conversation lookup error: {e}");
+            AppError::DbTimeout
+        })?
+        .ok_or(AppError::ResourceNotFound)?;
+
+    if conversation.user_id != claims.user_id {
+        return Err(AppError::ResourceNotFound);
+    }
+
+    if app_state.cancel_stream(message_id).await {
+        Ok(StatusCode::ACCEPTED)
+    } else {
+        Ok(StatusCode::NO_CONTENT)
+    }
+}
+
 pub async fn handle_chat_stream(
   claims:Claims,
   mut chat_id:Option<Path<Uuid>>,
@@ -946,12 +995,60 @@ pub async fn handle_chat_stream(
           .await
           .expect("failed to insert llm response in table messages");
 
+    let cancel_handle = app_state.register_stream_cancel(new_message_id).await;
+
     let mut event_source = event_source;
     let mut final_message_cost = Decimal::from(0);
     loop {
         let mut stream_should_continue = false;
         let mut stream_finished = false;
-        while let Some(event) = event_source.next().await {
+        while let Some(event) = tokio::select! {
+            _ = cancel_handle.cancelled() => {
+                let cancel_cost = calculate_cost_decimal(
+                    request_tokens,
+                    response_tokens,
+                    input_rate,
+                    output_rate,
+                );
+                final_message_cost = cancel_cost;
+                new_llm_message.updated_at = Set(Utc::now());
+                new_llm_message.request_tokens = Set(request_tokens);
+                new_llm_message.response_tokens = Set(response_tokens);
+                new_llm_message.total_tokens = Set(request_tokens + response_tokens);
+                new_llm_message.cost = Set(cancel_cost);
+                new_llm_message.message_content = Set(message_content.clone());
+                new_llm_message.metadata = Set(Some(json!({
+                    "webSearch": req.web_search,
+                    "cancelled": true,
+                })));
+                new_llm_message
+                    .clone()
+                    .update(&app_state.database)
+                    .await
+                    .expect("failed to update cancelled llm response");
+
+                let cancel_event = ChatStream {
+                    id: None,
+                    title: None,
+                    message_id: Some(new_message_id),
+                    is_new: None,
+                    content: None,
+                    input_tokens: Some(request_tokens),
+                    output_tokens: Some(response_tokens),
+                    latency_ms: Some(latency),
+                    cost: cancel_cost.to_f32(),
+                    event: None,
+                    tool_call: None,
+                    tool_result: None,
+                };
+                yield Event::default()
+                    .event(ChatStreamEvents::Cancelled.to_string())
+                    .data(cancel_event.to_string());
+                stream_finished = true;
+                None
+            }
+            ev = event_source.next() => ev,
+        } {
         match event {
             Ok(ReqwestEvent::Open) => {
                 println!("SSE connection open for provider: {}", &provider);
@@ -1409,9 +1506,11 @@ pub async fn handle_chat_stream(
                     new_llm_message.updated_at = Set(Utc::now());
                     new_llm_message
                       .clone()
-                      .update(&app_state.database)
-                      .await
-                      .expect("failed to update llm response in table messages");
+                        .update(&app_state.database)
+                        .await
+                        .expect("failed to update llm response in table messages");
+                    // remove cancel handle once stream ends
+                    app_state.clear_stream_cancel(new_message_id).await;
                     if mcp_tooling_enabled
                         && !pending_mcp_tool_calls.is_empty()
                         && tool_round < max_tool_rounds
@@ -1828,6 +1927,7 @@ pub async fn handle_chat_stream(
         }
 
         if stream_finished {
+            app_state.clear_stream_cancel(new_message_id).await;
             if total_tokens == 0 {
                 total_tokens = request_tokens + response_tokens;
             }
