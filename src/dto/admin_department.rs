@@ -22,6 +22,18 @@ pub struct DepartmentListQuery {
     #[serde(default)]
     pub include_children: bool,
     pub search: Option<String>,
+    pub sort: Option<DepartmentSortRule>,
+    pub ascending: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DepartmentSortRule {
+    Name,
+    CreatedAt,
+    UpdatedAt,
+    Members,
+    SubDepartments,
 }
 
 #[derive(Deserialize, IntoParams, ToSchema)]

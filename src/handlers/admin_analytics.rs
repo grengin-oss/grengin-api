@@ -132,6 +132,8 @@ pub async fn get_user_analytics(
         ("offset" = Option<u64>, Query, description = "Number of items to skip (default: 0)"),
         ("limit" = Option<u64>, Query, description = "Items per page (default: 20)"),
         ("search" = Option<String>, Query, description = "Search by department name"),
+        ("sort" = Option<crate::dto::analytics::DepartmentAnalyticsSortRule>, Query, description = "Sort by name, created_at, updated_at, members, or sub_departments"),
+        ("ascending" = Option<bool>, Query, description = "Sort ascending when true (default: false)"),
         ("live" = Option<bool>, Query, description = "Bypass cache and fetch live data"),
     ),
     responses(

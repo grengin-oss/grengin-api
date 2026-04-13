@@ -219,6 +219,7 @@ pub async fn load_openai_mcp_tools(
     selected_server_ids: &[Uuid],
     selected_tools: &[String],
 ) -> Result<(Vec<OpenaiTool>, HashMap<String, McpToolDescriptor>, Vec<McpServerSummary>), AppError> {
+    let debug = std::env::var("MISTRAL_TOOL_DEBUG").as_deref() == Ok("1");
     if selected_server_ids.is_empty() {
         return Ok((Vec::new(), HashMap::new(), Vec::new()));
     }
@@ -286,6 +287,12 @@ pub async fn load_openai_mcp_tools(
             && !selected_set.contains(&tool.name)
             && !selected_set.contains(&tool.original_name)
         {
+            if debug {
+                println!(
+                    "mcp tools debug: skip tool '{}' (openai='{}') not in selected {:?}",
+                    tool.name, openai_name, selected_set
+                );
+            }
             continue;
         }
 
@@ -315,9 +322,21 @@ pub async fn load_openai_mcp_tools(
         .await?;
 
         if tool_access.permission == mcp_access_policies::McpPermission::Denied {
+            if debug {
+                println!(
+                    "mcp tools debug: deny tool '{}' (openai='{}') via {:?}",
+                    tool.name, openai_name, tool_access.resolved_via
+                );
+            }
             continue;
         }
         if tool_access.permission == mcp_access_policies::McpPermission::ReadOnly && !tool.is_read_only {
+            if debug {
+                println!(
+                    "mcp tools debug: read-only deny tool '{}' (openai='{}') is_read_only=false",
+                    tool.name, openai_name
+                );
+            }
             continue;
         }
 

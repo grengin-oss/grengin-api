@@ -124,7 +124,9 @@ fn user_cache_suffix(query: &UserAnalyticsQuery, page: u64, limit: u64) -> Strin
 
 fn department_cache_suffix(query: &DepartmentAnalyticsQuery, limit: u64, offset: u64) -> String {
     let search = json_key(&query.search);
-    format!("limit={limit}&offset={offset}&search={search}")
+    let sort = json_key(&query.sort);
+    let ascending = query.ascending.unwrap_or(false);
+    format!("limit={limit}&offset={offset}&search={search}&sort={sort}&ascending={ascending}")
 }
 
 fn timeseries_cache_suffix(query: &TimeSeriesQuery, granularity: &str) -> String {
@@ -281,6 +283,8 @@ pub async fn get_department_analytics_cached(
             Some(limit),
             Some(offset),
             query.search.clone(),
+            query.sort.clone(),
+            query.ascending,
         )
         .await?;
         save_cached_response(db, &key, CACHE_CATEGORY_DEPARTMENTS, &window, &result).await?;
@@ -294,6 +298,8 @@ pub async fn get_department_analytics_cached(
         Some(limit),
         Some(offset),
         query.search,
+        query.sort,
+        query.ascending,
     )
     .await
 }
@@ -368,6 +374,8 @@ async fn refresh_cache_window(
         search: None,
         live: None,
         department_id:None,
+        sort: None,
+        ascending: None,
     };
     let departments = analytics_service::get_department_analytics(
         db,
@@ -375,6 +383,8 @@ async fn refresh_cache_window(
         Some(window.end_date),
         Some(20),
         Some(0),
+        None,
+        None,
         None,
     )
     .await?;

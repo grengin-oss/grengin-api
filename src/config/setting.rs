@@ -15,6 +15,7 @@ pub struct Settings {
     pub server:ServerSettings,
     pub openai:RwLock<Option<OpenaiSettings>>,
     pub anthropic:RwLock<Option<AnthropicSettings>>,
+    pub mistral:RwLock<Option<MistralSettings>>,
     pub ai_engines_cache:RwLock<HashMap<String, AiEngineStateCache>>,
     pub embedding:RwLock<Option<EmbeddingSettings>>,
     pub rag:RagSettings,
@@ -65,6 +66,12 @@ pub struct OpenaiSettings {
 pub struct AnthropicSettings {
     pub api_key: String,
     pub is_enabled:bool,
+}
+
+#[derive(Clone)]
+pub struct MistralSettings {
+    pub api_key: String,
+    pub is_enabled: bool,
 }
 
 #[derive(Clone)]
@@ -152,6 +159,14 @@ impl Settings {
                 .map(|anthropic| anthropic.api_key);
               return api_key;
            }
+           "mistral" => {
+              let api_key = self.mistral
+                .read()
+                .await
+                .clone()
+                .map(|mistral| mistral.api_key);
+              return api_key;
+           }
            _ => return  None,
        }
     }
@@ -194,6 +209,17 @@ impl Settings {
                     *self.anthropic.write().await = Some(AnthropicSettings { api_key: api_key.unwrap_or_default(), is_enabled });
                 } else {
                     *self.anthropic.write().await = None;
+                }
+            }
+            "mistral" => {
+                if is_enabled {
+                    println!("mistral api key added successfully from ai_engines Table");
+                    *self.mistral.write().await = Some(MistralSettings {
+                        api_key: api_key.unwrap_or_default(),
+                        is_enabled,
+                    });
+                } else {
+                    *self.mistral.write().await = None;
                 }
             }
             _ => {}
@@ -302,6 +328,7 @@ impl Settings {
             server:ServerSettings::from_env()?,
             openai:RwLock::new(OpenaiSettings::from_env().ok()),
             anthropic:RwLock::new(AnthropicSettings::from_env().ok()),
+            mistral:RwLock::new(MistralSettings::from_env().ok()),
             ai_engines_cache:RwLock::new(HashMap::new()),
             embedding:RwLock::new(None),
             rag:RagSettings::from_env(),
@@ -369,6 +396,13 @@ impl AnthropicSettings {
     pub fn from_env() -> Result<Self, ConfigError> {
         let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| ConfigError::Missing("ANTHROPIC_API_KEY"))?;
         Ok(Self { api_key,is_enabled:true })
+    }
+}
+
+impl MistralSettings {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let api_key = std::env::var("MISTRAL_API_KEY").map_err(|_| ConfigError::Missing("MISTRAL_API_KEY"))?;
+        Ok(Self { api_key, is_enabled: true })
     }
 }
 
