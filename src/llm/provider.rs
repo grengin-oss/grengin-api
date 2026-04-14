@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::{ToSchema};
 use uuid::Uuid;
 use crate::{
-    config::setting::{AnthropicSettings, OpenaiSettings},
+    config::setting::{AnthropicSettings, OpenaiSettings, MistralSettings},
     dto::{
         files::Attachment,
         llm::{
@@ -21,6 +21,7 @@ use crate::{
 pub enum LlmProviders{
     OpenAI,
     Anthropic,
+    Mistral,
     Google,
     Groq
 }
@@ -29,6 +30,7 @@ pub fn get_title_generation_model(provider:&str) -> Option<&str>{
     match provider {
         "openai" => "o3-mini".into(),
         "anthropic" => "claude-haiku-4-5".into(),
+        "mistral" => "mistral-small-latest".into(),
          _ => None
     }
 }
@@ -129,4 +131,69 @@ pub trait AnthropicApis {
 
 pub trait AnthropicHeaders: Send + Sync {
     fn add_anthropic_headers(self, anthropic_settings: &AnthropicSettings) -> Self;
+}
+
+#[async_trait]
+pub trait MistralApis {
+    async fn mistral_chat_stream(
+        &self,
+        mistral_settings: &MistralSettings,
+        model_name: String,
+        temperature: Option<f32>,
+        prompts: Vec<Prompt>,
+        tools: Option<Vec<crate::dto::llm::mistral::MistralTool>>,
+        tool_choice: Option<serde_json::Value>,
+    ) -> Result<EventSource, Error>;
+
+    async fn mistral_chat_stream_with_messages(
+        &self,
+        mistral_settings: &MistralSettings,
+        model_name: String,
+        temperature: Option<f32>,
+        messages: Vec<crate::dto::llm::mistral::MistralMessage>,
+        tools: Option<Vec<crate::dto::llm::mistral::MistralTool>>,
+        tool_choice: Option<serde_json::Value>,
+    ) -> Result<EventSource, Error>;
+
+    async fn mistral_get_title(
+        &self,
+        mistral_settings: &MistralSettings,
+        model_name: String,
+        prompt: String,
+    ) -> Result<PromptTitleResponse, Error>;
+
+    async fn mistral_conversation_start_stream(
+        &self,
+        mistral_settings: &MistralSettings,
+        inputs: serde_json::Value,
+        tools: Option<Vec<crate::dto::llm::mistral::MistralTool>>,
+        completion_args: Option<serde_json::Value>,
+        model: Option<String>,
+        agent_id: Option<String>,
+        instructions: Option<String>,
+    ) -> Result<EventSource, Error>;
+
+    async fn mistral_conversation_append_stream(
+        &self,
+        mistral_settings: &MistralSettings,
+        conversation_id: String,
+        inputs: serde_json::Value,
+        tools: Option<Vec<crate::dto::llm::mistral::MistralTool>>,
+        completion_args: Option<serde_json::Value>,
+    ) -> Result<EventSource, Error>;
+
+    async fn mistral_create_agent(
+        &self,
+        mistral_settings: &MistralSettings,
+        model: String,
+        name: String,
+        description: Option<String>,
+        instructions: String,
+        tools: Option<Vec<crate::dto::llm::mistral::MistralTool>>,
+        completion_args: Option<serde_json::Value>,
+    ) -> Result<String, Error>;
+}
+
+pub trait MistralHeaders: Send + Sync {
+    fn add_mistral_headers(self, mistral_settings: &MistralSettings) -> Self;
 }

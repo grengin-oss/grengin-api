@@ -53,6 +53,18 @@ pub struct DepartmentAnalyticsQuery {
     pub search: Option<String>,
     pub live: Option<bool>,
     pub department_id:Option<Uuid>,
+    pub sort: Option<DepartmentAnalyticsSortRule>,
+    pub ascending: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, ToSchema, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DepartmentAnalyticsSortRule {
+    Name,
+    CreatedAt,
+    UpdatedAt,
+    Members,
+    SubDepartments,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

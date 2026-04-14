@@ -4,7 +4,35 @@ use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, TryIntoModel};
 use uuid::Uuid;
 use std::collections::HashSet;
-use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, Error}, permissions::{PERMISSION_AI_PLATFORM_MANAGE, PERMISSION_AI_PLATFORM_VIEW}}, dto::{admin_ai::{AIEngineModels, AIEngineDetail, AIEngineUpdate, AIEngineValidation, AiModel, AiModelCapabilities}, models::ModelsResponse}, handlers::models::load_providers_cached, llm::provider::{AnthropicApis, OpenaiApis}, models::{ai_engines::{self, ApiKeyStatus}}, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
+use crate::{
+    auth::{
+        claims::Claims,
+        encryption::{decrypt_key, encrypt_key},
+        error::{AuthError, Error},
+        permissions::{PERMISSION_AI_PLATFORM_MANAGE, PERMISSION_AI_PLATFORM_VIEW},
+    },
+    dto::{
+        admin_ai::{
+            AIEngineDetail, AIEngineModels, AIEngineUpdate, AIEngineValidation, AiModel,
+            AiModelCapabilities,
+        },
+        models::ModelsResponse,
+    },
+    handlers::models::load_providers_cached,
+    llm::{mistral::MISTRAL_API_URL, provider::{AnthropicApis, OpenaiApis}},
+    models::ai_engines::{self, ApiKeyStatus},
+    services::authorization::{AuthorizationService, PermissionScopeMode},
+    state::SharedState,
+};
+
+fn normalize_bearer_token(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let without_prefix = trimmed
+        .strip_prefix("Bearer ")
+        .or_else(|| trimmed.strip_prefix("bearer "))
+        .unwrap_or(trimmed);
+    without_prefix.trim().to_string()
+}
 
 async fn load_models_response(app_state: &SharedState) -> Result<ModelsResponse, AuthError> {
     let providers = load_providers_cached(&app_state.req_client)
@@ -543,6 +571,56 @@ pub async fn validate_ai_engines_by_key(
             ApiKeyStatus::Invalid
           }
         }
+       "mistral" => {
+           // Validate against the key stored in DB (not in-memory state) to avoid cache drift.
+           let ai_engine = ai_engines::Entity::find()
+               .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
+               .order_by_desc(ai_engines::Column::CreatedAt)
+               .one(&app_state.database)
+               .await
+               .map_err(|e| {
+                   eprintln!("db error get engine for validation {e}");
+                   AuthError::DbTimeout
+               })?
+               .ok_or(AuthError::ResourceNotFound)?;
+
+           match ai_engine.api_key.as_ref() {
+               None => ApiKeyStatus::NotConfigured,
+               Some(encrypted_api_key) => {
+                   let api_key = decrypt_key(&app_state.settings.auth.app_key, encrypted_api_key)
+                       .map_err(|e| {
+                           eprintln!("mistral api key decrypt error: {e:?}");
+                           AuthError::DbTimeout
+                       })?;
+                   let api_key = normalize_bearer_token(&api_key);
+                   if api_key.is_empty() {
+                       ApiKeyStatus::NotConfigured
+                   } else {
+                       let response = app_state
+                           .req_client
+                           .get(format!("{MISTRAL_API_URL}/v1/models"))
+                           .bearer_auth(api_key)
+                           .send()
+                           .await;
+                       match response {
+                           Ok(resp) if resp.status().is_success() => ApiKeyStatus::Valid,
+                           // A 429 still implies the key was accepted/authenticated.
+                           Ok(resp) if resp.status() == StatusCode::TOO_MANY_REQUESTS => {
+                               ApiKeyStatus::Valid
+                           }
+                           Ok(resp)
+                               if resp.status() == StatusCode::UNAUTHORIZED
+                                   || resp.status() == StatusCode::FORBIDDEN =>
+                           {
+                               ApiKeyStatus::Invalid
+                           }
+                           Ok(_) => ApiKeyStatus::NotValidated,
+                           Err(_) => ApiKeyStatus::NotValidated,
+                       }
+                   }
+               }
+           }
+       }
        _ => ApiKeyStatus::NotConfigured,
    };
    let ai_engine = ai_engines::Entity::find()
@@ -569,10 +647,11 @@ pub async fn validate_ai_engines_by_key(
          eprintln!("db error update one {e}");
          AuthError::DbTimeout
        })?;
-   let (valid,message) = if api_key_status == ApiKeyStatus::Valid {
-     (true,"API key validated successfully".to_string())
-   }else{
-     (false,format!("API key is incorrect for {ai_engine_key}."))
+   let (valid,message) = match api_key_status {
+     ApiKeyStatus::Valid => (true,"API key validated successfully".to_string()),
+     ApiKeyStatus::Invalid => (false,format!("API key is incorrect for {ai_engine_key}.")),
+     ApiKeyStatus::NotConfigured => (false,format!("API key is not configured for {ai_engine_key}.")),
+     ApiKeyStatus::NotValidated => (false,format!("API key could not be validated for {ai_engine_key} right now.")),
    };
    let response = AIEngineValidation{ 
       valid,

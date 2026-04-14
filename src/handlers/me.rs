@@ -16,7 +16,7 @@ use crate::{
         admin_user::User,
         admin_department::{
             DepartmentListQuery, Department, DepartmentTreeNode, DepartmentTreeQuery,
-            DepartmentTree, DepartmentsListResponse,
+            DepartmentTree, DepartmentsListResponse, DepartmentSortRule,
         },
         analytics::{DepartmentAnalyticsQuery, DepartmentAnalytics, ScopedUserAnalyticsQuery, UserAnalytics},
         common::SortRule,
@@ -343,6 +343,8 @@ pub async fn get_my_permissions(
         ("limit" = Option<u64>, Query, description = "Items per page (default: 20)"),
         ("search" = Option<String>, Query, description = "Search by department name"),
         ("department_id" = Option<Uuid>, Query, description = "Filter by department (must be within scope)"),
+        ("sort" = Option<crate::dto::analytics::DepartmentAnalyticsSortRule>, Query, description = "Sort by name, created_at, updated_at, members, or sub_departments"),
+        ("ascending" = Option<bool>, Query, description = "Sort ascending when true (default: false)"),
         ("live" = Option<bool>, Query, description = "Bypass cache and fetch live data"),
     ),
     responses(
@@ -454,6 +456,8 @@ pub async fn get_my_administered_department_user_analytics(
         ("parent_id" = Option<String>, Query, description = "Filter by parent department id (use \"root\" for scope roots)"),
         ("include_children" = Option<bool>, Query, description = "Include descendant departments when parent_id is set (default: false)"),
         ("search" = Option<String>, Query, description = "Search by department name"),
+        ("sort" = Option<DepartmentSortRule>, Query, description = "Sort by name, created_at, updated_at, members, or sub_departments"),
+        ("ascending" = Option<bool>, Query, description = "Sort ascending when true (default: false)"),
     ),
     responses(
         (status = 200, body = DepartmentsListResponse),
@@ -543,6 +547,8 @@ pub async fn get_my_administered_departments_list(
     if let Some(search) = q.search.as_deref() {
         query = query.filter(departments::Column::Name.into_expr().ilike(format!("%{}%", search)));
     }
+
+    query = query.order_by_asc(departments::Column::Name);
 
     let rows = query
         .into_model::<DepartmentRow>()
@@ -642,6 +648,19 @@ pub async fn get_my_administered_departments_list(
             updated_at: d.updated_at,
         });
     }
+
+    let sort_rule = q.sort.unwrap_or(DepartmentSortRule::Name);
+    let ascending = q.ascending.unwrap_or(false);
+    departments.sort_by(|a, b| {
+        let ordering = match sort_rule {
+            DepartmentSortRule::Name => a.name.cmp(&b.name),
+            DepartmentSortRule::CreatedAt => a.created_at.cmp(&b.created_at),
+            DepartmentSortRule::UpdatedAt => a.updated_at.cmp(&b.updated_at),
+            DepartmentSortRule::Members => a.member_count.cmp(&b.member_count),
+            DepartmentSortRule::SubDepartments => a.child_count.cmp(&b.child_count),
+        };
+        if ascending { ordering } else { ordering.reverse() }
+    });
 
     Ok((StatusCode::OK, Json(DepartmentsListResponse { departments, total })))
 }
