@@ -178,6 +178,16 @@ impl AppState {
                    .map(|setting| setting.is_enabled);
                 is_enabled
             },
+            "mistral" => {
+                let is_enabled = self
+                    .settings
+                    .mistral
+                    .read()
+                    .await
+                    .as_ref()
+                    .map(|setting| setting.is_enabled);
+                is_enabled
+            }
             _ => None
         }
     }
