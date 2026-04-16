@@ -19,7 +19,7 @@ use crate::{
         models::ModelsResponse,
     },
     handlers::models::load_providers_cached,
-    llm::{mistral::MISTRAL_API_URL, provider::{AnthropicApis, OpenaiApis}},
+    llm::{gemini::GEMINI_API_URL, mistral::MISTRAL_API_URL, provider::{AnthropicApis, OpenaiApis}},
     models::ai_engines::{self, ApiKeyStatus},
     services::authorization::{AuthorizationService, PermissionScopeMode},
     state::SharedState,
@@ -620,6 +620,33 @@ pub async fn validate_ai_engines_by_key(
                    }
                }
            }
+       }
+       "gemini" => {
+        let gemini_settings = &app_state
+          .settings
+          .gemini
+          .read()
+          .await
+          .clone()
+          .ok_or(AuthError::ResourceNotFound)?;
+        let response = app_state
+            .req_client
+            .get(format!("{GEMINI_API_URL}/v1beta/models"))
+            .header("x-goog-api-key", gemini_settings.api_key.clone())
+            .send()
+            .await;
+        match response {
+            Ok(resp) if resp.status().is_success() => ApiKeyStatus::Valid,
+            Ok(resp) if resp.status() == StatusCode::TOO_MANY_REQUESTS => ApiKeyStatus::Valid,
+            Ok(resp)
+                if resp.status() == StatusCode::UNAUTHORIZED
+                    || resp.status() == StatusCode::FORBIDDEN =>
+            {
+                ApiKeyStatus::Invalid
+            }
+            Ok(_) => ApiKeyStatus::NotValidated,
+            Err(_) => ApiKeyStatus::NotValidated,
+        }
        }
        _ => ApiKeyStatus::NotConfigured,
    };

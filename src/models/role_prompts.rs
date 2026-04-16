@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "role_prompts", rename_all = "camelCase")]
@@ -9,7 +9,7 @@ pub struct Model {
     #[sea_orm(primary_key, unique)]
     pub id: Uuid,
     pub name: String,
-    pub role: String,
+    pub role_id: Uuid,
     pub prompt_text: String,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub variables: Option<serde_json::Value>,
@@ -22,7 +22,17 @@ pub struct Model {
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(belongs_to = "super::users::Entity", from = "Column::CreatedBy", to = "super::users::Column::Id")]
+    #[sea_orm(
+        belongs_to = "super::roles::Entity",
+        from = "Column::RoleId",
+        to = "super::roles::Column::Id"
+    )]
+    Roles,
+    #[sea_orm(
+        belongs_to = "super::users::Entity",
+        from = "Column::CreatedBy",
+        to = "super::users::Column::Id"
+    )]
     Users,
     #[sea_orm(has_many = "super::department_prompt_assignments::Entity")]
     DepartmentPromptAssignments,
@@ -30,6 +40,12 @@ pub enum Relation {
     UserPromptPreferences,
     #[sea_orm(has_many = "super::prompt_feedback::Entity")]
     PromptFeedback,
+}
+
+impl Related<super::roles::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Roles.def()
+    }
 }
 
 impl Related<super::users::Entity> for Entity {

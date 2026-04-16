@@ -17,10 +17,12 @@ COPY migration/Cargo.toml migration/Cargo.toml
 # create empty src trees so cargo can resolve features without invalidating cache
 RUN mkdir -p src migration/src && echo "fn main(){}" > src/main.rs && echo "" > migration/src/lib.rs
 RUN cargo fetch
-# install sqlx-mcp from lihongjie0209 repo (supports --database-url args)
+# install prebuilt rbdc-mcp binary (avoids source build failures)
 ENV RUSTFLAGS="-C target-feature=+crt-static"
-RUN RUST_TARGET=x86_64-unknown-linux-musl \
- && cargo install --git https://github.com/rbatis/rbdc-mcp.git --target "$RUST_TARGET" --root /usr/local/cargo
+RUN curl -fsSL \
+    https://github.com/rbatis/rbdc-mcp/releases/download/v0.1.7/rbdc-mcp-linux-x86_64 \
+    -o /usr/local/cargo/bin/rbdc-mcp \
+ && chmod +x /usr/local/cargo/bin/rbdc-mcp
 
 # now copy real sources
 COPY src ./src

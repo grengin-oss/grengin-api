@@ -188,6 +188,16 @@ impl AppState {
                     .map(|setting| setting.is_enabled);
                 is_enabled
             }
+            "gemini" => {
+                let is_enabled = self
+                    .settings
+                    .gemini
+                    .read()
+                    .await
+                    .as_ref()
+                    .map(|setting| setting.is_enabled);
+                is_enabled
+            }
             _ => None
         }
     }

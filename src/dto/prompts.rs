@@ -17,7 +17,7 @@ pub enum PromptSource {
 pub struct RolePromptResponse {
     pub id: Uuid,
     pub name: String,
-    pub role: String,
+    pub role_id: Uuid,
     pub prompt_text: String,
     pub variables: Option<Vec<String>>,
     pub is_system: bool,
@@ -30,7 +30,7 @@ pub struct RolePromptResponse {
 #[derive(Deserialize, ToSchema, IntoParams)]
 pub struct RolePromptCreate {
     pub name: String,
-    pub role: String,
+    pub role_id: Uuid,
     pub prompt_text: String,
     pub variables: Option<Vec<String>>,
     pub is_system: bool,
@@ -39,7 +39,7 @@ pub struct RolePromptCreate {
 #[derive(Deserialize, ToSchema, IntoParams)]
 pub struct RolePromptUpdate {
     pub name: Option<String>,
-    pub role: Option<String>,
+    pub role_id: Option<Uuid>,
     pub prompt_text: Option<String>,
     pub variables: Option<Vec<String>>,
     pub is_system: Option<bool>,
@@ -47,7 +47,7 @@ pub struct RolePromptUpdate {
 
 #[derive(Deserialize, ToSchema, IntoParams)]
 pub struct RolePromptListQuery {
-    pub role: Option<String>,
+    pub role_id: Option<Uuid>,
     pub is_system: Option<bool>,
 }
 
@@ -83,7 +83,7 @@ pub struct DepartmentPromptAssignmentListQuery {
 pub struct PromptMetricsResponse {
     pub prompt_id: Uuid,
     pub name: String,
-    pub role: String,
+    pub role_id: Uuid,
     pub usage_count: i32,
     pub feedback_count: i64,
     pub average_rating: Option<f64>,
@@ -92,7 +92,7 @@ pub struct PromptMetricsResponse {
 #[derive(Deserialize, ToSchema, IntoParams)]
 pub struct PromptMetricsQuery {
     pub prompt_id: Option<Uuid>,
-    pub role: Option<String>,
+    pub role_id: Option<Uuid>,
 }
 
 #[derive(Serialize, ToSchema)]

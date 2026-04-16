@@ -15,7 +15,7 @@ use uuid::Uuid;
 use rust_decimal::prelude::FromPrimitive;
 use crate::{
     auth::{claims::Claims, error::Error},
-    config::setting::{AnthropicSettings, OpenaiSettings, MistralSettings},
+    config::setting::{AnthropicSettings, GeminiSettings, OpenaiSettings, MistralSettings},
     dto::{
         chat_stream::{
             BudgetWarningPayload,
@@ -45,6 +45,7 @@ use crate::{
             MistralToolCall,
             MistralToolDefinition,
         },
+        llm::gemini::{normalize_gemini_parameters, prompts_to_gemini_payload},
         llm::openai::{OpenaiFunctionCallOutput, OpenaiInputItem, OpenaiTool},
     },
     error::{AppError, ErrorDetailVariant, ErrorResponse},
@@ -59,11 +60,12 @@ use crate::{
         update_web_search_action_state,
         update_web_search_results_state,
         anthropic::AnthropicStreamParser,
+        gemini::GeminiStreamParser,
         mistral::MistralStreamParser,
         mistral_conversations::MistralConversationStreamParser,
         openai::OpenaiStreamParser,
     },
-    llm::{prompt::Prompt, provider::{AnthropicApis, OpenaiApis, MistralApis, get_title_generation_model}, tooling::mcp_server_short_id},
+    llm::{prompt::Prompt, provider::{AnthropicApis, GeminiApis, OpenaiApis, MistralApis, get_title_generation_model}, tooling::mcp_server_short_id},
     models::{
         conversations,
         departments::ActionOnExceed,
@@ -108,6 +110,7 @@ enum LlmProviderConfig {
     OpenAI(OpenaiSettings),
     Anthropic(AnthropicSettings),
     Mistral(MistralSettings),
+    Gemini(GeminiSettings),
 }
 
 #[derive(Clone)]
@@ -199,24 +202,53 @@ fn resolve_mcp_tool_descriptor<'a>(
     if let Some(found) = lookup.get(tool_name) {
         return Some(found);
     }
-    if !tool_name.starts_with("mcp__") {
-        return None;
-    }
-    let Some((tool_prefix, _)) = tool_name.rsplit_once("__") else {
-        return None;
+    let is_mcp_name = tool_name.starts_with("mcp__");
+    let full_prefix = if is_mcp_name {
+        Some(format!("{tool_name}__"))
+    } else {
+        None
     };
-    let mut matched: Option<&McpToolDescriptor> = None;
-    for (name, descriptor) in lookup.iter() {
-        if let Some((candidate_prefix, _)) = name.rsplit_once("__") {
-            if candidate_prefix == tool_prefix {
-                if matched.is_some() {
-                    return None;
-                }
-                matched = Some(descriptor);
+    let truncated_prefix = if is_mcp_name {
+        tool_name.rsplit_once("__").map(|(prefix, _)| format!("{prefix}__"))
+    } else {
+        None
+    };
+
+    let matches: Vec<&McpToolDescriptor> = lookup
+        .iter()
+        .filter_map(|(name, descriptor)| {
+            if !is_mcp_name && descriptor.original_name == tool_name {
+                return Some(descriptor);
             }
-        }
+            if !is_mcp_name {
+                return None;
+            }
+
+            // Providers may emit a non-canonical function name without the hash suffix,
+            // or with a truncated hash. Match by stable MCP prefix in those cases.
+            if full_prefix
+                .as_ref()
+                .map(|prefix| name.starts_with(prefix))
+                .unwrap_or(false)
+            {
+                return Some(descriptor);
+            }
+            if truncated_prefix
+                .as_ref()
+                .map(|prefix| name.starts_with(prefix))
+                .unwrap_or(false)
+            {
+                return Some(descriptor);
+            }
+            None
+        })
+        .collect();
+
+    if matches.len() == 1 {
+        matches.first().copied()
+    } else {
+        None
     }
-    matched
 }
 
 fn is_rate_limit_error(body: &str) -> bool {
@@ -514,7 +546,8 @@ pub async fn handle_chat_stream(
  let start = Instant::now();
  let provider = req.provider.clone().unwrap_or_else(|| "openai".to_string());
  let selected_tools = req.selected_tools.clone().unwrap_or_default();
- let mut selected_mcp_servers = req.selected_mcp_servers.clone().unwrap_or_default();
+ let request_selected_mcp_servers = req.selected_mcp_servers.clone().unwrap_or_default();
+ let mut selected_mcp_servers = request_selected_mcp_servers.clone();
  let web_search = req.web_search;
  let openai_settings = app_state
     .settings
@@ -531,6 +564,12 @@ pub async fn handle_chat_stream(
  let mistral_settings = app_state
     .settings
     .mistral
+    .read()
+    .await
+    .clone();
+ let gemini_settings = app_state
+    .settings
+    .gemini
     .read()
     .await
     .clone();
@@ -565,6 +604,16 @@ pub async fn handle_chat_stream(
          }
          let model = req.model_name.clone().unwrap_or_else(|| "mistral-small-latest".to_string());
          (LlmProviderConfig::Mistral(settings), model)
+     },
+     "gemini" => {
+         let settings = gemini_settings
+           .clone()
+           .ok_or(AppError::LlmProviderNotConfigured { provider:provider.clone() })?;
+         if !settings.is_enabled{
+            return Err(AppError::LlmProviderDisabledByAdmin {provider:provider.clone()});
+         }
+         let model = req.model_name.clone().unwrap_or_else(|| "gemini-2.5-flash".to_string());
+         (LlmProviderConfig::Gemini(settings), model)
      },
      _ => return Err(AppError::InvalidLlmProvider{provider:provider.clone()})
  };
@@ -757,6 +806,14 @@ pub async fn handle_chat_stream(
               .mistral_get_title(settings, model, first_prompt)
               .await
       },
+      LlmProviderConfig::Gemini(settings) => {
+          let model = get_title_generation_model(&provider)
+              .unwrap_or("gemini-2.5-flash")
+              .to_string();
+          app_state.req_client
+              .gemini_get_title(settings, model, first_prompt)
+              .await
+      },
   };
   let mut new_metadata = metadata.clone();
   let mut generated_title: Option<String> = None;
@@ -887,11 +944,18 @@ pub async fn handle_chat_stream(
 let provider_is_openai = provider.to_lowercase() == "openai";
 let provider_is_anthropic = provider.to_lowercase() == "anthropic";
 let provider_is_mistral = provider.to_lowercase() == "mistral";
-let supports_mcp_tools = provider_is_openai || provider_is_anthropic || provider_is_mistral;
- if supports_mcp_tools && selected_mcp_servers.is_empty() {
+let provider_is_gemini = provider.to_lowercase() == "gemini";
+let gemini_web_search_only =
+    provider_is_gemini && web_search && selected_tools.is_empty() && request_selected_mcp_servers.is_empty();
+let supports_mcp_tools =
+    provider_is_openai || provider_is_anthropic || provider_is_mistral || provider_is_gemini;
+let should_auto_select_mcp = supports_mcp_tools
+    && selected_mcp_servers.is_empty()
+    && !gemini_web_search_only;
+ if should_auto_select_mcp {
      selected_mcp_servers = load_auto_mcp_server_ids(&app_state).await?;
  }
-let (mcp_openai_tools, mcp_tool_lookup, mcp_server_summaries) = if supports_mcp_tools {
+let (mcp_openai_tools, mcp_tool_lookup, mcp_server_summaries) = if supports_mcp_tools && !gemini_web_search_only {
     load_openai_mcp_tools(&app_state, claims.user_id, &selected_mcp_servers, &selected_tools).await?
 } else {
     (Vec::new(), HashMap::new(), Vec::new())
@@ -1011,6 +1075,78 @@ let mistral_tool_choice = if mistral_tools.is_some() {
  } else {
      None
  };
+let gemini_tools = if provider_is_gemini {
+    let mut tools: Vec<Value> = Vec::new();
+    if web_search {
+        tools.push(json!({ "google_search": {} }));
+    }
+    if supports_mcp_tools && !mcp_tool_lookup.is_empty() {
+        let function_declarations = mcp_tool_lookup
+            .values()
+            .map(|descriptor| {
+                let description = descriptor
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| descriptor.original_name.clone());
+                json!({
+                    "name": descriptor.openai_name.clone(),
+                    "description": description,
+                    "parameters": normalize_gemini_parameters(&descriptor.input_schema),
+                })
+            })
+            .collect::<Vec<Value>>();
+        if !function_declarations.is_empty() {
+            tools.push(json!({
+                "function_declarations": function_declarations
+            }));
+        }
+    }
+    if tools.is_empty() {
+        None
+    } else {
+        Some(Value::Array(tools))
+    }
+} else {
+    None
+};
+let gemini_tool_config = if provider_is_gemini {
+    let mut config = serde_json::Map::new();
+    if web_search && !mcp_tool_lookup.is_empty() {
+        config.insert(
+            "include_server_side_tool_invocations".to_string(),
+            json!(true),
+        );
+    }
+    if !selected_tools.is_empty() && mcp_tool_lookup.len() == 1 {
+        let tool_name = mcp_tool_lookup.keys().next().cloned().unwrap_or_default();
+        config.insert(
+            "function_calling_config".to_string(),
+            json!({
+                "mode": "ANY",
+                "allowed_function_names": [tool_name],
+            }),
+        );
+    } else if !mcp_tool_lookup.is_empty() {
+        config.insert(
+            "function_calling_config".to_string(),
+            json!({
+                "mode": "AUTO",
+            }),
+        );
+    }
+    if config.is_empty() {
+        None
+    } else {
+        Some(Value::Object(config))
+    }
+} else {
+    None
+};
+let (gemini_system_instruction, gemini_contents_seed) = if provider_is_gemini {
+    prompts_to_gemini_payload(&previous_prompts)
+} else {
+    (None, Vec::new())
+};
 let base_prompts = if (provider_is_anthropic || provider_is_mistral) && supports_mcp_tools {
     Some(previous_prompts.clone())
 } else {
@@ -1120,6 +1256,20 @@ let mistral_completion_args = if mistral_completion_args_map.is_empty() {
                  .await
          }
      },
+     LlmProviderConfig::Gemini(settings) => {
+         app_state
+             .req_client
+             .gemini_chat_stream_with_contents(
+                 settings,
+                 model_name.clone(),
+                 req.temperature,
+                 gemini_system_instruction.clone(),
+                 Value::Array(gemini_contents_seed.clone()),
+                 gemini_tools.clone(),
+                 gemini_tool_config.clone(),
+             )
+             .await
+     },
  }.map_err(|e| {
      eprintln!("event source loading error {} for llm provider {}", e, &provider);
      AppError::LlmProviderNotConfigured { provider:provider.clone() }
@@ -1135,6 +1285,7 @@ let mistral_completion_args = if mistral_completion_args_map.is_empty() {
              Box::new(MistralStreamParser::new())
          }
      }
+     LlmProviderConfig::Gemini(_) => Box::new(GeminiStreamParser::new()),
  };
 
  let sse_stream = async_stream::try_stream! {
@@ -1158,6 +1309,7 @@ let mistral_completion_args = if mistral_completion_args_map.is_empty() {
     let openai_tooling_enabled = provider_is_openai && mcp_tooling_enabled;
     let anthropic_tooling_enabled = provider_is_anthropic && mcp_tooling_enabled;
     let mistral_tooling_enabled = provider_is_mistral && mcp_tooling_enabled;
+    let gemini_tooling_enabled = provider_is_gemini && mcp_tooling_enabled;
     let mut openai_previous_response_id: Option<String> = None;
     let mut openai_next_input: Option<Vec<OpenaiInputItem>> = None;
     let mut tool_round: usize = 0;
@@ -1168,6 +1320,11 @@ let mistral_completion_args = if mistral_completion_args_map.is_empty() {
     let mut mistral_messages: Option<Vec<MistralMessage>> = None;
     let mut mistral_conversation_id: Option<String> = None;
     let mut mistral_conversation_next_inputs: Option<Value> = None;
+    let mut gemini_contents: Option<Vec<Value>> = if provider_is_gemini {
+        Some(gemini_contents_seed.clone())
+    } else {
+        None
+    };
     let latency = start
       .elapsed()
       .as_millis() as i32;
@@ -1309,7 +1466,16 @@ let mistral_completion_args = if mistral_completion_args_map.is_empty() {
                         data_for_parse = parsed.to_string();
                     }
                 }
-                let parse_result = stream_parser.parse_event(&data_for_parse);
+                let mut parse_results = vec![stream_parser.parse_event(&data_for_parse)];
+                loop {
+                    let pending = stream_parser.parse_event("");
+                    if matches!(pending, StreamParseResult::None) {
+                        break;
+                    }
+                    parse_results.push(pending);
+                }
+
+                for parse_result in parse_results {
                 match &parse_result {
                     StreamParseResult::TextDelta { text, request_id: rid } => {
                         message_content.push_str(text);
@@ -1804,6 +1970,7 @@ let mistral_completion_args = if mistral_completion_args_map.is_empty() {
                     }
                     StreamParseResult::None => {}
                 }
+                }
             }
             Err(e) => {
                 match e {
@@ -1844,6 +2011,8 @@ let mistral_completion_args = if mistral_completion_args_map.is_empty() {
                         let mut mistral_tool_calls: Vec<MistralToolCall> = Vec::new();
                         let mut mistral_tool_messages: Vec<MistralMessage> = Vec::new();
                         let mut mistral_function_results_entries: Vec<Value> = Vec::new();
+                        let mut gemini_model_tool_messages: Vec<Value> = Vec::new();
+                        let mut gemini_function_response_messages: Vec<Value> = Vec::new();
 
                         if anthropic_tooling_enabled && !stream_message_content.trim().is_empty() {
                             anthropic_tool_use_blocks.push(AnthropicContentBlock::Text {
@@ -2066,6 +2235,49 @@ let mistral_completion_args = if mistral_completion_args_map.is_empty() {
                             };
                             yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(chat_stream.to_string());
 
+                            if gemini_tooling_enabled {
+                                let gemini_call_id = call
+                                    .tool_id
+                                    .clone()
+                                    .unwrap_or_else(|| format!("gemini_call_{}", Uuid::new_v4()));
+                                let thought_signature = call
+                                    .raw
+                                    .as_ref()
+                                    .and_then(|raw| {
+                                        raw.get("thoughtSignature")
+                                            .cloned()
+                                            .or_else(|| raw.get("thought_signature").cloned())
+                                    });
+                                let mut part = serde_json::Map::new();
+                                part.insert(
+                                    "functionCall".to_string(),
+                                    json!({
+                                        "id": gemini_call_id.clone(),
+                                        "name": call.tool_name.clone(),
+                                        "args": args_for_call.clone(),
+                                    }),
+                                );
+                                if let Some(signature) = thought_signature {
+                                    part.insert("thoughtSignature".to_string(), signature);
+                                }
+                                gemini_model_tool_messages.push(json!({
+                                    "role": "model",
+                                    "parts": [Value::Object(part)]
+                                }));
+                                gemini_function_response_messages.push(json!({
+                                    "role": "user",
+                                    "parts": [{
+                                        "functionResponse": {
+                                            "id": gemini_call_id,
+                                            "name": call.tool_name.clone(),
+                                            "response": {
+                                                "output": output_payload.clone(),
+                                            }
+                                        }
+                                    }]
+                                }));
+                            }
+
                             if let Some(call_id) = call.tool_id.clone() {
                                 if openai_tooling_enabled {
                                     let output_text = serde_json::to_string(&output_payload)
@@ -2197,6 +2409,17 @@ let mistral_completion_args = if mistral_completion_args_map.is_empty() {
                                     anthropic_tool_result_blocks,
                                 ));
                                 anthropic_messages = Some(messages);
+                                tool_round += 1;
+                                stream_should_continue = true;
+                            }
+                        } else if gemini_tooling_enabled {
+                            if gemini_function_response_messages.is_empty() {
+                                stream_finished = true;
+                            } else {
+                                let mut contents = gemini_contents.take().unwrap_or_default();
+                                contents.extend(gemini_model_tool_messages);
+                                contents.extend(gemini_function_response_messages);
+                                gemini_contents = Some(contents);
                                 tool_round += 1;
                                 stream_should_continue = true;
                             }
@@ -2362,6 +2585,35 @@ let mistral_completion_args = if mistral_completion_args_map.is_empty() {
                     } else {
                         stream_finished = true;
                     }
+                }
+            } else if let LlmProviderConfig::Gemini(settings) = &provider_config {
+                let next_contents = gemini_contents.clone();
+                if let Some(contents) = next_contents {
+                    match app_state
+                        .req_client
+                        .gemini_chat_stream_with_contents(
+                            settings,
+                            model_name.clone(),
+                            req.temperature,
+                            gemini_system_instruction.clone(),
+                            Value::Array(contents),
+                            gemini_tools.clone(),
+                            gemini_tool_config.clone(),
+                        )
+                        .await
+                    {
+                        Ok(es) => {
+                            event_source = es;
+                            stream_message_content.clear();
+                            continue;
+                        }
+                        Err(e) => {
+                            eprintln!("gemini continuation error: {e}");
+                            stream_finished = true;
+                        }
+                    }
+                } else {
+                    stream_finished = true;
                 }
             } else {
                 stream_finished = true;
