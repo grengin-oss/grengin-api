@@ -16,6 +16,7 @@ pub struct Settings {
     pub openai:RwLock<Option<OpenaiSettings>>,
     pub anthropic:RwLock<Option<AnthropicSettings>>,
     pub mistral:RwLock<Option<MistralSettings>>,
+    pub gemini:RwLock<Option<GeminiSettings>>,
     pub ai_engines_cache:RwLock<HashMap<String, AiEngineStateCache>>,
     pub embedding:RwLock<Option<EmbeddingSettings>>,
     pub rag:RagSettings,
@@ -70,6 +71,12 @@ pub struct AnthropicSettings {
 
 #[derive(Clone)]
 pub struct MistralSettings {
+    pub api_key: String,
+    pub is_enabled: bool,
+}
+
+#[derive(Clone)]
+pub struct GeminiSettings {
     pub api_key: String,
     pub is_enabled: bool,
 }
@@ -167,6 +174,14 @@ impl Settings {
                 .map(|mistral| mistral.api_key);
               return api_key;
            }
+           "gemini" => {
+              let api_key = self.gemini
+                .read()
+                .await
+                .clone()
+                .map(|gemini| gemini.api_key);
+              return api_key;
+           }
            _ => return  None,
        }
     }
@@ -220,6 +235,17 @@ impl Settings {
                     });
                 } else {
                     *self.mistral.write().await = None;
+                }
+            }
+            "gemini" => {
+                if is_enabled {
+                    println!("gemini api key added successfully from ai_engines Table");
+                    *self.gemini.write().await = Some(GeminiSettings {
+                        api_key: api_key.unwrap_or_default(),
+                        is_enabled,
+                    });
+                } else {
+                    *self.gemini.write().await = None;
                 }
             }
             _ => {}
@@ -329,6 +355,7 @@ impl Settings {
             openai:RwLock::new(OpenaiSettings::from_env().ok()),
             anthropic:RwLock::new(AnthropicSettings::from_env().ok()),
             mistral:RwLock::new(MistralSettings::from_env().ok()),
+            gemini:RwLock::new(GeminiSettings::from_env().ok()),
             ai_engines_cache:RwLock::new(HashMap::new()),
             embedding:RwLock::new(None),
             rag:RagSettings::from_env(),
@@ -402,6 +429,13 @@ impl AnthropicSettings {
 impl MistralSettings {
     pub fn from_env() -> Result<Self, ConfigError> {
         let api_key = std::env::var("MISTRAL_API_KEY").map_err(|_| ConfigError::Missing("MISTRAL_API_KEY"))?;
+        Ok(Self { api_key, is_enabled: true })
+    }
+}
+
+impl GeminiSettings {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| ConfigError::Missing("GEMINI_API_KEY"))?;
         Ok(Self { api_key, is_enabled: true })
     }
 }

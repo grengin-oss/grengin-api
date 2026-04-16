@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::{ToSchema};
 use uuid::Uuid;
 use crate::{
-    config::setting::{AnthropicSettings, OpenaiSettings, MistralSettings},
+    config::setting::{AnthropicSettings, GeminiSettings, OpenaiSettings, MistralSettings},
     dto::{
         files::Attachment,
         llm::{
@@ -22,6 +22,7 @@ pub enum LlmProviders{
     OpenAI,
     Anthropic,
     Mistral,
+    Gemini,
     Google,
     Groq
 }
@@ -31,6 +32,7 @@ pub fn get_title_generation_model(provider:&str) -> Option<&str>{
         "openai" => "o3-mini".into(),
         "anthropic" => "claude-haiku-4-5".into(),
         "mistral" => "mistral-small-latest".into(),
+        "gemini" => "gemini-2.5-flash".into(),
          _ => None
     }
 }
@@ -196,4 +198,35 @@ pub trait MistralApis {
 
 pub trait MistralHeaders: Send + Sync {
     fn add_mistral_headers(self, mistral_settings: &MistralSettings) -> Self;
+}
+
+#[async_trait]
+pub trait GeminiApis {
+    async fn gemini_chat_stream(
+        &self,
+        gemini_settings: &GeminiSettings,
+        model_name: String,
+        temperature: Option<f32>,
+        prompts: Vec<Prompt>,
+        tools: Option<serde_json::Value>,
+        tool_config: Option<serde_json::Value>,
+    ) -> Result<EventSource, Error>;
+
+    async fn gemini_chat_stream_with_contents(
+        &self,
+        gemini_settings: &GeminiSettings,
+        model_name: String,
+        temperature: Option<f32>,
+        system_instruction: Option<serde_json::Value>,
+        contents: serde_json::Value,
+        tools: Option<serde_json::Value>,
+        tool_config: Option<serde_json::Value>,
+    ) -> Result<EventSource, Error>;
+
+    async fn gemini_get_title(
+        &self,
+        gemini_settings: &GeminiSettings,
+        model_name: String,
+        prompt: String,
+    ) -> Result<PromptTitleResponse, Error>;
 }

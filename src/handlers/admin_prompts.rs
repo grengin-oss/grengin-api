@@ -24,7 +24,7 @@ use crate::{
         RolePromptUpdate,
     },
     models::{
-        department_prompt_assignments, departments, prompt_feedback, role_prompts,
+        department_prompt_assignments, departments, prompt_feedback, role_prompts, roles,
         user_prompt_preferences,
     },
     services::authorization::{AuthorizationService, PermissionScopeMode},
@@ -35,7 +35,7 @@ fn to_role_prompt_response(model: role_prompts::Model) -> RolePromptResponse {
     RolePromptResponse {
         id: model.id,
         name: model.name,
-        role: model.role,
+        role_id: model.role_id,
         prompt_text: model.prompt_text,
         variables: model
             .variables
@@ -96,8 +96,8 @@ pub async fn list_role_prompts(
         .await?;
 
     let mut select = role_prompts::Entity::find();
-    if let Some(role) = query.role {
-        select = select.filter(role_prompts::Column::Role.eq(role));
+    if let Some(role_id) = query.role_id {
+        select = select.filter(role_prompts::Column::RoleId.eq(role_id));
     }
     if let Some(is_system) = query.is_system {
         select = select.filter(role_prompts::Column::IsSystem.eq(is_system));
@@ -190,10 +190,25 @@ pub async fn create_role_prompt(
         .clone()
         .map(|vars| serde_json::Value::Array(vars.into_iter().map(serde_json::Value::String).collect()));
 
+    let role_exists = roles::Entity::find_by_id(req.role_id)
+        .select_only()
+        .column(roles::Column::Id)
+        .into_tuple::<Uuid>()
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("role lookup error: {e}");
+            AuthError::DbTimeout
+        })?
+        .is_some();
+    if !role_exists {
+        return Err(AuthError::ResourceNotFound);
+    }
+
     let model = role_prompts::ActiveModel {
         id: Set(Uuid::new_v4()),
         name: Set(req.name),
-        role: Set(req.role),
+        role_id: Set(req.role_id),
         prompt_text: Set(req.prompt_text),
         variables: Set(variables),
         is_system: Set(req.is_system),
@@ -258,8 +273,22 @@ pub async fn update_role_prompt(
     if let Some(name) = req.name {
         active.name = Set(name);
     }
-    if let Some(role) = req.role {
-        active.role = Set(role);
+    if let Some(role_id) = req.role_id {
+        let role_exists = roles::Entity::find_by_id(role_id)
+            .select_only()
+            .column(roles::Column::Id)
+            .into_tuple::<Uuid>()
+            .one(&app_state.database)
+            .await
+            .map_err(|e| {
+                eprintln!("role lookup error: {e}");
+                AuthError::DbTimeout
+            })?
+            .is_some();
+        if !role_exists {
+            return Err(AuthError::ResourceNotFound);
+        }
+        active.role_id = Set(role_id);
     }
     if let Some(prompt_text) = req.prompt_text {
         active.prompt_text = Set(prompt_text);
@@ -572,8 +601,8 @@ struct PromptMetricRow {
     prompt_id: Uuid,
     #[sea_orm(from_alias = "name")]
     name: String,
-    #[sea_orm(from_alias = "role")]
-    role: String,
+    #[sea_orm(from_alias = "roleId")]
+    role_id: Uuid,
     #[sea_orm(from_alias = "usageCount")]
     usage_count: i32,
     #[sea_orm(from_alias = "feedbackCount")]
@@ -619,7 +648,7 @@ pub async fn get_prompt_metrics(
         .select_only()
         .column_as(role_prompts::Column::Id, "promptId")
         .column_as(role_prompts::Column::Name, "name")
-        .column_as(role_prompts::Column::Role, "role")
+        .column_as(role_prompts::Column::RoleId, "roleId")
         .column_as(role_prompts::Column::UsageCount, "usageCount")
         .expr_as(
             Func::count(Expr::col((prompt_feedback::Entity, prompt_feedback::Column::Id))),
@@ -632,8 +661,8 @@ pub async fn get_prompt_metrics(
     if let Some(prompt_id) = query.prompt_id {
         select = select.filter(role_prompts::Column::Id.eq(prompt_id));
     }
-    if let Some(role) = query.role {
-        select = select.filter(role_prompts::Column::Role.eq(role));
+    if let Some(role_id) = query.role_id {
+        select = select.filter(role_prompts::Column::RoleId.eq(role_id));
     }
 
     let rows = select
@@ -650,7 +679,7 @@ pub async fn get_prompt_metrics(
         .map(|row| PromptMetricsResponse {
             prompt_id: row.prompt_id,
             name: row.name,
-            role: row.role,
+            role_id: row.role_id,
             usage_count: row.usage_count,
             feedback_count: row.feedback_count,
             average_rating: row.average_rating,

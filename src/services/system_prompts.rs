@@ -7,9 +7,11 @@ use uuid::Uuid;
 use crate::{
     models::{
         departments,
+        roles,
         role_prompts,
         user_prompt_preferences,
         department_prompt_assignments,
+        user_role_assignments,
         users,
     },
     dto::prompts::PromptSource,
@@ -129,11 +131,43 @@ async fn resolve_system_default(
     db: &sea_orm::DatabaseConnection,
     user: &users::Model,
 ) -> Result<Option<ResolvedPrompt>, sea_orm::DbErr> {
-    let mut prompt = role_prompts::Entity::find()
-        .filter(role_prompts::Column::IsSystem.eq(true))
-        .filter(role_prompts::Column::Role.eq("developer"))
-        .one(db)
+    let org_role_ids: Vec<Uuid> = user_role_assignments::Entity::find()
+        .select_only()
+        .column(user_role_assignments::Column::RoleId)
+        .filter(user_role_assignments::Column::UserId.eq(user.id))
+        .filter(user_role_assignments::Column::ScopeDepartmentId.is_null())
+        .into_tuple::<Uuid>()
+        .all(db)
         .await?;
+
+    let mut prompt = if org_role_ids.is_empty() {
+        None
+    } else {
+        role_prompts::Entity::find()
+            .filter(role_prompts::Column::IsSystem.eq(true))
+            .filter(role_prompts::Column::RoleId.is_in(org_role_ids))
+            .order_by_asc(role_prompts::Column::CreatedAt)
+            .one(db)
+            .await?
+    };
+
+    if prompt.is_none() {
+        let user_role_id = roles::Entity::find()
+            .select_only()
+            .column(roles::Column::Id)
+            .filter(roles::Column::Name.eq("User"))
+            .into_tuple::<Uuid>()
+            .one(db)
+            .await?;
+        if let Some(user_role_id) = user_role_id {
+            prompt = role_prompts::Entity::find()
+                .filter(role_prompts::Column::IsSystem.eq(true))
+                .filter(role_prompts::Column::RoleId.eq(user_role_id))
+                .order_by_asc(role_prompts::Column::CreatedAt)
+                .one(db)
+                .await?;
+        }
+    }
 
     if prompt.is_none() {
         prompt = role_prompts::Entity::find()
