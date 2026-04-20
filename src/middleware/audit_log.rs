@@ -422,6 +422,9 @@ fn is_sensitive_key(key: &str) -> bool {
         "authorization",
         "cookie",
         "mfa_secret",
+        // Never persist user/assistant raw chat message text in audit snapshots.
+        "messagecontent",
+        "message_content",
     ]
     .iter()
     .any(|sensitive| key.contains(sensitive))

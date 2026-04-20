@@ -12,7 +12,7 @@ use crate::{
         },
         models::ModelsResponse,
     },
-    handlers::models::load_providers_cached,
+    handlers::models::{load_providers_cached, refresh_models_cache},
     llm::{
         gemini::GEMINI_API_URL,
         mistral::MISTRAL_API_URL,
@@ -45,12 +45,28 @@ fn normalize_bearer_token(raw: &str) -> String {
 }
 
 async fn load_models_response(app_state: &SharedState) -> Result<ModelsResponse, AuthError> {
-    let providers = load_providers_cached(&app_state.req_client)
-        .await
-        .map_err(|e| {
-            eprintln!("providers cache error: {e}");
-            AuthError::DbTimeout
-        })?;
+    let providers = load_providers_cached(&app_state.req_client).await.map_err(|e| {
+        eprintln!("providers cache error: {e}");
+        AuthError::DbTimeout
+    })?;
+    Ok(ModelsResponse { providers })
+}
+
+async fn load_models_response_refreshed(
+    app_state: &SharedState,
+) -> Result<ModelsResponse, AuthError> {
+    let providers = match refresh_models_cache(&app_state.req_client).await {
+        Ok(cache) => cache.providers,
+        Err(error) => {
+            eprintln!("providers cache refresh error: {error}");
+            load_providers_cached(&app_state.req_client)
+                .await
+                .map_err(|e| {
+                    eprintln!("providers cache fallback error: {e}");
+                    AuthError::DbTimeout
+                })?
+        }
+    };
     Ok(ModelsResponse { providers })
 }
 
@@ -78,7 +94,7 @@ pub async fn get_ai_engines(
             None,
         )
         .await?;
-    let ai_models = load_models_response(&app_state).await?;
+    let ai_models = load_models_response_refreshed(&app_state).await?;
     let selector = ai_engines::Entity::find();
     let mut ai_engines = selector
         .order_by_desc(ai_engines::Column::CreatedAt)

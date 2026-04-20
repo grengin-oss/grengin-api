@@ -35,28 +35,20 @@ pub async fn load_models_cache(req_client: &reqwest::Client) -> Result<Providers
         return Ok(cached.clone());
     }
 
-    let providers = fetch_providers(req_client).await?;
-    let mut models_by_key = HashMap::new();
-    for provider in &providers {
-        for model in &provider.models {
-            models_by_key
-                .entry(model.key.clone())
-                .or_insert_with(|| model.clone());
-            models_by_key
-                .entry(model.name.clone())
-                .or_insert_with(|| model.clone());
-        }
-    }
-    let cache = ProvidersCache {
-        providers,
-        models_by_key,
-    };
+    let cache = build_providers_cache(fetch_providers(req_client).await?);
     let mut write_guard = providers_cache().await.write().await;
     if let Some(cached) = write_guard.as_ref() {
         return Ok(cached.clone());
     }
     *write_guard = Some(cache.clone());
     Ok(cache)
+}
+
+pub async fn refresh_models_cache(req_client: &reqwest::Client) -> Result<ProvidersCache, Error> {
+    let refreshed = build_providers_cache(fetch_providers(req_client).await?);
+    let mut write_guard = providers_cache().await.write().await;
+    *write_guard = Some(refreshed.clone());
+    Ok(refreshed)
 }
 
 pub async fn load_providers_cached(
@@ -71,6 +63,24 @@ pub async fn get_model_info_cached(
 ) -> Result<Option<ModelInfo>, Error> {
     let cache = load_models_cache(req_client).await?;
     Ok(cache.models_by_key.get(model_key).cloned())
+}
+
+fn build_providers_cache(providers: Vec<ProviderInfo>) -> ProvidersCache {
+    let mut models_by_key = HashMap::new();
+    for provider in &providers {
+        for model in &provider.models {
+            models_by_key
+                .entry(model.key.clone())
+                .or_insert_with(|| model.clone());
+            models_by_key
+                .entry(model.name.clone())
+                .or_insert_with(|| model.clone());
+        }
+    }
+    ProvidersCache {
+        providers,
+        models_by_key,
+    }
 }
 
 async fn fetch_providers(req_client: &reqwest::Client) -> Result<Vec<ProviderInfo>, Error> {
