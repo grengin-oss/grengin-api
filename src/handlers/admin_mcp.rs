@@ -1,29 +1,35 @@
-use axum::{extract::{Path, State}, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 use chrono::Utc;
 use reqwest::StatusCode;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait, Set};
 use sea_orm::sea_query::{Alias, BinOper, Expr};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait,
+    Set,
+};
 use uuid::Uuid;
 
 use crate::{
-    auth::{claims::Claims, error::{AuthError, Error}, permissions::{PERMISSION_MCP_ADMIN, PERMISSION_MCP_DELEGATE, PERMISSION_MCP_VIEW}},
+    auth::{
+        claims::Claims,
+        error::{AuthError, Error},
+        permissions::{PERMISSION_MCP_ADMIN, PERMISSION_MCP_DELEGATE, PERMISSION_MCP_VIEW},
+    },
     dto::admin_mcp::{
-        McpAccessDefaultChangedPayload, McpAccessDefault, McpAccessRuleCreatedPayload,
+        McpAccessDefault, McpAccessDefaultChangedPayload, McpAccessRuleCreatedPayload,
         McpAccessRuleDeletedPayload, McpAccessRuleRequest, McpServerAccess,
     },
     dto::mcp::{McpAccessRule, McpAccessRuleInput, McpServerAccessUpdate},
     models::{
-        departments,
-        mcp_access_policies,
+        departments, mcp_access_policies,
         mcp_access_policies::{McpAccessTarget, McpAccessType},
-        mcp_servers,
-        roles,
-        user_role_assignments,
-        users,
+        mcp_servers, roles, user_role_assignments, users,
     },
     services::{
-        authorization::{AuthorizationService, PermissionScopeMode},
         auth_audit::{build_audit_payload, record_auth_event},
+        authorization::{AuthorizationService, PermissionScopeMode},
         mcp_helpers::build_access_rule_dtos,
     },
     state::SharedState,
@@ -138,13 +144,10 @@ pub async fn update_mcp_server_access(
             let mut active: mcp_servers::ActiveModel = server.into();
             active.default_access = Set(default_access);
             active.updated_at = Set(Utc::now());
-            active
-                .update(&app_state.database)
-                .await
-                .map_err(|e| {
-                    eprintln!("mcp server update error: {e}");
-                    AuthError::DbTimeout
-                })?;
+            active.update(&app_state.database).await.map_err(|e| {
+                eprintln!("mcp server update error: {e}");
+                AuthError::DbTimeout
+            })?;
         }
     }
 
@@ -188,13 +191,10 @@ pub async fn update_mcp_server_access(
                 created_at: Set(Utc::now()),
                 created_by: Set(Some(claims.user_id)),
             };
-            model
-                .insert(&app_state.database)
-                .await
-                .map_err(|e| {
-                    eprintln!("mcp rule insert error: {e}");
-                    AuthError::DbTimeout
-                })?;
+            model.insert(&app_state.database).await.map_err(|e| {
+                eprintln!("mcp rule insert error: {e}");
+                AuthError::DbTimeout
+            })?;
         }
     }
 
@@ -448,13 +448,10 @@ pub async fn create_mcp_access_rule(
         created_at: Set(now),
     };
 
-    let inserted = rule
-        .insert(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("mcp rule insert error: {e}");
-            AuthError::DbTimeout
-        })?;
+    let inserted = rule.insert(&app_state.database).await.map_err(|e| {
+        eprintln!("mcp rule insert error: {e}");
+        AuthError::DbTimeout
+    })?;
 
     if let Some(payload) = build_audit_payload(McpAccessRuleCreatedPayload {
         rule_id,
@@ -496,12 +493,10 @@ pub async fn create_mcp_access_rule(
                     .select_only()
                     .column(users::Column::Id)
                     .join(JoinType::InnerJoin, users::Relation::Departments.def())
-                    .filter(
-                        Expr::col(departments::Column::Path).binary(
-                            BinOper::Custom("<@".into()),
-                            Expr::val(department_path).cast_as(Alias::new("ltree")),
-                        ),
-                    )
+                    .filter(Expr::col(departments::Column::Path).binary(
+                        BinOper::Custom("<@".into()),
+                        Expr::val(department_path).cast_as(Alias::new("ltree")),
+                    ))
                     .into_tuple::<Uuid>()
                     .all(&app_state.database)
                     .await
@@ -533,7 +528,9 @@ pub async fn create_mcp_access_rule(
         }
     };
 
-    let _ = authz.recompute_effective_permissions_for_users(&affected_users).await;
+    let _ = authz
+        .recompute_effective_permissions_for_users(&affected_users)
+        .await;
 
     let rule_dtos = build_access_rule_dtos(&app_state.database, vec![inserted])
         .await
@@ -591,7 +588,9 @@ pub async fn delete_mcp_access_rule(
     } else {
         let target_department_id = match rule.access_type {
             McpAccessType::User => {
-                let Some(user_id) = rule.user_id else { return Err(AuthError::ResourceNotFound) };
+                let Some(user_id) = rule.user_id else {
+                    return Err(AuthError::ResourceNotFound);
+                };
                 let user = users::Entity::find_by_id(user_id)
                     .one(&app_state.database)
                     .await
@@ -625,10 +624,7 @@ pub async fn delete_mcp_access_rule(
             AuthError::DbTimeout
         })?;
 
-    if let Some(payload) = build_audit_payload(McpAccessRuleDeletedPayload {
-        rule_id,
-        server_id,
-    }) {
+    if let Some(payload) = build_audit_payload(McpAccessRuleDeletedPayload { rule_id, server_id }) {
         let _ = record_auth_event(
             &app_state.database,
             "auth.mcp_access_rule_deleted",
@@ -658,12 +654,10 @@ pub async fn delete_mcp_access_rule(
                             .select_only()
                             .column(users::Column::Id)
                             .join(JoinType::InnerJoin, users::Relation::Departments.def())
-                            .filter(
-                                Expr::col(departments::Column::Path).binary(
-                                    BinOper::Custom("<@".into()),
-                                    Expr::val(department_path).cast_as(Alias::new("ltree")),
-                                ),
-                            )
+                            .filter(Expr::col(departments::Column::Path).binary(
+                                BinOper::Custom("<@".into()),
+                                Expr::val(department_path).cast_as(Alias::new("ltree")),
+                            ))
                             .into_tuple::<Uuid>()
                             .all(&app_state.database)
                             .await
@@ -727,7 +721,9 @@ pub async fn delete_mcp_access_rule(
         }
     };
 
-    let _ = authz.recompute_effective_permissions_for_users(&affected_users).await;
+    let _ = authz
+        .recompute_effective_permissions_for_users(&affected_users)
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }

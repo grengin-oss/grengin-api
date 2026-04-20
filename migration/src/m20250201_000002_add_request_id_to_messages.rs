@@ -13,10 +13,10 @@ impl MigrationTrait for Migration {
                     .table(Messages::Table)
                     .add_column(
                         ColumnDef::new(Messages::RequestId)
-                            .string()   // VARCHAR/TEXT
-                            .null()     // Nullable
+                            .string() // VARCHAR/TEXT
+                            .null(), // Nullable
                     )
-                    .to_owned()
+                    .to_owned(),
             )
             .await?;
 
@@ -30,7 +30,7 @@ impl MigrationTrait for Migration {
                 TableAlterStatement::new()
                     .table(Messages::Table)
                     .drop_column(Messages::RequestId)
-                    .to_owned()
+                    .to_owned(),
             )
             .await?;
 

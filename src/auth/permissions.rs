@@ -6,23 +6,96 @@ pub struct PermissionDefinition {
 }
 
 pub const PERMISSIONS: &[PermissionDefinition] = &[
-    PermissionDefinition { domain: "ai_platform", action: "manage", is_scopeable: false },
-    PermissionDefinition { domain: "ai_platform", action: "view", is_scopeable: false },
-    PermissionDefinition { domain: "users", action: "view", is_scopeable: true },
-    PermissionDefinition { domain: "users", action: "manage", is_scopeable: true },
-    PermissionDefinition { domain: "analytics", action: "view", is_scopeable: true },
-    PermissionDefinition { domain: "budget", action: "view", is_scopeable: true },
-    PermissionDefinition { domain: "budget", action: "allocate", is_scopeable: true },
-    PermissionDefinition { domain: "mcp_servers", action: "view", is_scopeable: false },
-    PermissionDefinition { domain: "mcp_servers", action: "admin", is_scopeable: false },
-    PermissionDefinition { domain: "mcp_servers", action: "delegate", is_scopeable: true },
-    PermissionDefinition { domain: "departments", action: "view", is_scopeable: true },
-    PermissionDefinition { domain: "departments", action: "manage", is_scopeable: true },
-    PermissionDefinition { domain: "sso_providers", action: "view", is_scopeable: false },
-    PermissionDefinition { domain: "sso_providers", action: "manage", is_scopeable: false },
-    PermissionDefinition { domain: "roles", action: "view", is_scopeable: false },
-    PermissionDefinition { domain: "roles", action: "manage", is_scopeable: false },
-    PermissionDefinition { domain: "roles", action: "assign", is_scopeable: true },
+    PermissionDefinition {
+        domain: "ai_platform",
+        action: "manage",
+        is_scopeable: false,
+    },
+    PermissionDefinition {
+        domain: "ai_platform",
+        action: "view",
+        is_scopeable: false,
+    },
+    PermissionDefinition {
+        domain: "users",
+        action: "view",
+        is_scopeable: true,
+    },
+    PermissionDefinition {
+        domain: "users",
+        action: "manage",
+        is_scopeable: true,
+    },
+    PermissionDefinition {
+        domain: "analytics",
+        action: "view",
+        is_scopeable: true,
+    },
+    PermissionDefinition {
+        domain: "audit_logs",
+        action: "view",
+        is_scopeable: false,
+    },
+    PermissionDefinition {
+        domain: "budget",
+        action: "view",
+        is_scopeable: true,
+    },
+    PermissionDefinition {
+        domain: "budget",
+        action: "allocate",
+        is_scopeable: true,
+    },
+    PermissionDefinition {
+        domain: "mcp_servers",
+        action: "view",
+        is_scopeable: false,
+    },
+    PermissionDefinition {
+        domain: "mcp_servers",
+        action: "admin",
+        is_scopeable: false,
+    },
+    PermissionDefinition {
+        domain: "mcp_servers",
+        action: "delegate",
+        is_scopeable: true,
+    },
+    PermissionDefinition {
+        domain: "departments",
+        action: "view",
+        is_scopeable: true,
+    },
+    PermissionDefinition {
+        domain: "departments",
+        action: "manage",
+        is_scopeable: true,
+    },
+    PermissionDefinition {
+        domain: "sso_providers",
+        action: "view",
+        is_scopeable: false,
+    },
+    PermissionDefinition {
+        domain: "sso_providers",
+        action: "manage",
+        is_scopeable: false,
+    },
+    PermissionDefinition {
+        domain: "roles",
+        action: "view",
+        is_scopeable: false,
+    },
+    PermissionDefinition {
+        domain: "roles",
+        action: "manage",
+        is_scopeable: false,
+    },
+    PermissionDefinition {
+        domain: "roles",
+        action: "assign",
+        is_scopeable: true,
+    },
 ];
 
 pub const ROLE_SUPER_ADMIN: &str = "Super Admin";
@@ -38,6 +111,7 @@ pub const PERMISSION_AI_PLATFORM_VIEW: &str = "ai_platform:view";
 pub const PERMISSION_USERS_VIEW: &str = "users:view";
 pub const PERMISSION_USERS_MANAGE: &str = "users:manage";
 pub const PERMISSION_ANALYTICS_VIEW: &str = "analytics:view";
+pub const PERMISSION_AUDIT_LOGS_VIEW: &str = "audit_logs:view";
 pub const PERMISSION_BUDGET_VIEW: &str = "budget:view";
 pub const PERMISSION_BUDGET_ALLOCATE: &str = "budget:allocate";
 pub const PERMISSION_MCP_VIEW: &str = "mcp_servers:view";

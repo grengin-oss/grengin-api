@@ -20,42 +20,34 @@ use crate::{
         error::{AuthError, Error},
         permissions::{PERMISSION_MCP_ADMIN, PERMISSION_MCP_DELEGATE, PERMISSION_MCP_VIEW},
     },
-    error::AppError,
     dto::mcp::{
-        BulkToolAccessUpdate, BulkToolAccessUpdateResponse, ListExecutionsQuery, ListServersQuery,
-        ListPublicMcpServersQuery, ListToolsQuery, McpAuthorizeQuery, McpAuthorize,
-        McpOauthCallbackQuery, McpServer, McpServerAccessList,
-        McpServerAccessUpdate, McpServerCreate, McpServerTestResult, McpServerUpdate, McpSyncResult,
-        McpTool, McpToolAccess, McpToolAccessUpdate, McpTools, McpToolSummary,
-        McpUserConnection, McpUserConnections, McpServerCatalogResponse,
-        McpServerCatalogEntry, PaginatedMcpServers, PaginatedMcpToolExecutions,
-        McpDisconnect, McpOauthCallback, McpEffectiveAccessResponse,
-        McpEffectiveServerAccess, McpEffectiveToolAccess,
+        BulkToolAccessUpdate, BulkToolAccessUpdateResponse, ListExecutionsQuery,
+        ListPublicMcpServersQuery, ListServersQuery, ListToolsQuery, McpAuthorize,
+        McpAuthorizeQuery, McpDisconnect, McpEffectiveAccessResponse, McpEffectiveServerAccess,
+        McpEffectiveToolAccess, McpOauthCallback, McpOauthCallbackQuery, McpServer,
+        McpServerAccessList, McpServerAccessUpdate, McpServerCatalogEntry,
+        McpServerCatalogResponse, McpServerCreate, McpServerTestResult, McpServerUpdate,
+        McpSyncResult, McpTool, McpToolAccess, McpToolAccessUpdate, McpToolSummary, McpTools,
+        McpUserConnection, McpUserConnections, PaginatedMcpServers, PaginatedMcpToolExecutions,
     },
+    error::AppError,
+    llm::tooling::sanitize_tool_name,
     models::{
         mcp_access_policies,
         mcp_access_policies::McpAccessTarget,
         mcp_connections, mcp_executions, mcp_oauth_states, mcp_servers,
         mcp_servers::{McpDefaultAccess, McpTransportType},
-        mcp_tools,
-        roles,
+        mcp_tools, roles,
     },
-    llm::tooling::sanitize_tool_name,
     services::authorization::{AuthorizationService, PermissionScopeMode},
-    services::mcp_client::{build_authorization_url, exchange_code},
     services::mcp_access::{
-        build_access_context, load_server_rules, load_tool_rules,
-        resolve_server_access_with_rules, resolve_tool_access_with_rules,
+        build_access_context, load_server_rules, load_tool_rules, resolve_server_access_with_rules,
+        resolve_tool_access_with_rules,
     },
+    services::mcp_client::{build_authorization_url, exchange_code},
     services::mcp_helpers::{
-        build_oauth_config,
-        encrypt_db_url_in_config,
-        resolve_mcp_oauth_token,
-        store_oauth_tokens,
-        build_access_rule_dtos,
-        to_execution_dto,
-        to_server_dto,
-        to_tool_dto,
+        build_access_rule_dtos, build_oauth_config, encrypt_db_url_in_config,
+        resolve_mcp_oauth_token, store_oauth_tokens, to_execution_dto, to_server_dto, to_tool_dto,
         upsert_connection,
     },
     state::SharedState,
@@ -115,21 +107,17 @@ pub async fn list_mcp_servers(
             None,
         )
         .await?;
-    let mut finder = mcp_servers::Entity::find()
-     .order_by_desc(mcp_servers::Column::CreatedAt);
+    let mut finder = mcp_servers::Entity::find().order_by_desc(mcp_servers::Column::CreatedAt);
     if let Some(enabled) = query.enabled {
         finder = finder.filter(mcp_servers::Column::Enabled.eq(enabled));
     }
     if let Some(status) = query.status {
         finder = finder.filter(mcp_servers::Column::Status.eq(status));
     }
-    let servers = finder
-        .all(&state.database)
-        .await
-        .map_err(|e|{
-            eprintln!("Db get error {}",e);
-            AuthError::DbTimeout
-        })?;
+    let servers = finder.all(&state.database).await.map_err(|e| {
+        eprintln!("Db get error {}", e);
+        AuthError::DbTimeout
+    })?;
     let now = Utc::now();
     let server_ids: Vec<Uuid> = servers.iter().map(|server| server.id).collect();
     let connections = if server_ids.is_empty() {
@@ -198,16 +186,15 @@ pub async fn list_public_mcp_servers(
     if let Some(transport_type) = query.transport_type {
         finder = finder.filter(mcp_servers::Column::TransportType.eq(transport_type));
     }
-    let servers = finder
-        .all(&state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("mcp server lookup error: {e}");
-            AppError::DbTimeout
-        })?;
+    let servers = finder.all(&state.database).await.map_err(|e| {
+        eprintln!("mcp server lookup error: {e}");
+        AppError::DbTimeout
+    })?;
 
     if servers.is_empty() {
-        return Ok(Json(McpServerCatalogResponse { servers: Vec::new() }));
+        return Ok(Json(McpServerCatalogResponse {
+            servers: Vec::new(),
+        }));
     }
 
     let server_ids: Vec<Uuid> = servers.iter().map(|server| server.id).collect();
@@ -260,9 +247,7 @@ pub async fn list_public_mcp_servers(
                     connection.connected && not_expired
                 })
                 .unwrap_or(false),
-            mcp_servers::McpTransportType::Stdio => {
-                server.status.as_deref() == Some("connected")
-            }
+            mcp_servers::McpTransportType::Stdio => server.status.as_deref() == Some("connected"),
         };
 
         if let Some(connected_filter) = query.connected {
@@ -344,24 +329,24 @@ pub async fn create_mcp_server(
         created_at: Set(now),
         updated_at: Set(now),
     };
-    let saved = model
-        .insert(&state.database)
-        .await
-        .map_err(|e| {
-            let s = e.to_string();
-            if s.contains("duplicate key value violates unique constraint")
-                || s.contains("uq-mcp-servers-name")
-            {
-                AuthError::McpServerNameConflict {
-                    name: Some(server_name.clone()),
-                }
-            } else {
-                eprintln!("Db create error {}", e);
-                AuthError::DbTimeout
+    let saved = model.insert(&state.database).await.map_err(|e| {
+        let s = e.to_string();
+        if s.contains("duplicate key value violates unique constraint")
+            || s.contains("uq-mcp-servers-name")
+        {
+            AuthError::McpServerNameConflict {
+                name: Some(server_name.clone()),
             }
-        })?;
+        } else {
+            eprintln!("Db create error {}", e);
+            AuthError::DbTimeout
+        }
+    })?;
     state.upsert_mcp_client(&saved).await;
-    Ok((StatusCode::CREATED, Json(to_server_dto(&state, saved, false))))
+    Ok((
+        StatusCode::CREATED,
+        Json(to_server_dto(&state, saved, false)),
+    ))
 }
 
 #[utoipa::path(
@@ -394,10 +379,10 @@ pub async fn get_mcp_server(
     let server = mcp_servers::Entity::find_by_id(server_id)
         .one(&state.database)
         .await
-        .map_err(|e|{
-            eprintln!("Db get one error {}",e);
+        .map_err(|e| {
+            eprintln!("Db get one error {}", e);
             AuthError::DbTimeout
-         })?
+        })?
         .ok_or(AuthError::ResourceNotFound)?;
     let connected = resolve_server_connected(&state, &server).await?;
     Ok(Json(to_server_dto(&state, server, connected)))
@@ -452,7 +437,7 @@ pub async fn update_mcp_server(
             Set(Some(icon))
         };
     }
-    if let Some(transport_type) = req.transport_type{
+    if let Some(transport_type) = req.transport_type {
         active.transport_type = Set(transport_type);
     }
     if let Some(cfg) = req.connection_config {
@@ -485,22 +470,19 @@ pub async fn update_mcp_server(
         active.default_access = Set(default_access);
     }
     active.updated_at = Set(Utc::now());
-    let saved = active
-        .update(&state.database)
-        .await
-        .map_err(|e| {
-            let s = e.to_string();
-            if s.contains("duplicate key value violates unique constraint")
-                || s.contains("uq-mcp-servers-name")
-            {
-                AuthError::McpServerNameConflict {
-                    name: requested_name.clone(),
-                }
-            } else {
-                eprintln!("Db get error {}", e);
-                AuthError::DbTimeout
+    let saved = active.update(&state.database).await.map_err(|e| {
+        let s = e.to_string();
+        if s.contains("duplicate key value violates unique constraint")
+            || s.contains("uq-mcp-servers-name")
+        {
+            AuthError::McpServerNameConflict {
+                name: requested_name.clone(),
             }
-        })?;
+        } else {
+            eprintln!("Db get error {}", e);
+            AuthError::DbTimeout
+        }
+    })?;
     state.upsert_mcp_client(&saved).await;
     let connected = resolve_server_connected(&state, &saved).await?;
     Ok(Json(to_server_dto(&state, saved, connected)))
@@ -536,8 +518,8 @@ pub async fn delete_mcp_server(
     mcp_servers::Entity::delete_by_id(server_id)
         .exec(&state.database)
         .await
-        .map_err(|e|{
-            eprintln!("Db get error {}",e);
+        .map_err(|e| {
+            eprintln!("Db get error {}", e);
             AuthError::DbTimeout
         })?;
     state.remove_mcp_client(&server_id).await;
@@ -623,8 +605,7 @@ pub async fn sync_mcp_server_tools(
     let requires_oauth = matches!(
         server.transport_type,
         mcp_servers::McpTransportType::Http | mcp_servers::McpTransportType::Sse
-    )
-        && server.connection_config.get("oauth").is_some();
+    ) && server.connection_config.get("oauth").is_some();
     let oauth_token = if requires_oauth {
         match resolve_mcp_oauth_token(&state, claims.user_id, server_id).await {
             Ok(token) => token,
@@ -808,20 +789,14 @@ pub async fn list_mcp_server_executions(
     let paginator = finder
         .order_by_desc(mcp_executions::Column::ExecutedAt)
         .paginate(&state.database, limit);
-    let total = paginator
-        .num_items()
-        .await
-                    .map_err(|e|{
-              eprintln!("Db get error {}",e);
-              AuthError::DbTimeout
-           })?;
-    let data = paginator
-        .fetch_page(offset / limit)
-        .await
-                    .map_err(|e|{
-              eprintln!("Db get error {}",e);
-              AuthError::DbTimeout
-           })?;
+    let total = paginator.num_items().await.map_err(|e| {
+        eprintln!("Db get error {}", e);
+        AuthError::DbTimeout
+    })?;
+    let data = paginator.fetch_page(offset / limit).await.map_err(|e| {
+        eprintln!("Db get error {}", e);
+        AuthError::DbTimeout
+    })?;
     let executions = data.into_iter().map(to_execution_dto).collect();
     Ok(Json(PaginatedMcpToolExecutions {
         executions,
@@ -856,8 +831,8 @@ pub async fn get_mcp_server_access(
         .filter(mcp_access_policies::Column::ServerId.eq(server_id))
         .all(&state.database)
         .await
-        .map_err(|e|{
-            eprintln!("Db get error {}",e);
+        .map_err(|e| {
+            eprintln!("Db get error {}", e);
             AuthError::DbTimeout
         })?;
     let rule_dtos = build_access_rule_dtos(&state.database, rules)
@@ -891,17 +866,15 @@ pub async fn update_mcp_server_access(
         if let Some(server) = mcp_servers::Entity::find_by_id(server_id)
             .one(&state.database)
             .await
-            .map_err(|e|{
-              eprintln!("Db get error {}",e);
-              AuthError::DbTimeout
-           })?
+            .map_err(|e| {
+                eprintln!("Db get error {}", e);
+                AuthError::DbTimeout
+            })?
         {
             let mut active: mcp_servers::ActiveModel = server.into();
             active.default_access = Set(default_access);
-            let _ = active.update(&state.database)
-              .await
-              .map_err(|e|{
-                 eprintln!("Db get error {}",e);
+            let _ = active.update(&state.database).await.map_err(|e| {
+                eprintln!("Db get error {}", e);
                 AuthError::DbTimeout
             })?;
         }
@@ -912,8 +885,8 @@ pub async fn update_mcp_server_access(
         .filter(mcp_access_policies::Column::ServerId.eq(server_id))
         .exec(&state.database)
         .await
-        .map_err(|e|{
-            eprintln!("Db get error {}",e);
+        .map_err(|e| {
+            eprintln!("Db get error {}", e);
             AuthError::DbTimeout
         })?;
 
@@ -942,13 +915,10 @@ pub async fn update_mcp_server_access(
                 created_at: Set(Utc::now()),
                 created_by: Set(None),
             };
-            model
-                .insert(&state.database)
-                .await
-                .map_err(|e|{
-                   eprintln!("Db get error {}",e);
-                   AuthError::DbTimeout
-        })?;
+            model.insert(&state.database).await.map_err(|e| {
+                eprintln!("Db get error {}", e);
+                AuthError::DbTimeout
+            })?;
         }
     }
 
@@ -985,8 +955,8 @@ pub async fn get_mcp_server_tools_access(
         .filter(mcp_tools::Column::ServerId.eq(server_id))
         .all(&state.database)
         .await
-        .map_err(|e|{
-            eprintln!("Db get error {}",e);
+        .map_err(|e| {
+            eprintln!("Db get error {}", e);
             AuthError::DbTimeout
         })?;
     let mut result = Vec::new();
@@ -996,10 +966,10 @@ pub async fn get_mcp_server_tools_access(
             .filter(mcp_access_policies::Column::ToolId.eq(tool.id))
             .all(&state.database)
             .await
-            .map_err(|e|{
-               eprintln!("Db get error {}",e);
-               AuthError::DbTimeout
-        })?;
+            .map_err(|e| {
+                eprintln!("Db get error {}", e);
+                AuthError::DbTimeout
+            })?;
         let rule_dtos = build_access_rule_dtos(&state.database, rules)
             .await
             .map_err(|_| AuthError::DbTimeout)?;
@@ -1061,10 +1031,10 @@ pub async fn update_mcp_server_tools_access(
                 .filter(mcp_access_policies::Column::ToolId.eq(item.tool_id))
                 .exec(&state.database)
                 .await
-                .map_err(|e|{
-                   eprintln!("Db get error {}",e);
-                   AuthError::DbTimeout
-           })?;
+                .map_err(|e| {
+                    eprintln!("Db get error {}", e);
+                    AuthError::DbTimeout
+                })?;
             if let Some(rules) = item.rules {
                 for r in rules {
                     let (role_id, _) = resolve_role_reference(
@@ -1157,10 +1127,10 @@ pub async fn get_mcp_tool_access(
         .filter(mcp_access_policies::Column::ToolId.eq(tool_id))
         .all(&state.database)
         .await
-        .map_err(|e|{
-              eprintln!("Db get error {}",e);
-              AuthError::DbTimeout
-           })?;
+        .map_err(|e| {
+            eprintln!("Db get error {}", e);
+            AuthError::DbTimeout
+        })?;
     let rule_dtos = build_access_rule_dtos(&state.database, rules)
         .await
         .map_err(|_| AuthError::DbTimeout)?;
@@ -1218,10 +1188,10 @@ pub async fn update_mcp_tool_access(
         .filter(mcp_access_policies::Column::ToolId.eq(tool_id))
         .exec(&state.database)
         .await
-        .map_err(|e|{
-              eprintln!("Db delete error {}",e);
-              AuthError::DbTimeout
-           })?;
+        .map_err(|e| {
+            eprintln!("Db delete error {}", e);
+            AuthError::DbTimeout
+        })?;
     if let Some(rules) = req.rules {
         for r in rules {
             let (role_id, _) = resolve_role_reference(
@@ -1284,13 +1254,10 @@ pub async fn list_mcp_tools(
                 .or(Expr::col(mcp_tools::Column::Description).like(pattern)),
         );
     }
-    let tools = finder
-        .all(&state.database)
-        .await
-        .map_err(|e|{
-              eprintln!("Db get all error {}",e);
-              AppError::DbTimeout
-           })?;
+    let tools = finder.all(&state.database).await.map_err(|e| {
+        eprintln!("Db get all error {}", e);
+        AppError::DbTimeout
+    })?;
     let dto_tools: Vec<McpTool> = tools.iter().map(to_tool_dto).collect();
     Ok(Json(McpTools {
         tools: dto_tools,
@@ -1314,10 +1281,10 @@ pub async fn list_mcp_connections(
         .filter(mcp_connections::Column::UserId.eq(claims.user_id))
         .all(&state.database)
         .await
-        .map_err(|e|{
-              eprintln!("Db get all error {}",e);
-              AppError::DbTimeout
-           })?;
+        .map_err(|e| {
+            eprintln!("Db get all error {}", e);
+            AppError::DbTimeout
+        })?;
     let connections = rows
         .into_iter()
         .map(|c| McpUserConnection {
@@ -1391,13 +1358,10 @@ pub async fn authorize_mcp_connection(
         expires_at: Set(Some(expires_at)),
         created_at: Set(now),
     };
-    model
-        .insert(&state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("mcp oauth state insert error: {e}");
-            AppError::DbTimeout
-        })?;
+    model.insert(&state.database).await.map_err(|e| {
+        eprintln!("mcp oauth state insert error: {e}");
+        AppError::DbTimeout
+    })?;
 
     Ok(Json(McpAuthorize {
         success: true,
@@ -1503,9 +1467,8 @@ fn build_oauth_callback_response(
     if let Some(redirect_uri) = redirect_uri {
         let separator = if redirect_uri.contains('?') { "&" } else { "?" };
         let status_value = if success { "success" } else { "error" };
-        let url = format!(
-            "{redirect_uri}{separator}mcp_server_id={server_id}&status={status_value}"
-        );
+        let url =
+            format!("{redirect_uri}{separator}mcp_server_id={server_id}&status={status_value}");
         return Redirect::to(&url).into_response();
     }
 
@@ -1600,7 +1563,10 @@ pub async fn get_mcp_effective_access(
 
     let mut tools_by_server: HashMap<Uuid, Vec<mcp_tools::Model>> = HashMap::new();
     for tool in tools {
-        tools_by_server.entry(tool.server_id).or_default().push(tool);
+        tools_by_server
+            .entry(tool.server_id)
+            .or_default()
+            .push(tool);
     }
 
     let mut servers_out = Vec::new();
@@ -1609,14 +1575,10 @@ pub async fn get_mcp_effective_access(
             .get(&server.id)
             .map(|rules| rules.as_slice())
             .unwrap_or(&[]);
-        let server_access = resolve_server_access_with_rules(
-            &state.database,
-            &access_context,
-            &server,
-            rules,
-        )
-        .await
-        .map_err(map_mcp_access_error)?;
+        let server_access =
+            resolve_server_access_with_rules(&state.database, &access_context, &server, rules)
+                .await
+                .map_err(map_mcp_access_error)?;
 
         let mut tools_out = Vec::new();
         if let Some(server_tools) = tools_by_server.get(&server.id) {
@@ -1655,7 +1617,9 @@ pub async fn get_mcp_effective_access(
         });
     }
 
-    Ok(Json(McpEffectiveAccessResponse { servers: servers_out }))
+    Ok(Json(McpEffectiveAccessResponse {
+        servers: servers_out,
+    }))
 }
 
 fn map_mcp_access_error(err: AppError) -> AuthError {

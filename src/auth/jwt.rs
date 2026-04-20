@@ -1,5 +1,5 @@
-use std::sync::OnceLock;
 use jsonwebtoken::{DecodingKey, EncodingKey};
+use std::sync::OnceLock;
 
 pub struct Keys {
     pub encoding: EncodingKey,

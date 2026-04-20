@@ -11,7 +11,12 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(AiEngines::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(AiEngines::Id).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(AiEngines::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(AiEngines::OrgId).uuid().not_null())
                     .col(ColumnDef::new(AiEngines::DisplayName).text().not_null())
                     .col(ColumnDef::new(AiEngines::IsEnabled).boolean().not_null())

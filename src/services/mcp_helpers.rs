@@ -1,5 +1,7 @@
 use chrono::Utc;
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect, Set,
+};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -8,16 +10,12 @@ use crate::{
     dto::mcp::{McpAccessRule, McpServer, McpTool, McpToolExecution},
     error::AppError,
     models::{
-        departments,
-        mcp_access_policies,
-        mcp_connections,
-        mcp_executions,
-        mcp_servers,
-        mcp_tools,
-        roles,
-        users,
+        departments, mcp_access_policies, mcp_connections, mcp_executions, mcp_servers, mcp_tools,
+        roles, users,
     },
-    services::mcp_client::{refresh_token, McpOAuthConfig, McpOAuthTokens, oauth_config_from_connection},
+    services::mcp_client::{
+        oauth_config_from_connection, refresh_token, McpOAuthConfig, McpOAuthTokens,
+    },
     state::SharedState,
 };
 
@@ -43,11 +41,7 @@ pub fn encrypt_db_url_in_config(
     Ok(())
 }
 
-pub fn to_server_dto(
-    state: &SharedState,
-    model: mcp_servers::Model,
-    connected: bool,
-) -> McpServer {
+pub fn to_server_dto(state: &SharedState, model: mcp_servers::Model, connected: bool) -> McpServer {
     McpServer {
         id: model.id,
         name: model.name,
@@ -132,10 +126,7 @@ pub async fn build_access_rule_dtos(
     rules: Vec<mcp_access_policies::Model>,
 ) -> Result<Vec<McpAccessRule>, AppError> {
     let user_ids: Vec<Uuid> = rules.iter().filter_map(|rule| rule.user_id).collect();
-    let department_ids: Vec<Uuid> = rules
-        .iter()
-        .filter_map(|rule| rule.department_id)
-        .collect();
+    let department_ids: Vec<Uuid> = rules.iter().filter_map(|rule| rule.department_id).collect();
     let role_ids: Vec<Uuid> = rules.iter().filter_map(|rule| rule.role_id).collect();
 
     let mut user_email_map: HashMap<Uuid, String> = HashMap::new();
@@ -203,8 +194,11 @@ pub async fn build_access_rule_dtos(
             let role_id = rule.role_id;
             let mut dto = to_access_rule_dto(rule);
             dto.user_email = user_id.and_then(|id| user_email_map.get(&id).cloned());
-            dto.department_name = department_id.and_then(|id| department_name_map.get(&id).cloned());
-            dto.role_name = role_id.and_then(|id| role_name_map.get(&id).cloned()).or(dto.role_name);
+            dto.department_name =
+                department_id.and_then(|id| department_name_map.get(&id).cloned());
+            dto.role_name = role_id
+                .and_then(|id| role_name_map.get(&id).cloned())
+                .or(dto.role_name);
             dto
         })
         .collect();
@@ -238,13 +232,10 @@ pub async fn upsert_connection(
             active.token_type = Set(None);
         }
         active.updated_at = Set(Utc::now());
-        active
-            .update(&state.database)
-            .await
-            .map_err(|e| {
-                eprintln!("Db update error {}", e);
-                AppError::DbTimeout
-            })?;
+        active.update(&state.database).await.map_err(|e| {
+            eprintln!("Db update error {}", e);
+            AppError::DbTimeout
+        })?;
     } else {
         let model = mcp_connections::ActiveModel {
             id: Set(Uuid::new_v4()),
@@ -261,13 +252,10 @@ pub async fn upsert_connection(
             created_at: Set(Utc::now()),
             updated_at: Set(Utc::now()),
         };
-        model
-            .insert(&state.database)
-            .await
-            .map_err(|e| {
-                eprintln!("Db insert error {}", e);
-                AppError::DbTimeout
-            })?;
+        model.insert(&state.database).await.map_err(|e| {
+            eprintln!("Db insert error {}", e);
+            AppError::DbTimeout
+        })?;
     }
     Ok(())
 }
@@ -379,13 +367,10 @@ pub async fn store_oauth_tokens(
         active.refresh_token = Set(tokens.refresh_token);
         active.token_type = Set(tokens.token_type);
         active.updated_at = Set(now);
-        active
-            .update(&state.database)
-            .await
-            .map_err(|e| {
-                eprintln!("mcp connection update error: {e}");
-                AppError::DbTimeout
-            })?;
+        active.update(&state.database).await.map_err(|e| {
+            eprintln!("mcp connection update error: {e}");
+            AppError::DbTimeout
+        })?;
         return Ok(());
     }
 
@@ -404,13 +389,10 @@ pub async fn store_oauth_tokens(
         created_at: Set(now),
         updated_at: Set(now),
     };
-    model
-        .insert(&state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("mcp connection insert error: {e}");
-            AppError::DbTimeout
-        })?;
+    model.insert(&state.database).await.map_err(|e| {
+        eprintln!("mcp connection insert error: {e}");
+        AppError::DbTimeout
+    })?;
     Ok(())
 }
 
@@ -418,7 +400,10 @@ pub fn build_oauth_config(
     state: &SharedState,
     server: &mcp_servers::Model,
 ) -> Result<McpOAuthConfig, AppError> {
-    let client_id = server.client_id.clone().ok_or(AppError::ServiceTemporarilyUnavailable)?;
+    let client_id = server
+        .client_id
+        .clone()
+        .ok_or(AppError::ServiceTemporarilyUnavailable)?;
     let client_secret = match server.client_secret.as_deref() {
         Some(secret) => Some(
             decrypt_key(&state.settings.auth.app_key, secret)
@@ -426,9 +411,10 @@ pub fn build_oauth_config(
         ),
         None => None,
     };
-    oauth_config_from_connection(&server.connection_config, &client_id, client_secret)
-        .map_err(|e| {
+    oauth_config_from_connection(&server.connection_config, &client_id, client_secret).map_err(
+        |e| {
             eprintln!("mcp oauth config error: {e}");
             AppError::ServiceTemporarilyUnavailable
-        })
+        },
+    )
 }

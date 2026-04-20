@@ -153,7 +153,8 @@ impl AuthError {
                 let description_key = "error.auth.service_unavailable.description".to_string();
                 let solution_key = "error.auth.service_unavailable.solution".to_string();
 
-                let description_tpl = "The authentication service for {app} is temporarily unavailable.";
+                let description_tpl =
+                    "The authentication service for {app} is temporarily unavailable.";
                 let solution_tpl = "Try again in a few minutes. If it persists, contact support.";
 
                 (
@@ -177,8 +178,7 @@ impl AuthError {
                 let solution_key = "error.db.unavailable.solution".to_string();
 
                 let description_tpl = "{app} couldn't reach the database right now.";
-                let solution_tpl =
-                    "Try again in a few minutes. If it persists, check database health, network, and connection pool limits.";
+                let solution_tpl = "Try again in a few minutes. If it persists, check database health, network, and connection pool limits.";
 
                 (
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -200,8 +200,7 @@ impl AuthError {
                 let solution_key = "error.db.timeout.solution".to_string();
 
                 let description_tpl = "A database operation timed out in {app}.";
-                let solution_tpl =
-                    "Retry the request. If it continues, investigate database load, slow queries, and connection pool timeouts.";
+                let solution_tpl = "Retry the request. If it continues, investigate database load, slow queries, and connection pool timeouts.";
 
                 (
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -223,8 +222,7 @@ impl AuthError {
                 let solution_key = "error.db.conflict.solution".to_string();
 
                 let description_tpl = "The request conflicts with existing data in {app}.";
-                let solution_tpl =
-                    "Refresh data and retry. If you're creating a resource, ensure unique fields are not duplicated.";
+                let solution_tpl = "Refresh data and retry. If you're creating a resource, ensure unique fields are not duplicated.";
 
                 (
                     StatusCode::CONFLICT,
@@ -557,8 +555,7 @@ impl AuthError {
 
                 let description_tpl =
                     "A super admin cannot deactivate, suspend, or delete their own account.";
-                let solution_tpl =
-                    "Update a different user's status, or ask another super admin to perform this action.";
+                let solution_tpl = "Update a different user's status, or ask another super admin to perform this action.";
 
                 (
                     StatusCode::CONFLICT,
@@ -694,7 +691,8 @@ impl AuthError {
                 let description_key = "error.auth.sso.not_configured.description".to_string();
                 let solution_key = "error.auth.sso.not_configured.solution".to_string();
 
-                let description_tpl = "SSO provider `{provider}` is not configured correctly for {app}.";
+                let description_tpl =
+                    "SSO provider `{provider}` is not configured correctly for {app}.";
                 let solution_tpl =
                     "Ask an admin to configure `{provider}` SSO settings, then try again.";
 

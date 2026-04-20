@@ -6,10 +6,7 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        if manager
-            .has_column("mcp_servers", "organization_id")
-            .await?
-        {
+        if manager.has_column("mcp_servers", "organization_id").await? {
             manager
                 .alter_table(
                     Table::alter()
@@ -31,10 +28,7 @@ impl MigrationTrait for Migration {
                 .await?;
         }
 
-        if !manager
-            .has_column("mcp_servers", "client_secret")
-            .await?
-        {
+        if !manager.has_column("mcp_servers", "client_secret").await? {
             manager
                 .alter_table(
                     Table::alter()

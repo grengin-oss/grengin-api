@@ -1,17 +1,12 @@
-pub mod openai;
 pub mod anthropic;
+pub mod gemini;
 pub mod mistral;
 pub mod mistral_conversations;
-pub mod gemini;
+pub mod openai;
 pub mod tool;
 
 pub use tool::{
-    tool_name_is_web_search,
-    ToolCall,
-    ToolInput,
-    ToolInputDelta,
-    ToolKind,
-    ToolResult,
+    tool_name_is_web_search, ToolCall, ToolInput, ToolInputDelta, ToolKind, ToolResult,
 };
 
 /// Result of parsing a streaming event
@@ -144,14 +139,11 @@ pub fn parse_web_search_action(input: &serde_json::Value) -> Option<StreamWebSea
         .get("query")
         .and_then(|q| q.as_str())
         .map(|s| s.to_string());
-    let mut queries = input
-        .get("queries")
-        .and_then(|q| q.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect::<Vec<String>>()
-        });
+    let mut queries = input.get("queries").and_then(|q| q.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect::<Vec<String>>()
+    });
     if queries.is_none() {
         if let Some(query_value) = query.as_ref() {
             queries = Some(vec![query_value.clone()]);
@@ -173,11 +165,13 @@ pub fn update_web_search_action_state(
     let call_id = tool_id.or_else(|| last_call_id.clone());
     if let Some(id) = call_id {
         *last_call_id = Some(id.clone());
-        let entry = state.entry(id.clone()).or_insert_with(|| StreamWebSearchState {
-            query: None,
-            queries: None,
-            results: Vec::new(),
-        });
+        let entry = state
+            .entry(id.clone())
+            .or_insert_with(|| StreamWebSearchState {
+                query: None,
+                queries: None,
+                results: Vec::new(),
+            });
         if let Some(action) = action {
             if action.query.is_some() {
                 entry.query = action.query;
@@ -200,11 +194,13 @@ pub fn update_web_search_results_state(
     let call_id = tool_id.or_else(|| last_call_id.clone());
     if let Some(id) = call_id {
         *last_call_id = Some(id.clone());
-        let entry = state.entry(id.clone()).or_insert_with(|| StreamWebSearchState {
-            query: None,
-            queries: None,
-            results: Vec::new(),
-        });
+        let entry = state
+            .entry(id.clone())
+            .or_insert_with(|| StreamWebSearchState {
+                query: None,
+                queries: None,
+                results: Vec::new(),
+            });
         entry.results.extend(results);
         return Some((id.clone(), entry.clone()));
     }
@@ -212,12 +208,15 @@ pub fn update_web_search_results_state(
 }
 
 impl StreamParseResult {
-
     /// Extract request_id if available
     pub fn request_id(&self) -> Option<String> {
         match self {
             StreamParseResult::TextDelta { request_id, .. } => request_id.clone(),
-            StreamParseResult::MessageStart { request_id,input_tokens:_,output_tokens:_ } => Some(request_id.clone()),
+            StreamParseResult::MessageStart {
+                request_id,
+                input_tokens: _,
+                output_tokens: _,
+            } => Some(request_id.clone()),
             _ => None,
         }
     }

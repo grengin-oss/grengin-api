@@ -1,5 +1,5 @@
-use sea_orm_migration::prelude::*;
 use sea_orm_migration::prelude::extension::postgres::PgLTree;
+use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -24,22 +24,14 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
-                    .col(
-                        ColumnDef::new(Departments::Name)
-                            .string_len(100)
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(Departments::Name).string_len(100).not_null())
                     .col(
                         ColumnDef::new(Departments::Description)
                             .string_len(500)
                             .null(),
                     )
                     .col(ColumnDef::new(Departments::ParentId).uuid().null())
-                    .col(
-                        ColumnDef::new(Departments::Path)
-                            .custom(PgLTree)
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(Departments::Path).custom(PgLTree).not_null())
                     .col(
                         ColumnDef::new(Departments::Depth)
                             .integer()

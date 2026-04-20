@@ -27,10 +27,9 @@ impl MigrationTrait for Migration {
                     .col(
                         ColumnDef::new(SsoProviders::AllowedDomains)
                             .array(ColumnType::Text)
-                            .not_null()
-                            // keep it simple like your reference migration:
-                            // if you want a default, do it at app layer
-                            // or use a DB default later with cust() if needed.
+                            .not_null(), // keep it simple like your reference migration:
+                                         // if you want a default, do it at app layer
+                                         // or use a DB default later with cust() if needed.
                     )
                     .col(
                         ColumnDef::new(SsoProviders::IsEnabled)

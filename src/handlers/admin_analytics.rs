@@ -12,8 +12,8 @@ use crate::{
         permissions::PERMISSION_ANALYTICS_VIEW,
     },
     dto::analytics::{
-        AnalyticsQuery, DepartmentAnalyticsQuery, DepartmentAnalytics, AnalyticsOverview,
-        TimeSeriesQuery, AnalyticsTimeSeries, UserAnalyticsQuery, UserAnalytics,
+        AnalyticsOverview, AnalyticsQuery, AnalyticsTimeSeries, DepartmentAnalytics,
+        DepartmentAnalyticsQuery, TimeSeriesQuery, UserAnalytics, UserAnalyticsQuery,
     },
     models::users::UserStatus,
     services::{
@@ -115,9 +115,10 @@ pub async fn get_user_analytics(
     let db: &DatabaseConnection = &app_state.database;
     let result = analytics_cache::get_user_analytics_cached(db, query)
         .await
-        .map_err(|e| { 
-            eprintln!("{}",e);
-            AuthError::DbTimeout})?;
+        .map_err(|e| {
+            eprintln!("{}", e);
+            AuthError::DbTimeout
+        })?;
 
     Ok((StatusCode::OK, Json(result)))
 }
@@ -162,11 +163,11 @@ pub async fn get_department_analytics(
         .await?;
 
     let result = analytics_cache::get_department_analytics_cached(&app_state.database, query)
-    .await
-    .map_err(|e| {
-        eprintln!("Department analytics error: {}", e);
-        AuthError::DbTimeout
-    })?;
+        .await
+        .map_err(|e| {
+            eprintln!("Department analytics error: {}", e);
+            AuthError::DbTimeout
+        })?;
 
     Ok((StatusCode::OK, Json(result)))
 }
@@ -206,15 +207,12 @@ pub async fn get_timeseries_analytics(
         )
         .await?;
 
-    let result = analytics_cache::get_timeseries_analytics_cached(
-        &app_state.database,
-        query,
-    )
-    .await
-    .map_err(|e| {
-        eprintln!("Timeseries analytics error: {}", e);
-        AuthError::DbTimeout
-    })?;
+    let result = analytics_cache::get_timeseries_analytics_cached(&app_state.database, query)
+        .await
+        .map_err(|e| {
+            eprintln!("Timeseries analytics error: {}", e);
+            AuthError::DbTimeout
+        })?;
 
     Ok((StatusCode::OK, Json(result)))
 }

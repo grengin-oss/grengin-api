@@ -1,7 +1,7 @@
-use axum::{http::StatusCode};
+use crate::error::{AppError, ErrorCode, ErrorDetail};
+use axum::http::StatusCode;
 use std::collections::BTreeMap;
 use utoipa::ToSchema;
-use crate::error::{AppError, ErrorCode, ErrorDetail};
 
 #[derive(Debug, serde::Serialize, ToSchema)]
 pub struct AppErrorCatalogItem {
@@ -101,4 +101,3 @@ pub fn build_app_error_catalog() -> Vec<AppErrorCatalogItem> {
 
     items
 }
-

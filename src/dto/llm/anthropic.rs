@@ -1,6 +1,6 @@
+use crate::{llm::prompt::Prompt, models::messages::ChatRole};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::{llm::prompt::Prompt, models::messages::ChatRole};
 
 // ============== Constants ==============
 
@@ -27,7 +27,6 @@ pub struct AnthropicListModelsResponse {
     pub last_id: Option<String>,
     pub has_more: bool,
 }
-
 
 #[derive(Serialize, Deserialize)]
 pub struct AnthropicChatRequest {
@@ -244,7 +243,7 @@ pub struct AnthropicMessageResponse {
     pub usage: AnthropicUsage,
 }
 
-#[derive(Debug, Deserialize,Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum AnthropicContentBlockResponse {
     #[serde(rename = "text")]
@@ -268,7 +267,7 @@ pub enum AnthropicContentBlockResponse {
     },
 }
 
-#[derive(Debug, Deserialize,Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WebSearchResult {
     #[serde(rename = "type")]
     pub result_type: String,
@@ -303,7 +302,7 @@ pub struct AnthropicChatResponse {
 }
 
 impl AnthropicMessage {
-    pub fn from_prompts(prompts: Vec<Prompt>) -> (Vec<Self>, Option<String>){
+    pub fn from_prompts(prompts: Vec<Prompt>) -> (Vec<Self>, Option<String>) {
         let mut messages = Vec::new();
         let mut system_prompt = None;
 
@@ -325,7 +324,6 @@ impl AnthropicMessage {
                 });
             }
             for file in &prompt.files {
-                 
                 if let Some(data) = file.base64.clone() {
                     if file.content_type.starts_with("image/") {
                         blocks.push(AnthropicContentBlock::Image {

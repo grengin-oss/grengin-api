@@ -1,42 +1,42 @@
+use crate::models::users::UserStatus;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-use crate::models::users::UserStatus;
 use uuid::Uuid;
 
-#[derive(Debug,Deserialize,ToSchema)]
-#[serde(rename_all="snake_case")]
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum SortRule {
     Name,
     Email,
     CreatedAt,
     UpdatedAt,
     LastLoginAt,
-    Size
+    Size,
 }
 
-#[derive(Debug,Deserialize,ToSchema)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct PaginationQuery {
-   pub limit:Option<u64>,
-   pub offset:Option<u64>,
-   pub search:Option<String>,
-   pub semantic:Option<bool>,
-   pub archived:Option<bool>,
-   pub ascending:Option<bool>,
-   pub role_id:Option<Uuid>,
-   pub status:Option<UserStatus>,
-   pub unassigned_department:Option<bool>,
-   pub sort:Option<SortRule>,
-   #[serde(rename = "type")]
-   pub content_type:Option<String>
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+    pub search: Option<String>,
+    pub semantic: Option<bool>,
+    pub archived: Option<bool>,
+    pub ascending: Option<bool>,
+    pub role_id: Option<Uuid>,
+    pub status: Option<UserStatus>,
+    pub unassigned_department: Option<bool>,
+    pub sort: Option<SortRule>,
+    #[serde(rename = "type")]
+    pub content_type: Option<String>,
 }
 
-#[derive(Serialize,ToSchema)]
-pub struct PaginatedResponse<T>{
+#[derive(Serialize, ToSchema)]
+pub struct PaginatedResponse<T> {
     #[serde(skip_serializing_if = "Option::is_none")]
-   pub users:Option<Vec<T>>,
-   pub total:u64,
-   pub limit:u64,
-   pub offset:u64,
+    pub users: Option<Vec<T>>,
+    pub total: u64,
+    pub limit: u64,
+    pub offset: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-   pub files:Option<Vec<T>>,
+    pub files: Option<Vec<T>>,
 }

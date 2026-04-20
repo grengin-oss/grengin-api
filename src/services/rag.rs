@@ -71,9 +71,7 @@ pub async fn load_recent_prompts(
     let boundary = if recent_messages.len() < limit as usize {
         None
     } else {
-        recent_messages
-            .last()
-            .map(|message| message.created_at)
+        recent_messages.last().map(|message| message.created_at)
     };
 
     recent_messages.reverse();
@@ -156,7 +154,11 @@ pub async fn build_retrieval_prompt(
 
     let rows = app_state
         .database
-        .query_all(Statement::from_sql_and_values(DatabaseBackend::Postgres, sql, values))
+        .query_all(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            sql,
+            values,
+        ))
         .await
         .map_err(|e| {
             eprintln!("rag retrieval query error: {e}");
@@ -338,11 +340,11 @@ pub async fn update_conversation_summary(
         .unwrap_or_default();
     let summary_prompt = format!(
         "You are a summarization assistant. Update the conversation summary.\n\nCurrent summary:\n{}\n\nNew messages:\n{}\n\nReturn an updated summary that captures key topics, decisions, facts, names, numbers, user preferences, and open tasks. Keep it concise.",
-        existing_text,
-        new_chunk
+        existing_text, new_chunk
     );
 
-    let summary_response = generate_summary_text(app_state, provider, &summary_model, summary_prompt).await?;
+    let summary_response =
+        generate_summary_text(app_state, provider, &summary_model, summary_prompt).await?;
     let summary_text = summary_response.text.trim().to_string();
 
     let now = Utc::now();
@@ -465,15 +467,11 @@ async fn generate_summary_text(
 ) -> Result<PromptTextResponse, AppError> {
     match provider.to_lowercase().as_str() {
         "openai" => {
-            let openai_settings = app_state
-                .settings
-                .openai
-                .read()
-                .await
-                .clone()
-                .ok_or(AppError::LlmProviderNotConfigured {
+            let openai_settings = app_state.settings.openai.read().await.clone().ok_or(
+                AppError::LlmProviderNotConfigured {
                     provider: "openai".to_string(),
-                })?;
+                },
+            )?;
             let messages = vec![crate::dto::llm::openai::OpenaiMessage {
                 role: ChatRole::User,
                 content: vec![crate::dto::llm::openai::OpenaiContent {
@@ -494,15 +492,11 @@ async fn generate_summary_text(
                 })
         }
         "anthropic" => {
-            let anthropic_settings = app_state
-                .settings
-                .anthropic
-                .read()
-                .await
-                .clone()
-                .ok_or(AppError::LlmProviderNotConfigured {
+            let anthropic_settings = app_state.settings.anthropic.read().await.clone().ok_or(
+                AppError::LlmProviderNotConfigured {
                     provider: "anthropic".to_string(),
-                })?;
+                },
+            )?;
             let messages = vec![crate::dto::llm::anthropic::AnthropicMessage::from_text(
                 crate::dto::llm::anthropic::AnthropicRole::User,
                 prompt,
@@ -559,7 +553,11 @@ async fn insert_message_embedding(
     ];
     app_state
         .database
-        .execute(Statement::from_sql_and_values(DatabaseBackend::Postgres, sql, values))
+        .execute(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            sql,
+            values,
+        ))
         .await
         .map_err(|e| {
             eprintln!("embedding insert error: {e}");

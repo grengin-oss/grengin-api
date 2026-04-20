@@ -7,8 +7,13 @@ use sea_orm::{
 use uuid::Uuid;
 
 use crate::{
-    auth::{claims::Claims, error::{AuthError, Error}},
-    dto::prompts::{PromptFeedbackRequest, PromptSource, SystemPromptResponse, UserPromptPreferenceRequest},
+    auth::{
+        claims::Claims,
+        error::{AuthError, Error},
+    },
+    dto::prompts::{
+        PromptFeedbackRequest, PromptSource, SystemPromptResponse, UserPromptPreferenceRequest,
+    },
     models::{prompt_feedback, role_prompts, user_prompt_preferences},
     services::system_prompts,
     state::SharedState,
@@ -74,7 +79,14 @@ pub async fn set_my_system_prompt(
 ) -> Result<(StatusCode, Json<SystemPromptResponse>), AuthError> {
     let is_active = req.is_active.unwrap_or(true);
 
-    if is_active && req.prompt_id.is_none() && req.custom_prompt_text.as_ref().map(|v| v.trim().is_empty()).unwrap_or(true) {
+    if is_active
+        && req.prompt_id.is_none()
+        && req
+            .custom_prompt_text
+            .as_ref()
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(true)
+    {
         return Err(AuthError::DbConflict);
     }
 
@@ -108,13 +120,10 @@ pub async fn set_my_system_prompt(
         active.custom_prompt_text = Set(req.custom_prompt_text);
         active.is_active = Set(is_active);
         active.updated_at = Set(now);
-        active
-            .update(&app_state.database)
-            .await
-            .map_err(|e| {
-                eprintln!("user prompt preference update error: {e}");
-                AuthError::DbTimeout
-            })?
+        active.update(&app_state.database).await.map_err(|e| {
+            eprintln!("user prompt preference update error: {e}");
+            AuthError::DbTimeout
+        })?
     } else {
         user_prompt_preferences::ActiveModel {
             id: Set(Uuid::new_v4()),
@@ -185,13 +194,10 @@ pub async fn reset_my_system_prompt(
         let mut active = existing.into_active_model();
         active.is_active = Set(false);
         active.updated_at = Set(Utc::now());
-        active
-            .update(&app_state.database)
-            .await
-            .map_err(|e| {
-                eprintln!("user prompt preference update error: {e}");
-                AuthError::DbTimeout
-            })?;
+        active.update(&app_state.database).await.map_err(|e| {
+            eprintln!("user prompt preference update error: {e}");
+            AuthError::DbTimeout
+        })?;
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -242,13 +248,10 @@ pub async fn submit_prompt_feedback(
         created_at: Set(Utc::now()),
     };
 
-    model
-        .insert(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("prompt feedback insert error: {e}");
-            AuthError::DbTimeout
-        })?;
+    model.insert(&app_state.database).await.map_err(|e| {
+        eprintln!("prompt feedback insert error: {e}");
+        AuthError::DbTimeout
+    })?;
 
     Ok(StatusCode::CREATED)
 }

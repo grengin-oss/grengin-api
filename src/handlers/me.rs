@@ -1,35 +1,50 @@
-use std::collections::{HashMap, HashSet};
-use axum::{Json, extract::{Query, State}};
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
+use sea_orm::sea_query::{Alias, BinOper, Expr, Func};
 use sea_orm::{
     ColumnTrait, Condition, DatabaseConnection, EntityTrait, JoinType, Order, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect, RelationTrait,
 };
-use uuid::Uuid;
 use serde_json::{Map, Value};
-use sea_orm::sea_query::{Alias, BinOper, Expr, Func};
+use std::collections::{HashMap, HashSet};
+use uuid::Uuid;
 
 use crate::{
-    auth::{claims::Claims, error::{AuthError, Error}},
+    auth::{
+        claims::Claims,
+        error::{AuthError, Error},
+    },
     dto::{
-        admin_user::User,
         admin_department::{
-            DepartmentListQuery, Department, DepartmentTreeNode, DepartmentTreeQuery,
-            DepartmentTree, DepartmentsListResponse, DepartmentSortRule,
+            Department, DepartmentListQuery, DepartmentSortRule, DepartmentTree,
+            DepartmentTreeNode, DepartmentTreeQuery, DepartmentsListResponse,
         },
-        analytics::{DepartmentAnalyticsQuery, DepartmentAnalytics, ScopedUserAnalyticsQuery, UserAnalytics},
+        admin_user::User,
+        analytics::{
+            DepartmentAnalytics, DepartmentAnalyticsQuery, ScopedUserAnalyticsQuery, UserAnalytics,
+        },
         common::SortRule,
-        me::{AdministeredDepartmentUsersQuery, EffectivePermissionsResponse, MeDepartmentUsersResponse},
+        me::{
+            AdministeredDepartmentUsersQuery, EffectivePermissionsResponse,
+            MeDepartmentUsersResponse,
+        },
     },
     handlers::admin_department::{
-        ChildCountRow, DepartmentRow, DepartmentTreeRow, DeptCountRow, department_budget_snapshot,
-        departments_base_select, departments_tree_select, load_department_admin_ids_map,
+        department_budget_snapshot, departments_base_select, departments_tree_select,
+        load_department_admin_ids_map, ChildCountRow, DepartmentRow, DepartmentTreeRow,
+        DeptCountRow,
     },
-    models::{departments, permissions, role_permissions, roles, user_role_assignments, users, users::UserStatus},
+    models::{
+        departments, permissions, role_permissions, roles, user_role_assignments, users,
+        users::UserStatus,
+    },
     services::{
         analytics,
-        authorization::{AuthorizationService, is_path_within_scope},
+        authorization::{is_path_within_scope, AuthorizationService},
     },
     state::SharedState,
 };
@@ -85,7 +100,10 @@ async fn load_administered_department_ids(
             return Ok(Vec::new());
         }
 
-        if let Some(list) = value.get("administered_departments").and_then(|v| v.as_array()) {
+        if let Some(list) = value
+            .get("administered_departments")
+            .and_then(|v| v.as_array())
+        {
             for item in list {
                 if let Some(id_str) = item.as_str() {
                     if let Ok(id) = Uuid::parse_str(id_str) {
@@ -100,7 +118,9 @@ async fn load_administered_department_ids(
                 PermissionScope::OrgWide => load_all_department_ids(&app_state.database).await?,
                 PermissionScope::Scoped(ids) if !ids.is_empty() => ids,
                 _ => match view_scope {
-                    PermissionScope::OrgWide => load_all_department_ids(&app_state.database).await?,
+                    PermissionScope::OrgWide => {
+                        load_all_department_ids(&app_state.database).await?
+                    }
                     PermissionScope::Scoped(ids) => ids,
                     PermissionScope::Missing => Vec::new(),
                 },
@@ -193,9 +213,15 @@ async fn should_refresh_administered_departments(
     let count = user_role_assignments::Entity::find()
         .select_only()
         .column(user_role_assignments::Column::Id)
-        .join(JoinType::InnerJoin, user_role_assignments::Relation::Roles.def())
+        .join(
+            JoinType::InnerJoin,
+            user_role_assignments::Relation::Roles.def(),
+        )
         .join(JoinType::InnerJoin, roles::Relation::RolePermissions.def())
-        .join(JoinType::InnerJoin, role_permissions::Relation::Permissions.def())
+        .join(
+            JoinType::InnerJoin,
+            role_permissions::Relation::Permissions.def(),
+        )
         .filter(user_role_assignments::Column::UserId.eq(user_id))
         .filter(permissions::Column::Domain.eq("departments"))
         .filter(permissions::Column::Action.eq("manage"))
@@ -236,12 +262,10 @@ async fn load_administered_department_paths(
 fn scope_condition(scope_paths: &[String]) -> Condition {
     let mut cond = Condition::any();
     for path in scope_paths {
-        cond = cond.add(
-            Expr::col(departments::Column::Path).binary(
-                BinOper::Custom("<@".into()),
-                Expr::val(path.clone()).cast_as(Alias::new("ltree")),
-            ),
-        );
+        cond = cond.add(Expr::col(departments::Column::Path).binary(
+            BinOper::Custom("<@".into()),
+            Expr::val(path.clone()).cast_as(Alias::new("ltree")),
+        ));
     }
     cond
 }
@@ -325,11 +349,14 @@ pub async fn get_my_permissions(
         })
         .unwrap_or_default();
 
-    Ok((StatusCode::OK, Json(EffectivePermissionsResponse {
-        permissions,
-        mcp_access,
-        administered_departments,
-    })))
+    Ok((
+        StatusCode::OK,
+        Json(EffectivePermissionsResponse {
+            permissions,
+            mcp_access,
+            administered_departments,
+        }),
+    ))
 }
 
 #[utoipa::path(
@@ -373,16 +400,13 @@ pub async fn get_my_administered_department_analytics(
     let administered_ids = load_administered_department_ids(claims, &app_state).await?;
     let scope_paths = load_administered_department_paths(&app_state, &administered_ids).await?;
 
-    let result = analytics::get_department_analytics_scoped(
-        &app_state.database,
-        query,
-        &scope_paths,
-    )
-    .await
-    .map_err(|e| {
-        eprintln!("Administered department analytics error: {e}");
-        AuthError::DbTimeout
-    })?;
+    let result =
+        analytics::get_department_analytics_scoped(&app_state.database, query, &scope_paths)
+            .await
+            .map_err(|e| {
+                eprintln!("Administered department analytics error: {e}");
+                AuthError::DbTimeout
+            })?;
 
     Ok((StatusCode::OK, Json(result)))
 }
@@ -532,12 +556,10 @@ pub async fn get_my_administered_departments_list(
             }
 
             if q.include_children {
-                query = query.filter(
-                    Expr::col(departments::Column::Path).binary(
-                        BinOper::Custom("<@".into()),
-                        Expr::val(parent_path).cast_as(Alias::new("ltree")),
-                    ),
-                );
+                query = query.filter(Expr::col(departments::Column::Path).binary(
+                    BinOper::Custom("<@".into()),
+                    Expr::val(parent_path).cast_as(Alias::new("ltree")),
+                ));
             } else {
                 query = query.filter(departments::Column::ParentId.eq(parent_uuid));
             }
@@ -545,7 +567,11 @@ pub async fn get_my_administered_departments_list(
     }
 
     if let Some(search) = q.search.as_deref() {
-        query = query.filter(departments::Column::Name.into_expr().ilike(format!("%{}%", search)));
+        query = query.filter(
+            departments::Column::Name
+                .into_expr()
+                .ilike(format!("%{}%", search)),
+        );
     }
 
     query = query.order_by_asc(departments::Column::Name);
@@ -659,10 +685,17 @@ pub async fn get_my_administered_departments_list(
             DepartmentSortRule::Members => a.member_count.cmp(&b.member_count),
             DepartmentSortRule::SubDepartments => a.child_count.cmp(&b.child_count),
         };
-        if ascending { ordering } else { ordering.reverse() }
+        if ascending {
+            ordering
+        } else {
+            ordering.reverse()
+        }
     });
 
-    Ok((StatusCode::OK, Json(DepartmentsListResponse { departments, total })))
+    Ok((
+        StatusCode::OK,
+        Json(DepartmentsListResponse { departments, total }),
+    ))
 }
 
 #[utoipa::path(
@@ -724,12 +757,10 @@ pub async fn get_my_administered_departments_tree(
     query = query.filter(scope_condition(&scope_paths));
 
     if let Some(root_dept) = &root {
-        query = query.filter(
-            Expr::col(departments::Column::Path).binary(
-                BinOper::Custom("<@".into()),
-                Expr::val(root_dept.path.clone()).cast_as(Alias::new("ltree")),
-            ),
-        );
+        query = query.filter(Expr::col(departments::Column::Path).binary(
+            BinOper::Custom("<@".into()),
+            Expr::val(root_dept.path.clone()).cast_as(Alias::new("ltree")),
+        ));
         query = query.filter(departments::Column::Depth.lte(root_dept.depth + max_depth));
     } else {
         query = query.filter(departments::Column::Depth.lte(max_depth));
@@ -948,12 +979,10 @@ pub async fn get_my_administered_department_members(
             let subtree_dept_ids: Vec<Uuid> = departments::Entity::find()
                 .select_only()
                 .column(departments::Column::Id)
-                .filter(
-                    Expr::col(departments::Column::Path).binary(
-                        BinOper::Custom("<@".into()),
-                        Expr::val(root.path.clone()).cast_as(Alias::new("ltree")),
-                    ),
-                )
+                .filter(Expr::col(departments::Column::Path).binary(
+                    BinOper::Custom("<@".into()),
+                    Expr::val(root.path.clone()).cast_as(Alias::new("ltree")),
+                ))
                 .into_tuple()
                 .all(&app_state.database)
                 .await
@@ -1015,28 +1044,34 @@ pub async fn get_my_administered_department_members(
     if let Some(search) = &query.search {
         select = select.filter(
             Condition::any()
-                .add(users::Column::Name.into_expr().ilike(format!("%{}%", search)))
-                .add(users::Column::Email.into_expr().ilike(format!("%{}%", search)))
-                .add(departments::Column::Name.into_expr().ilike(format!("%{}%", search))),
+                .add(
+                    users::Column::Name
+                        .into_expr()
+                        .ilike(format!("%{}%", search)),
+                )
+                .add(
+                    users::Column::Email
+                        .into_expr()
+                        .ilike(format!("%{}%", search)),
+                )
+                .add(
+                    departments::Column::Name
+                        .into_expr()
+                        .ilike(format!("%{}%", search)),
+                ),
         );
     }
 
     let paginator = select.paginate(&app_state.database, limit);
-    response.total = paginator
-        .num_items()
-        .await
-        .map_err(|e| {
-            eprintln!("db get many error: {}", e);
-            AuthError::DbTimeout
-        })? as i32;
+    response.total = paginator.num_items().await.map_err(|e| {
+        eprintln!("db get many error: {}", e);
+        AuthError::DbTimeout
+    })? as i32;
 
-    let users_row = paginator
-        .fetch_page(page)
-        .await
-        .map_err(|e| {
-            eprintln!("db get many error: {}", e);
-            AuthError::DbTimeout
-        })?;
+    let users_row = paginator.fetch_page(page).await.map_err(|e| {
+        eprintln!("db get many error: {}", e);
+        AuthError::DbTimeout
+    })?;
 
     let user_ids: Vec<Uuid> = users_row.iter().map(|u| u.id).collect();
     let roles_map = authz.user_roles_map(&user_ids).await?;
@@ -1047,7 +1082,9 @@ pub async fn get_my_administered_department_members(
             let is_super_admin = roles.iter().any(|r| r == "Super Admin");
             User {
                 id: user.id,
-                sub: user.azure_id.unwrap_or(user.google_id.unwrap_or(user.email.clone())),
+                sub: user
+                    .azure_id
+                    .unwrap_or(user.google_id.unwrap_or(user.email.clone())),
                 email: user.email,
                 name: user.name,
                 picture: user.picture,

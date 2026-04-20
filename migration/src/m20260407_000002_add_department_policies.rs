@@ -65,8 +65,16 @@ impl MigrationTrait for Migration {
                             .uuid()
                             .not_null(),
                     )
-                    .col(ColumnDef::new(DepartmentAllowedModels::Provider).string().not_null())
-                    .col(ColumnDef::new(DepartmentAllowedModels::Model).string().not_null())
+                    .col(
+                        ColumnDef::new(DepartmentAllowedModels::Provider)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(DepartmentAllowedModels::Model)
+                            .string()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(DepartmentAllowedModels::CreatedAt)
                             .timestamp_with_time_zone()
@@ -123,7 +131,11 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .drop_table(Table::drop().table(DepartmentAllowedModels::Table).to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(DepartmentAllowedModels::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
             .alter_table(

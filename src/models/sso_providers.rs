@@ -1,4 +1,4 @@
-use chrono::{Utc,DateTime};
+use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -6,16 +6,16 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(table_name = "sso_providers", rename_all = "camelCase")]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
-    #[sea_orm(primary_key,indexed, column_type = "Uuid")]
+    #[sea_orm(primary_key, indexed, column_type = "Uuid")]
     pub id: Uuid,
-    #[sea_orm(indexed,unique)]
+    #[sea_orm(indexed, unique)]
     pub provider: String,
     pub name: String,
-    pub tenant_id:Option<String>, // default common for azure
+    pub tenant_id: Option<String>, // default common for azure
     pub client_id: String,
     pub client_secret: String,
     pub issuer_url: String,
-    pub redirect_url:String, // new field add
+    pub redirect_url: String, // new field add
     pub allowed_domains: Vec<String>,
     pub is_enabled: bool,
     pub is_default: bool,

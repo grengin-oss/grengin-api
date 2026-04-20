@@ -209,25 +209,15 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .get_connection()
-            .execute_unprepared(
-                r#"DROP INDEX IF EXISTS idx_message_embeddings_embedding;"#,
-            )
+            .execute_unprepared(r#"DROP INDEX IF EXISTS idx_message_embeddings_embedding;"#)
             .await?;
 
         manager
-            .drop_table(
-                Table::drop()
-                    .table(MessageEmbeddings::Table)
-                    .to_owned(),
-            )
+            .drop_table(Table::drop().table(MessageEmbeddings::Table).to_owned())
             .await?;
 
         manager
-            .drop_table(
-                Table::drop()
-                    .table(ConversationSummaries::Table)
-                    .to_owned(),
-            )
+            .drop_table(Table::drop().table(ConversationSummaries::Table).to_owned())
             .await
     }
 }

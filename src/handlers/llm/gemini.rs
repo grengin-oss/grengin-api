@@ -4,11 +4,7 @@ use std::sync::Mutex;
 use serde_json::Value;
 
 use crate::handlers::llm::{
-    build_tool_call,
-    StreamParseResult,
-    StreamParser,
-    StreamWebSearchResult,
-    ToolInput,
+    build_tool_call, StreamParseResult, StreamParser, StreamWebSearchResult, ToolInput,
 };
 
 #[derive(Default)]
@@ -58,7 +54,10 @@ impl StreamParser for GeminiStreamParser {
                 .and_then(|v| v.as_str())
                 .unwrap_or("gemini_error")
                 .to_string();
-            return StreamParseResult::Error { error_type, message };
+            return StreamParseResult::Error {
+                error_type,
+                message,
+            };
         }
 
         let responses = value
@@ -93,10 +92,8 @@ impl StreamParser for GeminiStreamParser {
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .to_string();
-                                let tool_id = fc
-                                    .get("id")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
+                                let tool_id =
+                                    fc.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
                                 let args = fc
                                     .get("args")
                                     .cloned()

@@ -7,34 +7,35 @@ pub struct ModelsResponse {
 }
 
 impl ModelsResponse {
-    pub fn get_icons<S: Into<String>>(&self,provider:S) -> (Option<String>,Option<String>){
-      let provider_key = provider.into();
-      let provider = self.providers
-       .iter()
-       .find(|provider | provider.key == provider_key);
-      let icon = provider
-       .map(|provider| provider.icon.clone());
-      let icon_dark = provider
-       .map(|provider| provider.icon_dark.clone());
-      (icon,icon_dark)
+    pub fn get_icons<S: Into<String>>(&self, provider: S) -> (Option<String>, Option<String>) {
+        let provider_key = provider.into();
+        let provider = self
+            .providers
+            .iter()
+            .find(|provider| provider.key == provider_key);
+        let icon = provider.map(|provider| provider.icon.clone());
+        let icon_dark = provider.map(|provider| provider.icon_dark.clone());
+        (icon, icon_dark)
     }
 
     pub fn default() -> Self {
-      ModelsResponse{providers:Vec::new()}
+        ModelsResponse {
+            providers: Vec::new(),
+        }
     }
 }
 
-#[derive(Serialize,Clone, ToSchema)]
+#[derive(Serialize, Clone, ToSchema)]
 pub struct ProviderInfo {
     pub key: String,
     pub name: String,
     pub icon: String,
-    pub icon_dark:String,
+    pub icon_dark: String,
     pub status: String,
     pub models: Vec<ModelInfo>,
 }
 
-#[derive(Serialize,Clone, ToSchema)]
+#[derive(Serialize, Clone, ToSchema)]
 pub struct ModelInfo {
     pub key: String,
     pub name: String,

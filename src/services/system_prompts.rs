@@ -1,20 +1,15 @@
 use std::collections::HashMap;
 
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use sea_orm::sea_query::Expr;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use uuid::Uuid;
 
 use crate::{
-    models::{
-        departments,
-        roles,
-        role_prompts,
-        user_prompt_preferences,
-        department_prompt_assignments,
-        user_role_assignments,
-        users,
-    },
     dto::prompts::PromptSource,
+    models::{
+        department_prompt_assignments, departments, role_prompts, roles, user_prompt_preferences,
+        user_role_assignments, users,
+    },
 };
 
 pub struct ResolvedPrompt {
@@ -112,7 +107,10 @@ async fn resolve_department_prompt(
         return Ok(None);
     };
 
-    if let Some(prompt) = role_prompts::Entity::find_by_id(assignment.prompt_id).one(db).await? {
+    if let Some(prompt) = role_prompts::Entity::find_by_id(assignment.prompt_id)
+        .one(db)
+        .await?
+    {
         let rendered = render_prompt(db, user, &prompt.prompt_text).await?;
         let variables = parse_variables(&prompt.variables);
         increment_usage(db, prompt.id).await?;
@@ -209,7 +207,10 @@ async fn render_prompt(
     } else {
         "Department".to_string()
     };
-    let company_name = std::env::var("COMPANY_NAME").ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| "Company".to_string());
+    let company_name = std::env::var("COMPANY_NAME")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "Company".to_string());
 
     let mut replacements = HashMap::new();
     replacements.insert("{{user_name}}", user_name);
@@ -228,15 +229,23 @@ fn apply_replacements(text: &str, replacements: &HashMap<&str, String>) -> Strin
 }
 
 fn parse_variables(value: &Option<serde_json::Value>) -> Option<Vec<String>> {
-    let Some(value) = value else { return None; };
-    let Some(array) = value.as_array() else { return None; };
+    let Some(value) = value else {
+        return None;
+    };
+    let Some(array) = value.as_array() else {
+        return None;
+    };
     let mut vars = Vec::new();
     for item in array {
         if let Some(val) = item.as_str() {
             vars.push(val.to_string());
         }
     }
-    if vars.is_empty() { None } else { Some(vars) }
+    if vars.is_empty() {
+        None
+    } else {
+        Some(vars)
+    }
 }
 
 async fn increment_usage(

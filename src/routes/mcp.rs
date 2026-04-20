@@ -1,13 +1,12 @@
-use axum::{Router, routing::get, routing::post};
+use axum::{routing::get, routing::post, Router};
 
 use crate::{
     handlers::mcp::{
         authorize_mcp_connection, create_mcp_server, delete_mcp_server, disconnect_mcp_connection,
-        get_mcp_server, get_mcp_server_tools_access, get_mcp_tool_access, list_mcp_connections,
-        list_mcp_server_executions, list_mcp_servers, list_mcp_tools, list_public_mcp_servers,
-        get_mcp_effective_access,
-        mcp_oauth_callback, sync_mcp_server_tools, test_mcp_server, update_mcp_server,
-        update_mcp_server_tools_access, update_mcp_tool_access,
+        get_mcp_effective_access, get_mcp_server, get_mcp_server_tools_access, get_mcp_tool_access,
+        list_mcp_connections, list_mcp_server_executions, list_mcp_servers, list_mcp_tools,
+        list_public_mcp_servers, mcp_oauth_callback, sync_mcp_server_tools, test_mcp_server,
+        update_mcp_server, update_mcp_server_tools_access, update_mcp_tool_access,
     },
     state::SharedState,
 };

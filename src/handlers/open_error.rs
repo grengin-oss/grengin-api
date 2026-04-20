@@ -1,5 +1,8 @@
-use axum::{Json, response::IntoResponse};
-use crate::docs::{app_error_catlog::{AppErrorCatalogItem, build_app_error_catalog}, auth_error_catlog::{AuthErrorCatalogItem, build_auth_error_catalog}};
+use crate::docs::{
+    app_error_catlog::{build_app_error_catalog, AppErrorCatalogItem},
+    auth_error_catlog::{build_auth_error_catalog, AuthErrorCatalogItem},
+};
+use axum::{response::IntoResponse, Json};
 
 #[utoipa::path(
     get,
@@ -11,8 +14,7 @@ use crate::docs::{app_error_catlog::{AppErrorCatalogItem, build_app_error_catalo
 )]
 pub async fn get_app_error_catalog() -> impl IntoResponse {
     Json(build_app_error_catalog())
-} 
-
+}
 
 #[utoipa::path(
     get,

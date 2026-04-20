@@ -36,14 +36,26 @@ impl MigrationTrait for Migration {
                             .not_null(),
                     )
                     .col(ColumnDef::new(Organizations::LogoUrl).text().null())
-                    .col(ColumnDef::new(Organizations::DefaultEngine).text().not_null())
-                    .col(ColumnDef::new(Organizations::DefaultModel).text().not_null())
+                    .col(
+                        ColumnDef::new(Organizations::DefaultEngine)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Organizations::DefaultModel)
+                            .text()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(Organizations::DataRetentionDays)
                             .big_integer()
                             .not_null(),
                     )
-                    .col(ColumnDef::new(Organizations::RequireMfa).boolean().not_null())
+                    .col(
+                        ColumnDef::new(Organizations::RequireMfa)
+                            .boolean()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(Organizations::CreatedOn)
                             .timestamp_with_time_zone()

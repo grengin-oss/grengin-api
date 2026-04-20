@@ -1,23 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::dto::llm::openai::{
-    OpenaiChatCompletionChunk,
-    OpenaiFunctionCallItem,
-    OpenaiResponseOutputItem,
-    OpenaiResponseStreamEvent,
-    OpenaiWebSearchAction,
-};
 use super::{
-    build_tool_call,
-    build_tool_input_delta,
-    parse_web_search_action,
-    tool_name_is_web_search,
-    StreamParseResult,
-    StreamParser,
-    StreamWebSearchResult,
-    ToolInput,
-    ToolResult,
+    build_tool_call, build_tool_input_delta, parse_web_search_action, tool_name_is_web_search,
+    StreamParseResult, StreamParser, StreamWebSearchResult, ToolInput, ToolResult,
+};
+use crate::dto::llm::openai::{
+    OpenaiChatCompletionChunk, OpenaiFunctionCallItem, OpenaiResponseOutputItem,
+    OpenaiResponseStreamEvent, OpenaiWebSearchAction,
 };
 use serde_json::Value;
 
@@ -83,13 +73,7 @@ impl OpenaiStreamParser {
             }
             OpenaiResponseStreamEvent::FunctionCallArgumentsDelta(ev) => {
                 let (tool_name, tool_id) = self.get_tool_meta(&ev.item_id);
-                let delta = build_tool_input_delta(
-                    ev.delta,
-                    None,
-                    tool_name,
-                    tool_id,
-                    None,
-                );
+                let delta = build_tool_input_delta(ev.delta, None, tool_name, tool_id, None);
                 Some(StreamParseResult::ToolInput(delta))
             }
             OpenaiResponseStreamEvent::FunctionCallArgumentsDone(ev) => {
@@ -101,10 +85,12 @@ impl OpenaiStreamParser {
                 }
                 None
             }
-            OpenaiResponseStreamEvent::OutputTextDelta(delta) => Some(StreamParseResult::TextDelta {
-                text: delta.delta,
-                request_id: Some(delta.item_id),
-            }),
+            OpenaiResponseStreamEvent::OutputTextDelta(delta) => {
+                Some(StreamParseResult::TextDelta {
+                    text: delta.delta,
+                    request_id: Some(delta.item_id),
+                })
+            }
             OpenaiResponseStreamEvent::OutputTextAnnotationAdded(ev) => {
                 parse_openai_url_citation(&ev.annotation).map(|result| {
                     StreamParseResult::WebSearchResult {
@@ -118,18 +104,23 @@ impl OpenaiStreamParser {
                 if let Some(event) = extract_openai_tool_event(raw) {
                     return Some(event);
                 }
-                ev.response.usage.clone().map(|usage| StreamParseResult::TokenUsage {
-                    request_id: Some(ev.response.id),
-                    input_tokens: Some(usage.input_tokens),
-                    output_tokens: Some(usage.output_tokens),
-                    total_tokens: Some(usage.total_tokens),
+                ev.response
+                    .usage
+                    .clone()
+                    .map(|usage| StreamParseResult::TokenUsage {
+                        request_id: Some(ev.response.id),
+                        input_tokens: Some(usage.input_tokens),
+                        output_tokens: Some(usage.output_tokens),
+                        total_tokens: Some(usage.total_tokens),
+                    })
+            }
+            OpenaiResponseStreamEvent::ResponseCreated(ev) => {
+                Some(StreamParseResult::MessageStart {
+                    request_id: ev.response.id,
+                    input_tokens: ev.response.usage.as_ref().map(|usage| usage.input_tokens),
+                    output_tokens: ev.response.usage.as_ref().map(|usage| usage.output_tokens),
                 })
             }
-            OpenaiResponseStreamEvent::ResponseCreated(ev) => Some(StreamParseResult::MessageStart {
-                request_id: ev.response.id,
-                input_tokens: ev.response.usage.as_ref().map(|usage| usage.input_tokens),
-                output_tokens: ev.response.usage.as_ref().map(|usage| usage.output_tokens),
-            }),
             OpenaiResponseStreamEvent::Error(ev) => Some(StreamParseResult::Error {
                 error_type: ev.error.error_type.unwrap_or("openai_error".into()),
                 message: ev.error.message.unwrap_or("openai.error.message".into()),
@@ -153,7 +144,8 @@ impl StreamParser for OpenaiStreamParser {
         };
 
         // 1) Prefer typed Responses-API events (response.output_text.delta etc.)
-        if let Ok(stream_event) = serde_json::from_value::<OpenaiResponseStreamEvent>(value.clone()) {
+        if let Ok(stream_event) = serde_json::from_value::<OpenaiResponseStreamEvent>(value.clone())
+        {
             if let Some(result) = self.handle_response_stream_event(stream_event, &value) {
                 return result;
             }
@@ -199,12 +191,17 @@ fn extract_openai_event_log(v: &Value) -> Option<StreamParseResult> {
     if !is_reasoning {
         return None;
     }
-    let message = v.get("delta")
+    let message = v
+        .get("delta")
         .and_then(|d| d.as_str())
         .or_else(|| v.get("text").and_then(|d| d.as_str()))
         .or_else(|| v.get("thinking").and_then(|d| d.as_str()))
         .map(|s| s.to_string());
-    let data = if message.is_some() { None } else { Some(v.clone()) };
+    let data = if message.is_some() {
+        None
+    } else {
+        Some(v.clone())
+    };
     Some(StreamParseResult::EventLog {
         event_type: event_type.to_string(),
         message,
@@ -381,10 +378,7 @@ fn parse_openai_typed_tool_item(
     match item {
         OpenaiResponseOutputItem::FunctionCall(call) => {
             let tool_id = call.call_id.clone().or_else(|| Some(call.id.clone()));
-            let input = call
-                .arguments
-                .clone()
-                .and_then(parse_tool_input);
+            let input = call.arguments.clone().and_then(parse_tool_input);
             if call.status.as_deref() == Some("in_progress") && input.is_none() {
                 return None;
             }
@@ -428,7 +422,13 @@ fn resolve_tool_name(item: &Value, item_type: &str) -> String {
     item.get("name")
         .and_then(|n| n.as_str())
         .or_else(|| item.get("tool_name").and_then(|n| n.as_str()))
-        .or_else(|| if item_type.is_empty() { None } else { Some(item_type) })
+        .or_else(|| {
+            if item_type.is_empty() {
+                None
+            } else {
+                Some(item_type)
+            }
+        })
         .unwrap_or("tool_call")
         .to_string()
 }
@@ -455,7 +455,10 @@ fn parse_openai_url_citation(annotation: &Value) -> Option<StreamWebSearchResult
     if annotation_type != "url_citation" {
         return None;
     }
-    let title = annotation.get("title").and_then(|t| t.as_str())?.to_string();
+    let title = annotation
+        .get("title")
+        .and_then(|t| t.as_str())?
+        .to_string();
     let url = annotation.get("url").and_then(|u| u.as_str())?.to_string();
     Some(StreamWebSearchResult {
         title,

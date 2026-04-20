@@ -147,9 +147,9 @@ pub async fn check_model_allowed(
     };
     let provider = provider.to_lowercase();
     let model = model.to_lowercase();
-    Ok(allowed.iter().any(|m| {
-        m.provider.to_lowercase() == provider && m.model.to_lowercase() == model
-    }))
+    Ok(allowed
+        .iter()
+        .any(|m| m.provider.to_lowercase() == provider && m.model.to_lowercase() == model))
 }
 
 async fn load_parent_row(

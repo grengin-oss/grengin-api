@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use crate::{
@@ -117,11 +117,9 @@ fn normalize_openai_parameters(schema: &Value) -> Value {
                     },
                     "items" => sanitize_items(value),
                     "oneOf" | "anyOf" | "allOf" => match value {
-                        Value::Array(list) => Value::Array(
-                            list.iter()
-                                .map(|item| sanitize_schema(item))
-                                .collect(),
-                        ),
+                        Value::Array(list) => {
+                            Value::Array(list.iter().map(|item| sanitize_schema(item)).collect())
+                        }
                         _ => Value::Array(Vec::new()),
                     },
                     "$defs" | "definitions" => match value {
@@ -142,7 +140,9 @@ fn normalize_openai_parameters(schema: &Value) -> Value {
                     "required" => match value {
                         Value::Array(reqs) => Value::Array(
                             reqs.iter()
-                                .filter_map(|item| item.as_str().map(|s| Value::String(s.to_string())))
+                                .filter_map(|item| {
+                                    item.as_str().map(|s| Value::String(s.to_string()))
+                                })
                                 .collect(),
                         ),
                         _ => Value::Array(Vec::new()),
@@ -218,7 +218,14 @@ pub async fn load_openai_mcp_tools(
     user_id: Uuid,
     selected_server_ids: &[Uuid],
     selected_tools: &[String],
-) -> Result<(Vec<OpenaiTool>, HashMap<String, McpToolDescriptor>, Vec<McpServerSummary>), AppError> {
+) -> Result<
+    (
+        Vec<OpenaiTool>,
+        HashMap<String, McpToolDescriptor>,
+        Vec<McpServerSummary>,
+    ),
+    AppError,
+> {
     let debug = std::env::var("MISTRAL_TOOL_DEBUG").as_deref() == Ok("1");
     if selected_server_ids.is_empty() {
         return Ok((Vec::new(), HashMap::new(), Vec::new()));
@@ -234,7 +241,8 @@ pub async fn load_openai_mcp_tools(
             eprintln!("mcp servers fetch error: {e}");
             AppError::DbTimeout
         })?;
-    let mut server_map: HashMap<Uuid, (String, Option<String>, mcp_servers::Model)> = HashMap::new();
+    let mut server_map: HashMap<Uuid, (String, Option<String>, mcp_servers::Model)> =
+        HashMap::new();
     for server in servers {
         server_map.insert(
             server.id,
@@ -278,7 +286,8 @@ pub async fn load_openai_mcp_tools(
     let mut allowed_servers: HashSet<Uuid> = HashSet::new();
 
     for tool in tools {
-        let Some((server_name, server_description, server_model)) = server_map.get(&tool.server_id) else {
+        let Some((server_name, server_description, server_model)) = server_map.get(&tool.server_id)
+        else {
             continue;
         };
         let openai_name = mcp_openai_tool_name(&tool.server_id, &tool.name);
@@ -330,7 +339,9 @@ pub async fn load_openai_mcp_tools(
             }
             continue;
         }
-        if tool_access.permission == mcp_access_policies::McpPermission::ReadOnly && !tool.is_read_only {
+        if tool_access.permission == mcp_access_policies::McpPermission::ReadOnly
+            && !tool.is_read_only
+        {
             if debug {
                 println!(
                     "mcp tools debug: read-only deny tool '{}' (openai='{}') is_read_only=false",

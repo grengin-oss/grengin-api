@@ -7,7 +7,7 @@ pub type AuthProvider = String;
 
 #[derive(Deserialize)]
 pub struct StartParams {
-   pub redirect_uri: Option<String>,
+    pub redirect_uri: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]

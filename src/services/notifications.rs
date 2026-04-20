@@ -13,12 +13,7 @@ use crate::{
     dto::notifications::NotificationDto,
     error::AppError,
     models::{
-        departments,
-        notifications,
-        permissions,
-        role_permissions,
-        roles,
-        user_role_assignments,
+        departments, notifications, permissions, role_permissions, roles, user_role_assignments,
         users::{self, UserStatus},
     },
     services::budget_allocation::period_bounds,
@@ -61,10 +56,7 @@ pub fn to_notification_dto(model: &notifications::Model) -> NotificationDto {
     }
 }
 
-pub async fn emit_budget_alerts(
-    state: &SharedState,
-    department_id: Uuid,
-) -> Result<(), AppError> {
+pub async fn emit_budget_alerts(state: &SharedState, department_id: Uuid) -> Result<(), AppError> {
     let dept = departments::Entity::find()
         .select_only()
         .column(departments::Column::Name)
@@ -87,8 +79,8 @@ pub async fn emit_budget_alerts(
     let kind = if budget_available <= Decimal::ZERO {
         BUDGET_EXHAUSTED_KIND
     } else {
-        let low_threshold = budget_allocated
-            * Decimal::from_f32_retain(0.2).unwrap_or(Decimal::ZERO);
+        let low_threshold =
+            budget_allocated * Decimal::from_f32_retain(0.2).unwrap_or(Decimal::ZERO);
         if budget_allocated > Decimal::ZERO && budget_available <= low_threshold {
             BUDGET_LOW_KIND
         } else {
@@ -132,10 +124,19 @@ pub async fn emit_budget_alerts(
     let orgwide_view_users = user_role_assignments::Entity::find()
         .select_only()
         .column(user_role_assignments::Column::UserId)
-        .join(JoinType::InnerJoin, user_role_assignments::Relation::Users.def())
-        .join(JoinType::InnerJoin, user_role_assignments::Relation::Roles.def())
+        .join(
+            JoinType::InnerJoin,
+            user_role_assignments::Relation::Users.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            user_role_assignments::Relation::Roles.def(),
+        )
         .join(JoinType::InnerJoin, roles::Relation::RolePermissions.def())
-        .join(JoinType::InnerJoin, role_permissions::Relation::Permissions.def())
+        .join(
+            JoinType::InnerJoin,
+            role_permissions::Relation::Permissions.def(),
+        )
         .filter(user_role_assignments::Column::ScopeDepartmentId.is_null())
         .filter(permissions::Column::Domain.eq("departments"))
         .filter(permissions::Column::Action.eq("view"))

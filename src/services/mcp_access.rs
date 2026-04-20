@@ -1,24 +1,19 @@
 use std::collections::{HashMap, HashSet};
 
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 use sea_orm::sea_query::Expr;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 use uuid::Uuid;
 
 use crate::{
-    auth::permissions::{PERMISSION_MCP_ADMIN},
+    auth::permissions::PERMISSION_MCP_ADMIN,
+    dto::mcp::McpResolvedVia,
     error::AppError,
     models::{
-        departments,
-        mcp_access_policies,
+        departments, mcp_access_policies,
         mcp_access_policies::{McpAccessTarget, McpAccessType, McpPermission},
-        mcp_servers,
-        mcp_tools,
-        roles,
-        user_role_assignments,
-        users,
+        mcp_servers, mcp_tools, roles, user_role_assignments, users,
     },
-    dto::mcp::McpResolvedVia,
-    services::authorization::{AuthorizationService, PermissionScopeMode, is_path_within_scope},
+    services::authorization::{is_path_within_scope, AuthorizationService, PermissionScopeMode},
 };
 
 #[derive(Clone, Debug)]
@@ -235,10 +230,15 @@ async fn resolve_access_from_rules(
 
             let mut best_rule: Option<(&mcp_access_policies::Model, i32)> = None;
             for rule in dept_rules {
-                let Some(dept_id) = rule.department_id else { continue };
-                let Some((path, depth)) = dept_lookup.get(&dept_id) else { continue };
+                let Some(dept_id) = rule.department_id else {
+                    continue;
+                };
+                let Some((path, depth)) = dept_lookup.get(&dept_id) else {
+                    continue;
+                };
                 let is_direct = dept_id == user_dept_id;
-                if is_direct || (rule.inherit_departments && is_path_within_scope(path, user_path)) {
+                if is_direct || (rule.inherit_departments && is_path_within_scope(path, user_path))
+                {
                     match best_rule {
                         Some((_, current_depth)) if current_depth >= *depth => {}
                         _ => best_rule = Some((rule, *depth)),
@@ -266,7 +266,10 @@ async fn resolve_access_from_rules(
         let mut saw_denied = false;
         let mut saw_full = false;
         let mut saw_read_only = false;
-        for rule in rules.iter().filter(|rule| rule.access_type == McpAccessType::Role) {
+        for rule in rules
+            .iter()
+            .filter(|rule| rule.access_type == McpAccessType::Role)
+        {
             if let Some(role_id) = rule.role_id {
                 if !ctx.role_ids.contains(&role_id) {
                     continue;
@@ -316,7 +319,11 @@ pub async fn resolve_server_access_with_rules(
     let permission = match server.default_access {
         mcp_servers::McpDefaultAccess::AllUsers => McpPermission::Full,
         mcp_servers::McpDefaultAccess::AdminOnly => {
-            if ctx.is_admin { McpPermission::Full } else { McpPermission::Denied }
+            if ctx.is_admin {
+                McpPermission::Full
+            } else {
+                McpPermission::Denied
+            }
         }
         mcp_servers::McpDefaultAccess::ExplicitOnly => McpPermission::Denied,
     };

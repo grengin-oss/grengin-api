@@ -9,10 +9,12 @@ impl MigrationTrait for Migration {
         // Drop UNIQUE(email)
         manager
             .get_connection()
-            .execute_unprepared(r#"
+            .execute_unprepared(
+                r#"
                 ALTER TABLE "users"
                 DROP CONSTRAINT IF EXISTS "users_email_key";
-            "#)
+            "#,
+            )
             .await?;
 
         Ok(())
@@ -22,10 +24,12 @@ impl MigrationTrait for Migration {
         // Re-add UNIQUE(email) on rollback
         manager
             .get_connection()
-            .execute_unprepared(r#"
+            .execute_unprepared(
+                r#"
                 ALTER TABLE "users"
                 ADD CONSTRAINT "users_email_key" UNIQUE ("email");
-            "#)
+            "#,
+            )
             .await?;
 
         Ok(())

@@ -1,10 +1,16 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize, ToSchema)]
-#[sea_orm(rs_type = "String", db_type = "String(StringLen::None)", rename_all = "lowercase")]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize, ToSchema,
+)]
+#[sea_orm(
+    rs_type = "String",
+    db_type = "String(StringLen::None)",
+    rename_all = "lowercase"
+)]
 #[serde(rename_all = "lowercase")]
 pub enum McpSubjectType {
     User,
@@ -12,8 +18,14 @@ pub enum McpSubjectType {
     Role,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize, ToSchema)]
-#[sea_orm(rs_type = "String", db_type = "String(StringLen::None)", rename_all = "lowercase")]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize, ToSchema,
+)]
+#[sea_orm(
+    rs_type = "String",
+    db_type = "String(StringLen::None)",
+    rename_all = "lowercase"
+)]
 #[serde(rename_all = "lowercase")]
 pub enum McpRuleType {
     Allow,
@@ -36,9 +48,17 @@ pub struct Model {
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(belongs_to = "super::mcp_servers::Entity", from = "Column::ServerId", to = "super::mcp_servers::Column::Id")]
+    #[sea_orm(
+        belongs_to = "super::mcp_servers::Entity",
+        from = "Column::ServerId",
+        to = "super::mcp_servers::Column::Id"
+    )]
     McpServers,
-    #[sea_orm(belongs_to = "super::users::Entity", from = "Column::CreatedBy", to = "super::users::Column::Id")]
+    #[sea_orm(
+        belongs_to = "super::users::Entity",
+        from = "Column::CreatedBy",
+        to = "super::users::Column::Id"
+    )]
     CreatedBy,
 }
 

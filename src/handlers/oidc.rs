@@ -1,23 +1,42 @@
-use std::borrow::Cow;
-use axum::{Json, extract::{Path, Query, State}, response::Redirect};
-use chrono::Utc;
-use openidconnect::{AuthorizationCode, ClaimsVerificationError, CsrfToken, Nonce, OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, core::{CoreAuthenticationFlow, CoreUserInfoClaims}};
-use openidconnect::{TokenResponse as OidcTokenResponse};
-use axum::http::StatusCode;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, TryIntoModel};
-use uuid::Uuid;
 use crate::{
-    auth::{claims::{Claiming as _, Claims, RefreshClaims}, error::Error},
+    auth::error::AuthError,
+    dto::{
+        auth::{AuthToken, TokenType, User},
+        oauth::{AuthCallback, StartParams},
+    },
+    state::SharedState,
+};
+use crate::{
+    auth::{
+        claims::{Claiming as _, Claims, RefreshClaims},
+        error::Error,
+    },
     dto::oauth::AuthProvider,
     models::{
-        oauth_sessions,
-        roles,
-        user_role_assignments,
+        oauth_sessions, roles, user_role_assignments,
         users::{self, UserStatus},
     },
     services::authorization::AuthorizationService,
 };
-use crate::{auth::error::{AuthError}, dto::{auth::{AuthToken, TokenType, User}, oauth::{AuthCallback, StartParams}}, state::SharedState};
+use axum::http::StatusCode;
+use axum::{
+    extract::{Path, Query, State},
+    response::Redirect,
+    Json,
+};
+use chrono::Utc;
+use openidconnect::TokenResponse as OidcTokenResponse;
+use openidconnect::{
+    core::{CoreAuthenticationFlow, CoreUserInfoClaims},
+    AuthorizationCode, ClaimsVerificationError, CsrfToken, Nonce, OAuth2TokenResponse,
+    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
+};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, TryIntoModel,
+};
+use std::borrow::Cow;
+use uuid::Uuid;
 
 #[utoipa::path(
     get,
@@ -43,31 +62,41 @@ use crate::{auth::error::{AuthError}, dto::{auth::{AuthToken, TokenType, User}, 
 pub async fn oidc_login_start(
     Path(provider): Path<AuthProvider>,
     Query(query): Query<StartParams>,
-    State(app_state): State<SharedState>
+    State(app_state): State<SharedState>,
 ) -> Result<Redirect, AuthError> {
     let is_enabled = app_state
-      .check_sso_provider_is_enabled(&provider)
-      .await
-      .ok_or(AuthError::InvalidProvider{provider:Some(provider.clone())})?;
+        .check_sso_provider_is_enabled(&provider)
+        .await
+        .ok_or(AuthError::InvalidProvider {
+            provider: Some(provider.clone()),
+        })?;
     if !is_enabled {
-        return Err(AuthError::SsoProviderDisabledByAdmin{provider:Some(provider.clone())});
-    }   
+        return Err(AuthError::SsoProviderDisabledByAdmin {
+            provider: Some(provider.clone()),
+        });
+    }
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-    let (oidc_client, _,default_redirect_uri) = app_state
+    let (oidc_client, _, default_redirect_uri) = app_state
         .get_oidc_client_and_column_and_redirect_uri(&provider)
         .await
-        .map_err(|_| AuthError::InvalidProvider{provider:Some(provider.clone())})?;
-    let redirect_uri = RedirectUrl::new(query.redirect_uri
-        .clone()
-        .unwrap_or(default_redirect_uri
-            .ok_or(AuthError::SsoProviderNotConfigured{provider:Some(provider.clone())})?
-          )
-        ).map_err(|_| AuthError::InvalidRedirectUri{redirect_uri:query.redirect_uri.clone()})?;
+        .map_err(|_| AuthError::InvalidProvider {
+            provider: Some(provider.clone()),
+        })?;
+    let redirect_uri = RedirectUrl::new(query.redirect_uri.clone().unwrap_or(
+        default_redirect_uri.ok_or(AuthError::SsoProviderNotConfigured {
+            provider: Some(provider.clone()),
+        })?,
+    ))
+    .map_err(|_| AuthError::InvalidRedirectUri {
+        redirect_uri: query.redirect_uri.clone(),
+    })?;
     let (auth_url, csrf_state, nonce) = oidc_client
         .read()
         .await
         .as_ref()
-        .ok_or(AuthError::SsoProviderNotConfigured{provider:Some(provider.clone())})?
+        .ok_or(AuthError::SsoProviderNotConfigured {
+            provider: Some(provider.clone()),
+        })?
         .authorize_url(
             CoreAuthenticationFlow::AuthorizationCode,
             CsrfToken::new_random,
@@ -87,12 +116,10 @@ pub async fn oidc_login_start(
         redirect_uri: Set(Some(redirect_uri.to_string())),
         created_at: Set(Utc::now()),
     };
-    sess.insert(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("{:?}", e);
-            AuthError::ServiceTemporarilyUnavailable
-        })?;
+    sess.insert(&app_state.database).await.map_err(|e| {
+        eprintln!("{:?}", e);
+        AuthError::ServiceTemporarilyUnavailable
+    })?;
     Ok(Redirect::to(auth_url.as_str()))
 }
 
@@ -128,7 +155,7 @@ pub async fn oidc_login_start(
 pub async fn oidc_oauth_callback_get(
     Path(provider): Path<AuthProvider>,
     Query(cb): Query<AuthCallback>,
-    State(app_state): State<SharedState>
+    State(app_state): State<SharedState>,
 ) -> Result<(StatusCode, Json<AuthToken>), AuthError> {
     oidc_oauth_callback(provider, cb, app_state).await
 }
@@ -143,18 +170,21 @@ async fn oidc_oauth_callback(
         eprintln!("OAuth error: {} - {:?}", error, cb.error_description);
         return Err(AuthError::InvalidCallbackParameters);
     }
-    let code = cb
-     .code
-     .ok_or(AuthError::InvalidCallbackParameters)?;
-    let (oidc_client_configured, column,default_redirect_uri) = app_state
+    let code = cb.code.ok_or(AuthError::InvalidCallbackParameters)?;
+    let (oidc_client_configured, column, default_redirect_uri) = app_state
         .get_oidc_client_and_column_and_redirect_uri(&provider)
         .await
-        .map_err(|_| AuthError::InvalidProvider{provider:Some(provider.clone())})?;
-    let mut oidc_client = oidc_client_configured
-        .read()
-        .await
-        .clone()
-        .ok_or(AuthError::SsoProviderNotConfigured{provider:Some(provider.clone())})?;
+        .map_err(|_| AuthError::InvalidProvider {
+            provider: Some(provider.clone()),
+        })?;
+    let mut oidc_client =
+        oidc_client_configured
+            .read()
+            .await
+            .clone()
+            .ok_or(AuthError::SsoProviderNotConfigured {
+                provider: Some(provider.clone()),
+            })?;
     let sess = oauth_sessions::Entity::find()
         .filter(oauth_sessions::Column::State.eq(Some(cb.state.to_owned())))
         .order_by_desc(oauth_sessions::Column::CreatedAt)
@@ -162,20 +192,22 @@ async fn oidc_oauth_callback(
         .await
         .map_err(|e| {
             eprintln!("db error while fetching session: {e:?}");
-            AuthError::ServiceTemporarilyUnavailable})?
+            AuthError::ServiceTemporarilyUnavailable
+        })?
         .ok_or(AuthError::InvalidToken)?;
-    let redirect_uri = RedirectUrl::new(sess.redirect_uri
-         .clone()
-         .unwrap_or(default_redirect_uri
-            .ok_or(AuthError::SsoProviderNotConfigured{provider:Some(provider.clone())})?
-         ))
-        .map_err(|_| AuthError::InvalidRedirectUri{redirect_uri:sess.redirect_uri.clone()})?;
+    let redirect_uri = RedirectUrl::new(sess.redirect_uri.clone().unwrap_or(
+        default_redirect_uri.ok_or(AuthError::SsoProviderNotConfigured {
+            provider: Some(provider.clone()),
+        })?,
+    ))
+    .map_err(|_| AuthError::InvalidRedirectUri {
+        redirect_uri: sess.redirect_uri.clone(),
+    })?;
     let active: oauth_sessions::ActiveModel = sess.clone().into();
-    active.delete(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("db error while deleting oauth_session: {e:?}");
-            AuthError::ServiceTemporarilyUnavailable })?;
+    active.delete(&app_state.database).await.map_err(|e| {
+        eprintln!("db error while deleting oauth_session: {e:?}");
+        AuthError::ServiceTemporarilyUnavailable
+    })?;
     let token_resp = oidc_client
         .exchange_code(AuthorizationCode::new(code))
         .expect("Failed to get token response")
@@ -191,57 +223,62 @@ async fn oidc_oauth_callback(
     let id_token = token_resp
         .id_token()
         .ok_or(AuthError::ServiceTemporarilyUnavailable)?;
-   let claims = match {
-     let verifier = oidc_client.id_token_verifier();
-     id_token.claims(&verifier, &nonce)
-   } {
-    Ok(c) => c,
-    Err(e) => {
-        let should_refresh = matches!(
-            e,
-            ClaimsVerificationError::SignatureVerification(_) // includes NoMatchingKey, CryptoError, etc.
-        );
-        if !should_refresh {
-            eprintln!("id_token claims verification failed (non-refreshable): {e:?}");
-            return Err(AuthError::InvalidToken);
-        }
-        app_state
-            .refresh_oidc_client(&provider)
-            .await
-            .map_err(|err| {
-                eprintln!("oidc client refresh error: {err:?}");
-                AuthError::ServiceTemporarilyUnavailable
-            })?;
+    let claims = match {
+        let verifier = oidc_client.id_token_verifier();
+        id_token.claims(&verifier, &nonce)
+    } {
+        Ok(c) => c,
+        Err(e) => {
+            let should_refresh = matches!(
+                e,
+                ClaimsVerificationError::SignatureVerification(_) // includes NoMatchingKey, CryptoError, etc.
+            );
+            if !should_refresh {
+                eprintln!("id_token claims verification failed (non-refreshable): {e:?}");
+                return Err(AuthError::InvalidToken);
+            }
+            app_state
+                .refresh_oidc_client(&provider)
+                .await
+                .map_err(|err| {
+                    eprintln!("oidc client refresh error: {err:?}");
+                    AuthError::ServiceTemporarilyUnavailable
+                })?;
 
-        oidc_client = oidc_client_configured
-            .read()
-            .await
-            .clone()
-            .ok_or(AuthError::SsoProviderNotConfigured{provider:Some(provider.clone())})?;
+            oidc_client = oidc_client_configured.read().await.clone().ok_or(
+                AuthError::SsoProviderNotConfigured {
+                    provider: Some(provider.clone()),
+                },
+            )?;
 
-        let verifier2 = oidc_client.id_token_verifier();
-        id_token
-            .claims(&verifier2, &nonce)
-            .map_err(|e2| {
+            let verifier2 = oidc_client.id_token_verifier();
+            id_token.claims(&verifier2, &nonce).map_err(|e2| {
                 eprintln!("id_token claims verification failed after refresh: {e2:?}");
                 AuthError::InvalidToken
             })?
-    }
-   };
-    let sub = claims.subject()
-       .as_str()
-       .to_string();
-    let mut email = claims.email()
-       .map(|e| e.as_str().to_string());
+        }
+    };
+    let sub = claims.subject().as_str().to_string();
+    let mut email = claims.email().map(|e| e.as_str().to_string());
     let mut display_name: Option<String> = None;
-    let picture = claims.picture()
-       .and_then(|pic_claim| pic_claim.get(None))       // default locale
-       .map(|url| url.as_str().to_owned());
-    let hd = claims.website()
-       .and_then(|website_claim| website_claim.get(None))       // default locale
-       .map(|url| url.as_str().to_owned());
-    let google_id = if provider == "google" {Some(sub.clone())}else{None};
-    let azure_id = if provider == "azure" {Some(sub.clone())}else{None};
+    let picture = claims
+        .picture()
+        .and_then(|pic_claim| pic_claim.get(None)) // default locale
+        .map(|url| url.as_str().to_owned());
+    let hd = claims
+        .website()
+        .and_then(|website_claim| website_claim.get(None)) // default locale
+        .map(|url| url.as_str().to_owned());
+    let google_id = if provider == "google" {
+        Some(sub.clone())
+    } else {
+        None
+    };
+    let azure_id = if provider == "azure" {
+        Some(sub.clone())
+    } else {
+        None
+    };
     if email.is_none() {
         let info: CoreUserInfoClaims = oidc_client
             .user_info(token_resp.access_token().to_owned(), None)
@@ -250,8 +287,8 @@ async fn oidc_oauth_callback(
             .await
             .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
         email = info.email().map(|e| e.as_str().to_string());
-        if display_name.is_none(){
-          display_name = info.name().and_then(|n| n.get(None).map(|s| s.to_string()));
+        if display_name.is_none() {
+            display_name = info.name().and_then(|n| n.get(None).map(|s| s.to_string()));
         }
     } else {
         display_name = claims
@@ -259,10 +296,10 @@ async fn oidc_oauth_callback(
             .and_then(|n| n.get(None).map(|s| s.to_string()));
     }
     if let Some(email) = email.as_ref() {
-        let (is_allowed,domain) = app_state.is_email_domain_allowed(email, &provider).await;
-       if !is_allowed {
-          return Err(AuthError::EmailDomainNotAllowed{domain});
-       } 
+        let (is_allowed, domain) = app_state.is_email_domain_allowed(email, &provider).await;
+        if !is_allowed {
+            return Err(AuthError::EmailDomainNotAllowed { domain });
+        }
     }
     let mut user = users::Entity::find()
         .filter(column.eq(Some(sub.clone())))
@@ -272,19 +309,21 @@ async fn oidc_oauth_callback(
         .await
         .map_err(|e| {
             eprintln!("db error while fetching user: {e:?}");
-            AuthError::ServiceTemporarilyUnavailable})?;
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
     if let Some(u) = &user {
-      match &u.status {
-         UserStatus::Deactivated | UserStatus::Suspended => return Err(AuthError::AccountDeactivated),
-         _ => ()
-      }
-      let mut active_user:users::ActiveModel = u.clone().into();
-      active_user.last_login_at = Set(Utc::now());
-      active_user.update(&app_state.database)
-         .await
-         .map_err(|e|{
-            eprintln!("db error while updating user {:?}",e);
-            AuthError::ServiceTemporarilyUnavailable})?;
+        match &u.status {
+            UserStatus::Deactivated | UserStatus::Suspended => {
+                return Err(AuthError::AccountDeactivated);
+            }
+            _ => (),
+        }
+        let mut active_user: users::ActiveModel = u.clone().into();
+        active_user.last_login_at = Set(Utc::now());
+        active_user.update(&app_state.database).await.map_err(|e| {
+            eprintln!("db error while updating user {:?}", e);
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
     }
     if user.is_none() {
         if let Some(ref em) = email {
@@ -293,25 +332,27 @@ async fn oidc_oauth_callback(
                 .filter(users::Column::Status.ne(UserStatus::Deleted))
                 .one(&app_state.database)
                 .await
-                .map_err(|e|{
-                      eprintln!("{:?}",e);
-                      AuthError::ServiceTemporarilyUnavailable})?;
+                .map_err(|e| {
+                    eprintln!("{:?}", e);
+                    AuthError::ServiceTemporarilyUnavailable
+                })?;
 
             if let Some(u) = &user {
                 match &u.status {
-                   UserStatus::Deactivated | UserStatus::Suspended => return Err(AuthError::AccountDeactivated),
-                   _ => ()
+                    UserStatus::Deactivated | UserStatus::Suspended => {
+                        return Err(AuthError::AccountDeactivated);
+                    }
+                    _ => (),
                 }
-                let mut active_user:users::ActiveModel = u.clone().into();
+                let mut active_user: users::ActiveModel = u.clone().into();
                 active_user.google_id = Set(google_id.clone());
                 active_user.azure_id = Set(azure_id.clone());
                 active_user.updated_at = Set(Utc::now());
                 active_user.last_login_at = Set(Utc::now());
-                active_user.update(&app_state.database)
-                  .await
-                  .map_err(|e|{
-                      eprintln!("db error while updating user {:?}",e);
-                      AuthError::ServiceTemporarilyUnavailable})?;
+                active_user.update(&app_state.database).await.map_err(|e| {
+                    eprintln!("db error while updating user {:?}", e);
+                    AuthError::ServiceTemporarilyUnavailable
+                })?;
             }
         }
     }
@@ -324,38 +365,42 @@ async fn oidc_oauth_callback(
                 AuthError::ServiceTemporarilyUnavailable
             })?
             == 0;
-        let new_user = users::ActiveModel{
+        let new_user = users::ActiveModel {
             id: Set(Uuid::new_v4()),
-            email: Set(email.clone().unwrap_or_else(|| format!("{sub}@users.noreply.oidc"))),
+            email: Set(email
+                .clone()
+                .unwrap_or_else(|| format!("{sub}@users.noreply.oidc"))),
             name: Set(display_name.into()),
             google_id: Set(google_id),
-            azure_id:Set(azure_id),
-            email_verified:Set(true),
-            created_at:Set(Utc::now()),
-            updated_at:Set(Utc::now()),
-            last_login_at:Set(Utc::now()),
-            password_changed_at:Set(None),
-            department_id:Set(None),
+            azure_id: Set(azure_id),
+            email_verified: Set(true),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            last_login_at: Set(Utc::now()),
+            password_changed_at: Set(None),
+            department_id: Set(None),
             is_independent: Set(false),
             effective_permissions: Set(None),
-            status:Set(UserStatus::Active),
-            mfa_enabled:Set(false),
-            mfa_secret:Set(None),
-            picture:Set(picture.clone()),
-            password:Set(None),
-            metadata:Set(None),
-            hd:Set(hd),
+            status: Set(UserStatus::Active),
+            mfa_enabled: Set(false),
+            mfa_secret: Set(None),
+            picture: Set(picture.clone()),
+            password: Set(None),
+            metadata: Set(None),
+            hd: Set(hd),
         };
-        new_user.clone()
-           .insert(&app_state.database)
-           .await
-           .map_err(|e|{
-             eprintln!("{:?}",e);
-             AuthError::ServiceTemporarilyUnavailable})?;
-        let inserted_user = new_user.try_into_model()
-           .map_err(|e|{
-             eprintln!("db error while parsing user {:?}",e);
-             AuthError::ServiceTemporarilyUnavailable})?;
+        new_user
+            .clone()
+            .insert(&app_state.database)
+            .await
+            .map_err(|e| {
+                eprintln!("{:?}", e);
+                AuthError::ServiceTemporarilyUnavailable
+            })?;
+        let inserted_user = new_user.try_into_model().map_err(|e| {
+            eprintln!("db error while parsing user {:?}", e);
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
         let role_name = if is_first_user { "Super Admin" } else { "User" };
         if let Some(role) = roles::Entity::find()
             .filter(roles::Column::Name.eq(role_name))
@@ -379,13 +424,15 @@ async fn oidc_oauth_callback(
             let _ = assignment.insert(&app_state.database).await;
         }
         let authz = AuthorizationService::new(&app_state.database);
-        let _ = authz.recompute_effective_permissions(inserted_user.id).await;
+        let _ = authz
+            .recompute_effective_permissions(inserted_user.id)
+            .await;
         user = Some(inserted_user);
     };
-    let user = user
-      .ok_or(AuthError::EmailDoesNotExist)?;
+    let user = user.ok_or(AuthError::EmailDoesNotExist)?;
 
-    let access_token_claims = Claims::new_access_token(user.email.clone(), user.name.clone(), user.id);
+    let access_token_claims =
+        Claims::new_access_token(user.email.clone(), user.name.clone(), user.id);
     let refresh_token_claims = RefreshClaims::new_refresh_token(user.email.clone(), user.id);
     let authz = AuthorizationService::new(&app_state.database);
     let mut roles_map = authz.user_roles_map(&[user.id]).await?;
@@ -412,13 +459,13 @@ async fn oidc_oauth_callback(
     };
 
     let resp = AuthToken {
-        access_token:access_token_claims.get_token_string(),
+        access_token: access_token_claims.get_token_string(),
         token_type: TokenType::Bearer,
         expires_in: 3600, // 1 hour - match your JWT expiry
         refresh_token: Some(refresh_token_claims.get_token_string()), // TODO: Implement refresh token logic if needed
         user: Some(user_response),
     };
-  Ok((StatusCode::OK, Json(resp)))
+    Ok((StatusCode::OK, Json(resp)))
 }
 
 #[utoipa::path(

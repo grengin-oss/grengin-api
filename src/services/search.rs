@@ -1,8 +1,8 @@
+use sea_orm::sea_query::{Alias, BinOper, Expr, Func, Order};
 use sea_orm::{
     ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder, QuerySelect,
     RelationTrait,
 };
-use sea_orm::sea_query::{Alias, BinOper, Expr, Func, Order};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -71,18 +71,14 @@ pub async fn semantic_conversation_search(
         Some(config) if config.is_enabled => config,
         _ => return Ok(None),
     };
-    let embedding = match generate_search_embedding(app_state, &embedding_config, query_text).await? {
-        Some(embedding) => embedding,
-        None => return Ok(None),
-    };
+    let embedding =
+        match generate_search_embedding(app_state, &embedding_config, query_text).await? {
+            Some(embedding) => embedding,
+            None => return Ok(None),
+        };
 
-    let total = load_total_matches(
-        &app_state.database,
-        user_id,
-        archived,
-        &embedding_config,
-    )
-    .await?;
+    let total =
+        load_total_matches(&app_state.database, user_id, archived, &embedding_config).await?;
 
     if total == 0 {
         return Ok(Some(SemanticConversationPage {
@@ -97,34 +93,33 @@ pub async fn semantic_conversation_search(
         BinOper::Custom("<=>".into()),
         Expr::val(vector).cast_as(Alias::new("vector")),
     );
-    let distance_min: sea_orm::sea_query::SimpleExpr =
-        Func::min(distance_expr.clone()).into();
+    let distance_min: sea_orm::sea_query::SimpleExpr = Func::min(distance_expr.clone()).into();
 
-    let rows: Vec<SemanticConversationRow> = build_semantic_base_query(
-        user_id,
-        archived,
-        &embedding_config,
-    )
-    .select_only()
-    .column_as(
-        Expr::col((message_embeddings::Entity, message_embeddings::Column::ConversationId)),
-        "conversationId",
-    )
-    .column_as(distance_min.clone(), "distance")
-    .group_by(Expr::col((
-        message_embeddings::Entity,
-        message_embeddings::Column::ConversationId,
-    )))
-    .order_by(distance_min, Order::Asc)
-    .limit(limit)
-    .offset(offset)
-    .into_model::<SemanticConversationRow>()
-    .all(&app_state.database)
-    .await
-    .map_err(|e| {
-        eprintln!("conversation semantic query error -> {e}");
-        AppError::DbTimeout
-    })?;
+    let rows: Vec<SemanticConversationRow> =
+        build_semantic_base_query(user_id, archived, &embedding_config)
+            .select_only()
+            .column_as(
+                Expr::col((
+                    message_embeddings::Entity,
+                    message_embeddings::Column::ConversationId,
+                )),
+                "conversationId",
+            )
+            .column_as(distance_min.clone(), "distance")
+            .group_by(Expr::col((
+                message_embeddings::Entity,
+                message_embeddings::Column::ConversationId,
+            )))
+            .order_by(distance_min, Order::Asc)
+            .limit(limit)
+            .offset(offset)
+            .into_model::<SemanticConversationRow>()
+            .all(&app_state.database)
+            .await
+            .map_err(|e| {
+                eprintln!("conversation semantic query error -> {e}");
+                AppError::DbTimeout
+            })?;
 
     let conversation_ids = rows
         .into_iter()
@@ -154,8 +149,14 @@ fn build_semantic_base_query(
     config: &EmbeddingSettings,
 ) -> sea_orm::Select<message_embeddings::Entity> {
     let mut query = message_embeddings::Entity::find()
-        .join(JoinType::InnerJoin, message_embeddings::Relation::Messages.def())
-        .join(JoinType::InnerJoin, message_embeddings::Relation::Conversations.def())
+        .join(
+            JoinType::InnerJoin,
+            message_embeddings::Relation::Messages.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            message_embeddings::Relation::Conversations.def(),
+        )
         .filter(conversations::Column::UserId.eq(user_id))
         .filter(message_embeddings::Column::Provider.eq(config.provider.clone()))
         .filter(message_embeddings::Column::Model.eq(config.model.clone()))
@@ -180,8 +181,11 @@ async fn load_total_matches(
     let row = build_semantic_base_query(user_id, archived, config)
         .select_only()
         .column_as(
-            Expr::col((message_embeddings::Entity, message_embeddings::Column::ConversationId))
-                .count_distinct(),
+            Expr::col((
+                message_embeddings::Entity,
+                message_embeddings::Column::ConversationId,
+            ))
+            .count_distinct(),
             "count",
         )
         .into_model::<CountRow>()
@@ -218,11 +222,17 @@ async fn load_semantic_snippets(
         let row = build_semantic_base_query(user_id, archived, config)
             .select_only()
             .column_as(
-                Expr::col((message_embeddings::Entity, message_embeddings::Column::ConversationId)),
+                Expr::col((
+                    message_embeddings::Entity,
+                    message_embeddings::Column::ConversationId,
+                )),
                 "conversationId",
             )
             .column_as(
-                Expr::col((message_embeddings::Entity, message_embeddings::Column::MessageId)),
+                Expr::col((
+                    message_embeddings::Entity,
+                    message_embeddings::Column::MessageId,
+                )),
                 "messageId",
             )
             .column_as(
@@ -269,7 +279,11 @@ async fn generate_search_embedding(
             };
             let response = app_state
                 .req_client
-                .openai_create_embedding(&openai_settings, config.model.clone(), vec![text.to_string()])
+                .openai_create_embedding(
+                    &openai_settings,
+                    config.model.clone(),
+                    vec![text.to_string()],
+                )
                 .await
                 .map_err(|e| {
                     eprintln!("embedding request error: {e}");

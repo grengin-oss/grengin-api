@@ -1,4 +1,4 @@
-use axum::{Json, extract::State};
+use axum::{extract::State, Json};
 use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, IntoActiveModel, QueryOrder};
@@ -50,13 +50,10 @@ async fn get_or_create_embedding_config(
         updated_at: Set(Utc::now()),
     };
 
-    model
-        .insert(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("embedding config insert error: {e}");
-            AuthError::DbTimeout
-        })
+    model.insert(&app_state.database).await.map_err(|e| {
+        eprintln!("embedding config insert error: {e}");
+        AuthError::DbTimeout
+    })
 }
 
 async fn model_to_response(
@@ -111,7 +108,10 @@ pub async fn get_embedding_config(
         .await?;
 
     let model = get_or_create_embedding_config(&app_state).await?;
-    Ok((StatusCode::OK, Json(model_to_response(&app_state, &model).await)))
+    Ok((
+        StatusCode::OK,
+        Json(model_to_response(&app_state, &model).await),
+    ))
 }
 
 #[utoipa::path(
@@ -174,5 +174,8 @@ pub async fn update_embedding_config(
         })
         .await;
 
-    Ok((StatusCode::OK, Json(model_to_response(&app_state, &updated).await)))
+    Ok((
+        StatusCode::OK,
+        Json(model_to_response(&app_state, &updated).await),
+    ))
 }

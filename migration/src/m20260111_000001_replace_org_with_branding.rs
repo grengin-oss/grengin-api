@@ -20,8 +20,18 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Branding::ColorPrimary).text().not_null())
                     .col(ColumnDef::new(Branding::ColorAccent).text().not_null())
                     .col(ColumnDef::new(Branding::FontFamily).text().not_null())
-                    .col(ColumnDef::new(Branding::CreatedAt).timestamp_with_time_zone().not_null().default(Expr::current_timestamp()))
-                    .col(ColumnDef::new(Branding::UpdatedAt).timestamp_with_time_zone().not_null().default(Expr::current_timestamp()))
+                    .col(
+                        ColumnDef::new(Branding::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .col(
+                        ColumnDef::new(Branding::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -47,29 +57,96 @@ impl MigrationTrait for Migration {
         "#).await?;
 
         // 3. Drop FK and index from sso_providers, then drop column
-        manager.drop_foreign_key(ForeignKey::drop().name("fk_sso_providers_org").table(SsoProviders::Table).to_owned()).await?;
-        manager.drop_index(Index::drop().name("idx_sso_providers_org_id").table(SsoProviders::Table).to_owned()).await?;
-        manager.alter_table(Table::alter().table(SsoProviders::Table).drop_column(SsoProviders::OrgId).to_owned()).await?;
+        manager
+            .drop_foreign_key(
+                ForeignKey::drop()
+                    .name("fk_sso_providers_org")
+                    .table(SsoProviders::Table)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_index(
+                Index::drop()
+                    .name("idx_sso_providers_org_id")
+                    .table(SsoProviders::Table)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(SsoProviders::Table)
+                    .drop_column(SsoProviders::OrgId)
+                    .to_owned(),
+            )
+            .await?;
 
         // 4. Drop FK and index from ai_engines, then drop column
-        manager.drop_foreign_key(ForeignKey::drop().name("fk_ai_engines_orgId").table(AiEngines::Table).to_owned()).await?;
-        manager.drop_index(Index::drop().name("idx_ai_engines_orgId").table(AiEngines::Table).to_owned()).await?;
-        manager.alter_table(Table::alter().table(AiEngines::Table).drop_column(AiEngines::OrgId).to_owned()).await?;
+        manager
+            .drop_foreign_key(
+                ForeignKey::drop()
+                    .name("fk_ai_engines_orgId")
+                    .table(AiEngines::Table)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_index(
+                Index::drop()
+                    .name("idx_ai_engines_orgId")
+                    .table(AiEngines::Table)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(AiEngines::Table)
+                    .drop_column(AiEngines::OrgId)
+                    .to_owned(),
+            )
+            .await?;
 
         // 5. Drop FK and index from users, then drop column
-        manager.drop_foreign_key(ForeignKey::drop().name("fk-users-orgId-organizations-id").table(Users::Table).to_owned()).await?;
-        manager.drop_index(Index::drop().name("idx-users-orgId").table(Users::Table).to_owned()).await?;
-        manager.alter_table(Table::alter().table(Users::Table).drop_column(Users::OrgId).to_owned()).await?;
+        manager
+            .drop_foreign_key(
+                ForeignKey::drop()
+                    .name("fk-users-orgId-organizations-id")
+                    .table(Users::Table)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_index(
+                Index::drop()
+                    .name("idx-users-orgId")
+                    .table(Users::Table)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Users::Table)
+                    .drop_column(Users::OrgId)
+                    .to_owned(),
+            )
+            .await?;
 
         // 6. Drop organizations table
-        manager.drop_table(Table::drop().table(Organizations::Table).to_owned()).await?;
+        manager
+            .drop_table(Table::drop().table(Organizations::Table).to_owned())
+            .await?;
 
         Ok(())
     }
 
     async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
         // This migration is irreversible
-        Err(DbErr::Migration("This migration cannot be reversed. Restore from backup if needed.".to_string()))
+        Err(DbErr::Migration(
+            "This migration cannot be reversed. Restore from backup if needed.".to_string(),
+        ))
     }
 }
 

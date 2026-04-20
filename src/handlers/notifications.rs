@@ -1,17 +1,23 @@
 use std::convert::Infallible;
 
 use axum::{
-    Json,
     extract::{Path, Query, State},
-    response::{Sse, sse::{Event, KeepAlive}},
+    response::{
+        sse::{Event, KeepAlive},
+        Sse,
+    },
+    Json,
 };
-use chrono::{Utc};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, PaginatorTrait, QuerySelect};
+use chrono::Utc;
 use sea_orm::sea_query::Expr;
+use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 use uuid::Uuid;
 
 use crate::{
-    auth::{claims::Claims, error::{AuthError, Error}},
+    auth::{
+        claims::Claims,
+        error::{AuthError, Error},
+    },
     dto::notifications::{NotificationDto, NotificationsListQuery, NotificationsListResponse},
     error::AppError,
     models::notifications,
@@ -57,14 +63,10 @@ pub async fn list_my_notifications(
         base = base.filter(notifications::Column::CreatedAt.lte(to));
     }
 
-    let total = base
-        .clone()
-        .count(&state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("notifications count error: {e}");
-            AuthError::DbTimeout
-        })?;
+    let total = base.clone().count(&state.database).await.map_err(|e| {
+        eprintln!("notifications count error: {e}");
+        AuthError::DbTimeout
+    })?;
 
     let rows = base
         .offset(offset)

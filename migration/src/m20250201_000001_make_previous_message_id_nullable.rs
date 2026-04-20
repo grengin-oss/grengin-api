@@ -6,14 +6,13 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-
         // 1. Drop existing foreign key
         manager
             .drop_foreign_key(
                 ForeignKey::drop()
                     .name("fk_messages_previous_message_id")
                     .table(Messages::Table)
-                    .to_owned()
+                    .to_owned(),
             )
             .await?;
 
@@ -23,11 +22,9 @@ impl MigrationTrait for Migration {
                 TableAlterStatement::new()
                     .table(Messages::Table)
                     .modify_column(
-                        ColumnDef::new(Messages::PreviousMessageId)
-                            .uuid()
-                            .null()     // <-- Make nullable
+                        ColumnDef::new(Messages::PreviousMessageId).uuid().null(), // <-- Make nullable
                     )
-                    .to_owned()
+                    .to_owned(),
             )
             .await?;
 
@@ -40,7 +37,7 @@ impl MigrationTrait for Migration {
                     .to(Messages::Table, Messages::Id)
                     .on_delete(ForeignKeyAction::Restrict)
                     .on_update(ForeignKeyAction::Cascade)
-                    .to_owned()
+                    .to_owned(),
             )
             .await?;
 
@@ -48,7 +45,6 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-
         // Reverse order
 
         manager
@@ -56,7 +52,7 @@ impl MigrationTrait for Migration {
                 ForeignKey::drop()
                     .name("fk_messages_previous_message_id")
                     .table(Messages::Table)
-                    .to_owned()
+                    .to_owned(),
             )
             .await?;
 
@@ -67,9 +63,9 @@ impl MigrationTrait for Migration {
                     .modify_column(
                         ColumnDef::new(Messages::PreviousMessageId)
                             .uuid()
-                            .not_null()   // rollback to NOT NULL
+                            .not_null(), // rollback to NOT NULL
                     )
-                    .to_owned()
+                    .to_owned(),
             )
             .await?;
 
@@ -81,7 +77,7 @@ impl MigrationTrait for Migration {
                     .to(Messages::Table, Messages::Id)
                     .on_delete(ForeignKeyAction::Restrict)
                     .on_update(ForeignKeyAction::Cascade)
-                    .to_owned()
+                    .to_owned(),
             )
             .await?;
 

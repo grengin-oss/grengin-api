@@ -1,20 +1,30 @@
+use crate::{
+    handlers::admin_department_budgets::departments_budget_select,
+    models::{conversations, departments, messages, users},
+};
 use chrono::{DateTime, Datelike, TimeZone, Utc, Weekday};
 use rust_decimal::Decimal;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, JoinType, QueryFilter, QuerySelect,
-    RelationTrait, sea_query::Expr,
+    sea_query::Expr, ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, JoinType,
+    QueryFilter, QuerySelect, RelationTrait,
 };
 use uuid::Uuid;
-use crate::{handlers::admin_department_budgets::departments_budget_select, models::{conversations, departments, messages, users}};
 
-pub fn period_bounds(period: &departments::BudgetPeriod, now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
+pub fn period_bounds(
+    period: &departments::BudgetPeriod,
+    now: DateTime<Utc>,
+) -> (DateTime<Utc>, DateTime<Utc>) {
     match period {
         departments::BudgetPeriod::Daily => {
-            let start = Utc.with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0).unwrap();
+            let start = Utc
+                .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
+                .unwrap();
             (start, start + chrono::Duration::days(1))
         }
         departments::BudgetPeriod::Weekly => {
-            let today0 = Utc.with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0).unwrap();
+            let today0 = Utc
+                .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
+                .unwrap();
             let days_from_monday = match today0.weekday() {
                 Weekday::Mon => 0,
                 Weekday::Tue => 1,
@@ -28,8 +38,14 @@ pub fn period_bounds(period: &departments::BudgetPeriod, now: DateTime<Utc>) -> 
             (start, start + chrono::Duration::days(7))
         }
         departments::BudgetPeriod::Monthly => {
-            let start = Utc.with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0).unwrap();
-            let (ny, nm) = if now.month() == 12 { (now.year() + 1, 1) } else { (now.year(), now.month() + 1) };
+            let start = Utc
+                .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
+                .unwrap();
+            let (ny, nm) = if now.month() == 12 {
+                (now.year() + 1, 1)
+            } else {
+                (now.year(), now.month() + 1)
+            };
             let end = Utc.with_ymd_and_hms(ny, nm, 1, 0, 0, 0).unwrap();
             (start, end)
         }
@@ -49,7 +65,10 @@ pub async fn sum_child_allocations(
     let mut q = departments_budget_select()
         .filter(departments::Column::ParentId.eq(parent_id))
         .select_only()
-        .column_as(Expr::col(departments::Column::BudgetAllocated).sum(), "sum_alloc");
+        .column_as(
+            Expr::col(departments::Column::BudgetAllocated).sum(),
+            "sum_alloc",
+        );
 
     if let Some(excl) = exclude_child {
         q = q.filter(departments::Column::Id.ne(excl));
@@ -66,8 +85,8 @@ pub async fn sum_department_cost_in_range(
     end: DateTime<Utc>,
 ) -> Result<Decimal, sea_orm::DbErr> {
     let sum: Option<Decimal> = messages::Entity::find()
-        .join(JoinType::InnerJoin, messages::Relation::Conversations.def())        // messages -> conversations
-        .join(JoinType::InnerJoin, conversations::Relation::Users.def())          // conversations -> users
+        .join(JoinType::InnerJoin, messages::Relation::Conversations.def()) // messages -> conversations
+        .join(JoinType::InnerJoin, conversations::Relation::Users.def()) // conversations -> users
         .filter(users::Column::DepartmentId.eq(dept_id))
         .filter(messages::Column::Deleted.eq(false))
         .filter(messages::Column::CreatedAt.gte(start))
@@ -82,7 +101,10 @@ pub async fn sum_department_cost_in_range(
     Ok(sum.unwrap_or(Decimal::ZERO))
 }
 
-pub async fn sum_department_cost_total(db: &DatabaseConnection, dept_id: Uuid) -> Result<Decimal, sea_orm::DbErr> {
+pub async fn sum_department_cost_total(
+    db: &DatabaseConnection,
+    dept_id: Uuid,
+) -> Result<Decimal, sea_orm::DbErr> {
     let sum: Option<Decimal> = messages::Entity::find()
         .join(JoinType::InnerJoin, messages::Relation::Conversations.def())
         .join(JoinType::InnerJoin, conversations::Relation::Users.def())
@@ -130,7 +152,10 @@ pub async fn refresh_department_budget_available(
         (dept.budget_allocated - budget_distributed - budget_used).max(Decimal::ZERO);
 
     departments::Entity::update_many()
-        .col_expr(departments::Column::BudgetAvailable, Expr::val(budget_available).into())
+        .col_expr(
+            departments::Column::BudgetAvailable,
+            Expr::val(budget_available).into(),
+        )
         .filter(departments::Column::Id.eq(dept_id))
         .exec(db)
         .await?;
@@ -173,7 +198,10 @@ pub async fn get_department_budget_status(
         (dept.budget_allocated - budget_distributed - budget_used).max(Decimal::ZERO);
 
     departments::Entity::update_many()
-        .col_expr(departments::Column::BudgetAvailable, Expr::val(budget_available).into())
+        .col_expr(
+            departments::Column::BudgetAvailable,
+            Expr::val(budget_available).into(),
+        )
         .filter(departments::Column::Id.eq(dept_id))
         .exec(db)
         .await?;

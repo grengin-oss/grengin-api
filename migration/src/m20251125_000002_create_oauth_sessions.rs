@@ -22,16 +22,8 @@ impl MigrationTrait for Migration {
                             .string()
                             .not_null(),
                     )
-                    .col(
-                        ColumnDef::new(OAuthSessions::Nonce)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(OAuthSessions::RedirectUri)
-                            .string()
-                            .null(),
-                    )
+                    .col(ColumnDef::new(OAuthSessions::Nonce).string().not_null())
+                    .col(ColumnDef::new(OAuthSessions::RedirectUri).string().null())
                     .col(
                         ColumnDef::new(OAuthSessions::CreatedAt)
                             .timestamp_with_time_zone()
@@ -46,11 +38,7 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .drop_table(
-                Table::drop()
-                    .table(OAuthSessions::Table)
-                    .to_owned(),
-            )
+            .drop_table(Table::drop().table(OAuthSessions::Table).to_owned())
             .await
     }
 }

@@ -27,13 +27,10 @@ pub async fn record_auth_event(
         created_at: Set(Utc::now()),
     };
 
-    active
-        .insert(db)
-        .await
-        .map_err(|e| {
-            eprintln!("audit insert error: {e}");
-            AuthError::DbTimeout
-        })?;
+    active.insert(db).await.map_err(|e| {
+        eprintln!("audit insert error: {e}");
+        AuthError::DbTimeout
+    })?;
 
     Ok(())
 }

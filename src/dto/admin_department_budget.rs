@@ -1,8 +1,8 @@
+use crate::models::departments::{ActionOnExceed, BudgetPeriod};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
-use crate::models::departments::{ActionOnExceed, BudgetPeriod};
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SubDepartmentBudgetDto {

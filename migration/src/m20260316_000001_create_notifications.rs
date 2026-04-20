@@ -17,31 +17,11 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
-                    .col(
-                        ColumnDef::new(Notifications::UserId)
-                            .uuid()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Notifications::DepartmentId)
-                            .uuid()
-                            .null(),
-                    )
-                    .col(
-                        ColumnDef::new(Notifications::Kind)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Notifications::Title)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Notifications::Body)
-                            .text()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(Notifications::UserId).uuid().not_null())
+                    .col(ColumnDef::new(Notifications::DepartmentId).uuid().null())
+                    .col(ColumnDef::new(Notifications::Kind).string().not_null())
+                    .col(ColumnDef::new(Notifications::Title).string().not_null())
+                    .col(ColumnDef::new(Notifications::Body).text().not_null())
                     .col(
                         ColumnDef::new(Notifications::Payload)
                             .json_binary()

@@ -1,11 +1,5 @@
-use anyhow::Error;
-use async_trait::async_trait;
-use reqwest_eventsource::EventSource;
-use serde::{Deserialize, Serialize};
-use utoipa::{ToSchema};
-use uuid::Uuid;
 use crate::{
-    config::setting::{AnthropicSettings, GeminiSettings, OpenaiSettings, MistralSettings},
+    config::setting::{AnthropicSettings, GeminiSettings, MistralSettings, OpenaiSettings},
     dto::{
         files::Attachment,
         llm::{
@@ -13,27 +7,33 @@ use crate::{
             openai::OpenaiModel,
         },
     },
-    llm::prompt::{Prompt, PromptTitleResponse, PromptTextResponse},
+    llm::prompt::{Prompt, PromptTextResponse, PromptTitleResponse},
 };
+use anyhow::Error;
+use async_trait::async_trait;
+use reqwest_eventsource::EventSource;
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+use uuid::Uuid;
 
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
-pub enum LlmProviders{
+pub enum LlmProviders {
     OpenAI,
     Anthropic,
     Mistral,
     Gemini,
     Google,
-    Groq
+    Groq,
 }
 
-pub fn get_title_generation_model(provider:&str) -> Option<&str>{
+pub fn get_title_generation_model(provider: &str) -> Option<&str> {
     match provider {
         "openai" => "o3-mini".into(),
         "anthropic" => "claude-haiku-4-5".into(),
         "mistral" => "mistral-small-latest".into(),
         "gemini" => "gemini-2.5-flash".into(),
-         _ => None
+        _ => None,
     }
 }
 
@@ -50,10 +50,24 @@ pub trait OpenaiApis {
         tool_choice: Option<crate::dto::llm::openai::OpenaiToolChoice>,
         previous_response_id: Option<String>,
         input: Option<Vec<crate::dto::llm::openai::OpenaiInputItem>>,
-    ) -> Result<EventSource,Error>;
-    async fn openai_chat_stream_text(&self,openai_settings:&OpenaiSettings,model_name:String,temperature:Option<f32>,prompt:Vec<String>) -> Result<EventSource,Error>;
-    async fn openai_upload_file(&self,openai_settings:&OpenaiSettings,attachment:&Attachment) -> Result<String,Error>;
-    async fn openai_get_title(&self,openai_settings:&OpenaiSettings,prompt:String) -> Result<PromptTitleResponse,Error>;
+    ) -> Result<EventSource, Error>;
+    async fn openai_chat_stream_text(
+        &self,
+        openai_settings: &OpenaiSettings,
+        model_name: String,
+        temperature: Option<f32>,
+        prompt: Vec<String>,
+    ) -> Result<EventSource, Error>;
+    async fn openai_upload_file(
+        &self,
+        openai_settings: &OpenaiSettings,
+        attachment: &Attachment,
+    ) -> Result<String, Error>;
+    async fn openai_get_title(
+        &self,
+        openai_settings: &OpenaiSettings,
+        prompt: String,
+    ) -> Result<PromptTitleResponse, Error>;
     async fn openai_generate_text(
         &self,
         openai_settings: &OpenaiSettings,
@@ -67,11 +81,14 @@ pub trait OpenaiApis {
         model_name: String,
         input: Vec<String>,
     ) -> Result<crate::dto::llm::openai::OpenaiEmbeddingResponse, Error>;
-    async fn openai_list_models(&self,openai_settings: &OpenaiSettings) -> Result<Vec<OpenaiModel>, Error>;
-} 
+    async fn openai_list_models(
+        &self,
+        openai_settings: &OpenaiSettings,
+    ) -> Result<Vec<OpenaiModel>, Error>;
+}
 
 pub trait OpenaiHeaders: Send + Sync {
-    fn add_openai_headers(self,openai_settings:&OpenaiSettings) -> Self;
+    fn add_openai_headers(self, openai_settings: &OpenaiSettings) -> Self;
 }
 
 /// Type alias for file data loader function
@@ -87,7 +104,7 @@ pub trait AnthropicApis {
         temperature: Option<f32>,
         prompts: Vec<Prompt>,
         tools: Option<Vec<AnthropicToolUnion>>,
-        user_id:&Uuid,
+        user_id: &Uuid,
     ) -> Result<EventSource, Error>;
 
     async fn anthropic_chat_stream_with_messages(
@@ -127,7 +144,7 @@ pub trait AnthropicApis {
 
     async fn anthropic_get_models(
         &self,
-        anthropic_settings: &AnthropicSettings
+        anthropic_settings: &AnthropicSettings,
     ) -> Result<AnthropicListModelsResponse, Error>;
 }
 

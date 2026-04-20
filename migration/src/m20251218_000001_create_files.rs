@@ -11,12 +11,7 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Files::Table)
                     .if_not_exists()
-                    .col(
-                        ColumnDef::new(Files::Id)
-                            .uuid()
-                            .not_null()
-                            .primary_key(),
-                    )
+                    .col(ColumnDef::new(Files::Id).uuid().not_null().primary_key())
                     .col(ColumnDef::new(Files::UserId).uuid().not_null())
                     .col(ColumnDef::new(Files::Name).string().not_null())
                     .col(ColumnDef::new(Files::ContentType).string().not_null())

@@ -1,35 +1,30 @@
+use crate::models::mcp_servers::McpTransportType;
 use chrono::{DateTime, Duration, Utc};
-use rmcp::{
-    ServiceExt,
-    model::{CallToolRequestParams, CallToolResult, JsonObject, Tool},
-    transport::{
-        StreamableHttpClientTransport, TokioChildProcess,
-    },
+use oauth2::{
+    basic::BasicClient, EndpointNotSet as OAuthEndpointNotSet, EndpointSet as OAuthEndpointSet,
 };
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use openidconnect::{
+    core::{CoreAuthenticationFlow, CoreClient, CoreJsonWebKeySet},
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointNotSet, EndpointSet,
     IssuerUrl, Nonce, OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
     RefreshToken, Scope, TokenUrl,
-    core::{CoreAuthenticationFlow, CoreClient, CoreJsonWebKeySet},
 };
-use oauth2::{
-    basic::BasicClient,
-    EndpointNotSet as OAuthEndpointNotSet,
-    EndpointSet as OAuthEndpointSet,
+use reqwest::{header::ACCEPT, Client as ReqwestClient};
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::{
+    model::{CallToolRequestParams, CallToolResult, JsonObject, Tool},
+    transport::{StreamableHttpClientTransport, TokioChildProcess},
+    ServiceExt,
 };
-use reqwest::{Client as ReqwestClient, header::ACCEPT};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
+use thiserror::Error;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use uuid::Uuid;
-use crate::models::mcp_servers::McpTransportType;
-use thiserror::Error;
-use serde_json::Value;
 
 const MAX_USER_HTTP_CLIENTS: usize = 256;
-
 
 #[derive(Debug, Error)]
 pub enum McpClientError {
@@ -172,9 +167,7 @@ fn build_oauth2_client(config: &McpOAuthConfig) -> Result<OAuth2Client, McpClien
     Ok(client)
 }
 
-fn tokens_from_response(
-    token_response: &openidconnect::core::CoreTokenResponse,
-) -> McpOAuthTokens {
+fn tokens_from_response(token_response: &openidconnect::core::CoreTokenResponse) -> McpOAuthTokens {
     let access_token = token_response.access_token().secret().to_string();
     let refresh_token = token_response
         .refresh_token()
@@ -236,9 +229,8 @@ struct OAuth2TokenResponsePayload {
 }
 
 fn parse_oauth2_token_response(body: &str) -> Result<McpOAuthTokens, McpClientError> {
-    let payload: OAuth2TokenResponsePayload = serde_json::from_str(body).map_err(|e| {
-        McpClientError::OAuth(format!("Failed to parse token response: {e}"))
-    })?;
+    let payload: OAuth2TokenResponsePayload = serde_json::from_str(body)
+        .map_err(|e| McpClientError::OAuth(format!("Failed to parse token response: {e}")))?;
 
     let expires_at = payload
         .expires_in
@@ -372,7 +364,8 @@ pub async fn exchange_code(
             let client = build_oidc_client(config)?;
             let mut request = client.exchange_code(AuthorizationCode::new(code.to_string()));
             if config.use_pkce {
-                request = request.set_pkce_verifier(PkceCodeVerifier::new(pkce_verifier.to_string()));
+                request =
+                    request.set_pkce_verifier(PkceCodeVerifier::new(pkce_verifier.to_string()));
             }
             let token_response = request
                 .request_async(http_client)
@@ -653,9 +646,9 @@ impl McpServerClient {
                         },
                     );
                 }
-                let entry = clients
-                    .get_mut(&user_id)
-                    .ok_or_else(|| McpClientError::Rmcp("rmcp client not initialized".to_string()))?;
+                let entry = clients.get_mut(&user_id).ok_or_else(|| {
+                    McpClientError::Rmcp("rmcp client not initialized".to_string())
+                })?;
                 let arguments = rmcp_args_from_value(args)?;
                 entry
                     .client
@@ -674,9 +667,9 @@ impl McpServerClient {
             _ => {
                 self.ensure_connected().await?;
                 let mut client = self.client.lock().await;
-                let service = client
-                    .as_mut()
-                    .ok_or_else(|| McpClientError::Rmcp("rmcp client not initialized".to_string()))?;
+                let service = client.as_mut().ok_or_else(|| {
+                    McpClientError::Rmcp("rmcp client not initialized".to_string())
+                })?;
                 let arguments = rmcp_args_from_value(args)?;
                 service
                     .call_tool(CallToolRequestParams {
@@ -731,9 +724,9 @@ impl McpServerClient {
                         },
                     );
                 }
-                let entry = clients
-                    .get_mut(&user_id)
-                    .ok_or_else(|| McpClientError::Rmcp("rmcp client not initialized".to_string()))?;
+                let entry = clients.get_mut(&user_id).ok_or_else(|| {
+                    McpClientError::Rmcp("rmcp client not initialized".to_string())
+                })?;
                 entry
                     .client
                     .list_all_tools()
@@ -754,7 +747,11 @@ impl McpServerClient {
                 .as_deref()
                 .ok_or_else(|| McpClientError::Config("mcp http url missing".to_string())),
             McpTransportType::Sse => {
-                if let Some(sse_url) = self.connection_config.get("sse_url").and_then(Value::as_str) {
+                if let Some(sse_url) = self
+                    .connection_config
+                    .get("sse_url")
+                    .and_then(Value::as_str)
+                {
                     return Ok(sse_url);
                 }
                 self.url
@@ -775,12 +772,9 @@ fn parse_stdio_config(
     let mut config: StdioConnectionConfig = serde_json::from_value(connection_config.clone())
         .map_err(|e| McpClientError::Config(format!("invalid stdio config: {e}")))?;
     if let Some(db_url) = db_url {
-        let has_placeholder = config
-            .args
-            .iter()
-            .any(|arg| arg.contains("{{db_url}}")
-                || arg.contains("$DB_URL")
-                || arg.contains("${DB_URL}"));
+        let has_placeholder = config.args.iter().any(|arg| {
+            arg.contains("{{db_url}}") || arg.contains("$DB_URL") || arg.contains("${DB_URL}")
+        });
         if has_placeholder {
             config.args = config
                 .args
@@ -816,7 +810,9 @@ fn extract_auth_header(connection_config: &Value) -> Result<Option<String>, McpC
     };
 
     let resolved = resolve_env_placeholders(header_value)?;
-    let token = resolved.strip_prefix("Bearer ").unwrap_or(resolved.as_str());
+    let token = resolved
+        .strip_prefix("Bearer ")
+        .unwrap_or(resolved.as_str());
     Ok(Some(token.to_string()))
 }
 
@@ -879,7 +875,6 @@ fn resolve_env_placeholders(value: &str) -> Result<String, McpClientError> {
 }
 
 fn resolve_env_var(name: &str) -> Result<String, McpClientError> {
-    std::env::var(name).map_err(|_| {
-        McpClientError::Config(format!("missing environment variable: {name}"))
-    })
+    std::env::var(name)
+        .map_err(|_| McpClientError::Config(format!("missing environment variable: {name}")))
 }

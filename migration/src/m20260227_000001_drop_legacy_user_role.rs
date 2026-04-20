@@ -64,10 +64,7 @@ impl MigrationTrait for Migration {
                 "UPDATE users SET \"role\" = 'superadmin' FROM user_role_assignments ura WHERE ura.\"userId\" = users.id AND ura.\"roleId\" = '{}' AND ura.\"scopeDepartmentId\" IS NULL",
                 role_id
             );
-            manager
-                .get_connection()
-                .execute_unprepared(&update)
-                .await?;
+            manager.get_connection().execute_unprepared(&update).await?;
         }
 
         if let Some(role_id) = role_ids.get("Observer") {
@@ -75,17 +72,16 @@ impl MigrationTrait for Migration {
                 "UPDATE users SET \"role\" = 'observer' FROM user_role_assignments ura WHERE ura.\"userId\" = users.id AND ura.\"roleId\" = '{}' AND ura.\"scopeDepartmentId\" IS NULL AND users.\"role\" != 'superadmin'",
                 role_id
             );
-            manager
-                .get_connection()
-                .execute_unprepared(&update)
-                .await?;
+            manager.get_connection().execute_unprepared(&update).await?;
         }
 
         Ok(())
     }
 }
 
-async fn load_role_ids(manager: &SchemaManager<'_>) -> Result<std::collections::HashMap<String, Uuid>, DbErr> {
+async fn load_role_ids(
+    manager: &SchemaManager<'_>,
+) -> Result<std::collections::HashMap<String, Uuid>, DbErr> {
     let mut role_ids = std::collections::HashMap::new();
     let role_rows = manager
         .get_connection()
@@ -149,10 +145,7 @@ async fn assign_legacy_users(
     insert_role_assignments(manager, role_id, &user_ids).await
 }
 
-async fn assign_unassigned_users(
-    manager: &SchemaManager<'_>,
-    role_id: Uuid,
-) -> Result<(), DbErr> {
+async fn assign_unassigned_users(manager: &SchemaManager<'_>, role_id: Uuid) -> Result<(), DbErr> {
     let query = "SELECT u.\"id\" FROM users u LEFT JOIN user_role_assignments ura ON ura.\"userId\" = u.\"id\" WHERE ura.\"id\" IS NULL";
     let rows = manager
         .get_connection()
@@ -195,10 +188,7 @@ async fn insert_role_assignments(
         values.join(",")
     );
 
-    manager
-        .get_connection()
-        .execute_unprepared(&insert)
-        .await?;
+    manager.get_connection().execute_unprepared(&insert).await?;
 
     Ok(())
 }

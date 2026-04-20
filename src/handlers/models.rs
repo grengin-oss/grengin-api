@@ -1,10 +1,10 @@
-use std::collections::HashMap;
-use axum::{extract::State, Json};
 use anyhow::{anyhow, Error};
+use axum::{extract::State, Json};
 use reqwest::StatusCode;
-use serde_json::Value;
-use tokio::sync::{OnceCell, RwLock};
 use sea_orm::EntityTrait;
+use serde_json::Value;
+use std::collections::HashMap;
+use tokio::sync::{OnceCell, RwLock};
 
 use crate::{
     auth::claims::Claims,
@@ -39,13 +39,18 @@ pub async fn load_models_cache(req_client: &reqwest::Client) -> Result<Providers
     let mut models_by_key = HashMap::new();
     for provider in &providers {
         for model in &provider.models {
-            models_by_key.entry(model.key.clone()).or_insert_with(|| model.clone());
+            models_by_key
+                .entry(model.key.clone())
+                .or_insert_with(|| model.clone());
             models_by_key
                 .entry(model.name.clone())
                 .or_insert_with(|| model.clone());
         }
     }
-    let cache = ProvidersCache { providers, models_by_key };
+    let cache = ProvidersCache {
+        providers,
+        models_by_key,
+    };
     let mut write_guard = providers_cache().await.write().await;
     if let Some(cached) = write_guard.as_ref() {
         return Ok(cached.clone());
@@ -54,7 +59,9 @@ pub async fn load_models_cache(req_client: &reqwest::Client) -> Result<Providers
     Ok(cache)
 }
 
-pub async fn load_providers_cached(req_client: &reqwest::Client) -> Result<Vec<ProviderInfo>, Error> {
+pub async fn load_providers_cached(
+    req_client: &reqwest::Client,
+) -> Result<Vec<ProviderInfo>, Error> {
     Ok(load_models_cache(req_client).await?.providers)
 }
 
@@ -183,7 +190,7 @@ fn get_str(value: &Value, field: &str) -> Result<String, Error> {
 )]
 pub async fn get_list_models(
     claims: Claims,
-    State(app_state):State<SharedState>,
+    State(app_state): State<SharedState>,
 ) -> (StatusCode, Json<ModelsResponse>) {
     let user = users::Entity::find_by_id(claims.user_id)
         .one(&app_state.database)
@@ -256,11 +263,16 @@ pub async fn get_list_models(
             key: provider.key,
             name: provider.name,
             icon: provider.icon,
-            icon_dark:provider.icon_dark,
+            icon_dark: provider.icon_dark,
             status: provider.status,
             models,
         });
     }
 
-    (status, Json(ModelsResponse { providers: filtered_providers }))
+    (
+        status,
+        Json(ModelsResponse {
+            providers: filtered_providers,
+        }),
+    )
 }
