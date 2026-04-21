@@ -121,6 +121,7 @@ use utoipa::OpenApi;
         admin_analytics::get_timeseries_analytics,
         admin_analytics::get_department_analytics,
         admin_audit::get_audit_logs,
+        admin_audit::get_audit_actions,
         admin_audit::export_audit_logs,
         admin_audit::redact_audit_logs_for_user,
         admin_department::create_department,

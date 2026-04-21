@@ -16,8 +16,8 @@ use crate::{
         permissions::PERMISSION_AUDIT_LOGS_VIEW,
     },
     dto::audit_logs::{
-        AuditLogEntry, AuditLogExportFormat, AuditLogRedactResponse, AuditLogsExportQuery,
-        AuditLogsQuery, AuditLogsResponse,
+        AuditLogAction, AuditLogEntry, AuditLogExportFormat, AuditLogRedactResponse,
+        AuditLogsExportQuery, AuditLogsQuery, AuditLogsResponse,
     },
     models::audit_logs,
     services::{
@@ -30,6 +30,34 @@ use crate::{
 };
 
 const EXPORT_BATCH_LIMIT: u64 = 500;
+
+#[utoipa::path(
+    get,
+    path = "/audit/actions",
+    tag = "admin",
+    responses(
+        (status = 200, body = Vec<AuditLogAction>),
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 403, content_type = "application/json", body = Error),
+    )
+)]
+pub async fn get_audit_actions(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+) -> Result<(StatusCode, Json<Vec<AuditLogAction>>), AuthError> {
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_AUDIT_LOGS_VIEW,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
+
+    Ok((StatusCode::OK, Json(AuditLogAction::all())))
+}
 
 fn to_entry(model: audit_logs::Model) -> AuditLogEntry {
     AuditLogEntry {

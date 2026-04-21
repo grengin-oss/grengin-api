@@ -8,7 +8,9 @@ use crate::{
             get_analytics_overview, get_department_analytics, get_timeseries_analytics,
             get_user_analytics,
         },
-        admin_audit::{export_audit_logs, get_audit_logs, redact_audit_logs_for_user},
+        admin_audit::{
+            export_audit_logs, get_audit_actions, get_audit_logs, redact_audit_logs_for_user,
+        },
         admin_department::{
             add_users_in_department, create_department, delete_department, get_department_by_id,
             get_departments_tree, get_users_from_department, list_departments, move_department,
@@ -94,6 +96,7 @@ pub fn admin_routes() -> Router<SharedState> {
         .route("/admin/analytics/timeseries", get(get_timeseries_analytics))
         .route("/admin/audit-logs", get(get_audit_logs))
         .route("/admin/audit-logs/export", get(export_audit_logs))
+        .route("/audit/actions", get(get_audit_actions))
         .route(
             "/admin/audit-logs/redact/{user_id}",
             post(redact_audit_logs_for_user),
