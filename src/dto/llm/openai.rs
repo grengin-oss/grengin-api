@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::{dto::files::File, llm::prompt::Prompt, models::messages::ChatRole};
+use serde::{Deserialize, Serialize};
 
 //
 // ---------------------------

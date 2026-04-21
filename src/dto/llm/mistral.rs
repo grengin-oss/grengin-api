@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::{llm::prompt::Prompt, models::messages::ChatRole};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MistralChatCompletionRequest {
@@ -118,7 +118,10 @@ impl MistralMessage {
             .collect()
     }
 
-    pub fn assistant_with_tool_calls(content: Option<String>, tool_calls: Vec<MistralToolCall>) -> Self {
+    pub fn assistant_with_tool_calls(
+        content: Option<String>,
+        tool_calls: Vec<MistralToolCall>,
+    ) -> Self {
         MistralMessage {
             role: ChatRole::Assistant,
             content,

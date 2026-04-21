@@ -1,9 +1,26 @@
-use axum::{Json, extract::{Path, State}};
+use crate::{
+    auth::{
+        claims::Claims,
+        encryption::{decrypt_key, encrypt_key},
+        error::{AuthError, Error},
+        permissions::{PERMISSION_SSO_PROVIDERS_MANAGE, PERMISSION_SSO_PROVIDERS_VIEW},
+        sso_provider::{is_editable, sso_providers_list},
+    },
+    dto::admin_sso_providers::{
+        EditableField, SsoProvider, SsoProviderEditable, SsoProviderUpdate,
+    },
+    models::sso_providers,
+    services::authorization::{AuthorizationService, PermissionScopeMode},
+    state::SharedState,
+};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, IntoActiveModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error::{AuthError, Error}, permissions::{PERMISSION_SSO_PROVIDERS_MANAGE, PERMISSION_SSO_PROVIDERS_VIEW}, sso_provider::{is_editable, sso_providers_list}}, dto::admin_sso_providers::{EditableField, SsoProviderEditable, SsoProvider, SsoProviderUpdate}, models::sso_providers, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
 
 #[utoipa::path(
     get,
@@ -19,10 +36,10 @@ use crate::{auth::{claims::Claims, encryption::{decrypt_key, encrypt_key}, error
 )]
 pub async fn get_sso_providers(
     claims: Claims,
-     State(app_state): State<SharedState>,
-) -> Result<(StatusCode,Json<Vec<SsoProvider>>), AuthError> {
-     let authz = AuthorizationService::new(&app_state.database);
-     authz
+    State(app_state): State<SharedState>,
+) -> Result<(StatusCode, Json<Vec<SsoProvider>>), AuthError> {
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
         .ensure_permission(
             claims.user_id,
             PERMISSION_SSO_PROVIDERS_VIEW,
@@ -31,68 +48,70 @@ pub async fn get_sso_providers(
             None,
         )
         .await?;
-     let mut models = sso_providers::Entity::find()
-       .all(&app_state.database)
-       .await
-       .map_err(|e|{
-          eprintln!("Db get all error: {:?}",e);
-          AuthError::DbTimeout
-       })?;
-      if models.is_empty(){
-         let mut insert_models = Vec::new();
-         for sso_provider in sso_providers_list() {
-            insert_models.push(sso_providers::Model{
-                id:Uuid::new_v4(),
-                provider:sso_provider.provider,
-                name:sso_provider.name,
-                tenant_id:sso_provider.tenant_id,
-                client_id:"<empty>".to_string(),
-                client_secret:"<empty>".to_string(),
-                issuer_url:sso_provider.issuer_url,
-                redirect_url:sso_provider.redirect_url,
-                allowed_domains:Vec::new(),
+    let mut models = sso_providers::Entity::find()
+        .all(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("Db get all error: {:?}", e);
+            AuthError::DbTimeout
+        })?;
+    if models.is_empty() {
+        let mut insert_models = Vec::new();
+        for sso_provider in sso_providers_list() {
+            insert_models.push(sso_providers::Model {
+                id: Uuid::new_v4(),
+                provider: sso_provider.provider,
+                name: sso_provider.name,
+                tenant_id: sso_provider.tenant_id,
+                client_id: "<empty>".to_string(),
+                client_secret: "<empty>".to_string(),
+                issuer_url: sso_provider.issuer_url,
+                redirect_url: sso_provider.redirect_url,
+                allowed_domains: Vec::new(),
                 is_enabled: false,
                 is_default: false,
                 created_at: Utc::now(),
-                updated_at: Utc::now()
+                updated_at: Utc::now(),
             });
-         }
-         models = insert_models.clone();
-         let insert_active_models:Vec<_> = insert_models
+        }
+        models = insert_models.clone();
+        let insert_active_models: Vec<_> = insert_models
             .into_iter()
             .map(|m| m.into_active_model())
             .collect();
-         sso_providers::Entity::insert_many(insert_active_models.clone())
-           .exec(&app_state.database)
-           .await
-           .map_err(|e|{
-             eprintln!("DB insert many error {:?}",e);
-             AuthError::DbTimeout
-           })?;
-      }
-      let response = models
+        sso_providers::Entity::insert_many(insert_active_models.clone())
+            .exec(&app_state.database)
+            .await
+            .map_err(|e| {
+                eprintln!("DB insert many error {:?}", e);
+                AuthError::DbTimeout
+            })?;
+    }
+    let response = models
         .into_iter()
-        .map(|model|{
-            let decrypted_client_secret = decrypt_key(&app_state.settings.auth.app_key,&model.client_secret)
-              .ok();
-           SsoProvider{
-             id:model.id,
-             redirect_url:model.redirect_url, 
-             provider:model.provider,
-             name:model.name,
-             client_id:model.client_id,
-             client_secret:app_state.get_decrypted_api_key_preview(&decrypted_client_secret).unwrap_or("<empty>".to_string()),
-             issuer_url: model.issuer_url,
-             tenant_id:model.tenant_id,
-             allowed_domains:model.allowed_domains,
-             is_enabled:model.is_enabled,
-             created_at:model.created_at,
-             updated_at:model.updated_at,
-          }
-        }).collect();
-  Ok((StatusCode::OK,Json(response)))
+        .map(|model| {
+            let decrypted_client_secret =
+                decrypt_key(&app_state.settings.auth.app_key, &model.client_secret).ok();
+            SsoProvider {
+                id: model.id,
+                redirect_url: model.redirect_url,
+                provider: model.provider,
+                name: model.name,
+                client_id: model.client_id,
+                client_secret: app_state
+                    .get_decrypted_api_key_preview(&decrypted_client_secret)
+                    .unwrap_or("<empty>".to_string()),
+                issuer_url: model.issuer_url,
+                tenant_id: model.tenant_id,
+                allowed_domains: model.allowed_domains,
+                is_enabled: model.is_enabled,
+                created_at: model.created_at,
+                updated_at: model.updated_at,
+            }
+        })
+        .collect();
+    Ok((StatusCode::OK, Json(response)))
 }
-
 
 #[utoipa::path(
     get,
@@ -106,12 +125,12 @@ pub async fn get_sso_providers(
     )
 )]
 pub async fn get_sso_provider_by_id(
-     claims: Claims,
-     Path(provider_id):Path<Uuid>,
-     State(app_state): State<SharedState>,
-) -> Result<(StatusCode,Json<SsoProviderEditable>), AuthError> {
-     let authz = AuthorizationService::new(&app_state.database);
-     authz
+    claims: Claims,
+    Path(provider_id): Path<Uuid>,
+    State(app_state): State<SharedState>,
+) -> Result<(StatusCode, Json<SsoProviderEditable>), AuthError> {
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
         .ensure_permission(
             claims.user_id,
             PERMISSION_SSO_PROVIDERS_VIEW,
@@ -120,34 +139,58 @@ pub async fn get_sso_provider_by_id(
             Some(provider_id),
         )
         .await?;
-     let model = sso_providers::Entity::find_by_id(provider_id)
-       .one(&app_state.database)
-       .await
-       .map_err(|e|{
-          eprintln!("Db get all error: {}",e);
-          AuthError::DbTimeout
-       })?;
-      let response = model
-        .map(|model|{
-           let decrypted_client_secret = decrypt_key(&app_state.settings.auth.app_key,&model.client_secret)
-             .ok();
+    let model = sso_providers::Entity::find_by_id(provider_id)
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("Db get all error: {}", e);
+            AuthError::DbTimeout
+        })?;
+    let response = model
+        .map(|model| {
+            let decrypted_client_secret =
+                decrypt_key(&app_state.settings.auth.app_key, &model.client_secret).ok();
             let editable = is_editable(&model.provider);
-            SsoProviderEditable{
-              id:model.id, 
-              provider:EditableField { editable, value: model.provider },
-              name:EditableField { editable, value:model.name },
-              tenant_id:model.tenant_id.map(|t_id| EditableField { editable: true, value: t_id }),
-              redirect_url:EditableField { editable, value: model.redirect_url },
-              client_id:EditableField { editable:true, value: model.client_id },
-              client_secret:app_state.get_decrypted_api_key_preview(&decrypted_client_secret).map(|preview| EditableField{editable:true,value:preview}),
-              issuer_url:EditableField { editable, value: model.issuer_url},
-              allowed_domains:model.allowed_domains,
-              is_enabled:model.is_enabled,
-              created_at:model.created_at,
-              updated_at:model.updated_at,
-          }
-        }).ok_or(AuthError::ResourceNotFound)?;
-  Ok((StatusCode::OK,Json(response)))
+            SsoProviderEditable {
+                id: model.id,
+                provider: EditableField {
+                    editable,
+                    value: model.provider,
+                },
+                name: EditableField {
+                    editable,
+                    value: model.name,
+                },
+                tenant_id: model.tenant_id.map(|t_id| EditableField {
+                    editable: true,
+                    value: t_id,
+                }),
+                redirect_url: EditableField {
+                    editable,
+                    value: model.redirect_url,
+                },
+                client_id: EditableField {
+                    editable: true,
+                    value: model.client_id,
+                },
+                client_secret: app_state
+                    .get_decrypted_api_key_preview(&decrypted_client_secret)
+                    .map(|preview| EditableField {
+                        editable: true,
+                        value: preview,
+                    }),
+                issuer_url: EditableField {
+                    editable,
+                    value: model.issuer_url,
+                },
+                allowed_domains: model.allowed_domains,
+                is_enabled: model.is_enabled,
+                created_at: model.created_at,
+                updated_at: model.updated_at,
+            }
+        })
+        .ok_or(AuthError::ResourceNotFound)?;
+    Ok((StatusCode::OK, Json(response)))
 }
 
 #[utoipa::path(
@@ -162,12 +205,12 @@ pub async fn get_sso_provider_by_id(
     )
 )]
 pub async fn delete_sso_provider_by_id(
-     claims: Claims,
-     Path(provider_id):Path<Uuid>,
-     State(app_state): State<SharedState>,
-) -> Result<(StatusCode,&'static str), AuthError> {
-     let authz = AuthorizationService::new(&app_state.database);
-     authz
+    claims: Claims,
+    Path(provider_id): Path<Uuid>,
+    State(app_state): State<SharedState>,
+) -> Result<(StatusCode, &'static str), AuthError> {
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
         .ensure_permission(
             claims.user_id,
             PERMISSION_SSO_PROVIDERS_MANAGE,
@@ -176,30 +219,29 @@ pub async fn delete_sso_provider_by_id(
             Some(provider_id),
         )
         .await?;
-     let model = sso_providers::Entity::find_by_id(provider_id)
-       .one(&app_state.database)
-       .await
-       .map_err(|e|{
-          eprintln!("Db get one error: {}",e);
-          AuthError::DbTimeout
-       })?
-      .ok_or(AuthError::ResourceNotFound)?;
-      let mut active_model = model
-        .into_active_model();
-      active_model.client_id = Set("<empty>".to_string());
-      active_model.client_secret = Set("<empty>".to_string());
-      active_model.updated_at = Set(Utc::now());
-      active_model.is_default = Set(false);
-      active_model.is_enabled = Set(false);
-      active_model.tenant_id = Set(None);
-      active_model
+    let model = sso_providers::Entity::find_by_id(provider_id)
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("Db get one error: {}", e);
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+    let mut active_model = model.into_active_model();
+    active_model.client_id = Set("<empty>".to_string());
+    active_model.client_secret = Set("<empty>".to_string());
+    active_model.updated_at = Set(Utc::now());
+    active_model.is_default = Set(false);
+    active_model.is_enabled = Set(false);
+    active_model.tenant_id = Set(None);
+    active_model
         .update(&app_state.database)
         .await
-        .map_err(|e|{
-           eprintln!("Db get one error: {}",e);
-           AuthError::DbTimeout
-       })?;
-  Ok((StatusCode::OK,"Deleted successfully"))
+        .map_err(|e| {
+            eprintln!("Db get one error: {}", e);
+            AuthError::DbTimeout
+        })?;
+    Ok((StatusCode::OK, "Deleted successfully"))
 }
 
 #[utoipa::path(
@@ -214,13 +256,13 @@ pub async fn delete_sso_provider_by_id(
     )
 )]
 pub async fn update_sso_provider_by_id(
-     claims: Claims,
-     Path(provider_id):Path<Uuid>,
-     State(app_state): State<SharedState>,
-     Json(req):Json<SsoProviderUpdate>
-) -> Result<(StatusCode,Json<SsoProvider>), AuthError> {
-     let authz = AuthorizationService::new(&app_state.database);
-     authz
+    claims: Claims,
+    Path(provider_id): Path<Uuid>,
+    State(app_state): State<SharedState>,
+    Json(req): Json<SsoProviderUpdate>,
+) -> Result<(StatusCode, Json<SsoProvider>), AuthError> {
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
         .ensure_permission(
             claims.user_id,
             PERMISSION_SSO_PROVIDERS_MANAGE,
@@ -229,80 +271,93 @@ pub async fn update_sso_provider_by_id(
             Some(provider_id),
         )
         .await?;
-     let model = sso_providers::Entity::find_by_id(provider_id)
-       .one(&app_state.database)
-       .await
-       .map_err(|e|{
-          eprintln!("Db get one error: {}",e);
-          AuthError::DbTimeout
-       })?
-      .ok_or(AuthError::DbNotFound)?;
-     let mut active_model = model
-       .into_active_model();
-     if let Some(provider) = req.provider {
+    let model = sso_providers::Entity::find_by_id(provider_id)
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("Db get one error: {}", e);
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::DbNotFound)?;
+    let mut active_model = model.into_active_model();
+    if let Some(provider) = req.provider {
         active_model.provider = Set(provider);
-     }
-     if let Some(name) = req.name {
+    }
+    if let Some(name) = req.name {
         active_model.name = Set(name);
-     }
-     if let Some(allowed_domains) = req.allowed_domains {
+    }
+    if let Some(allowed_domains) = req.allowed_domains {
         active_model.allowed_domains = Set(allowed_domains);
-     }
-     if let Some(client_id) = req.client_id {
+    }
+    if let Some(client_id) = req.client_id {
         active_model.client_id = Set(client_id);
-     }
-     if let Some(is_enabled) = req.is_enabled{
+    }
+    if let Some(is_enabled) = req.is_enabled {
         active_model.is_enabled = Set(is_enabled);
-     }
-     if let Some(issuer_url) = req.issuer_url  {
-         active_model.issuer_url = Set(issuer_url);
-     }
-     if let Some(redirect_url) = req.redirect_url  {
+    }
+    if let Some(issuer_url) = req.issuer_url {
+        active_model.issuer_url = Set(issuer_url);
+    }
+    if let Some(redirect_url) = req.redirect_url {
         active_model.redirect_url = Set(redirect_url);
-     }
-     active_model.tenant_id = Set(req.tenant_id);
-     if let Some(client_secret) = req.client_secret {
-        active_model.client_secret = Set(encrypt_key(&app_state.settings.auth.app_key,client_secret.as_bytes())
-         .map_err(|e|{
-             eprintln!("Sso key encryption error {:?}",e);
-             AuthError::DbTimeout
-         })?);
-     }
-     active_model.updated_at = Set(Utc::now());
-     let updated_model = active_model
+    }
+    active_model.tenant_id = Set(req.tenant_id);
+    if let Some(client_secret) = req.client_secret {
+        active_model.client_secret = Set(encrypt_key(
+            &app_state.settings.auth.app_key,
+            client_secret.as_bytes(),
+        )
+        .map_err(|e| {
+            eprintln!("Sso key encryption error {:?}", e);
+            AuthError::DbTimeout
+        })?);
+    }
+    active_model.updated_at = Set(Utc::now());
+    let updated_model = active_model
         .update(&app_state.database)
         .await
-        .map_err(|e|{
-            eprintln!("Db update error {:?}",e);
+        .map_err(|e| {
+            eprintln!("Db update error {:?}", e);
             AuthError::DbTimeout
-     })?;
-     if let Ok(client_secret) = decrypt_key(&app_state.settings.auth.app_key,&updated_model.client_secret)  {
-      let allowed_domains = updated_model
-        .allowed_domains
-        .iter()
-        .map(|d| d.into())
-        .collect();
-      let _ = app_state
-        .settings
-        .load_sso_provider_in_state(&updated_model.provider,&updated_model.client_id,&client_secret,&updated_model.redirect_url, updated_model.tenant_id.as_ref(), updated_model.is_enabled,allowed_domains)
-        .await;
-      let _ = app_state
-        .refresh_oidc_client(&updated_model.provider)
-        .await;
-     }
-     let response = SsoProvider { 
-        id:updated_model.id,
-        provider:updated_model.provider,
-        name:updated_model.name,
-        client_id:updated_model.client_id,
-        client_secret:app_state.get_decrypted_api_key_preview(&Some(updated_model.client_secret)).unwrap_or("<empty>".to_string()),
-        issuer_url:updated_model.issuer_url,
-        redirect_url:updated_model.redirect_url,
-        tenant_id:updated_model.tenant_id,
-        allowed_domains:updated_model.allowed_domains,
-        is_enabled:updated_model.is_enabled,
-        created_at:updated_model.created_at,
-        updated_at:updated_model.updated_at,
+        })?;
+    if let Ok(client_secret) = decrypt_key(
+        &app_state.settings.auth.app_key,
+        &updated_model.client_secret,
+    ) {
+        let allowed_domains = updated_model
+            .allowed_domains
+            .iter()
+            .map(|d| d.into())
+            .collect();
+        let _ = app_state
+            .settings
+            .load_sso_provider_in_state(
+                &updated_model.provider,
+                &updated_model.client_id,
+                &client_secret,
+                &updated_model.redirect_url,
+                updated_model.tenant_id.as_ref(),
+                updated_model.is_enabled,
+                allowed_domains,
+            )
+            .await;
+        let _ = app_state.refresh_oidc_client(&updated_model.provider).await;
+    }
+    let response = SsoProvider {
+        id: updated_model.id,
+        provider: updated_model.provider,
+        name: updated_model.name,
+        client_id: updated_model.client_id,
+        client_secret: app_state
+            .get_decrypted_api_key_preview(&Some(updated_model.client_secret))
+            .unwrap_or("<empty>".to_string()),
+        issuer_url: updated_model.issuer_url,
+        redirect_url: updated_model.redirect_url,
+        tenant_id: updated_model.tenant_id,
+        allowed_domains: updated_model.allowed_domains,
+        is_enabled: updated_model.is_enabled,
+        created_at: updated_model.created_at,
+        updated_at: updated_model.updated_at,
     };
-  Ok((StatusCode::OK,Json(response)))
+    Ok((StatusCode::OK, Json(response)))
 }

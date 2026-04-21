@@ -1,13 +1,20 @@
-use anyhow::{Error, anyhow};
+use crate::{
+    config::setting::AnthropicSettings,
+    dto::llm::anthropic::{
+        AnthropicChatRequest, AnthropicChatResponse, AnthropicContentBlockResponse,
+        AnthropicListModelsResponse, AnthropicMessage, AnthropicRole, AnthropicToolUnion,
+    },
+    handlers::file::get_file_binary,
+    llm::{
+        prompt::{Prompt, PromptTextResponse, PromptTitleResponse},
+        provider::{AnthropicApis, AnthropicHeaders},
+    },
+};
+use anyhow::{anyhow, Error};
 use async_trait::async_trait;
 use reqwest::{Client as ReqwestClient, RequestBuilder};
 use reqwest_eventsource::EventSource;
 use uuid::Uuid;
-use crate::{
-    config::setting::AnthropicSettings, dto::llm::anthropic::{
-        AnthropicChatRequest, AnthropicChatResponse, AnthropicContentBlockResponse, AnthropicListModelsResponse, AnthropicMessage, AnthropicRole, AnthropicToolUnion
-    }, handlers::file::get_file_binary, llm::{prompt::{Prompt, PromptTitleResponse, PromptTextResponse}, provider::{AnthropicApis, AnthropicHeaders}}
-};
 
 pub const ANTHROPIC_API_URL: &str = "https://api.anthropic.com";
 pub const ANTHROPIC_API_VERSION: &str = "2023-06-01";
@@ -30,16 +37,16 @@ impl AnthropicApis for ReqwestClient {
         temperature: Option<f32>,
         mut prompts: Vec<Prompt>,
         tools: Option<Vec<AnthropicToolUnion>>,
-        user_id:&Uuid,
+        user_id: &Uuid,
     ) -> Result<EventSource, Error> {
         for prompt in &mut prompts {
-           for file in &mut prompt.files {
-              if let Ok(attachment) = get_file_binary(&file, user_id){
-                 file.base64 = attachment.get_base64();
-              };
-           }
+            for file in &mut prompt.files {
+                if let Ok(attachment) = get_file_binary(&file, user_id) {
+                    file.base64 = attachment.get_base64();
+                };
+            }
         }
-        let (messages, system_prompt) = AnthropicMessage::from_prompts(prompts);    
+        let (messages, system_prompt) = AnthropicMessage::from_prompts(prompts);
         self.anthropic_chat_stream_with_messages(
             anthropic_settings,
             model_name,
@@ -136,9 +143,9 @@ impl AnthropicApis for ReqwestClient {
             system: None,
             tools: None,
             stop_sequences: None,
-         };
+        };
 
-         let response: AnthropicChatResponse = self
+        let response: AnthropicChatResponse = self
             .post(format!("{ANTHROPIC_API_URL}/v1/messages"))
             .add_anthropic_headers(anthropic_settings)
             .json(&body)
@@ -148,7 +155,7 @@ impl AnthropicApis for ReqwestClient {
             .json()
             .await?;
 
-         let title = response
+        let title = response
             .content
             .first()
             .and_then(|block| match block {
@@ -156,13 +163,13 @@ impl AnthropicApis for ReqwestClient {
                 _ => None,
             })
             .ok_or(anyhow!("anthropic response content is empty"))?;
-         let input_tokens = response
-            .usage
-            .input_tokens;
-         let output_tokens = response
-            .usage
-            .output_tokens;
-        Ok(PromptTitleResponse { title, input_tokens, output_tokens })
+        let input_tokens = response.usage.input_tokens;
+        let output_tokens = response.usage.output_tokens;
+        Ok(PromptTitleResponse {
+            title,
+            input_tokens,
+            output_tokens,
+        })
     }
 
     async fn anthropic_generate_text(
@@ -212,8 +219,9 @@ impl AnthropicApis for ReqwestClient {
     }
 
     async fn anthropic_get_models(
-        &self,anthropic_settings:
-        &AnthropicSettings) -> Result<AnthropicListModelsResponse, Error> {
+        &self,
+        anthropic_settings: &AnthropicSettings,
+    ) -> Result<AnthropicListModelsResponse, Error> {
         let models = self
             .get(format!("{ANTHROPIC_API_URL}/v1/models"))
             .add_anthropic_headers(anthropic_settings)

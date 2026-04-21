@@ -1,9 +1,3 @@
-use axum::{Json, extract::{Path, State}};
-use chrono::Utc;
-use reqwest::StatusCode;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, TryIntoModel};
-use uuid::Uuid;
-use std::collections::HashSet;
 use crate::{
     auth::{
         claims::Claims,
@@ -18,12 +12,28 @@ use crate::{
         },
         models::ModelsResponse,
     },
-    handlers::models::load_providers_cached,
-    llm::{gemini::GEMINI_API_URL, mistral::MISTRAL_API_URL, provider::{AnthropicApis, OpenaiApis}},
+    handlers::models::{load_providers_cached, refresh_models_cache},
+    llm::{
+        gemini::GEMINI_API_URL,
+        mistral::MISTRAL_API_URL,
+        provider::{AnthropicApis, OpenaiApis},
+    },
     models::ai_engines::{self, ApiKeyStatus},
     services::authorization::{AuthorizationService, PermissionScopeMode},
     state::SharedState,
 };
+use axum::{
+    extract::{Path, State},
+    Json,
+};
+use chrono::Utc;
+use reqwest::StatusCode;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
+    QueryOrder, TryIntoModel,
+};
+use std::collections::HashSet;
+use uuid::Uuid;
 
 fn normalize_bearer_token(raw: &str) -> String {
     let trimmed = raw.trim();
@@ -35,12 +45,28 @@ fn normalize_bearer_token(raw: &str) -> String {
 }
 
 async fn load_models_response(app_state: &SharedState) -> Result<ModelsResponse, AuthError> {
-    let providers = load_providers_cached(&app_state.req_client)
-        .await
-        .map_err(|e| {
-            eprintln!("providers cache error: {e}");
-            AuthError::DbTimeout
-        })?;
+    let providers = load_providers_cached(&app_state.req_client).await.map_err(|e| {
+        eprintln!("providers cache error: {e}");
+        AuthError::DbTimeout
+    })?;
+    Ok(ModelsResponse { providers })
+}
+
+async fn load_models_response_refreshed(
+    app_state: &SharedState,
+) -> Result<ModelsResponse, AuthError> {
+    let providers = match refresh_models_cache(&app_state.req_client).await {
+        Ok(cache) => cache.providers,
+        Err(error) => {
+            eprintln!("providers cache refresh error: {error}");
+            load_providers_cached(&app_state.req_client)
+                .await
+                .map_err(|e| {
+                    eprintln!("providers cache fallback error: {e}");
+                    AuthError::DbTimeout
+                })?
+        }
+    };
     Ok(ModelsResponse { providers })
 }
 
@@ -55,9 +81,9 @@ async fn load_models_response(app_state: &SharedState) -> Result<ModelsResponse,
     )
 )]
 pub async fn get_ai_engines(
-    claims:Claims,
+    claims: Claims,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode,Json<Vec<AIEngineDetail>>),AuthError>{
+) -> Result<(StatusCode, Json<Vec<AIEngineDetail>>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(
@@ -68,16 +94,16 @@ pub async fn get_ai_engines(
             None,
         )
         .await?;
-    let ai_models = load_models_response(&app_state).await?;
+    let ai_models = load_models_response_refreshed(&app_state).await?;
     let selector = ai_engines::Entity::find();
     let mut ai_engines = selector
-      .order_by_desc(ai_engines::Column::CreatedAt)
-      .all(&app_state.database)
-      .await
-      .map_err(|e|{
-         eprintln!("db error get all {e}");
-         AuthError::DbTimeout
-      })?;
+        .order_by_desc(ai_engines::Column::CreatedAt)
+        .all(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db error get all {e}");
+            AuthError::DbTimeout
+        })?;
     let mut existing_keys: HashSet<String> = ai_engines
         .iter()
         .map(|engine| engine.engine_key.clone())
@@ -91,12 +117,10 @@ pub async fn get_ai_engines(
             .settings
             .get_ai_engine_api_key(&provider.key)
             .await;
-        let api_key_encrypted = api_key
-            .clone()
-            .map(|k|{
-              encrypt_key(&app_state.settings.auth.app_key, k.as_bytes())
+        let api_key_encrypted = api_key.clone().map(|k| {
+            encrypt_key(&app_state.settings.auth.app_key, k.as_bytes())
                 .expect("Failed to encrypt the api key")
-            });
+        });
         let whitelist_models = provider
             .models
             .iter()
@@ -104,17 +128,21 @@ pub async fn get_ai_engines(
             .collect::<Vec<String>>();
         to_insert.push((
             ai_engines::ActiveModel {
-                id:Set(Uuid::new_v4()),
-                display_name:Set(provider.name.clone()),
-                is_enabled:Set(api_key_encrypted.is_some()),
-                engine_key:Set(provider.key.clone()),
-                api_key_status:Set(if api_key_encrypted.is_some(){ApiKeyStatus::NotValidated}else{ApiKeyStatus::NotConfigured}),
-                api_key:Set(api_key_encrypted.clone()),
-                whitelist_models:Set(whitelist_models.clone()),
-                default_model:Set(String::from("<empty>")),
-                api_key_validated_at:Set(None),
-                created_at:Set(Utc::now()),
-                updated_at:Set(Utc::now()),
+                id: Set(Uuid::new_v4()),
+                display_name: Set(provider.name.clone()),
+                is_enabled: Set(api_key_encrypted.is_some()),
+                engine_key: Set(provider.key.clone()),
+                api_key_status: Set(if api_key_encrypted.is_some() {
+                    ApiKeyStatus::NotValidated
+                } else {
+                    ApiKeyStatus::NotConfigured
+                }),
+                api_key: Set(api_key_encrypted.clone()),
+                whitelist_models: Set(whitelist_models.clone()),
+                default_model: Set(String::from("<empty>")),
+                api_key_validated_at: Set(None),
+                created_at: Set(Utc::now()),
+                updated_at: Set(Utc::now()),
             },
             api_key,
             whitelist_models,
@@ -131,16 +159,10 @@ pub async fn get_ai_engines(
                 AuthError::DbTimeout
             })?;
         for (active_model, api_key, whitelist_models) in to_insert {
-             let model = active_model
-                .try_into_model()
-                .unwrap();
-             let engine_key = model
-                .engine_key
-                .clone();
-             let is_enabled = model
-                .is_enabled
-                .clone();
-             let _ = app_state
+            let model = active_model.try_into_model().unwrap();
+            let engine_key = model.engine_key.clone();
+            let is_enabled = model.is_enabled.clone();
+            let _ = app_state
                 .settings
                 .load_ai_engine_in_state(engine_key, api_key, is_enabled, whitelist_models)
                 .await;
@@ -156,25 +178,24 @@ pub async fn get_ai_engines(
     }
 
     let response = ai_engines
-      .into_iter()
-      .map(|model|{
-        AIEngineDetail{
-            icon:ai_models.get_icons(&model.engine_key).0,
-            icon_dark:ai_models.get_icons(&model.engine_key).1,
-            engine_key:model.engine_key,
-            display_name:model.display_name,
-            is_enabled:model.is_enabled,
-            api_key_configured:model.api_key.is_some(),
-            api_key_status:model.api_key_status,
-            api_key_preview:app_state.get_decrypted_api_key_preview(&model.api_key),
-            api_key_last_validated_at:model.api_key_validated_at,
-            whitelisted_models:model.whitelist_models,
-            default_model:Some(model.default_model),
-            created_at:model.created_at,
-            updated_at:model.updated_at
-        }
-     }).collect();
- Ok((StatusCode::OK,Json(response)))
+        .into_iter()
+        .map(|model| AIEngineDetail {
+            icon: ai_models.get_icons(&model.engine_key).0,
+            icon_dark: ai_models.get_icons(&model.engine_key).1,
+            engine_key: model.engine_key,
+            display_name: model.display_name,
+            is_enabled: model.is_enabled,
+            api_key_configured: model.api_key.is_some(),
+            api_key_status: model.api_key_status,
+            api_key_preview: app_state.get_decrypted_api_key_preview(&model.api_key),
+            api_key_last_validated_at: model.api_key_validated_at,
+            whitelisted_models: model.whitelist_models,
+            default_model: Some(model.default_model),
+            created_at: model.created_at,
+            updated_at: model.updated_at,
+        })
+        .collect();
+    Ok((StatusCode::OK, Json(response)))
 }
 
 #[utoipa::path(
@@ -192,12 +213,12 @@ pub async fn get_ai_engines(
     )
 )]
 pub async fn get_ai_engines_by_key(
-    claims:Claims,
-    Path(ai_engine_key):Path<String>,
+    claims: Claims,
+    Path(ai_engine_key): Path<String>,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode,Json<AIEngineDetail>),AuthError>{
-   let authz = AuthorizationService::new(&app_state.database);
-   authz
+) -> Result<(StatusCode, Json<AIEngineDetail>), AuthError> {
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
         .ensure_permission(
             claims.user_id,
             PERMISSION_AI_PLATFORM_VIEW,
@@ -206,33 +227,33 @@ pub async fn get_ai_engines_by_key(
             None,
         )
         .await?;
-   let ai_models = load_models_response(&app_state).await?;
-   let model = ai_engines::Entity::find()
-      .filter(ai_engines::Column::EngineKey.eq(ai_engine_key))
-      .order_by_desc(ai_engines::Column::CreatedAt)
-      .one(&app_state.database)
-      .await
-      .map_err(|e|{
-        eprintln!("db error get all {e}");
-        AuthError::DbTimeout
-      })?
-      .ok_or(AuthError::ResourceNotFound)?;
-    let response = AIEngineDetail{
-            icon:ai_models.get_icons(&model.engine_key).0,
-            icon_dark:ai_models.get_icons(&model.engine_key).1,
-            engine_key:model.engine_key,
-            display_name:model.display_name,
-            is_enabled:model.is_enabled,
-            api_key_configured:model.api_key.is_some(),
-            api_key_status:model.api_key_status,
-            api_key_preview:app_state.get_decrypted_api_key_preview(&model.api_key),
-            api_key_last_validated_at:model.api_key_validated_at,
-            whitelisted_models:model.whitelist_models,
-            default_model:Some(model.default_model),
-            created_at:model.created_at,
-            updated_at:model.updated_at
-        };
- Ok((StatusCode::OK,Json(response)))
+    let ai_models = load_models_response(&app_state).await?;
+    let model = ai_engines::Entity::find()
+        .filter(ai_engines::Column::EngineKey.eq(ai_engine_key))
+        .order_by_desc(ai_engines::Column::CreatedAt)
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db error get all {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+    let response = AIEngineDetail {
+        icon: ai_models.get_icons(&model.engine_key).0,
+        icon_dark: ai_models.get_icons(&model.engine_key).1,
+        engine_key: model.engine_key,
+        display_name: model.display_name,
+        is_enabled: model.is_enabled,
+        api_key_configured: model.api_key.is_some(),
+        api_key_status: model.api_key_status,
+        api_key_preview: app_state.get_decrypted_api_key_preview(&model.api_key),
+        api_key_last_validated_at: model.api_key_validated_at,
+        whitelisted_models: model.whitelist_models,
+        default_model: Some(model.default_model),
+        created_at: model.created_at,
+        updated_at: model.updated_at,
+    };
+    Ok((StatusCode::OK, Json(response)))
 }
 
 #[utoipa::path(
@@ -251,12 +272,12 @@ pub async fn get_ai_engines_by_key(
     )
 )]
 pub async fn get_ai_engine_models_by_key(
-    claims:Claims,
-    Path(ai_engine_key):Path<String>,
+    claims: Claims,
+    Path(ai_engine_key): Path<String>,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode,Json<AIEngineModels>),AuthError>{
-   let authz = AuthorizationService::new(&app_state.database);
-   authz
+) -> Result<(StatusCode, Json<AIEngineModels>), AuthError> {
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
         .ensure_permission(
             claims.user_id,
             PERMISSION_AI_PLATFORM_VIEW,
@@ -265,39 +286,36 @@ pub async fn get_ai_engine_models_by_key(
             None,
         )
         .await?;
-   let ai_engine = ai_engines::Entity::find()
-      .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
-      .order_by_desc(ai_engines::Column::CreatedAt)
-      .one(&app_state.database)
-      .await
-      .map_err(|e|{
-        eprintln!("db error get all {e}");
-        AuthError::DbTimeout
-      })?
-      .ok_or(AuthError::ResourceNotFound)?;
-    let mut response = AIEngineModels{ 
-      models:Vec::new()
-    };
-   let ai_models = load_models_response(&app_state).await?;
-   for provider in ai_models.providers{
-       if provider.key != ai_engine_key {
-         continue;
-       }
-       for model in provider.models {
-          response.models.push(AiModel{
-            model_id:model.key.clone(),
-            display_name:model.name.clone(),
-            is_whitelisted:ai_engine.whitelist_models.contains(&model.key),
-            capabilities:AiModelCapabilities{ 
-               vision:model.supports_vision,
-               function_calling:model.supports_tools,
-               streaming:model.supports_streaming 
-            } 
-          }
-         )
-       }
-    };
- Ok((StatusCode::OK,Json(response)))
+    let ai_engine = ai_engines::Entity::find()
+        .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
+        .order_by_desc(ai_engines::Column::CreatedAt)
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db error get all {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+    let mut response = AIEngineModels { models: Vec::new() };
+    let ai_models = load_models_response(&app_state).await?;
+    for provider in ai_models.providers {
+        if provider.key != ai_engine_key {
+            continue;
+        }
+        for model in provider.models {
+            response.models.push(AiModel {
+                model_id: model.key.clone(),
+                display_name: model.name.clone(),
+                is_whitelisted: ai_engine.whitelist_models.contains(&model.key),
+                capabilities: AiModelCapabilities {
+                    vision: model.supports_vision,
+                    function_calling: model.supports_tools,
+                    streaming: model.supports_streaming,
+                },
+            })
+        }
+    }
+    Ok((StatusCode::OK, Json(response)))
 }
 
 #[utoipa::path(
@@ -316,13 +334,13 @@ pub async fn get_ai_engine_models_by_key(
     )
 )]
 pub async fn update_ai_engines_by_key(
-    claims:Claims,
-    Path(ai_engine_key):Path<String>,
+    claims: Claims,
+    Path(ai_engine_key): Path<String>,
     State(app_state): State<SharedState>,
-    Json(req):Json<AIEngineUpdate>
-) -> Result<(StatusCode,Json<AIEngineDetail>),AuthError>{
-   let authz = AuthorizationService::new(&app_state.database);
-   authz
+    Json(req): Json<AIEngineUpdate>,
+) -> Result<(StatusCode, Json<AIEngineDetail>), AuthError> {
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
         .ensure_permission(
             claims.user_id,
             PERMISSION_AI_PLATFORM_MANAGE,
@@ -331,60 +349,55 @@ pub async fn update_ai_engines_by_key(
             None,
         )
         .await?;
-   let ai_models = load_models_response(&app_state).await?;
-   let ai_engine = ai_engines::Entity::find()
-      .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
-      .order_by_desc(ai_engines::Column::CreatedAt)
-      .one(&app_state.database)
-      .await
-      .map_err(|e|{
-        eprintln!("db error get all {e}");
-        AuthError::DbTimeout
-      })?
-      .ok_or(AuthError::ResourceNotFound)?;
-    let mut active_model = ai_engine
-      .clone()
-      .into_active_model();
+    let ai_models = load_models_response(&app_state).await?;
+    let ai_engine = ai_engines::Entity::find()
+        .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
+        .order_by_desc(ai_engines::Column::CreatedAt)
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db error get all {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+    let mut active_model = ai_engine.clone().into_active_model();
     if let Some(api_key) = req.api_key {
-      let encrypted_api_key = encrypt_key(&app_state.settings.auth.app_key,api_key.as_bytes())
-       .map_err(|e|{
-         eprintln!("Encryption error for api key: {:?}",e);
-         AuthError::DbTimeout
-       })?;
-      active_model.api_key = Set(Some(encrypted_api_key));
-      active_model.api_key_status = Set(ApiKeyStatus::NotValidated)
+        let encrypted_api_key = encrypt_key(&app_state.settings.auth.app_key, api_key.as_bytes())
+            .map_err(|e| {
+            eprintln!("Encryption error for api key: {:?}", e);
+            AuthError::DbTimeout
+        })?;
+        active_model.api_key = Set(Some(encrypted_api_key));
+        active_model.api_key_status = Set(ApiKeyStatus::NotValidated)
     }
     active_model.updated_at = Set(Utc::now());
-    if let Some(default_model) = req.default_model{
-      active_model.default_model = Set(default_model);
+    if let Some(default_model) = req.default_model {
+        active_model.default_model = Set(default_model);
     }
-    if let Some(whitelist_models) = req.whitelisted_models{
-      active_model.whitelist_models = Set(whitelist_models);
+    if let Some(whitelist_models) = req.whitelisted_models {
+        active_model.whitelist_models = Set(whitelist_models);
     }
     if let Some(is_enabled) = req.is_enabled {
-      active_model.is_enabled = Set(is_enabled);
+        active_model.is_enabled = Set(is_enabled);
     }
     active_model
-     .clone()
-     .update(&app_state.database)
-     .await
-     .map_err(|e|{
-        eprintln!("db error update one {e}");
-        AuthError::DbTimeout
-      })?;
-    let model = active_model
-      .try_into_model()
-      .map_err(|e|{
+        .clone()
+        .update(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db error update one {e}");
+            AuthError::DbTimeout
+        })?;
+    let model = active_model.try_into_model().map_err(|e| {
         eprintln!("db error model parse error {e}");
         AuthError::DbTimeout
-      })?;
+    })?;
     let decrypted_api_key = match &model.api_key {
         Some(api_key) => Some(
-            decrypt_key(&app_state.settings.auth.app_key, api_key)
-                .map_err(|e| {
-                    eprintln!("Decryption api key error {:?}", e);
-                    AuthError::DbTimeout
-                })?,
+            decrypt_key(&app_state.settings.auth.app_key, api_key).map_err(|e| {
+                eprintln!("Decryption api key error {:?}", e);
+                AuthError::DbTimeout
+            })?,
         ),
         None => None,
     };
@@ -401,23 +414,23 @@ pub async fn update_ai_engines_by_key(
             eprintln!("Ai engine loading error in state {e}");
             AuthError::DbTimeout
         })?;
-    let _ = validate_ai_engines_by_key(claims,Path(ai_engine_key),State(app_state.clone()));
-    let response = AIEngineDetail{
-            icon:ai_models.get_icons(&model.engine_key).0,
-            icon_dark:ai_models.get_icons(&model.engine_key).1,
-            engine_key:model.engine_key,
-            display_name:model.display_name,
-            is_enabled:model.is_enabled,
-            api_key_configured:model.api_key.is_some(),
-            api_key_status:model.api_key_status,
-            api_key_preview:app_state.get_decrypted_api_key_preview(&model.api_key),
-            api_key_last_validated_at:model.api_key_validated_at,
-            whitelisted_models:model.whitelist_models,
-            default_model:Some(model.default_model),
-            created_at:model.created_at,
-            updated_at:model.updated_at
-        };
- Ok((StatusCode::OK,Json(response)))
+    let _ = validate_ai_engines_by_key(claims, Path(ai_engine_key), State(app_state.clone()));
+    let response = AIEngineDetail {
+        icon: ai_models.get_icons(&model.engine_key).0,
+        icon_dark: ai_models.get_icons(&model.engine_key).1,
+        engine_key: model.engine_key,
+        display_name: model.display_name,
+        is_enabled: model.is_enabled,
+        api_key_configured: model.api_key.is_some(),
+        api_key_status: model.api_key_status,
+        api_key_preview: app_state.get_decrypted_api_key_preview(&model.api_key),
+        api_key_last_validated_at: model.api_key_validated_at,
+        whitelisted_models: model.whitelist_models,
+        default_model: Some(model.default_model),
+        created_at: model.created_at,
+        updated_at: model.updated_at,
+    };
+    Ok((StatusCode::OK, Json(response)))
 }
 
 #[utoipa::path(
@@ -435,12 +448,12 @@ pub async fn update_ai_engines_by_key(
     )
 )]
 pub async fn delete_ai_engines_api_key_key(
-    claims:Claims,
-    Path(ai_engine_key):Path<String>,
+    claims: Claims,
+    Path(ai_engine_key): Path<String>,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode,Json<AIEngineDetail>),AuthError>{
-   let authz = AuthorizationService::new(&app_state.database);
-   authz
+) -> Result<(StatusCode, Json<AIEngineDetail>), AuthError> {
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
         .ensure_permission(
             claims.user_id,
             PERMISSION_AI_PLATFORM_MANAGE,
@@ -449,62 +462,56 @@ pub async fn delete_ai_engines_api_key_key(
             None,
         )
         .await?;
-   let ai_models = load_models_response(&app_state).await?;
-   let ai_engine = ai_engines::Entity::find()
-      .filter(ai_engines::Column::EngineKey.eq(ai_engine_key))
-      .order_by_desc(ai_engines::Column::CreatedAt)
-      .one(&app_state.database)
-      .await
-      .map_err(|e|{
-        eprintln!("db error get all {e}");
-        AuthError::DbTimeout
-      })?
-      .ok_or(AuthError::ResourceNotFound)?;
-    let mut active_model = ai_engine
-      .clone()
-      .into_active_model();
+    let ai_models = load_models_response(&app_state).await?;
+    let ai_engine = ai_engines::Entity::find()
+        .filter(ai_engines::Column::EngineKey.eq(ai_engine_key))
+        .order_by_desc(ai_engines::Column::CreatedAt)
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db error get all {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+    let mut active_model = ai_engine.clone().into_active_model();
     active_model.api_key = Set(None);
     active_model.updated_at = Set(Utc::now());
     active_model.api_key_status = Set(ApiKeyStatus::NotConfigured);
     active_model.is_enabled = Set(false);
-    let _ = app_state
-      .settings
-      .load_ai_engine_in_state(
-          ai_engine.engine_key,
-          None,
-          false,
-          ai_engine.whitelist_models.clone(),
-      );
+    let _ = app_state.settings.load_ai_engine_in_state(
+        ai_engine.engine_key,
+        None,
+        false,
+        ai_engine.whitelist_models.clone(),
+    );
     active_model
-     .clone()
-     .update(&app_state.database)
-     .await
-     .map_err(|e|{
-        eprintln!("db error update one {e}");
-        AuthError::DbTimeout
-      })?;
-    let model = active_model
-      .try_into_model()
-      .map_err(|e|{
+        .clone()
+        .update(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db error update one {e}");
+            AuthError::DbTimeout
+        })?;
+    let model = active_model.try_into_model().map_err(|e| {
         eprintln!("db error model parse error {e}");
         AuthError::DbTimeout
-      })?;
-      let response = AIEngineDetail{
-            icon:ai_models.get_icons(&model.engine_key).0,
-            icon_dark:ai_models.get_icons(&model.engine_key).1,
-            engine_key:model.engine_key,
-            display_name:model.display_name,
-            is_enabled:model.is_enabled,
-            api_key_configured:model.api_key.is_some(),
-            api_key_status:model.api_key_status,
-            api_key_preview:app_state.get_decrypted_api_key_preview(&model.api_key),
-            api_key_last_validated_at:model.api_key_validated_at,
-            whitelisted_models:model.whitelist_models,
-            default_model:Some(model.default_model),
-            created_at:model.created_at,
-            updated_at:model.updated_at
-        };
- Ok((StatusCode::OK,Json(response)))
+    })?;
+    let response = AIEngineDetail {
+        icon: ai_models.get_icons(&model.engine_key).0,
+        icon_dark: ai_models.get_icons(&model.engine_key).1,
+        engine_key: model.engine_key,
+        display_name: model.display_name,
+        is_enabled: model.is_enabled,
+        api_key_configured: model.api_key.is_some(),
+        api_key_status: model.api_key_status,
+        api_key_preview: app_state.get_decrypted_api_key_preview(&model.api_key),
+        api_key_last_validated_at: model.api_key_validated_at,
+        whitelisted_models: model.whitelist_models,
+        default_model: Some(model.default_model),
+        created_at: model.created_at,
+        updated_at: model.updated_at,
+    };
+    Ok((StatusCode::OK, Json(response)))
 }
 
 #[utoipa::path(
@@ -520,12 +527,12 @@ pub async fn delete_ai_engines_api_key_key(
     )
 )]
 pub async fn validate_ai_engines_by_key(
-    claims:Claims,
-    Path(ai_engine_key):Path<String>,
+    claims: Claims,
+    Path(ai_engine_key): Path<String>,
     State(app_state): State<SharedState>,
-) -> Result<(StatusCode,Json<AIEngineValidation>),AuthError>{
-   let authz = AuthorizationService::new(&app_state.database);
-   authz
+) -> Result<(StatusCode, Json<AIEngineValidation>), AuthError> {
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
         .ensure_permission(
             claims.user_id,
             PERMISSION_AI_PLATFORM_MANAGE,
@@ -534,156 +541,160 @@ pub async fn validate_ai_engines_by_key(
             None,
         )
         .await?;
-   let api_key_status =  match ai_engine_key.as_ref() {
-       "openai" => {
-         let openai_settings = &app_state
-           .settings
-           .openai
-           .read()
-           .await
-           .clone()
-           .ok_or(AuthError::ResourceNotFound)?;
-         let models = app_state
-           .req_client
-           .openai_list_models(openai_settings)
-           .await;
-          if models.is_ok(){
-            ApiKeyStatus::Valid
-          }else{
-            ApiKeyStatus::Invalid
-          }
-       }
-       "anthropic" => {
-        let anthropic_settings = &app_state
-          .settings
-          .anthropic
-          .write()
-          .await
-          .clone()
-          .ok_or(AuthError::ResourceNotFound)?;
-        let models = app_state
-           .req_client
-           .anthropic_get_models(anthropic_settings)
-           .await;
-          if models.is_ok(){
-            ApiKeyStatus::Valid
-          }else{
-            ApiKeyStatus::Invalid
-          }
-        }
-       "mistral" => {
-           // Validate against the key stored in DB (not in-memory state) to avoid cache drift.
-           let ai_engine = ai_engines::Entity::find()
-               .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
-               .order_by_desc(ai_engines::Column::CreatedAt)
-               .one(&app_state.database)
-               .await
-               .map_err(|e| {
-                   eprintln!("db error get engine for validation {e}");
-                   AuthError::DbTimeout
-               })?
-               .ok_or(AuthError::ResourceNotFound)?;
-
-           match ai_engine.api_key.as_ref() {
-               None => ApiKeyStatus::NotConfigured,
-               Some(encrypted_api_key) => {
-                   let api_key = decrypt_key(&app_state.settings.auth.app_key, encrypted_api_key)
-                       .map_err(|e| {
-                           eprintln!("mistral api key decrypt error: {e:?}");
-                           AuthError::DbTimeout
-                       })?;
-                   let api_key = normalize_bearer_token(&api_key);
-                   if api_key.is_empty() {
-                       ApiKeyStatus::NotConfigured
-                   } else {
-                       let response = app_state
-                           .req_client
-                           .get(format!("{MISTRAL_API_URL}/v1/models"))
-                           .bearer_auth(api_key)
-                           .send()
-                           .await;
-                       match response {
-                           Ok(resp) if resp.status().is_success() => ApiKeyStatus::Valid,
-                           // A 429 still implies the key was accepted/authenticated.
-                           Ok(resp) if resp.status() == StatusCode::TOO_MANY_REQUESTS => {
-                               ApiKeyStatus::Valid
-                           }
-                           Ok(resp)
-                               if resp.status() == StatusCode::UNAUTHORIZED
-                                   || resp.status() == StatusCode::FORBIDDEN =>
-                           {
-                               ApiKeyStatus::Invalid
-                           }
-                           Ok(_) => ApiKeyStatus::NotValidated,
-                           Err(_) => ApiKeyStatus::NotValidated,
-                       }
-                   }
-               }
-           }
-       }
-       "gemini" => {
-        let gemini_settings = &app_state
-          .settings
-          .gemini
-          .read()
-          .await
-          .clone()
-          .ok_or(AuthError::ResourceNotFound)?;
-        let response = app_state
-            .req_client
-            .get(format!("{GEMINI_API_URL}/v1beta/models"))
-            .header("x-goog-api-key", gemini_settings.api_key.clone())
-            .send()
-            .await;
-        match response {
-            Ok(resp) if resp.status().is_success() => ApiKeyStatus::Valid,
-            Ok(resp) if resp.status() == StatusCode::TOO_MANY_REQUESTS => ApiKeyStatus::Valid,
-            Ok(resp)
-                if resp.status() == StatusCode::UNAUTHORIZED
-                    || resp.status() == StatusCode::FORBIDDEN =>
-            {
+    let api_key_status = match ai_engine_key.as_ref() {
+        "openai" => {
+            let openai_settings = &app_state
+                .settings
+                .openai
+                .read()
+                .await
+                .clone()
+                .ok_or(AuthError::ResourceNotFound)?;
+            let models = app_state
+                .req_client
+                .openai_list_models(openai_settings)
+                .await;
+            if models.is_ok() {
+                ApiKeyStatus::Valid
+            } else {
                 ApiKeyStatus::Invalid
             }
-            Ok(_) => ApiKeyStatus::NotValidated,
-            Err(_) => ApiKeyStatus::NotValidated,
         }
-       }
-       _ => ApiKeyStatus::NotConfigured,
-   };
-   let ai_engine = ai_engines::Entity::find()
-      .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
-      .order_by_desc(ai_engines::Column::CreatedAt)
-      .one(&app_state.database)
-      .await
-      .map_err(|e|{
-        eprintln!("db error get all {e}");
-        AuthError::DbTimeout
-      })?
-      .ok_or(AuthError::ResourceNotFound)?;
-    let mut active_model = ai_engine
-      .clone()
-      .into_active_model();
+        "anthropic" => {
+            let anthropic_settings = &app_state
+                .settings
+                .anthropic
+                .write()
+                .await
+                .clone()
+                .ok_or(AuthError::ResourceNotFound)?;
+            let models = app_state
+                .req_client
+                .anthropic_get_models(anthropic_settings)
+                .await;
+            if models.is_ok() {
+                ApiKeyStatus::Valid
+            } else {
+                ApiKeyStatus::Invalid
+            }
+        }
+        "mistral" => {
+            // Validate against the key stored in DB (not in-memory state) to avoid cache drift.
+            let ai_engine = ai_engines::Entity::find()
+                .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
+                .order_by_desc(ai_engines::Column::CreatedAt)
+                .one(&app_state.database)
+                .await
+                .map_err(|e| {
+                    eprintln!("db error get engine for validation {e}");
+                    AuthError::DbTimeout
+                })?
+                .ok_or(AuthError::ResourceNotFound)?;
+
+            match ai_engine.api_key.as_ref() {
+                None => ApiKeyStatus::NotConfigured,
+                Some(encrypted_api_key) => {
+                    let api_key = decrypt_key(&app_state.settings.auth.app_key, encrypted_api_key)
+                        .map_err(|e| {
+                            eprintln!("mistral api key decrypt error: {e:?}");
+                            AuthError::DbTimeout
+                        })?;
+                    let api_key = normalize_bearer_token(&api_key);
+                    if api_key.is_empty() {
+                        ApiKeyStatus::NotConfigured
+                    } else {
+                        let response = app_state
+                            .req_client
+                            .get(format!("{MISTRAL_API_URL}/v1/models"))
+                            .bearer_auth(api_key)
+                            .send()
+                            .await;
+                        match response {
+                            Ok(resp) if resp.status().is_success() => ApiKeyStatus::Valid,
+                            // A 429 still implies the key was accepted/authenticated.
+                            Ok(resp) if resp.status() == StatusCode::TOO_MANY_REQUESTS => {
+                                ApiKeyStatus::Valid
+                            }
+                            Ok(resp)
+                                if resp.status() == StatusCode::UNAUTHORIZED
+                                    || resp.status() == StatusCode::FORBIDDEN =>
+                            {
+                                ApiKeyStatus::Invalid
+                            }
+                            Ok(_) => ApiKeyStatus::NotValidated,
+                            Err(_) => ApiKeyStatus::NotValidated,
+                        }
+                    }
+                }
+            }
+        }
+        "gemini" => {
+            let gemini_settings = &app_state
+                .settings
+                .gemini
+                .read()
+                .await
+                .clone()
+                .ok_or(AuthError::ResourceNotFound)?;
+            let response = app_state
+                .req_client
+                .get(format!("{GEMINI_API_URL}/v1beta/models"))
+                .header("x-goog-api-key", gemini_settings.api_key.clone())
+                .send()
+                .await;
+            match response {
+                Ok(resp) if resp.status().is_success() => ApiKeyStatus::Valid,
+                Ok(resp) if resp.status() == StatusCode::TOO_MANY_REQUESTS => ApiKeyStatus::Valid,
+                Ok(resp)
+                    if resp.status() == StatusCode::UNAUTHORIZED
+                        || resp.status() == StatusCode::FORBIDDEN =>
+                {
+                    ApiKeyStatus::Invalid
+                }
+                Ok(_) => ApiKeyStatus::NotValidated,
+                Err(_) => ApiKeyStatus::NotValidated,
+            }
+        }
+        _ => ApiKeyStatus::NotConfigured,
+    };
+    let ai_engine = ai_engines::Entity::find()
+        .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
+        .order_by_desc(ai_engines::Column::CreatedAt)
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db error get all {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+    let mut active_model = ai_engine.clone().into_active_model();
     active_model.api_key_status = Set(api_key_status.clone());
     active_model.updated_at = Set(Utc::now());
     active_model.api_key_validated_at = Set(Some(Utc::now()));
     active_model
-      .clone()
-      .update(&app_state.database)
-      .await
-      .map_err(|e|{
-         eprintln!("db error update one {e}");
-         AuthError::DbTimeout
-       })?;
-   let (valid,message) = match api_key_status {
-     ApiKeyStatus::Valid => (true,"API key validated successfully".to_string()),
-     ApiKeyStatus::Invalid => (false,format!("API key is incorrect for {ai_engine_key}.")),
-     ApiKeyStatus::NotConfigured => (false,format!("API key is not configured for {ai_engine_key}.")),
-     ApiKeyStatus::NotValidated => (false,format!("API key could not be validated for {ai_engine_key} right now.")),
-   };
-   let response = AIEngineValidation{ 
-      valid,
-      message,
-      models_available:ai_engine.whitelist_models.len() as i64,
+        .clone()
+        .update(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db error update one {e}");
+            AuthError::DbTimeout
+        })?;
+    let (valid, message) = match api_key_status {
+        ApiKeyStatus::Valid => (true, "API key validated successfully".to_string()),
+        ApiKeyStatus::Invalid => (false, format!("API key is incorrect for {ai_engine_key}.")),
+        ApiKeyStatus::NotConfigured => (
+            false,
+            format!("API key is not configured for {ai_engine_key}."),
+        ),
+        ApiKeyStatus::NotValidated => (
+            false,
+            format!("API key could not be validated for {ai_engine_key} right now."),
+        ),
     };
- Ok((StatusCode::OK,Json(response)))
+    let response = AIEngineValidation {
+        valid,
+        message,
+        models_available: ai_engine.whitelist_models.len() as i64,
+    };
+    Ok((StatusCode::OK, Json(response)))
 }

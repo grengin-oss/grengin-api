@@ -97,8 +97,12 @@ pub enum AppError {
     DbNotFound,
 
     /// Generic missing field. Use for things like "message" etc.
-    ValidationMissingField { field: &'static str },
-    ValidationEmptyField { field: &'static str },
+    ValidationMissingField {
+        field: &'static str,
+    },
+    ValidationEmptyField {
+        field: &'static str,
+    },
 
     /// Microsoft-style conditional access block.
     /// - `external_code`: set to Some("53003") if you want to mirror Microsoft codes
@@ -107,13 +111,24 @@ pub enum AppError {
         external_code: Option<&'static str>,
     },
 
-    InvalidLlmProvider { provider: String },
-    LlmProviderNotConfigured { provider: String },
-    LlmProviderDisabledByAdmin { provider: String },
-    LlmTokenExhausted { provider: String },
+    InvalidLlmProvider {
+        provider: String,
+    },
+    LlmProviderNotConfigured {
+        provider: String,
+    },
+    LlmProviderDisabledByAdmin {
+        provider: String,
+    },
+    LlmTokenExhausted {
+        provider: String,
+    },
 
     DepartmentBudgetExceeded,
-    DepartmentModelNotAllowed { provider: String, model: String },
+    DepartmentModelNotAllowed {
+        provider: String,
+        model: String,
+    },
     McpServerNotFound,
     McpAccessUpdateFailed,
 }
@@ -157,8 +172,7 @@ impl AppError {
                 let solution_key = "error.service_unavailable.solution".to_string();
 
                 let description_tpl = "The {app} service is temporarily unavailable.";
-                let solution_tpl =
-                    "Try again in a few minutes. If it persists, contact support.";
+                let solution_tpl = "Try again in a few minutes. If it persists, contact support.";
 
                 (
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -225,8 +239,7 @@ impl AppError {
                 let solution_key = "error.db.unavailable.solution".to_string();
 
                 let description_tpl = "{app} couldn't reach the database right now.";
-                let solution_tpl =
-                    "Try again in a few minutes. If it persists, check database health, network, and connection pool limits.";
+                let solution_tpl = "Try again in a few minutes. If it persists, check database health, network, and connection pool limits.";
 
                 (
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -248,8 +261,7 @@ impl AppError {
                 let solution_key = "error.db.timeout.solution".to_string();
 
                 let description_tpl = "A database operation timed out in {app}.";
-                let solution_tpl =
-                    "Retry the request. If it continues, investigate database load, slow queries, and connection pool timeouts.";
+                let solution_tpl = "Retry the request. If it continues, investigate database load, slow queries, and connection pool timeouts.";
 
                 (
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -270,10 +282,8 @@ impl AppError {
                 let description_key = "error.db.conflict.description".to_string();
                 let solution_key = "error.db.conflict.solution".to_string();
 
-                let description_tpl =
-                    "The request conflicts with existing data in {app}.";
-                let solution_tpl =
-                    "Refresh data and retry. If you're creating a resource, ensure unique fields are not duplicated.";
+                let description_tpl = "The request conflicts with existing data in {app}.";
+                let solution_tpl = "Refresh data and retry. If you're creating a resource, ensure unique fields are not duplicated.";
 
                 (
                     StatusCode::CONFLICT,
@@ -446,7 +456,8 @@ impl AppError {
                 let description_key = "error.llm.disabled_by_admin.description".to_string();
                 let solution_key = "error.llm.disabled_by_admin.solution".to_string();
 
-                let description_tpl = "The LLM provider `{provider}` is disabled by an administrator.";
+                let description_tpl =
+                    "The LLM provider `{provider}` is disabled by an administrator.";
                 let solution_tpl =
                     "Ask an admin to enable `{provider}` or select a different provider.";
 
@@ -471,10 +482,8 @@ impl AppError {
                 let description_key = "error.llm.token_exhausted.description".to_string();
                 let solution_key = "error.llm.token_exhausted.solution".to_string();
 
-                let description_tpl =
-                    "The {provider} request exceeded the available token budget.";
-                let solution_tpl =
-                    "Try shortening the input, reducing context, or selecting a model with a larger context window.";
+                let description_tpl = "The {provider} request exceeded the available token budget.";
+                let solution_tpl = "Try shortening the input, reducing context, or selecting a model with a larger context window.";
 
                 (
                     StatusCode::PAYLOAD_TOO_LARGE,
@@ -520,8 +529,7 @@ impl AppError {
                 params.insert("model".to_string(), model.clone());
                 let description_key = "error.department_model_not_allowed.description".to_string();
                 let solution_key = "error.department_model_not_allowed.solution".to_string();
-                let description_tpl =
-                    "The model `{model}` from provider `{provider}` is not allowed for your department.";
+                let description_tpl = "The model `{model}` from provider `{provider}` is not allowed for your department.";
                 let solution_tpl =
                     "Choose a model allowed by your department or contact your admin.";
 
@@ -545,8 +553,7 @@ impl AppError {
                 let solution_key = "error.service_unavailable.solution".to_string();
 
                 let description_tpl = "Updating MCP access policies failed.";
-                let solution_tpl =
-                    "Retry the request or contact support if it persists.";
+                let solution_tpl = "Retry the request or contact support if it persists.";
 
                 (
                     StatusCode::SERVICE_UNAVAILABLE,

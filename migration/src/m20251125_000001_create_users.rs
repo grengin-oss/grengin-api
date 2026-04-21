@@ -11,65 +11,21 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Users::Table)
                     .if_not_exists()
-                    .col(
-                        ColumnDef::new(Users::Id)
-                            .uuid()
-                            .not_null()
-                            .primary_key(),
-                    )
+                    .col(ColumnDef::new(Users::Id).uuid().not_null().primary_key())
                     .col(
                         ColumnDef::new(Users::Status)
                             .string() // backing type of UserStatus enum (rs_type = "String")
                             .not_null(),
                     )
-                    .col(
-                        ColumnDef::new(Users::Picture)
-                            .string()
-                            .null(),
-                    )
-                    .col(
-                        ColumnDef::new(Users::Email)
-                            .text()
-                            .not_null()
-                            .unique_key(),
-                    )
-                    .col(
-                        ColumnDef::new(Users::EmailVerified)
-                            .boolean()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Users::Name)
-                            .string()
-                            .null(),
-                    )
-                    .col(
-                        ColumnDef::new(Users::Password)
-                            .string()
-                            .null(),
-                    )
-                    .col(
-                        ColumnDef::new(Users::GoogleId)
-                            .text()
-                            .null()
-                            .unique_key(),
-                    )
-                    .col(
-                        ColumnDef::new(Users::AzureId)
-                            .text()
-                            .null()
-                            .unique_key(),
-                    )
-                    .col(
-                        ColumnDef::new(Users::MfaEnabled)
-                            .boolean()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Users::MfaSecret)
-                            .string()
-                            .null(),
-                    )
+                    .col(ColumnDef::new(Users::Picture).string().null())
+                    .col(ColumnDef::new(Users::Email).text().not_null().unique_key())
+                    .col(ColumnDef::new(Users::EmailVerified).boolean().not_null())
+                    .col(ColumnDef::new(Users::Name).string().null())
+                    .col(ColumnDef::new(Users::Password).string().null())
+                    .col(ColumnDef::new(Users::GoogleId).text().null().unique_key())
+                    .col(ColumnDef::new(Users::AzureId).text().null().unique_key())
+                    .col(ColumnDef::new(Users::MfaEnabled).boolean().not_null())
+                    .col(ColumnDef::new(Users::MfaSecret).string().null())
                     .col(
                         ColumnDef::new(Users::CreatedAt)
                             .timestamp_with_time_zone()
@@ -90,21 +46,9 @@ impl MigrationTrait for Migration {
                             .timestamp_with_time_zone()
                             .null(),
                     )
-                    .col(
-                        ColumnDef::new(Users::Hd)
-                            .string()
-                            .null(),
-                    )
-                    .col(
-                        ColumnDef::new(Users::Department)
-                            .string()
-                            .null(),
-                    )
-                    .col(
-                        ColumnDef::new(Users::Metadata)
-                            .json_binary()
-                            .null(),
-                    )
+                    .col(ColumnDef::new(Users::Hd).string().null())
+                    .col(ColumnDef::new(Users::Department).string().null())
+                    .col(ColumnDef::new(Users::Metadata).json_binary().null())
                     .to_owned(),
             )
             .await?;

@@ -15,7 +15,12 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Alias::new("mcp_oauth_states"))
                     .if_not_exists()
-                    .col(ColumnDef::new(Alias::new("id")).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(Alias::new("id"))
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(Alias::new("serverId")).uuid().not_null())
                     .col(ColumnDef::new(Alias::new("userId")).uuid().not_null())
                     .col(ColumnDef::new(Alias::new("state")).string().not_null())
@@ -72,7 +77,11 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .drop_table(Table::drop().table(Alias::new("mcp_oauth_states")).to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(Alias::new("mcp_oauth_states"))
+                    .to_owned(),
+            )
             .await
     }
 }

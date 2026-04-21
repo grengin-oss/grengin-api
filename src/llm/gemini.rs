@@ -65,7 +65,10 @@ impl GeminiApis for ReqwestClient {
             body.insert("tool_config".to_string(), tool_config);
         }
         if let Some(temp) = temperature {
-            body.insert("generationConfig".to_string(), json!({ "temperature": temp }));
+            body.insert(
+                "generationConfig".to_string(),
+                json!({ "temperature": temp }),
+            );
         }
 
         let request = self
@@ -97,7 +100,9 @@ impl GeminiApis for ReqwestClient {
         });
 
         let response = self
-            .post(format!("{GEMINI_API_URL}/v1beta/models/{model_name}:generateContent"))
+            .post(format!(
+                "{GEMINI_API_URL}/v1beta/models/{model_name}:generateContent"
+            ))
             .header("Content-Type", "application/json");
         let response: Value = add_gemini_headers(response, gemini_settings)
             .json(&body)
@@ -118,7 +123,9 @@ impl GeminiApis for ReqwestClient {
             .and_then(|part| part.get("text"))
             .and_then(|t| t.as_str())
             .map(|s| s.to_string())
-            .ok_or_else(|| anyhow!("gemini response missing candidates[0].content.parts[0].text"))?;
+            .ok_or_else(|| {
+                anyhow!("gemini response missing candidates[0].content.parts[0].text")
+            })?;
 
         // Gemini REST doesn't always provide token usage in this response shape; keep it optional.
         let input_tokens = response

@@ -4,11 +4,11 @@ use axum::{
 };
 use chrono::Utc;
 use reqwest::StatusCode;
+use sea_orm::sea_query::{Expr, ExprTrait, Func};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect,
 };
-use sea_orm::sea_query::{Expr, ExprTrait, Func};
 use uuid::Uuid;
 
 use crate::{
@@ -55,7 +55,9 @@ fn to_role_prompt_response(model: role_prompts::Model) -> RolePromptResponse {
     }
 }
 
-fn to_assignment_response(model: department_prompt_assignments::Model) -> DepartmentPromptAssignmentResponse {
+fn to_assignment_response(
+    model: department_prompt_assignments::Model,
+) -> DepartmentPromptAssignmentResponse {
     DepartmentPromptAssignmentResponse {
         id: model.id,
         department_id: model.department_id,
@@ -185,10 +187,9 @@ pub async fn create_role_prompt(
         )
         .await?;
 
-    let variables = req
-        .variables
-        .clone()
-        .map(|vars| serde_json::Value::Array(vars.into_iter().map(serde_json::Value::String).collect()));
+    let variables = req.variables.clone().map(|vars| {
+        serde_json::Value::Array(vars.into_iter().map(serde_json::Value::String).collect())
+    });
 
     let role_exists = roles::Entity::find_by_id(req.role_id)
         .select_only()
@@ -218,13 +219,10 @@ pub async fn create_role_prompt(
         usage_count: Set(0),
     };
 
-    let model = model
-        .insert(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("role prompt insert error: {e}");
-            AuthError::DbTimeout
-        })?;
+    let model = model.insert(&app_state.database).await.map_err(|e| {
+        eprintln!("role prompt insert error: {e}");
+        AuthError::DbTimeout
+    })?;
 
     Ok((StatusCode::CREATED, Json(to_role_prompt_response(model))))
 }
@@ -294,7 +292,8 @@ pub async fn update_role_prompt(
         active.prompt_text = Set(prompt_text);
     }
     if let Some(vars) = req.variables {
-        let value = serde_json::Value::Array(vars.into_iter().map(serde_json::Value::String).collect());
+        let value =
+            serde_json::Value::Array(vars.into_iter().map(serde_json::Value::String).collect());
         active.variables = Set(Some(value));
     }
     if let Some(is_system) = req.is_system {
@@ -302,13 +301,10 @@ pub async fn update_role_prompt(
     }
     active.updated_at = Set(Utc::now());
 
-    let model = active
-        .update(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("role prompt update error: {e}");
-            AuthError::DbTimeout
-        })?;
+    let model = active.update(&app_state.database).await.map_err(|e| {
+        eprintln!("role prompt update error: {e}");
+        AuthError::DbTimeout
+    })?;
 
     Ok((StatusCode::OK, Json(to_role_prompt_response(model))))
 }
@@ -405,7 +401,8 @@ pub async fn list_department_prompts(
 
     let mut select = department_prompt_assignments::Entity::find();
     if let Some(department_id) = query.department_id {
-        select = select.filter(department_prompt_assignments::Column::DepartmentId.eq(department_id));
+        select =
+            select.filter(department_prompt_assignments::Column::DepartmentId.eq(department_id));
     }
 
     let rows = select
@@ -417,7 +414,10 @@ pub async fn list_department_prompts(
             AuthError::DbTimeout
         })?;
 
-    Ok((StatusCode::OK, Json(rows.into_iter().map(to_assignment_response).collect())))
+    Ok((
+        StatusCode::OK,
+        Json(rows.into_iter().map(to_assignment_response).collect()),
+    ))
 }
 
 #[utoipa::path(
@@ -486,17 +486,14 @@ pub async fn assign_department_prompt(
         updated_at: Set(Utc::now()),
     };
 
-    let model = model
-        .insert(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("department prompt insert error: {e}");
-            if e.to_string().contains("uniq_department_prompt") {
-                AuthError::DbConflict
-            } else {
-                AuthError::DbTimeout
-            }
-        })?;
+    let model = model.insert(&app_state.database).await.map_err(|e| {
+        eprintln!("department prompt insert error: {e}");
+        if e.to_string().contains("uniq_department_prompt") {
+            AuthError::DbConflict
+        } else {
+            AuthError::DbTimeout
+        }
+    })?;
 
     Ok((StatusCode::CREATED, Json(to_assignment_response(model))))
 }
@@ -545,13 +542,10 @@ pub async fn update_department_prompt(
     active.priority = Set(req.priority);
     active.updated_at = Set(Utc::now());
 
-    let model = active
-        .update(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("department prompt update error: {e}");
-            AuthError::DbTimeout
-        })?;
+    let model = active.update(&app_state.database).await.map_err(|e| {
+        eprintln!("department prompt update error: {e}");
+        AuthError::DbTimeout
+    })?;
 
     Ok((StatusCode::OK, Json(to_assignment_response(model))))
 }
@@ -643,7 +637,7 @@ pub async fn get_prompt_metrics(
         prompt_feedback::Entity,
         prompt_feedback::Column::Rating,
     )))
-        .cast_as("double precision");
+    .cast_as("double precision");
     let mut select = role_prompts::Entity::find()
         .select_only()
         .column_as(role_prompts::Column::Id, "promptId")
@@ -651,7 +645,10 @@ pub async fn get_prompt_metrics(
         .column_as(role_prompts::Column::RoleId, "roleId")
         .column_as(role_prompts::Column::UsageCount, "usageCount")
         .expr_as(
-            Func::count(Expr::col((prompt_feedback::Entity, prompt_feedback::Column::Id))),
+            Func::count(Expr::col((
+                prompt_feedback::Entity,
+                prompt_feedback::Column::Id,
+            ))),
             "feedbackCount",
         )
         .expr_as(average_rating_expr, "averageRating")

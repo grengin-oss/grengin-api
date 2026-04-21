@@ -1,7 +1,7 @@
+use crate::auth::error::{AuthError, AuthErrorCode, ErrorDetail};
 use std::collections::BTreeMap;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use crate::auth::error::{AuthError, AuthErrorCode, ErrorDetail};
 
 #[derive(Debug, serde::Serialize, ToSchema)]
 pub struct AuthErrorCatalogItem {

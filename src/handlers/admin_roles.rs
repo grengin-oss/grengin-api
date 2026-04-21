@@ -1,27 +1,34 @@
-use axum::{extract::{Path, State}, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 use chrono::Utc;
 use reqwest::StatusCode;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait, Set};
 use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait,
+    Set,
+};
 use uuid::Uuid;
 
 use crate::{
-    auth::{claims::Claims, error::{AuthError, Error}, permissions::{PERMISSION_ROLES_ASSIGN, PERMISSION_ROLES_MANAGE, PERMISSION_ROLES_VIEW, ROLE_DEPARTMENT_ADMIN}},
+    auth::{
+        claims::Claims,
+        error::{AuthError, Error},
+        permissions::{
+            PERMISSION_ROLES_ASSIGN, PERMISSION_ROLES_MANAGE, PERMISSION_ROLES_VIEW,
+            ROLE_DEPARTMENT_ADMIN,
+        },
+    },
     dto::admin_roles::{
-        PermissionDto, PermissionsResponse, RoleAssignmentPayload, RoleCreatedPayload, RoleDeletedPayload,
-        RoleDto, RoleRequest, RoleUpdateRequest, RoleUpdatedPayload, RolesResponse,
-        UserRoleAssignmentDto, UserRoleAssignmentInput, UserRoleAssignmentsResponse,
+        PermissionDto, PermissionsResponse, RoleAssignmentPayload, RoleCreatedPayload,
+        RoleDeletedPayload, RoleDto, RoleRequest, RoleUpdateRequest, RoleUpdatedPayload,
+        RolesResponse, UserRoleAssignmentDto, UserRoleAssignmentInput, UserRoleAssignmentsResponse,
     },
-    models::{
-        permissions,
-        role_permissions,
-        roles,
-        user_role_assignments,
-        users,
-    },
+    models::{permissions, role_permissions, roles, user_role_assignments, users},
     services::{
-        authorization::{AuthorizationService, PermissionScopeMode},
         auth_audit::{build_audit_payload, record_auth_event},
+        authorization::{AuthorizationService, PermissionScopeMode},
     },
     state::SharedState,
 };
@@ -41,7 +48,6 @@ struct RoleUserCountRow {
     #[sea_orm(from_alias = "user_count")]
     user_count: i64,
 }
-
 
 #[utoipa::path(
     get,
@@ -130,7 +136,10 @@ pub async fn list_roles(
         .column(role_permissions::Column::RoleId)
         .column_as(permissions::Column::Domain, "domain")
         .column_as(permissions::Column::Action, "action")
-        .join(JoinType::InnerJoin, role_permissions::Relation::Permissions.def())
+        .join(
+            JoinType::InnerJoin,
+            role_permissions::Relation::Permissions.def(),
+        )
         .into_model::<RolePermissionRow>()
         .all(&app_state.database)
         .await
@@ -139,7 +148,8 @@ pub async fn list_roles(
             AuthError::DbTimeout
         })?;
 
-    let mut permission_map: std::collections::HashMap<Uuid, Vec<String>> = std::collections::HashMap::new();
+    let mut permission_map: std::collections::HashMap<Uuid, Vec<String>> =
+        std::collections::HashMap::new();
     for row in role_permissions_rows {
         permission_map
             .entry(row.role_id)
@@ -178,7 +188,12 @@ pub async fn list_roles(
         })
         .collect();
 
-    Ok((StatusCode::OK, Json(RolesResponse { roles: roles_response })))
+    Ok((
+        StatusCode::OK,
+        Json(RolesResponse {
+            roles: roles_response,
+        }),
+    ))
 }
 
 #[utoipa::path(
@@ -233,7 +248,10 @@ pub async fn create_role(
 
     let mut permission_lookup = std::collections::HashMap::new();
     for permission in permission_models {
-        permission_lookup.insert(format!("{}:{}", permission.domain, permission.action), permission.id);
+        permission_lookup.insert(
+            format!("{}:{}", permission.domain, permission.action),
+            permission.id,
+        );
     }
 
     let role_id = Uuid::new_v4();
@@ -246,13 +264,10 @@ pub async fn create_role(
         updated_at: Set(now),
     };
 
-    role_model
-        .insert(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("role insert error: {e}");
-            AuthError::DbTimeout
-        })?;
+    role_model.insert(&app_state.database).await.map_err(|e| {
+        eprintln!("role insert error: {e}");
+        AuthError::DbTimeout
+    })?;
 
     let mut assigned_permissions = Vec::new();
     let mut permission_ids = Vec::new();
@@ -353,7 +368,10 @@ pub async fn get_role_by_id(
         .column(role_permissions::Column::RoleId)
         .column_as(permissions::Column::Domain, "domain")
         .column_as(permissions::Column::Action, "action")
-        .join(JoinType::InnerJoin, role_permissions::Relation::Permissions.def())
+        .join(
+            JoinType::InnerJoin,
+            role_permissions::Relation::Permissions.def(),
+        )
         .filter(role_permissions::Column::RoleId.eq(role_id))
         .into_model::<RolePermissionRow>()
         .all(&app_state.database)
@@ -448,15 +466,12 @@ pub async fn update_role(
         role_active.name = Set(name.clone());
     }
     role_active.updated_at = Set(Utc::now());
-    role_active
-        .update(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("role update error: {e}");
-            AuthError::DbTimeout
-        })?;
+    role_active.update(&app_state.database).await.map_err(|e| {
+        eprintln!("role update error: {e}");
+        AuthError::DbTimeout
+    })?;
 
-     let permissions_list: Vec<String>;
+    let permissions_list: Vec<String>;
 
     if let Some(permission_keys) = permissions {
         role_permissions::Entity::delete_many()
@@ -477,7 +492,10 @@ pub async fn update_role(
             })?;
         let mut permission_lookup = std::collections::HashMap::new();
         for permission in permission_models {
-            permission_lookup.insert(format!("{}:{}", permission.domain, permission.action), permission.id);
+            permission_lookup.insert(
+                format!("{}:{}", permission.domain, permission.action),
+                permission.id,
+            );
         }
 
         let mut inserts = Vec::new();
@@ -501,13 +519,18 @@ pub async fn update_role(
         }
         permissions_list = permission_keys;
 
-        let _ = authz.recompute_effective_permissions_for_role(role_id).await;
+        let _ = authz
+            .recompute_effective_permissions_for_role(role_id)
+            .await;
     } else {
         let permission_rows = role_permissions::Entity::find()
             .select_only()
             .column_as(permissions::Column::Domain, "domain")
             .column_as(permissions::Column::Action, "action")
-            .join(JoinType::InnerJoin, role_permissions::Relation::Permissions.def())
+            .join(
+                JoinType::InnerJoin,
+                role_permissions::Relation::Permissions.def(),
+            )
             .filter(role_permissions::Column::RoleId.eq(role_id))
             .into_tuple::<(String, String)>()
             .all(&app_state.database)
@@ -631,7 +654,9 @@ pub async fn delete_role(
             AuthError::DbTimeout
         })?;
 
-    let _ = authz.recompute_effective_permissions_for_users(&assigned_users).await;
+    let _ = authz
+        .recompute_effective_permissions_for_users(&assigned_users)
+        .await;
 
     if let Some(payload) = build_audit_payload(RoleDeletedPayload {
         role_id,
@@ -773,9 +798,7 @@ pub async fn assign_role_to_user(
         return Err(AuthError::DbConflict);
     }
 
-    let target_scope = req
-        .scope_department_id
-        .or(target_user.department_id);
+    let target_scope = req.scope_department_id.or(target_user.department_id);
 
     authz
         .ensure_permission(
@@ -811,18 +834,15 @@ pub async fn assign_role_to_user(
         updated_at: Set(now),
     };
 
-    assignment
-        .insert(&app_state.database)
-        .await
-        .map_err(|e| {
-            let s = e.to_string();
-            if s.contains("duplicate key value violates unique constraint") {
-                AuthError::DbConflict
-            } else {
-                eprintln!("role assignment insert error: {e}");
-                AuthError::DbTimeout
-            }
-        })?;
+    assignment.insert(&app_state.database).await.map_err(|e| {
+        let s = e.to_string();
+        if s.contains("duplicate key value violates unique constraint") {
+            AuthError::DbConflict
+        } else {
+            eprintln!("role assignment insert error: {e}");
+            AuthError::DbTimeout
+        }
+    })?;
 
     let _ = authz.recompute_effective_permissions(user_id).await;
 

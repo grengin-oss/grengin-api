@@ -6,12 +6,8 @@ use serde_json::Value;
 use crate::dto::llm::mistral::{MistralChatCompletionChunk, MistralToolCallDelta};
 
 use super::{
-    build_tool_call,
-    build_tool_input_delta,
-    parse_web_search_action,
-    StreamParseResult,
-    StreamParser,
-    ToolInput,
+    build_tool_call, build_tool_input_delta, parse_web_search_action, StreamParseResult,
+    StreamParser, ToolInput,
 };
 
 #[derive(Debug, Clone)]
@@ -67,12 +63,14 @@ impl MistralStreamParser {
         arguments_delta: Option<&str>,
     ) -> (Option<String>, String) {
         if let Ok(mut calls) = self.tool_calls.lock() {
-            let entry = calls.entry(tool_id.clone()).or_insert_with(|| MistralToolCallMeta {
-                name: name.clone(),
-                id: tool_id.clone(),
-                buffer: String::new(),
-                index,
-            });
+            let entry = calls
+                .entry(tool_id.clone())
+                .or_insert_with(|| MistralToolCallMeta {
+                    name: name.clone(),
+                    id: tool_id.clone(),
+                    buffer: String::new(),
+                    index,
+                });
             if entry.name.is_none() && name.is_some() {
                 entry.name = name.clone();
             }
@@ -96,10 +94,7 @@ impl MistralStreamParser {
         let tool_id = self.resolve_tool_id(call);
         let index = call.index;
         let name = call.function.as_ref().and_then(|f| f.name.clone());
-        let arguments = call
-            .function
-            .as_ref()
-            .and_then(|f| f.arguments.clone());
+        let arguments = call.function.as_ref().and_then(|f| f.arguments.clone());
 
         let (resolved_name, buffer) =
             self.upsert_tool_meta(tool_id.clone(), name.clone(), index, arguments.as_deref());
@@ -113,7 +108,8 @@ impl MistralStreamParser {
             if finish_reason == Some("tool_calls") || finish_reason == Some("stop") {
                 let tool_name = resolved_name.unwrap_or_else(|| "tool_call".to_string());
                 let input = Some(ToolInput::Json(json));
-                let call = build_tool_call(tool_name, Some(tool_id), input, index, Some(raw.clone()));
+                let call =
+                    build_tool_call(tool_name, Some(tool_id), input, index, Some(raw.clone()));
                 return Some(StreamParseResult::ToolCall(call));
             }
         }
@@ -214,13 +210,13 @@ impl StreamParser for MistralStreamParser {
 
         if let Some(choices) = value.get("choices").and_then(|v| v.as_array()) {
             if let Some(choice) = choices.first() {
-                let finish_reason = choice
-                    .get("finish_reason")
-                    .and_then(|v| v.as_str());
+                let finish_reason = choice.get("finish_reason").and_then(|v| v.as_str());
                 if let Some(message) = choice.get("message") {
                     if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
                         for call in tool_calls {
-                            if let Ok(delta) = serde_json::from_value::<MistralToolCallDelta>(call.clone()) {
+                            if let Ok(delta) =
+                                serde_json::from_value::<MistralToolCallDelta>(call.clone())
+                            {
                                 if let Some(result) =
                                     self.handle_tool_call_delta(&delta, finish_reason, &value)
                                 {

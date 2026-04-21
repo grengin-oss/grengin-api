@@ -62,8 +62,16 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(PromptTemplates::UserId).uuid().null())
                     .col(ColumnDef::new(PromptTemplates::Name).string().not_null())
-                    .col(ColumnDef::new(PromptTemplates::ModelProvider).string().not_null())
-                    .col(ColumnDef::new(PromptTemplates::ModelName).string().not_null())
+                    .col(
+                        ColumnDef::new(PromptTemplates::ModelProvider)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PromptTemplates::ModelName)
+                            .string()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(PromptTemplates::CreatedAt)
                             .timestamp_with_time_zone()
@@ -74,17 +82,41 @@ impl MigrationTrait for Migration {
                             .timestamp_with_time_zone()
                             .not_null(),
                     )
-                    .col(ColumnDef::new(PromptTemplates::UsageCounter).integer().not_null())
-                    .col(ColumnDef::new(PromptTemplates::Description).text().not_null())
-                    .col(ColumnDef::new(PromptTemplates::Category).string().not_null())
-                    .col(ColumnDef::new(PromptTemplates::PromptText).text().not_null())
-                    .col(ColumnDef::new(PromptTemplates::PublicFlag).string().not_null())
+                    .col(
+                        ColumnDef::new(PromptTemplates::UsageCounter)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PromptTemplates::Description)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PromptTemplates::Category)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PromptTemplates::PromptText)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PromptTemplates::PublicFlag)
+                            .string()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(PromptTemplates::SystemFlagTemplate)
                             .string()
                             .not_null(),
                     )
-                    .col(ColumnDef::new(PromptTemplates::Metadata).json_binary().null())
+                    .col(
+                        ColumnDef::new(PromptTemplates::Metadata)
+                            .json_binary()
+                            .null(),
+                    )
                     .to_owned(),
             )
             .await?;

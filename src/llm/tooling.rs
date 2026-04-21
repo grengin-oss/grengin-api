@@ -64,9 +64,7 @@ pub fn mcp_openai_tool_name(server_id: &Uuid, tool_name: &str) -> String {
     let prefix = format!("mcp__{server_part}__");
     let suffix = format!("__{hash}");
     let max_len = 64usize;
-    let max_tool_len = max_len
-        .saturating_sub(prefix.len() + suffix.len())
-        .max(1);
+    let max_tool_len = max_len.saturating_sub(prefix.len() + suffix.len()).max(1);
     if tool_part.len() > max_tool_len {
         tool_part.truncate(max_tool_len);
     }

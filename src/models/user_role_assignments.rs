@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "user_role_assignments", rename_all = "camelCase")]
@@ -18,13 +18,29 @@ pub struct Model {
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(belongs_to = "super::users::Entity", from = "Column::UserId", to = "super::users::Column::Id")]
+    #[sea_orm(
+        belongs_to = "super::users::Entity",
+        from = "Column::UserId",
+        to = "super::users::Column::Id"
+    )]
     Users,
-    #[sea_orm(belongs_to = "super::roles::Entity", from = "Column::RoleId", to = "super::roles::Column::Id")]
+    #[sea_orm(
+        belongs_to = "super::roles::Entity",
+        from = "Column::RoleId",
+        to = "super::roles::Column::Id"
+    )]
     Roles,
-    #[sea_orm(belongs_to = "super::departments::Entity", from = "Column::ScopeDepartmentId", to = "super::departments::Column::Id")]
+    #[sea_orm(
+        belongs_to = "super::departments::Entity",
+        from = "Column::ScopeDepartmentId",
+        to = "super::departments::Column::Id"
+    )]
     ScopeDepartments,
-    #[sea_orm(belongs_to = "super::users::Entity", from = "Column::AssignedBy", to = "super::users::Column::Id")]
+    #[sea_orm(
+        belongs_to = "super::users::Entity",
+        from = "Column::AssignedBy",
+        to = "super::users::Column::Id"
+    )]
     AssignedBy,
 }
 

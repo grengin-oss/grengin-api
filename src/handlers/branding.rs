@@ -1,9 +1,19 @@
-use axum::{Json, extract::State};
+use crate::{
+    auth::{
+        claims::Claims,
+        error::{AuthError, Error},
+        permissions::PERMISSION_AI_PLATFORM_MANAGE,
+    },
+    dto::branding::{Branding, BrandingUpdate},
+    models::branding,
+    services::authorization::{AuthorizationService, PermissionScopeMode},
+    state::SharedState,
+};
+use axum::{extract::State, Json};
 use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, IntoActiveModel};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::{AuthError, Error}, permissions::PERMISSION_AI_PLATFORM_MANAGE}, dto::branding::{Branding, BrandingUpdate}, models::branding, services::authorization::{AuthorizationService, PermissionScopeMode}, state::SharedState};
 
 fn create_default_branding() -> branding::Model {
     branding::Model {

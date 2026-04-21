@@ -113,7 +113,12 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(RolePrompts::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(RolePrompts::Id).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(RolePrompts::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(RolePrompts::Name).string().not_null())
                     .col(ColumnDef::new(RolePrompts::Role).string().not_null())
                     .col(ColumnDef::new(RolePrompts::PromptText).text().not_null())
@@ -171,11 +176,31 @@ impl MigrationTrait for Migration {
             .await?;
 
         let default_prompts = [
-            ("Developer", "developer", "You are a senior software developer at {{company_name}}. Provide precise, practical guidance. Ask clarifying questions when needed. Use the user's context and avoid unnecessary verbosity. Address the user by name when appropriate ({{user_name}})."),
-            ("Marketer", "marketer", "You are a performance marketer at {{company_name}}. Craft clear, persuasive messaging and campaigns. Tailor recommendations to the {{department}} team's goals. Ask for missing details when necessary."),
-            ("Sales", "sales", "You are a sales specialist at {{company_name}}. Write concise, value-focused responses. Adapt tone to the prospect and include next-step suggestions."),
-            ("Support", "support", "You are a customer support specialist at {{company_name}}. Be empathetic, clear, and solution-oriented. Ask for the minimum details required to resolve issues."),
-            ("Analyst", "analyst", "You are a data analyst at {{company_name}}. Provide structured analysis, highlight assumptions, and suggest next actions. Use concise summaries and bullet points when helpful."),
+            (
+                "Developer",
+                "developer",
+                "You are a senior software developer at {{company_name}}. Provide precise, practical guidance. Ask clarifying questions when needed. Use the user's context and avoid unnecessary verbosity. Address the user by name when appropriate ({{user_name}}).",
+            ),
+            (
+                "Marketer",
+                "marketer",
+                "You are a performance marketer at {{company_name}}. Craft clear, persuasive messaging and campaigns. Tailor recommendations to the {{department}} team's goals. Ask for missing details when necessary.",
+            ),
+            (
+                "Sales",
+                "sales",
+                "You are a sales specialist at {{company_name}}. Write concise, value-focused responses. Adapt tone to the prospect and include next-step suggestions.",
+            ),
+            (
+                "Support",
+                "support",
+                "You are a customer support specialist at {{company_name}}. Be empathetic, clear, and solution-oriented. Ask for the minimum details required to resolve issues.",
+            ),
+            (
+                "Analyst",
+                "analyst",
+                "You are a data analyst at {{company_name}}. Provide structured analysis, highlight assumptions, and suggest next actions. Use concise summaries and bullet points when helpful.",
+            ),
         ];
         let variables = json!(["user_name", "department", "company_name"]);
         let now = Expr::current_timestamp();
@@ -334,7 +359,11 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .unique_key(),
                     )
-                    .col(ColumnDef::new(UserPromptPreferences::PromptId).uuid().null())
+                    .col(
+                        ColumnDef::new(UserPromptPreferences::PromptId)
+                            .uuid()
+                            .null(),
+                    )
                     .col(
                         ColumnDef::new(UserPromptPreferences::CustomPromptText)
                             .text()
@@ -372,7 +401,10 @@ impl MigrationTrait for Migration {
         manager
             .create_foreign_key(
                 ForeignKey::create()
-                    .from(UserPromptPreferences::Table, UserPromptPreferences::PromptId)
+                    .from(
+                        UserPromptPreferences::Table,
+                        UserPromptPreferences::PromptId,
+                    )
                     .to(RolePrompts::Table, RolePrompts::Id)
                     .on_delete(ForeignKeyAction::SetNull)
                     .on_update(ForeignKeyAction::Cascade)
@@ -385,7 +417,12 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(PromptFeedback::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(PromptFeedback::Id).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(PromptFeedback::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(PromptFeedback::UserId).uuid().not_null())
                     .col(ColumnDef::new(PromptFeedback::PromptId).uuid().null())
                     .col(ColumnDef::new(PromptFeedback::Rating).integer().not_null())
@@ -441,7 +478,11 @@ impl MigrationTrait for Migration {
             .drop_table(Table::drop().table(UserPromptPreferences::Table).to_owned())
             .await?;
         manager
-            .drop_table(Table::drop().table(DepartmentPromptAssignments::Table).to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(DepartmentPromptAssignments::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
             .drop_table(Table::drop().table(RolePrompts::Table).to_owned())

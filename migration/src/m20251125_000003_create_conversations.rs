@@ -18,26 +18,14 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
-                    .col(
-                        ColumnDef::new(Conversations::UserId)
-                            .uuid()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Conversations::Title)
-                            .string()
-                            .null(),
-                    )
+                    .col(ColumnDef::new(Conversations::UserId).uuid().not_null())
+                    .col(ColumnDef::new(Conversations::Title).string().null())
                     .col(
                         ColumnDef::new(Conversations::ModelProvider)
                             .string()
                             .not_null(),
                     )
-                    .col(
-                        ColumnDef::new(Conversations::ModelName)
-                            .string()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(Conversations::ModelName).string().not_null())
                     .col(
                         // Use timestamp_with_time_zone for Postgres; switch to .timestamp() for MySQL/SQLite
                         ColumnDef::new(Conversations::CreatedAt)
@@ -76,11 +64,7 @@ impl MigrationTrait for Migration {
                             .decimal_len(18, 6)
                             .not_null(),
                     )
-                    .col(
-                        ColumnDef::new(Conversations::Metadata)
-                            .json_binary()
-                            .null(),
-                    )
+                    .col(ColumnDef::new(Conversations::Metadata).json_binary().null())
                     .to_owned(),
             )
             .await?;

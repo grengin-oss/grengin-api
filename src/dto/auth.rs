@@ -1,8 +1,8 @@
+use crate::models::users::UserStatus;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
-use crate::models::users::UserStatus;
 
 #[derive(Serialize, ToSchema)]
 pub struct AuthInit {
@@ -13,7 +13,7 @@ pub struct AuthInit {
     pub state: String,
 }
 
-#[derive(Serialize,Deserialize, IntoParams, ToSchema)]
+#[derive(Serialize, Deserialize, IntoParams, ToSchema)]
 pub struct RefreshToken {
     pub refresh_token: String,
 }
@@ -62,7 +62,7 @@ pub struct User {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hd: Option<String>,
     pub roles: Vec<String>,
-    pub status:UserStatus,
+    pub status: UserStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub department_id: Option<Uuid>,
     /// Super admin has full platform control and cannot be deleted (default: false)

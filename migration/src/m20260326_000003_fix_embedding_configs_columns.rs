@@ -7,7 +7,9 @@ pub struct Migration;
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         // Align column names with camelCase entity mapping.
-        if manager.has_column("embedding_configs", "is_enabled").await?
+        if manager
+            .has_column("embedding_configs", "is_enabled")
+            .await?
             && !manager.has_column("embedding_configs", "isEnabled").await?
         {
             manager
@@ -20,7 +22,9 @@ impl MigrationTrait for Migration {
                 .await?;
         }
 
-        if manager.has_column("embedding_configs", "created_at").await?
+        if manager
+            .has_column("embedding_configs", "created_at")
+            .await?
             && !manager.has_column("embedding_configs", "createdAt").await?
         {
             manager
@@ -33,7 +37,9 @@ impl MigrationTrait for Migration {
                 .await?;
         }
 
-        if manager.has_column("embedding_configs", "updated_at").await?
+        if manager
+            .has_column("embedding_configs", "updated_at")
+            .await?
             && !manager.has_column("embedding_configs", "updatedAt").await?
         {
             manager
@@ -51,7 +57,9 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         if manager.has_column("embedding_configs", "isEnabled").await?
-            && !manager.has_column("embedding_configs", "is_enabled").await?
+            && !manager
+                .has_column("embedding_configs", "is_enabled")
+                .await?
         {
             manager
                 .alter_table(
@@ -64,7 +72,9 @@ impl MigrationTrait for Migration {
         }
 
         if manager.has_column("embedding_configs", "createdAt").await?
-            && !manager.has_column("embedding_configs", "created_at").await?
+            && !manager
+                .has_column("embedding_configs", "created_at")
+                .await?
         {
             manager
                 .alter_table(
@@ -77,7 +87,9 @@ impl MigrationTrait for Migration {
         }
 
         if manager.has_column("embedding_configs", "updatedAt").await?
-            && !manager.has_column("embedding_configs", "updated_at").await?
+            && !manager
+                .has_column("embedding_configs", "updated_at")
+                .await?
         {
             manager
                 .alter_table(

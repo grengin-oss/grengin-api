@@ -33,7 +33,12 @@ async fn ensure_mcp_servers(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
                 Table::create()
                     .table(Alias::new("mcp_servers"))
                     .if_not_exists()
-                    .col(ColumnDef::new(Alias::new("id")).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(Alias::new("id"))
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(Alias::new("name")).string().not_null())
                     .col(ColumnDef::new(Alias::new("description")).text().null())
                     .col(
@@ -265,24 +270,17 @@ async fn ensure_mcp_access_policies(manager: &SchemaManager<'_>) -> Result<(), D
                 Table::create()
                     .table(Alias::new("mcp_access_policies"))
                     .if_not_exists()
-                    .col(ColumnDef::new(Alias::new("id")).uuid().not_null().primary_key())
                     .col(
-                        ColumnDef::new(Alias::new("targetType"))
-                            .string()
-                            .not_null(),
+                        ColumnDef::new(Alias::new("id"))
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
                     )
+                    .col(ColumnDef::new(Alias::new("targetType")).string().not_null())
                     .col(ColumnDef::new(Alias::new("serverId")).uuid().null())
                     .col(ColumnDef::new(Alias::new("toolId")).uuid().null())
-                    .col(
-                        ColumnDef::new(Alias::new("accessType"))
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Alias::new("permission"))
-                            .string()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(Alias::new("accessType")).string().not_null())
+                    .col(ColumnDef::new(Alias::new("permission")).string().not_null())
                     .col(ColumnDef::new(Alias::new("roleName")).string().null())
                     .col(ColumnDef::new(Alias::new("departmentId")).uuid().null())
                     .col(ColumnDef::new(Alias::new("userId")).uuid().null())
@@ -309,9 +307,7 @@ async fn ensure_mcp_access_policies(manager: &SchemaManager<'_>) -> Result<(), D
         "mcp_access_policies",
         "target_type",
         "targetType",
-        ColumnDef::new(Alias::new("targetType"))
-            .string()
-            .not_null(),
+        ColumnDef::new(Alias::new("targetType")).string().not_null(),
     )
     .await?;
     ensure_column_renamed(
@@ -335,9 +331,7 @@ async fn ensure_mcp_access_policies(manager: &SchemaManager<'_>) -> Result<(), D
         "mcp_access_policies",
         "access_type",
         "accessType",
-        ColumnDef::new(Alias::new("accessType"))
-            .string()
-            .not_null(),
+        ColumnDef::new(Alias::new("accessType")).string().not_null(),
     )
     .await?;
     ensure_column_renamed(
@@ -345,9 +339,7 @@ async fn ensure_mcp_access_policies(manager: &SchemaManager<'_>) -> Result<(), D
         "mcp_access_policies",
         "permission",
         "permission",
-        ColumnDef::new(Alias::new("permission"))
-            .string()
-            .not_null(),
+        ColumnDef::new(Alias::new("permission")).string().not_null(),
     )
     .await?;
     ensure_column_renamed(
@@ -379,7 +371,9 @@ async fn ensure_mcp_access_policies(manager: &SchemaManager<'_>) -> Result<(), D
         "mcp_access_policies",
         "inherit_from_server",
         "inheritFromServer",
-        ColumnDef::new(Alias::new("inheritFromServer")).boolean().null(),
+        ColumnDef::new(Alias::new("inheritFromServer"))
+            .boolean()
+            .null(),
     )
     .await?;
     ensure_column_renamed(
@@ -412,7 +406,12 @@ async fn ensure_mcp_tools(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
                 Table::create()
                     .table(Alias::new("mcp_tools"))
                     .if_not_exists()
-                    .col(ColumnDef::new(Alias::new("id")).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(Alias::new("id"))
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(Alias::new("serverId")).uuid().not_null())
                     .col(ColumnDef::new(Alias::new("serverName")).string().not_null())
                     .col(ColumnDef::new(Alias::new("name")).string().not_null())
@@ -606,7 +605,12 @@ async fn ensure_mcp_server_tools(manager: &SchemaManager<'_>) -> Result<(), DbEr
                 Table::create()
                     .table(Alias::new("mcp_server_tools"))
                     .if_not_exists()
-                    .col(ColumnDef::new(Alias::new("id")).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(Alias::new("id"))
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(Alias::new("serverId")).uuid().not_null())
                     .col(ColumnDef::new(Alias::new("toolId")).uuid().not_null())
                     .col(
@@ -676,7 +680,12 @@ async fn ensure_mcp_executions(manager: &SchemaManager<'_>) -> Result<(), DbErr>
                 Table::create()
                     .table(Alias::new("mcp_executions"))
                     .if_not_exists()
-                    .col(ColumnDef::new(Alias::new("id")).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(Alias::new("id"))
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(Alias::new("serverId")).uuid().not_null())
                     .col(ColumnDef::new(Alias::new("serverName")).string().not_null())
                     .col(ColumnDef::new(Alias::new("toolName")).string().not_null())
@@ -808,7 +817,12 @@ async fn ensure_mcp_connections(manager: &SchemaManager<'_>) -> Result<(), DbErr
                 Table::create()
                     .table(Alias::new("mcp_connections"))
                     .if_not_exists()
-                    .col(ColumnDef::new(Alias::new("id")).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(Alias::new("id"))
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(Alias::new("userId")).uuid().not_null())
                     .col(ColumnDef::new(Alias::new("serverId")).uuid().not_null())
                     .col(ColumnDef::new(Alias::new("serverName")).string().not_null())

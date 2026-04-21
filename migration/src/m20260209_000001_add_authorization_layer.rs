@@ -76,18 +76,9 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Roles::Table)
                     .if_not_exists()
-                    .col(
-                        ColumnDef::new(Roles::Id)
-                            .uuid()
-                            .not_null()
-                            .primary_key(),
-                    )
+                    .col(ColumnDef::new(Roles::Id).uuid().not_null().primary_key())
                     .col(ColumnDef::new(Roles::Name).string().not_null())
-                    .col(
-                        ColumnDef::new(Roles::IsSystem)
-                            .boolean()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(Roles::IsSystem).boolean().not_null())
                     .col(
                         ColumnDef::new(Roles::CreatedAt)
                             .timestamp_with_time_zone()
@@ -118,11 +109,7 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(RolePermissions::Table)
                     .if_not_exists()
-                    .col(
-                        ColumnDef::new(RolePermissions::RoleId)
-                            .uuid()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(RolePermissions::RoleId).uuid().not_null())
                     .col(
                         ColumnDef::new(RolePermissions::PermissionId)
                             .uuid()
@@ -181,7 +168,11 @@ impl MigrationTrait for Migration {
                             .uuid()
                             .not_null(),
                     )
-                    .col(ColumnDef::new(UserRoleAssignments::ScopeDepartmentId).uuid().null())
+                    .col(
+                        ColumnDef::new(UserRoleAssignments::ScopeDepartmentId)
+                            .uuid()
+                            .null(),
+                    )
                     .col(
                         ColumnDef::new(UserRoleAssignments::AssignedBy)
                             .uuid()
@@ -429,7 +420,11 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(AuthAuditEvents::Event).string().not_null())
                     .col(ColumnDef::new(AuthAuditEvents::ActorId).uuid().null())
-                    .col(ColumnDef::new(AuthAuditEvents::Payload).json_binary().null())
+                    .col(
+                        ColumnDef::new(AuthAuditEvents::Payload)
+                            .json_binary()
+                            .null(),
+                    )
                     .col(
                         ColumnDef::new(AuthAuditEvents::CreatedAt)
                             .timestamp_with_time_zone()
@@ -460,9 +455,7 @@ impl MigrationTrait for Migration {
             .await?;
         manager
             .get_connection()
-            .execute_unprepared(
-                r#"DROP INDEX IF EXISTS uq_user_role_assignments_orgwide;"#,
-            )
+            .execute_unprepared(r#"DROP INDEX IF EXISTS uq_user_role_assignments_orgwide;"#)
             .await?;
         manager
             .drop_table(Table::drop().table(RolePermissions::Table).to_owned())
@@ -496,6 +489,7 @@ impl Migration {
             ("users", "view", true),
             ("users", "manage", true),
             ("analytics", "view", true),
+            ("audit_logs", "view", false),
             ("budget", "view", true),
             ("budget", "allocate", true),
             ("mcp_servers", "view", false),
@@ -575,7 +569,13 @@ impl Migration {
         }
 
         if let Some(role_id) = role_ids.get("HR Admin") {
-            for key in ["users:view", "users:manage", "departments:view", "roles:view", "roles:assign"] {
+            for key in [
+                "users:view",
+                "users:manage",
+                "departments:view",
+                "roles:view",
+                "roles:assign",
+            ] {
                 if let Some(permission_id) = permission_ids.get(key) {
                     role_permissions.push((*role_id, *permission_id));
                 }
@@ -583,7 +583,12 @@ impl Migration {
         }
 
         if let Some(role_id) = role_ids.get("Finance Admin") {
-            for key in ["budget:view", "budget:allocate", "analytics:view", "departments:view"] {
+            for key in [
+                "budget:view",
+                "budget:allocate",
+                "analytics:view",
+                "departments:view",
+            ] {
                 if let Some(permission_id) = permission_ids.get(key) {
                     role_permissions.push((*role_id, *permission_id));
                 }
@@ -636,8 +641,7 @@ impl Migration {
                 .into_table(RolePermissions::Table)
                 .columns([RolePermissions::RoleId, RolePermissions::PermissionId]);
             for (role_id, permission_id) in role_permissions {
-                insert_role_permissions
-                    .values_panic([role_id.into(), permission_id.into()]);
+                insert_role_permissions.values_panic([role_id.into(), permission_id.into()]);
             }
             manager.exec_stmt(insert_role_permissions).await?;
         }

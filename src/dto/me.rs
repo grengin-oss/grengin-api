@@ -1,10 +1,7 @@
+use crate::{dto::common::SortRule, models::users::UserStatus};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
-use crate::{
-    dto::common::SortRule,
-    models::users::UserStatus,
-};
 
 #[derive(Serialize, ToSchema)]
 pub struct AdministeredDepartmentsResponse {

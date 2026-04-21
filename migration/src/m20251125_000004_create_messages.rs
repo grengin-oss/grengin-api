@@ -12,17 +12,8 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Messages::Table)
                     .if_not_exists()
-                    .col(
-                        ColumnDef::new(Messages::Id)
-                            .uuid()
-                            .not_null()
-                            .primary_key(),
-                    )
-                    .col(
-                        ColumnDef::new(Messages::ConversationId)
-                            .uuid()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(Messages::Id).uuid().not_null().primary_key())
+                    .col(ColumnDef::new(Messages::ConversationId).uuid().not_null())
                     .col(
                         ColumnDef::new(Messages::PreviousMessageId)
                             .uuid()
@@ -34,26 +25,10 @@ impl MigrationTrait for Migration {
                             .string() // DB text/varchar
                             .not_null(),
                     )
-                    .col(
-                        ColumnDef::new(Messages::MessageContent)
-                            .text()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Messages::ModelProvider)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Messages::ModelName)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Messages::RequestTokens)
-                            .integer()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(Messages::MessageContent).text().not_null())
+                    .col(ColumnDef::new(Messages::ModelProvider).string().not_null())
+                    .col(ColumnDef::new(Messages::ModelName).string().not_null())
+                    .col(ColumnDef::new(Messages::RequestTokens).integer().not_null())
                     .col(
                         ColumnDef::new(Messages::ResponseTokens)
                             .integer()
@@ -63,12 +38,12 @@ impl MigrationTrait for Migration {
                         // JSON array payloads; store as jsonb with default [] for non-null Vec<..>
                         ColumnDef::new(Messages::ToolsCalls)
                             .array(ColumnType::JsonBinary)
-                            .not_null()
+                            .not_null(),
                     )
                     .col(
                         ColumnDef::new(Messages::ToolsResults)
                             .array(ColumnType::JsonBinary)
-                            .not_null()
+                            .not_null(),
                     )
                     .col(
                         ColumnDef::new(Messages::CreatedAt)
@@ -80,26 +55,10 @@ impl MigrationTrait for Migration {
                             .timestamp_with_time_zone()
                             .not_null(),
                     )
-                    .col(
-                        ColumnDef::new(Messages::TotalTokens)
-                            .integer()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Messages::Latency)
-                            .integer()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Messages::Cost)
-                            .decimal_len(18, 6)
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(Messages::Metadata)
-                            .json_binary()
-                            .null(),
-                    )
+                    .col(ColumnDef::new(Messages::TotalTokens).integer().not_null())
+                    .col(ColumnDef::new(Messages::Latency).integer().not_null())
+                    .col(ColumnDef::new(Messages::Cost).decimal_len(18, 6).not_null())
+                    .col(ColumnDef::new(Messages::Metadata).json_binary().null())
                     .to_owned(),
             )
             .await?;
@@ -112,7 +71,7 @@ impl MigrationTrait for Migration {
                     .name("fk_messages_conversation_id")
                     .from(Messages::Table, Messages::ConversationId)
                     .to(Conversations::Table, Conversations::Id)
-                    .on_delete(ForeignKeyAction::Cascade)  // delete messages with their conversation
+                    .on_delete(ForeignKeyAction::Cascade) // delete messages with their conversation
                     .on_update(ForeignKeyAction::NoAction)
                     .to_owned(),
             )

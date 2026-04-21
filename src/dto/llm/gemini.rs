@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json, Map};
+use serde_json::{json, Map, Value};
 
 use crate::{llm::prompt::Prompt, models::messages::ChatRole};
 
@@ -120,11 +120,9 @@ pub fn normalize_gemini_parameters(schema: &Value) -> Value {
                     },
                     "items" => sanitize_items(value),
                     "oneOf" | "anyOf" | "allOf" => match value {
-                        Value::Array(list) => Value::Array(
-                            list.iter()
-                                .map(sanitize_schema)
-                                .collect(),
-                        ),
+                        Value::Array(list) => {
+                            Value::Array(list.iter().map(sanitize_schema).collect())
+                        }
                         _ => Value::Array(Vec::new()),
                     },
                     "additionalProperties" => match value {
@@ -135,7 +133,9 @@ pub fn normalize_gemini_parameters(schema: &Value) -> Value {
                     "required" => match value {
                         Value::Array(reqs) => Value::Array(
                             reqs.iter()
-                                .filter_map(|item| item.as_str().map(|s| Value::String(s.to_string())))
+                                .filter_map(|item| {
+                                    item.as_str().map(|s| Value::String(s.to_string()))
+                                })
                                 .collect(),
                         ),
                         _ => Value::Array(Vec::new()),

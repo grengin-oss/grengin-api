@@ -45,5 +45,5 @@ enum Departments {
     #[sea_orm(iden = "departments")]
     Table,
     #[sea_orm(iden = "budgetAvailable")]
-    BudgetAvailable
+    BudgetAvailable,
 }

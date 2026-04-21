@@ -1,8 +1,8 @@
+use crate::models::users::UserStatus;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
-use crate::models::users::UserStatus;
 
 #[derive(Serialize, ToSchema)]
 pub struct User {
@@ -19,7 +19,7 @@ pub struct User {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hd: Option<String>,
     pub roles: Vec<String>,
-    pub status:UserStatus,
+    pub status: UserStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub department: Option<String>,
     pub department_id: Option<Uuid>,
@@ -36,32 +36,31 @@ pub struct User {
     pub effective_permissions: Option<serde_json::Value>,
 }
 
-#[derive(Serialize,ToSchema)]
-pub struct PaginatedUsers{
-  pub users:Vec<User>,
-  pub total:u64,
-  pub limit:u64,
-  pub offset:u64
+#[derive(Serialize, ToSchema)]
+pub struct PaginatedUsers {
+    pub users: Vec<User>,
+    pub total: u64,
+    pub limit: u64,
+    pub offset: u64,
 }
 
-#[derive(Deserialize,ToSchema)]
-pub struct UserCreate{
-   pub email:String,
-   pub name:String,
-   pub department_id:Option<Uuid>,
+#[derive(Deserialize, ToSchema)]
+pub struct UserCreate {
+    pub email: String,
+    pub name: String,
+    pub department_id: Option<Uuid>,
 }
 
-
-#[derive(Deserialize,ToSchema)]
-pub struct UserUpdate{
-   pub email:Option<String>,
-   pub name:Option<String>,
-   pub department_id:Option<Uuid>,
-   /// When true, clear any existing department assignment.
-   pub unassign_department: Option<bool>,
+#[derive(Deserialize, ToSchema)]
+pub struct UserUpdate {
+    pub email: Option<String>,
+    pub name: Option<String>,
+    pub department_id: Option<Uuid>,
+    /// When true, clear any existing department assignment.
+    pub unassign_department: Option<bool>,
 }
 
-#[derive(Deserialize,ToSchema)]
-pub struct UserPatchRequest{
-   pub status:UserStatus,
+#[derive(Deserialize, ToSchema)]
+pub struct UserPatchRequest {
+    pub status: UserStatus,
 }

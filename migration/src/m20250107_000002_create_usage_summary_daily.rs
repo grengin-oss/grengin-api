@@ -17,16 +17,8 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
-                    .col(
-                        ColumnDef::new(UsageSummaryDaily::Date)
-                            .date()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(UsageSummaryDaily::UserId)
-                            .uuid()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(UsageSummaryDaily::Date).date().not_null())
+                    .col(ColumnDef::new(UsageSummaryDaily::UserId).uuid().not_null())
                     .col(
                         ColumnDef::new(UsageSummaryDaily::Department)
                             .string()
@@ -151,19 +143,35 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .drop_index(Index::drop().name("idx_usage_summary_daily_department").to_owned())
+            .drop_index(
+                Index::drop()
+                    .name("idx_usage_summary_daily_department")
+                    .to_owned(),
+            )
             .await?;
 
         manager
-            .drop_index(Index::drop().name("idx_usage_summary_daily_user_id").to_owned())
+            .drop_index(
+                Index::drop()
+                    .name("idx_usage_summary_daily_user_id")
+                    .to_owned(),
+            )
             .await?;
 
         manager
-            .drop_index(Index::drop().name("idx_usage_summary_daily_date").to_owned())
+            .drop_index(
+                Index::drop()
+                    .name("idx_usage_summary_daily_date")
+                    .to_owned(),
+            )
             .await?;
 
         manager
-            .drop_index(Index::drop().name("uq_usage_summary_daily_date_user_model").to_owned())
+            .drop_index(
+                Index::drop()
+                    .name("uq_usage_summary_daily_date_user_model")
+                    .to_owned(),
+            )
             .await?;
 
         manager

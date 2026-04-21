@@ -1,12 +1,3 @@
-use std::collections::{HashMap, HashSet};
-use axum::{Json, extract::{Path, Query, State}};
-use chrono::{DateTime, Utc};
-use migration::{Alias, BinOper, Func, SimpleExpr, extension::postgres::PgExpr};
-use rust_decimal::Decimal;
-use sea_orm::{ActiveModelTrait, Condition, DatabaseConnection, EntityName as _, FromQueryResult, JoinType, Order, PaginatorTrait, QueryOrder, QuerySelect, RelationTrait, sea_query::{Expr, PostgresQueryBuilder,Query as SqlQuery}};
-use reqwest::StatusCode;
-use sea_orm::{ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait as _, QueryFilter, Statement, sqlx::postgres::types::{PgLTree, PgLTreeLabel}};
-use uuid::Uuid;
 use crate::{
     auth::{
         claims::Claims,
@@ -18,10 +9,10 @@ use crate::{
     },
     dto::{
         admin_department::{
-            DepartmentListQuery, DepartmentMembersResponse, DepartmentMemeberListQuery,
-            DepartmentCreate, Department, DepartmentTreeNode, DepartmentTreeQuery,
-            DepartmentTree, DepartmentUpdate, DepartmentsListResponse, DepartmentModelKey,
-            DepartmentMove, RoleAssignmentPayload, DepartmentSortRule,
+            Department, DepartmentCreate, DepartmentListQuery, DepartmentMembersResponse,
+            DepartmentMemeberListQuery, DepartmentModelKey, DepartmentMove, DepartmentSortRule,
+            DepartmentTree, DepartmentTreeNode, DepartmentTreeQuery, DepartmentUpdate,
+            DepartmentsListResponse, RoleAssignmentPayload,
         },
         admin_user::User,
         common::SortRule,
@@ -29,24 +20,43 @@ use crate::{
     models::{
         department_allowed_models,
         departments::{self, ActionOnExceed, BudgetPeriod},
-        roles,
-        user_role_assignments,
+        roles, user_role_assignments,
         users::{self, UserStatus},
     },
     services::{
-        authorization::{AuthorizationService, PermissionScopeMode},
         auth_audit::{build_audit_payload, record_auth_event},
+        authorization::{AuthorizationService, PermissionScopeMode},
         budget_allocation::{
-            period_bounds,
-            refresh_department_budget_available,
-            sum_child_allocations,
+            period_bounds, refresh_department_budget_available, sum_child_allocations,
             sum_department_cost_in_range,
         },
-        department_policies::{load_allowed_models_map, validate_allowed_models_subset, validate_retention_days},
+        department_policies::{
+            load_allowed_models_map, validate_allowed_models_subset, validate_retention_days,
+        },
         notifications::emit_budget_alerts,
     },
     state::SharedState,
 };
+use axum::{
+    extract::{Path, Query, State},
+    Json,
+};
+use chrono::{DateTime, Utc};
+use migration::{extension::postgres::PgExpr, Alias, BinOper, Func, SimpleExpr};
+use reqwest::StatusCode;
+use rust_decimal::Decimal;
+use sea_orm::{
+    sea_query::{Expr, PostgresQueryBuilder, Query as SqlQuery},
+    ActiveModelTrait, Condition, DatabaseConnection, EntityName as _, FromQueryResult, JoinType,
+    Order, PaginatorTrait, QueryOrder, QuerySelect, RelationTrait,
+};
+use sea_orm::{
+    sqlx::postgres::types::{PgLTree, PgLTreeLabel},
+    ActiveValue::Set,
+    ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait as _, QueryFilter, Statement,
+};
+use std::collections::{HashMap, HashSet};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, FromQueryResult)]
 pub(crate) struct DepartmentRow {
@@ -99,31 +109,31 @@ fn ltree_label_from_uuid(id: uuid::Uuid) -> String {
 fn build_ltree_path(parent_path: Option<&str>, id: uuid::Uuid) -> Result<String, AuthError> {
     let mut tree = if let Some(p) = parent_path {
         // parse existing ltree string into PgLTree (validates overall format)
-        p.parse::<PgLTree>().map_err(|_| AuthError::ServiceTemporarilyUnavailable)?
+        p.parse::<PgLTree>()
+            .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?
     } else {
         PgLTree::new()
     };
 
     let label_str = ltree_label_from_uuid(id);
-    let label = PgLTreeLabel::new(label_str).map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
+    let label =
+        PgLTreeLabel::new(label_str).map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
     tree.push(label);
 
     Ok(tree.to_string())
 }
 
-async fn max_subtree_depth(
-    db: &DatabaseConnection,
-    path: &str,
-) -> Result<i32, AuthError> {
+async fn max_subtree_depth(db: &DatabaseConnection, path: &str) -> Result<i32, AuthError> {
     let row = departments::Entity::find()
         .select_only()
-        .expr_as(Func::max(Expr::col(departments::Column::Depth)), "max_depth")
-        .filter(
-            Expr::col(departments::Column::Path).binary(
-                BinOper::Custom("<@".into()),
-                Expr::val(path.to_string()).cast_as(Alias::new("ltree")),
-            ),
+        .expr_as(
+            Func::max(Expr::col(departments::Column::Depth)),
+            "max_depth",
         )
+        .filter(Expr::col(departments::Column::Path).binary(
+            BinOper::Custom("<@".into()),
+            Expr::val(path.to_string()).cast_as(Alias::new("ltree")),
+        ))
         .into_tuple::<(Option<i32>,)>()
         .one(db)
         .await
@@ -219,18 +229,15 @@ async fn sync_department_admin_assignments(
             updated_at: Set(now),
         };
 
-        assignment
-            .insert(db)
-            .await
-            .map_err(|e| {
-                let s = e.to_string();
-                if s.contains("duplicate key value violates unique constraint") {
-                    AuthError::DbConflict
-                } else {
-                    eprintln!("role assignment insert error: {e}");
-                    AuthError::DbTimeout
-                }
-            })?;
+        assignment.insert(db).await.map_err(|e| {
+            let s = e.to_string();
+            if s.contains("duplicate key value violates unique constraint") {
+                AuthError::DbConflict
+            } else {
+                eprintln!("role assignment insert error: {e}");
+                AuthError::DbTimeout
+            }
+        })?;
 
         if let Some(payload) = build_audit_payload(RoleAssignmentPayload {
             assignment_id,
@@ -238,13 +245,7 @@ async fn sync_department_admin_assignments(
             role_id: role.id,
             scope_department_id: Some(department_id),
         }) {
-            let _ = record_auth_event(
-                db,
-                "auth.role_assigned",
-                Some(actor_id),
-                payload,
-            )
-            .await;
+            let _ = record_auth_event(db, "auth.role_assigned", Some(actor_id), payload).await;
         }
 
         affected_users.insert(user_id);
@@ -268,13 +269,7 @@ async fn sync_department_admin_assignments(
             role_id: role.id,
             scope_department_id: Some(department_id),
         }) {
-            let _ = record_auth_event(
-                db,
-                "auth.role_unassigned",
-                Some(actor_id),
-                payload,
-            )
-            .await;
+            let _ = record_auth_event(db, "auth.role_unassigned", Some(actor_id), payload).await;
         }
 
         affected_users.insert(user_id);
@@ -282,7 +277,9 @@ async fn sync_department_admin_assignments(
 
     if !affected_users.is_empty() {
         let affected: Vec<Uuid> = affected_users.into_iter().collect();
-        let _ = authz.recompute_effective_permissions_for_users(&affected).await;
+        let _ = authz
+            .recompute_effective_permissions_for_users(&affected)
+            .await;
     }
 
     Ok(())
@@ -361,7 +358,9 @@ pub(crate) async fn load_department_admin_ids_map(
         .column(user_role_assignments::Column::ScopeDepartmentId)
         .column(user_role_assignments::Column::UserId)
         .filter(user_role_assignments::Column::RoleId.eq(role.id))
-        .filter(user_role_assignments::Column::ScopeDepartmentId.is_in(department_ids.iter().copied()))
+        .filter(
+            user_role_assignments::Column::ScopeDepartmentId.is_in(department_ids.iter().copied()),
+        )
         .into_tuple::<(Option<Uuid>, Uuid)>()
         .all(db)
         .await
@@ -379,7 +378,6 @@ pub(crate) async fn load_department_admin_ids_map(
 
     Ok(map)
 }
-
 
 // Selects all columns but casts path -> text so decoding works
 pub fn departments_base_select() -> sea_orm::Select<departments::Entity> {
@@ -462,7 +460,7 @@ pub async fn create_department(
     claims: Claims,
     State(app_state): State<SharedState>,
     Json(req): Json<DepartmentCreate>,
-) -> Result<(StatusCode,Json<Department>), AuthError> {
+) -> Result<(StatusCode, Json<Department>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
         .ensure_permission(
@@ -518,46 +516,46 @@ pub async fn create_department(
         return Err(AuthError::ServiceTemporarilyUnavailable);
     }
 
-   let insert = SqlQuery::insert()
-    .into_table(departments::Entity)
-    .columns([
-        departments::Column::Id,
-        departments::Column::Name,
-        departments::Column::Description,
-        departments::Column::ParentId,
-        departments::Column::Depth,
-        departments::Column::Path,
-        departments::Column::RetentionDays,
-        departments::Column::CreatedAt,
-        departments::Column::UpdatedAt,
-    ])
-    .values_panic([
-        id.into(),
-        req.name.clone().into(),
-        req.description.clone().into(),
-        req.parent_id.into(),
-        depth.into(),
-        Expr::val(path_str.clone())
-            .cast_as(Alias::new("ltree"))
-            .into(),
-        req.retention_days.into(),
-        created_at.into(),
-        updated_at.into(),
-    ])
-    .to_owned();
-let (sql, values) = insert.build(PostgresQueryBuilder);
+    let insert = SqlQuery::insert()
+        .into_table(departments::Entity)
+        .columns([
+            departments::Column::Id,
+            departments::Column::Name,
+            departments::Column::Description,
+            departments::Column::ParentId,
+            departments::Column::Depth,
+            departments::Column::Path,
+            departments::Column::RetentionDays,
+            departments::Column::CreatedAt,
+            departments::Column::UpdatedAt,
+        ])
+        .values_panic([
+            id.into(),
+            req.name.clone().into(),
+            req.description.clone().into(),
+            req.parent_id.into(),
+            depth.into(),
+            Expr::val(path_str.clone())
+                .cast_as(Alias::new("ltree"))
+                .into(),
+            req.retention_days.into(),
+            created_at.into(),
+            updated_at.into(),
+        ])
+        .to_owned();
+    let (sql, values) = insert.build(PostgresQueryBuilder);
     app_state
-    .database
-    .execute(Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        sql,
-        values,
-    ))
-    .await
-    .map_err(|e| {
-        eprintln!("insert error: {e}");
-        AuthError::DbTimeout
-    })?;
+        .database
+        .execute(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            sql,
+            values,
+        ))
+        .await
+        .map_err(|e| {
+            eprintln!("insert error: {e}");
+            AuthError::DbTimeout
+        })?;
 
     sync_department_allowed_models(&app_state.database, id, req.allowed_models.as_deref()).await?;
 
@@ -614,16 +612,13 @@ pub async fn list_departments(
     Query(q): Query<DepartmentListQuery>,
 ) -> Result<(StatusCode, Json<DepartmentsListResponse>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
-    let target_scope = q
-        .parent_id
-        .as_deref()
-        .and_then(|parent| {
-            if parent.eq_ignore_ascii_case("root") {
-                None
-            } else {
-                Uuid::parse_str(parent).ok()
-            }
-        });
+    let target_scope = q.parent_id.as_deref().and_then(|parent| {
+        if parent.eq_ignore_ascii_case("root") {
+            None
+        } else {
+            Uuid::parse_str(parent).ok()
+        }
+    });
     authz
         .ensure_permission(
             claims.user_id,
@@ -656,12 +651,10 @@ pub async fn list_departments(
                     .ok_or(AuthError::DbNotFound)?;
 
                 // path <@ CAST(parent_path AS ltree)  (no raw string)
-                query = query.filter(
-                    Expr::col(departments::Column::Path).binary(
-                        BinOper::Custom("<@".into()),
-                        Expr::val(parent_dept.path.clone()).cast_as(Alias::new("ltree")),
-                    ),
-                );
+                query = query.filter(Expr::col(departments::Column::Path).binary(
+                    BinOper::Custom("<@".into()),
+                    Expr::val(parent_dept.path.clone()).cast_as(Alias::new("ltree")),
+                ));
             } else {
                 query = query.filter(departments::Column::ParentId.eq(parent_uuid));
             }
@@ -669,7 +662,11 @@ pub async fn list_departments(
     }
 
     if let Some(search) = q.search.as_deref() {
-        query = query.filter(departments::Column::Name.into_expr().ilike(format!("%{}%", search)));
+        query = query.filter(
+            departments::Column::Name
+                .into_expr()
+                .ilike(format!("%{}%", search)),
+        );
     }
 
     query = query.order_by_asc(departments::Column::Name);
@@ -796,10 +793,17 @@ pub async fn list_departments(
             DepartmentSortRule::Members => a.member_count.cmp(&b.member_count),
             DepartmentSortRule::SubDepartments => a.child_count.cmp(&b.child_count),
         };
-        if ascending { ordering } else { ordering.reverse() }
+        if ascending {
+            ordering
+        } else {
+            ordering.reverse()
+        }
     });
 
-    Ok((StatusCode::OK, Json(DepartmentsListResponse { departments, total })))
+    Ok((
+        StatusCode::OK,
+        Json(DepartmentsListResponse { departments, total }),
+    ))
 }
 
 #[utoipa::path(
@@ -856,12 +860,10 @@ pub async fn get_departments_tree(
     let mut query = departments_tree_select();
 
     if let Some(root_dept) = &root {
-        query = query.filter(
-            Expr::col(departments::Column::Path).binary(
-                BinOper::Custom("<@".into()),
-                Expr::val(root_dept.path.clone()).cast_as(Alias::new("ltree")),
-            ),
-        );
+        query = query.filter(Expr::col(departments::Column::Path).binary(
+            BinOper::Custom("<@".into()),
+            Expr::val(root_dept.path.clone()).cast_as(Alias::new("ltree")),
+        ));
         query = query.filter(departments::Column::Depth.lte(root_dept.depth + max_depth));
     } else {
         query = query.filter(departments::Column::Depth.lte(max_depth));
@@ -1062,12 +1064,10 @@ pub async fn get_department_by_id(
     let subtree_ids: Vec<Uuid> = departments::Entity::find()
         .select_only()
         .column(departments::Column::Id)
-        .filter(
-            Expr::col(departments::Column::Path).binary(
-                BinOper::Custom("<@".into()),
-                Expr::val(dept.path.clone()).cast_as(Alias::new("ltree")),
-            ),
-        )
+        .filter(Expr::col(departments::Column::Path).binary(
+            BinOper::Custom("<@".into()),
+            Expr::val(dept.path.clone()).cast_as(Alias::new("ltree")),
+        ))
         .into_tuple::<(Uuid,)>()
         .all(&app_state.database)
         .await
@@ -1114,7 +1114,10 @@ pub async fn get_department_by_id(
             eprintln!("allowed models load error: {e}");
             AuthError::DbTimeout
         })?;
-    let allowed_models = allowed_models_map.get(&dept.id).cloned().unwrap_or_default();
+    let allowed_models = allowed_models_map
+        .get(&dept.id)
+        .cloned()
+        .unwrap_or_default();
 
     let resp = Department {
         id: dept.id,
@@ -1225,8 +1228,7 @@ pub async fn update_department(
                     })?;
 
             let parent_available_for_children =
-                (parent.budget_allocated - other_children_alloc - parent_used)
-                    .max(Decimal::ZERO);
+                (parent.budget_allocated - other_children_alloc - parent_used).max(Decimal::ZERO);
 
             if budget_allocated > parent_available_for_children {
                 return Err(AuthError::BudgetExceedsParentAvailable);
@@ -1309,12 +1311,13 @@ pub async fn update_department(
             (departments::Column::Depth, depth.into()),
             (
                 departments::Column::Path,
-                Expr::val(path.clone())
-                    .cast_as(Alias::new("ltree"))
-                    .into(),
+                Expr::val(path.clone()).cast_as(Alias::new("ltree")).into(),
             ),
             (departments::Column::RetentionDays, retention_days.into()),
-            (departments::Column::BudgetAllocated, budget_allocated.into()),
+            (
+                departments::Column::BudgetAllocated,
+                budget_allocated.into(),
+            ),
             (departments::Column::BudgetPeriod, budget_period.into()),
             (departments::Column::ActionOnExceed, action_on_exceed.into()),
             (departments::Column::UpdatedAt, updated_at.into()),
@@ -1452,12 +1455,16 @@ pub async fn move_department(
             eprintln!("allowed models validation error: {e}");
             AuthError::DbConflict
         })?;
-    validate_retention_days(&app_state.database, Some(new_parent.id), dept.retention_days)
-        .await
-        .map_err(|e| {
-            eprintln!("retention_days validation error: {e}");
-            AuthError::DbConflict
-        })?;
+    validate_retention_days(
+        &app_state.database,
+        Some(new_parent.id),
+        dept.retention_days,
+    )
+    .await
+    .map_err(|e| {
+        eprintln!("retention_days validation error: {e}");
+        AuthError::DbConflict
+    })?;
 
     let subtree_max = max_subtree_depth(&app_state.database, &dept.path).await?;
     let new_root_depth = new_parent.depth + 1;
@@ -1521,12 +1528,10 @@ pub async fn move_department(
             ),
             (departments::Column::UpdatedAt, updated_at.into()),
         ])
-        .and_where(
-            Expr::col(departments::Column::Path).binary(
-                BinOper::Custom("<@".into()),
-                Expr::val(dept.path.clone()).cast_as(Alias::new("ltree")),
-            ),
-        )
+        .and_where(Expr::col(departments::Column::Path).binary(
+            BinOper::Custom("<@".into()),
+            Expr::val(dept.path.clone()).cast_as(Alias::new("ltree")),
+        ))
         .to_owned();
 
     let (subtree_sql, subtree_values) = subtree_stmt.build(PostgresQueryBuilder);
@@ -1599,7 +1604,7 @@ pub async fn delete_department(
         return Err(AuthError::DbNotFound);
     }
     let _ = authz.recompute_effective_permissions_for_all_users().await;
-  Ok(StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(
@@ -1621,10 +1626,10 @@ pub async fn add_users_in_department(
     claims: Claims,
     State(app_state): State<SharedState>,
     Path(department_id): Path<Uuid>,
-    Json(user_ids):Json<Vec<Uuid>>,
-) -> Result<(StatusCode,Json<Department>), AuthError> {
-     let authz = AuthorizationService::new(&app_state.database);
-     authz
+    Json(user_ids): Json<Vec<Uuid>>,
+) -> Result<(StatusCode, Json<Department>), AuthError> {
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
         .ensure_permission(
             claims.user_id,
             PERMISSION_DEPARTMENTS_MANAGE,
@@ -1633,12 +1638,14 @@ pub async fn add_users_in_department(
             Some(department_id),
         )
         .await?;
-    let response = get_department_by_id(claims,State(app_state.clone()),Path(department_id.clone()))
-        .await
-        .map_err(|_|{
-          AuthError::DbTimeout  
-        })?;
-     users::Entity::update_many()
+    let response = get_department_by_id(
+        claims,
+        State(app_state.clone()),
+        Path(department_id.clone()),
+    )
+    .await
+    .map_err(|_| AuthError::DbTimeout)?;
+    users::Entity::update_many()
         .filter(users::Column::Id.is_in(user_ids.clone()))
         .col_expr(users::Column::DepartmentId, Expr::value(department_id))
         .col_expr(users::Column::UpdatedAt, Expr::value(Utc::now()))
@@ -1648,7 +1655,9 @@ pub async fn add_users_in_department(
             eprintln!("db update many error: {e}");
             AuthError::DbTimeout
         })?;
-    let _ = authz.recompute_effective_permissions_for_users(&user_ids).await;
+    let _ = authz
+        .recompute_effective_permissions_for_users(&user_ids)
+        .await;
     Ok(response)
 }
 
@@ -1671,11 +1680,11 @@ pub async fn remove_users_from_department(
     claims: Claims,
     State(app_state): State<SharedState>,
     Path(department_id): Path<Uuid>,
-    Query(query):Query<DepartmentMemeberListQuery>,
-    Json(user_ids):Json<Vec<Uuid>>,
-) -> Result<(StatusCode,Json<Department>), AuthError> {
-     let authz = AuthorizationService::new(&app_state.database);
-     authz
+    Query(query): Query<DepartmentMemeberListQuery>,
+    Json(user_ids): Json<Vec<Uuid>>,
+) -> Result<(StatusCode, Json<Department>), AuthError> {
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
         .ensure_permission(
             claims.user_id,
             PERMISSION_DEPARTMENTS_MANAGE,
@@ -1684,53 +1693,56 @@ pub async fn remove_users_from_department(
             Some(department_id),
         )
         .await?;
- let force = query.force.unwrap_or(false);
+    let force = query.force.unwrap_or(false);
 
- let users_t = Alias::new(users::Entity.table_name());
- let depts_t = Alias::new(departments::Entity.table_name());
+    let users_t = Alias::new(users::Entity.table_name());
+    let depts_t = Alias::new(departments::Entity.table_name());
 
-// SELECT parent_id FROM departments WHERE id = ?
-let parent_select = SqlQuery::select()
-    .column((depts_t.clone(), departments::Column::ParentId))
-    .from(depts_t.clone())
-    .and_where(Expr::col((depts_t.clone(), departments::Column::Id)).eq(department_id))
-    .to_owned();
+    // SELECT parent_id FROM departments WHERE id = ?
+    let parent_select = SqlQuery::select()
+        .column((depts_t.clone(), departments::Column::ParentId))
+        .from(depts_t.clone())
+        .and_where(Expr::col((depts_t.clone(), departments::Column::Id)).eq(department_id))
+        .to_owned();
 
-let parent_subexpr: SimpleExpr = SimpleExpr::SubQuery(
-    None,
-    Box::new(parent_select.into_sub_query_statement()),
-);
+    let parent_subexpr: SimpleExpr =
+        SimpleExpr::SubQuery(None, Box::new(parent_select.into_sub_query_statement()));
 
-let new_dept_expr: SimpleExpr = if force {
-    parent_subexpr
-} else {
-    // department_id = NULL
-    Expr::value(Option::<Uuid>::None).into()
-};
+    let new_dept_expr: SimpleExpr = if force {
+        parent_subexpr
+    } else {
+        // department_id = NULL
+        Expr::value(Option::<Uuid>::None).into()
+    };
 
-// UPDATE users SET department_id = (subquery or NULL) WHERE ...
-let update_stmt = SqlQuery::update()
-    .table(users_t.clone())
-    .value(users::Column::DepartmentId, new_dept_expr)
-    .value(users::Column::UpdatedAt, Expr::value(Utc::now()))
-    .and_where(Expr::col((users_t.clone(), users::Column::Id)).is_in(user_ids.clone()))
-    .and_where(Expr::col((users_t.clone(), users::Column::DepartmentId)).eq(department_id))
-    .to_owned();
+    // UPDATE users SET department_id = (subquery or NULL) WHERE ...
+    let update_stmt = SqlQuery::update()
+        .table(users_t.clone())
+        .value(users::Column::DepartmentId, new_dept_expr)
+        .value(users::Column::UpdatedAt, Expr::value(Utc::now()))
+        .and_where(Expr::col((users_t.clone(), users::Column::Id)).is_in(user_ids.clone()))
+        .and_where(Expr::col((users_t.clone(), users::Column::DepartmentId)).eq(department_id))
+        .to_owned();
 
-// execute (no manual SQL text; SQL is generated + values bound)
-let (sql, values) = update_stmt.build(PostgresQueryBuilder);
+    // execute (no manual SQL text; SQL is generated + values bound)
+    let (sql, values) = update_stmt.build(PostgresQueryBuilder);
 
-app_state
-    .database
-    .execute(Statement::from_sql_and_values(DatabaseBackend::Postgres, sql, values))
-    .await
-    .map_err(|e| {
-        eprintln!("db update error: {e}");
-        AuthError::DbTimeout
-    })?;
-  let _ = authz.recompute_effective_permissions_for_users(&user_ids).await;
-  get_department_by_id(claims,State(app_state),Path(department_id))
-   .await
+    app_state
+        .database
+        .execute(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            sql,
+            values,
+        ))
+        .await
+        .map_err(|e| {
+            eprintln!("db update error: {e}");
+            AuthError::DbTimeout
+        })?;
+    let _ = authz
+        .recompute_effective_permissions_for_users(&user_ids)
+        .await;
+    get_department_by_id(claims, State(app_state), Path(department_id)).await
 }
 
 #[utoipa::path(
@@ -1757,12 +1769,15 @@ pub async fn get_users_from_department(
     claims: Claims,
     State(app_state): State<SharedState>,
     Path(department_id): Path<Uuid>,
-    Query(query):Query<DepartmentMemeberListQuery>
-) -> Result<(StatusCode,Json<DepartmentMembersResponse>), AuthError> {
-     let include_sub_department = query.include_sub_department.unwrap_or(false);
-     let mut response = DepartmentMembersResponse{total:0,members:Vec::new()};
-     let authz = AuthorizationService::new(&app_state.database);
-     authz
+    Query(query): Query<DepartmentMemeberListQuery>,
+) -> Result<(StatusCode, Json<DepartmentMembersResponse>), AuthError> {
+    let include_sub_department = query.include_sub_department.unwrap_or(false);
+    let mut response = DepartmentMembersResponse {
+        total: 0,
+        members: Vec::new(),
+    };
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
         .ensure_permission(
             claims.user_id,
             PERMISSION_USERS_VIEW,
@@ -1772,27 +1787,31 @@ pub async fn get_users_from_department(
         )
         .await?;
     let root = departments_base_select()
-      .filter(departments::Column::Id.eq(department_id))
-      .into_model::<DepartmentRow>()
-      .one(&app_state.database)
-      .await
-      .map_err(|e| { eprintln!("db error: {e}"); AuthError::DbTimeout })?
-      .ok_or(AuthError::DbNotFound)?;
+        .filter(departments::Column::Id.eq(department_id))
+        .into_model::<DepartmentRow>()
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db error: {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::DbNotFound)?;
 
     let subtree_dept_ids: Vec<Uuid> = departments::Entity::find()
-       .select_only()
-       .column(departments::Column::Id)
-       .filter(
-         Expr::col(departments::Column::Path).binary(
+        .select_only()
+        .column(departments::Column::Id)
+        .filter(Expr::col(departments::Column::Path).binary(
             BinOper::Custom("<@".into()),
             // RHS must be ltree-typed
             Expr::val(root.path.clone()).cast_as(Alias::new("ltree")),
-        ),
-        )
+        ))
         .into_tuple() // returns Vec<(Uuid,)>
         .all(&app_state.database)
         .await
-        .map_err(|e| { eprintln!("db error: {e}"); AuthError::DbTimeout })?
+        .map_err(|e| {
+            eprintln!("db error: {e}");
+            AuthError::DbTimeout
+        })?
         .into_iter()
         .map(|(id,)| id)
         .collect();
@@ -1812,12 +1831,18 @@ pub async fn get_users_from_department(
                 AuthError::DbTimeout
             })?;
         if role_user_ids.is_empty() {
-            return Ok((StatusCode::OK, Json(DepartmentMembersResponse { total: 0, members: Vec::new() })));
+            return Ok((
+                StatusCode::OK,
+                Json(DepartmentMembersResponse {
+                    total: 0,
+                    members: Vec::new(),
+                }),
+            ));
         }
         select = select.filter(users::Column::Id.is_in(role_user_ids));
     }
-    if let Some(status) = query.status{
-       select = select.filter(users::Column::Status.eq(status))
+    if let Some(status) = query.status {
+        select = select.filter(users::Column::Status.eq(status))
     }
     let order = query.order.as_deref().unwrap_or("desc");
     let ord = if order.eq_ignore_ascii_case("asc") {
@@ -1825,66 +1850,87 @@ pub async fn get_users_from_department(
     } else {
         Order::Desc
     };
-    if let Some(sort) = query.sort{
-       select = match sort {
-          SortRule::Name => select.order_by(users::Column::Name,ord),
-          SortRule::Email => select.order_by(users::Column::Email,ord),
-          SortRule::CreatedAt => select.order_by(users::Column::CreatedAt,ord),
-          SortRule::UpdatedAt => select.order_by(users::Column::UpdatedAt,ord),
-          SortRule::LastLoginAt => select.order_by(users::Column::LastLoginAt,ord),
-          _ => select.order_by(users::Column::CreatedAt,ord),
-      };
+    if let Some(sort) = query.sort {
+        select = match sort {
+            SortRule::Name => select.order_by(users::Column::Name, ord),
+            SortRule::Email => select.order_by(users::Column::Email, ord),
+            SortRule::CreatedAt => select.order_by(users::Column::CreatedAt, ord),
+            SortRule::UpdatedAt => select.order_by(users::Column::UpdatedAt, ord),
+            SortRule::LastLoginAt => select.order_by(users::Column::LastLoginAt, ord),
+            _ => select.order_by(users::Column::CreatedAt, ord),
+        };
     }
-    if let Some(search) = &query.search{
-       select = select.filter(    
-       Condition::any()
-         .add(users::Column::Name.into_expr().ilike(format!("%{}%", search)))
-         .add(users::Column::Email.into_expr().ilike(format!("%{}%", search)))
-         .add(departments::Column::Name.into_expr().ilike(format!("%{}%", search)))
-     );
+    if let Some(search) = &query.search {
+        select = select.filter(
+            Condition::any()
+                .add(
+                    users::Column::Name
+                        .into_expr()
+                        .ilike(format!("%{}%", search)),
+                )
+                .add(
+                    users::Column::Email
+                        .into_expr()
+                        .ilike(format!("%{}%", search)),
+                )
+                .add(
+                    departments::Column::Name
+                        .into_expr()
+                        .ilike(format!("%{}%", search)),
+                ),
+        );
     }
     let users_row = if include_sub_department {
-    // subtree_dept_ids logic above...
-    select
-        .filter(users::Column::DepartmentId.is_in(subtree_dept_ids))
-        .all(&app_state.database)
-        .await
-        .map_err(|e| { eprintln!("db error: {e}"); AuthError::DbTimeout })? 
+        // subtree_dept_ids logic above...
+        select
+            .filter(users::Column::DepartmentId.is_in(subtree_dept_ids))
+            .all(&app_state.database)
+            .await
+            .map_err(|e| {
+                eprintln!("db error: {e}");
+                AuthError::DbTimeout
+            })?
     } else {
-       select
-        .filter(users::Column::DepartmentId.eq(department_id))
-        .all(&app_state.database)
-        .await
-        .map_err(|e| { eprintln!("db error: {e}"); AuthError::DbTimeout })?
-     };
-     let user_ids: Vec<Uuid> = users_row.iter().map(|u| u.id).collect();
-     let roles_map = authz.user_roles_map(&user_ids).await?;
-     response.members = users_row
-       .into_iter()
-       .map(|user| {
-        let roles = roles_map.get(&user.id).cloned().unwrap_or_default();
-        let is_super_admin = roles.iter().any(|r| r == "Super Admin");
-        User{ 
-            id:user.id,
-            sub: user.azure_id.unwrap_or(user.google_id.unwrap_or(user.email.clone())),
-            email:user.email,
-            name: user.name,
-            picture:user.picture,
-            hd:user.hd,
-            roles,
-            status:user.status,
-            department:None,
-            department_id:user.department_id,
-            is_super_admin,
-            has_password:user.password.is_some(),
-            mfa_enabled:user.mfa_enabled,
-            last_login_at:Some(user.last_login_at),
-            password_changed_at:user.password_changed_at,
-            created_at:user.created_at,
-            updated_at:user.updated_at,
-            effective_permissions:user.effective_permissions,
-        }
-    }).collect();
+        select
+            .filter(users::Column::DepartmentId.eq(department_id))
+            .all(&app_state.database)
+            .await
+            .map_err(|e| {
+                eprintln!("db error: {e}");
+                AuthError::DbTimeout
+            })?
+    };
+    let user_ids: Vec<Uuid> = users_row.iter().map(|u| u.id).collect();
+    let roles_map = authz.user_roles_map(&user_ids).await?;
+    response.members = users_row
+        .into_iter()
+        .map(|user| {
+            let roles = roles_map.get(&user.id).cloned().unwrap_or_default();
+            let is_super_admin = roles.iter().any(|r| r == "Super Admin");
+            User {
+                id: user.id,
+                sub: user
+                    .azure_id
+                    .unwrap_or(user.google_id.unwrap_or(user.email.clone())),
+                email: user.email,
+                name: user.name,
+                picture: user.picture,
+                hd: user.hd,
+                roles,
+                status: user.status,
+                department: None,
+                department_id: user.department_id,
+                is_super_admin,
+                has_password: user.password.is_some(),
+                mfa_enabled: user.mfa_enabled,
+                last_login_at: Some(user.last_login_at),
+                password_changed_at: user.password_changed_at,
+                created_at: user.created_at,
+                updated_at: user.updated_at,
+                effective_permissions: user.effective_permissions,
+            }
+        })
+        .collect();
     response.total = response.members.len() as i32;
-  Ok((StatusCode::OK,Json(response)))
+    Ok((StatusCode::OK, Json(response)))
 }

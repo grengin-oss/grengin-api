@@ -1,17 +1,20 @@
-use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
-use migration::OnConflict;
-use std::{collections::hash_map::DefaultHasher, hash::{Hash, Hasher}};
-use sea_orm::{ActiveValue::Set, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
-use serde::{de::DeserializeOwned, Serialize};
-use uuid::Uuid;
 use crate::{
     dto::analytics::{
-        DepartmentAnalyticsQuery, DepartmentAnalytics, AnalyticsOverview, TimeSeriesQuery,
-        AnalyticsTimeSeries, UserAnalyticsQuery, UserAnalytics,
+        AnalyticsOverview, AnalyticsTimeSeries, DepartmentAnalytics, DepartmentAnalyticsQuery,
+        TimeSeriesQuery, UserAnalytics, UserAnalyticsQuery,
     },
     models::analytics,
     services::analytics as analytics_service,
 };
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
+use migration::OnConflict;
+use sea_orm::{ActiveValue::Set, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
+use serde::{de::DeserializeOwned, Serialize};
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
+use uuid::Uuid;
 
 const CACHE_WINDOWS_DAYS: [i64; 3] = [7, 30, 90];
 const CACHE_WINDOW_MTD: &str = "mtd";
@@ -50,8 +53,7 @@ fn cache_window_for_days(days: i64, today: NaiveDate) -> CacheWindow {
 }
 
 fn cache_window_for_mtd(today: NaiveDate) -> CacheWindow {
-    let start_date = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
-        .unwrap_or(today);
+    let start_date = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
     CacheWindow {
         key: CACHE_WINDOW_MTD.to_string(),
         start_date,
@@ -247,8 +249,7 @@ pub async fn get_user_analytics_cached(
             }
         }
 
-        let result =
-            analytics_service::calculate_user_analytics(db, query, page, limit).await?;
+        let result = analytics_service::calculate_user_analytics(db, query, page, limit).await?;
         save_cached_response(db, &key, CACHE_CATEGORY_USERS, &window, &result).await?;
         return Ok(result);
     }
@@ -308,7 +309,10 @@ pub async fn get_timeseries_analytics_cached(
     db: &DatabaseConnection,
     query: TimeSeriesQuery,
 ) -> Result<AnalyticsTimeSeries, DbErr> {
-    let granularity = query.granularity.clone().unwrap_or_else(|| "day".to_string());
+    let granularity = query
+        .granularity
+        .clone()
+        .unwrap_or_else(|| "day".to_string());
     let live = query.live.unwrap_or(false);
 
     if let Some(window) = cache_window_for_query(query.start_date, query.end_date) {
@@ -335,10 +339,7 @@ pub async fn get_timeseries_analytics_cached(
         .await
 }
 
-async fn refresh_cache_window(
-    db: &DatabaseConnection,
-    window: CacheWindow,
-) -> Result<(), DbErr> {
+async fn refresh_cache_window(db: &DatabaseConnection, window: CacheWindow) -> Result<(), DbErr> {
     let overview = analytics_service::get_overview_analytics(
         db,
         Some(window.start_date),
@@ -346,7 +347,14 @@ async fn refresh_cache_window(
     )
     .await?;
     let overview_key = cache_key(CACHE_CATEGORY_OVERVIEW, &window.key, "");
-    save_cached_response(db, &overview_key, CACHE_CATEGORY_OVERVIEW, &window, &overview).await?;
+    save_cached_response(
+        db,
+        &overview_key,
+        CACHE_CATEGORY_OVERVIEW,
+        &window,
+        &overview,
+    )
+    .await?;
 
     let user_query = UserAnalyticsQuery {
         start_date: Some(window.start_date),
@@ -373,7 +381,7 @@ async fn refresh_cache_window(
         limit: Some(20),
         search: None,
         live: None,
-        department_id:None,
+        department_id: None,
         sort: None,
         ascending: None,
     };
@@ -393,7 +401,14 @@ async fn refresh_cache_window(
         &window.key,
         &department_cache_suffix(&dept_query, 20, 0),
     );
-    save_cached_response(db, &dept_key, CACHE_CATEGORY_DEPARTMENTS, &window, &departments).await?;
+    save_cached_response(
+        db,
+        &dept_key,
+        CACHE_CATEGORY_DEPARTMENTS,
+        &window,
+        &departments,
+    )
+    .await?;
 
     let ts_query = TimeSeriesQuery {
         start_date: Some(window.start_date),

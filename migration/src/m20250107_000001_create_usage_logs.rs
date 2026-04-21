@@ -17,31 +17,11 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
-                    .col(
-                        ColumnDef::new(UsageLogs::Identifier)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(UsageLogs::UserId)
-                            .uuid()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(UsageLogs::ModelProvider)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(UsageLogs::ModelName)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(UsageLogs::ConversationId)
-                            .uuid()
-                            .null(),
-                    )
+                    .col(ColumnDef::new(UsageLogs::Identifier).string().not_null())
+                    .col(ColumnDef::new(UsageLogs::UserId).uuid().not_null())
+                    .col(ColumnDef::new(UsageLogs::ModelProvider).string().not_null())
+                    .col(ColumnDef::new(UsageLogs::ModelName).string().not_null())
+                    .col(ColumnDef::new(UsageLogs::ConversationId).uuid().null())
                     .col(
                         ColumnDef::new(UsageLogs::RequestTokens)
                             .big_integer()
@@ -78,27 +58,15 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
-                    .col(
-                        ColumnDef::new(UsageLogs::Department)
-                            .string()
-                            .null(),
-                    )
+                    .col(ColumnDef::new(UsageLogs::Department).string().null())
                     .col(
                         ColumnDef::new(UsageLogs::Status)
                             .string()
                             .not_null()
                             .default("success"),
                     )
-                    .col(
-                        ColumnDef::new(UsageLogs::ErrorMessage)
-                            .text()
-                            .null(),
-                    )
-                    .col(
-                        ColumnDef::new(UsageLogs::Metadata)
-                            .json_binary()
-                            .null(),
-                    )
+                    .col(ColumnDef::new(UsageLogs::ErrorMessage).text().null())
+                    .col(ColumnDef::new(UsageLogs::Metadata).json_binary().null())
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_usage_logs_user")
@@ -192,7 +160,11 @@ impl MigrationTrait for Migration {
             .await?;
 
         manager
-            .drop_index(Index::drop().name("idx_usage_logs_model_provider").to_owned())
+            .drop_index(
+                Index::drop()
+                    .name("idx_usage_logs_model_provider")
+                    .to_owned(),
+            )
             .await?;
 
         manager

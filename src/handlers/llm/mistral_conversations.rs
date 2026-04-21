@@ -4,13 +4,8 @@ use std::sync::Mutex;
 use serde_json::Value;
 
 use super::{
-    build_tool_call,
-    build_tool_input_delta,
-    parse_web_search_action,
-    StreamParseResult,
-    StreamParser,
-    StreamWebSearchResult,
-    ToolInput,
+    build_tool_call, build_tool_input_delta, parse_web_search_action, StreamParseResult,
+    StreamParser, StreamWebSearchResult, ToolInput,
 };
 
 #[derive(Debug, Clone)]
@@ -42,7 +37,11 @@ impl MistralConversationStreamParser {
         None
     }
 
-    fn parse_message_output_delta(&self, payload: &Value, request_id: Option<String>) -> Option<StreamParseResult> {
+    fn parse_message_output_delta(
+        &self,
+        payload: &Value,
+        request_id: Option<String>,
+    ) -> Option<StreamParseResult> {
         let content = payload.get("content")?;
         let mut collected_text = String::new();
         let mut references: Vec<StreamWebSearchResult> = Vec::new();
@@ -54,10 +53,24 @@ impl MistralConversationStreamParser {
                 }
             }
             if item.get("type").and_then(|v| v.as_str()) == Some("tool_reference") {
-                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let source = item.get("tool").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let snippet = item.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let title = item
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let url = item
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let source = item
+                    .get("tool")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let snippet = item
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
                 if !title.is_empty() || !url.is_empty() {
                     references.push(StreamWebSearchResult {
                         title,
@@ -99,9 +112,20 @@ impl MistralConversationStreamParser {
     }
 
     fn parse_tool_execution(&self, payload: &Value, is_done: bool) -> Option<StreamParseResult> {
-        let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("tool_call").to_string();
-        let tool_id = payload.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let arguments = payload.get("arguments").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name = payload
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("tool_call")
+            .to_string();
+        let tool_id = payload
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let arguments = payload
+            .get("arguments")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if is_done {
             let mut output = payload.get("info").cloned().unwrap_or(Value::Null);
             if output.is_null() || output == Value::Object(Default::default()) {
@@ -115,19 +139,44 @@ impl MistralConversationStreamParser {
                 output = payload.clone();
             }
             if name.contains("web_search") {
-                let results = output.get("results")
+                let results = output
+                    .get("results")
                     .and_then(|v| v.as_array())
                     .or_else(|| payload.get("results").and_then(|v| v.as_array()))
-                    .or_else(|| payload.get("result").and_then(|v| v.get("results")).and_then(|v| v.as_array()))
-                    .or_else(|| payload.get("output").and_then(|v| v.get("results")).and_then(|v| v.as_array()));
+                    .or_else(|| {
+                        payload
+                            .get("result")
+                            .and_then(|v| v.get("results"))
+                            .and_then(|v| v.as_array())
+                    })
+                    .or_else(|| {
+                        payload
+                            .get("output")
+                            .and_then(|v| v.get("results"))
+                            .and_then(|v| v.as_array())
+                    });
                 if let Some(results) = results {
                     let mapped = results
                         .iter()
                         .filter_map(|item| {
-                            let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let source = item.get("source").and_then(|v| v.as_str()).map(|s| s.to_string());
-                            let snippet = item.get("snippet").and_then(|v| v.as_str()).map(|s| s.to_string());
+                            let title = item
+                                .get("title")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let url = item
+                                .get("url")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let source = item
+                                .get("source")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            let snippet = item
+                                .get("snippet")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
                             if title.is_empty() && url.is_empty() {
                                 None
                             } else {
@@ -170,16 +219,28 @@ impl MistralConversationStreamParser {
     }
 
     fn parse_function_call_delta(&self, payload: &Value) -> Option<StreamParseResult> {
-        let tool_call_id = payload.get("tool_call_id").and_then(|v| v.as_str())?.to_string();
-        let name = payload.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let arguments = payload.get("arguments").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let tool_call_id = payload
+            .get("tool_call_id")
+            .and_then(|v| v.as_str())?
+            .to_string();
+        let name = payload
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let arguments = payload
+            .get("arguments")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         if let Ok(mut buffers) = self.tool_buffers.lock() {
-            let entry = buffers.entry(tool_call_id.clone()).or_insert_with(|| ToolBuffer {
-                name: name.clone(),
-                buffer: String::new(),
-                index: None,
-            });
+            let entry = buffers
+                .entry(tool_call_id.clone())
+                .or_insert_with(|| ToolBuffer {
+                    name: name.clone(),
+                    buffer: String::new(),
+                    index: None,
+                });
             if entry.name.is_none() && name.is_some() {
                 entry.name = name.clone();
             }
@@ -188,7 +249,10 @@ impl MistralConversationStreamParser {
             }
             let candidate = entry.buffer.clone();
             if let Ok(json) = serde_json::from_str::<Value>(&candidate) {
-                let tool_name = entry.name.clone().unwrap_or_else(|| "tool_call".to_string());
+                let tool_name = entry
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| "tool_call".to_string());
                 let call = build_tool_call(
                     tool_name,
                     Some(tool_call_id),
@@ -252,9 +316,18 @@ impl StreamParser for MistralConversationStreamParser {
             }
             "conversation.response.done" => {
                 if let Some(usage) = payload.get("usage") {
-                    let input_tokens = usage.get("prompt_tokens").and_then(|v| v.as_u64()).map(|v| v as u32);
-                    let output_tokens = usage.get("completion_tokens").and_then(|v| v.as_u64()).map(|v| v as u32);
-                    let total_tokens = usage.get("total_tokens").and_then(|v| v.as_u64()).map(|v| v as u32);
+                    let input_tokens = usage
+                        .get("prompt_tokens")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32);
+                    let output_tokens = usage
+                        .get("completion_tokens")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32);
+                    let total_tokens = usage
+                        .get("total_tokens")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32);
                     return StreamParseResult::TokenUsage {
                         request_id: None,
                         input_tokens,
@@ -264,8 +337,16 @@ impl StreamParser for MistralConversationStreamParser {
                 }
             }
             "conversation.response.error" => {
-                let message = payload.get("message").and_then(|v| v.as_str()).unwrap_or("mistral error").to_string();
-                let code = payload.get("code").and_then(|v| v.as_i64()).map(|v| v.to_string()).unwrap_or("mistral_error".to_string());
+                let message = payload
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("mistral error")
+                    .to_string();
+                let code = payload
+                    .get("code")
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v.to_string())
+                    .unwrap_or("mistral_error".to_string());
                 return StreamParseResult::Error {
                     error_type: code,
                     message,

@@ -44,5 +44,3 @@ enum SsoProviders {
     #[iden = "redirectUrl"]
     RedirectUrl, // <- new field
 }
-
-

@@ -1,22 +1,18 @@
-use anyhow::{Error, anyhow};
-use async_trait::async_trait;
-use reqwest::{Client as ReqwestClient, RequestBuilder};
-use reqwest_eventsource::EventSource;
 use crate::{
     config::setting::MistralSettings,
     dto::llm::mistral::{
-        MistralAgentCreateRequest,
-        MistralAgentCreateResponse,
-        MistralChatCompletionRequest,
-        MistralChatCompletionResponse,
-        MistralMessage,
-        MistralTool,
+        MistralAgentCreateRequest, MistralAgentCreateResponse, MistralChatCompletionRequest,
+        MistralChatCompletionResponse, MistralMessage, MistralTool,
     },
     llm::{
         prompt::{Prompt, PromptTitleResponse},
         provider::{MistralApis, MistralHeaders},
     },
 };
+use anyhow::{anyhow, Error};
+use async_trait::async_trait;
+use reqwest::{Client as ReqwestClient, RequestBuilder};
+use reqwest_eventsource::EventSource;
 
 pub const MISTRAL_API_URL: &str = "https://api.mistral.ai";
 
@@ -193,7 +189,9 @@ impl MistralApis for ReqwestClient {
             stream: Some(true),
         };
         let request = self
-            .post(format!("{MISTRAL_API_URL}/v1/conversations/{conversation_id}"))
+            .post(format!(
+                "{MISTRAL_API_URL}/v1/conversations/{conversation_id}"
+            ))
             .add_mistral_headers(mistral_settings)
             .json(&body);
         let es = EventSource::new(request)?;

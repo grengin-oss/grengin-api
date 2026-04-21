@@ -1,11 +1,30 @@
-use axum::{extract::{Path, State}, Json};
+use crate::{
+    auth::{
+        claims::Claims,
+        error::{AuthError, Error},
+        permissions::PERMISSION_BUDGET_VIEW,
+    },
+    dto::admin_department_budget::{DepartmentBudgetStatus, SubDepartmentBudgetDto},
+    models::departments::{self, ActionOnExceed, BudgetPeriod},
+    services::{
+        authorization::{AuthorizationService, PermissionScopeMode},
+        budget_allocation::{
+            period_bounds, sum_child_allocations, sum_department_cost_in_range,
+            sum_department_cost_total,
+        },
+    },
+    state::SharedState,
+};
 use axum::http::StatusCode;
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 use chrono::{DateTime, Utc};
 use migration::Expr;
 use rust_decimal::Decimal;
 use sea_orm::{ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QuerySelect};
 use uuid::Uuid;
-use crate::{auth::{claims::Claims, error::{AuthError, Error}, permissions::PERMISSION_BUDGET_VIEW}, dto::admin_department_budget::{DepartmentBudgetStatus, SubDepartmentBudgetDto}, models::{departments::{self, ActionOnExceed, BudgetPeriod}}, services::{authorization::{AuthorizationService, PermissionScopeMode}, budget_allocation::{period_bounds, sum_child_allocations, sum_department_cost_in_range, sum_department_cost_total}}, state::SharedState};
 
 #[derive(Debug, Clone, FromQueryResult)]
 pub struct DepartmentBudgetRow {
@@ -45,7 +64,6 @@ pub fn departments_budget_select() -> sea_orm::Select<departments::Entity> {
         .column(departments::Column::CreatedAt)
         .column(departments::Column::UpdatedAt)
 }
-
 
 #[utoipa::path(
     get,
@@ -99,12 +117,13 @@ pub async fn get_department_budget(
             AuthError::DbTimeout
         })?;
 
-    let budget_used = sum_department_cost_in_range(&app_state.database, dept.id, period_start, period_end)
-        .await
-        .map_err(|e| {
-            eprintln!("sum_department_cost_in_range error: {e}");
-            AuthError::DbTimeout
-        })?;
+    let budget_used =
+        sum_department_cost_in_range(&app_state.database, dept.id, period_start, period_end)
+            .await
+            .map_err(|e| {
+                eprintln!("sum_department_cost_in_range error: {e}");
+                AuthError::DbTimeout
+            })?;
 
     let budget_used_total = sum_department_cost_total(&app_state.database, dept.id)
         .await
@@ -128,18 +147,19 @@ pub async fn get_department_budget(
 
     let mut sub_department_budgets = Vec::with_capacity(children.len());
     for c in children {
-        let used = sum_department_cost_in_range(&app_state.database, c.id, period_start, period_end)
-            .await
-            .map_err(|e| {
-                eprintln!("sum child dept used error: {e}");
-                AuthError::DbTimeout
-            })?;
+        let used =
+            sum_department_cost_in_range(&app_state.database, c.id, period_start, period_end)
+                .await
+                .map_err(|e| {
+                    eprintln!("sum child dept used error: {e}");
+                    AuthError::DbTimeout
+                })?;
 
         sub_department_budgets.push(SubDepartmentBudgetDto {
             department_id: c.id,
             name: c.name,
             allocated: c.budget_allocated.to_string().parse().unwrap(),
-            used:used.to_string().parse().unwrap(),
+            used: used.to_string().parse().unwrap(),
         });
     }
 
@@ -148,10 +168,10 @@ pub async fn get_department_budget(
         Json(DepartmentBudgetStatus {
             department_id: dept.id,
             budget_allocated: dept.budget_allocated.to_string().parse().unwrap(),
-            budget_distributed:budget_distributed.to_string().parse().unwrap(),
-            budget_available:budget_available.to_string().parse().unwrap(),
-            budget_used:budget_used.to_string().parse().unwrap(),
-            budget_used_total:budget_used_total.to_string().parse().unwrap(),
+            budget_distributed: budget_distributed.to_string().parse().unwrap(),
+            budget_available: budget_available.to_string().parse().unwrap(),
+            budget_used: budget_used.to_string().parse().unwrap(),
+            budget_used_total: budget_used_total.to_string().parse().unwrap(),
             period: dept.budget_period,
             period_start,
             period_end,

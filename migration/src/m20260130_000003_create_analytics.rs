@@ -23,11 +23,7 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .unique_key(),
                     )
-                    .col(
-                        ColumnDef::new(Analytics::Category)
-                            .string()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(Analytics::Category).string().not_null())
                     .col(
                         ColumnDef::new(Analytics::RangeStart)
                             .timestamp_with_time_zone()
@@ -38,11 +34,7 @@ impl MigrationTrait for Migration {
                             .timestamp_with_time_zone()
                             .not_null(),
                     )
-                    .col(
-                        ColumnDef::new(Analytics::Payload)
-                            .json_binary()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(Analytics::Payload).json_binary().not_null())
                     .col(
                         ColumnDef::new(Analytics::CreatedAt)
                             .timestamp_with_time_zone()

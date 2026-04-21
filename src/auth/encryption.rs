@@ -55,13 +55,13 @@ pub fn decrypt_key(key_32bytes: &[u8; 32], payload_b64: &str) -> Result<String, 
     let key: &Key<Aes256Gcm> = key_32bytes.into();
     let cipher = Aes256Gcm::new(key);
     let plaintext_bytes = cipher.decrypt(&nonce, ciphertext)?;
-  Ok(String::from_utf8(plaintext_bytes).map_err(|_| CryptoError::InvalidPayload)?)
+    Ok(String::from_utf8(plaintext_bytes).map_err(|_| CryptoError::InvalidPayload)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aes_gcm::aead::{OsRng, rand_core::RngCore};
+    use aes_gcm::aead::{rand_core::RngCore, OsRng};
 
     fn random_key() -> [u8; 32] {
         let mut key = [0u8; 32];

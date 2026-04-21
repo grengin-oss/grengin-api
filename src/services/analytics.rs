@@ -1,27 +1,34 @@
-use chrono::{DateTime, Duration, NaiveDate, Utc};
-use migration::{ExprTrait, SimpleExpr, extension::postgres::PgExpr};
-use rust_decimal::Decimal;
-use sea_orm::{ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, FromQueryResult, JoinType, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait, sea_query::{Alias, BinOper, Expr, Func, Query}};
-use uuid::Uuid;
 use crate::{
     dto::analytics::{
         AnalyticsOverview, AnalyticsTimeSeries, DepartmentAnalytics, DepartmentAnalyticsItem,
-        DepartmentAnalyticsQuery, DepartmentAnalyticsSortRule, ModelUsage, ScopedUserAnalyticsQuery,
-        TimeSeriesDataPoint, UserAnalytics, UserAnalyticsItem, UserAnalyticsQuery,
+        DepartmentAnalyticsQuery, DepartmentAnalyticsSortRule, ModelUsage,
+        ScopedUserAnalyticsQuery, TimeSeriesDataPoint, UserAnalytics, UserAnalyticsItem,
+        UserAnalyticsQuery,
     },
-    models::{conversations, departments, messages::{self, ChatRole}, users::{self}},
+    models::{
+        conversations, departments,
+        messages::{self, ChatRole},
+        users::{self},
+    },
     services::authorization::is_path_within_scope,
 };
+use chrono::{DateTime, Duration, NaiveDate, Utc};
+use migration::{extension::postgres::PgExpr, ExprTrait, SimpleExpr};
+use rust_decimal::Decimal;
+use sea_orm::{
+    sea_query::{Alias, BinOper, Expr, Func, Query},
+    ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, FromQueryResult, JoinType,
+    Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+};
+use uuid::Uuid;
 
 fn scope_condition(scope_paths: &[String]) -> Condition {
     let mut cond = Condition::any();
     for path in scope_paths {
-        cond = cond.add(
-            Expr::col(departments::Column::Path).binary(
-                BinOper::Custom("<@".into()),
-                Expr::val(path.clone()).cast_as(Alias::new("ltree")),
-            ),
-        );
+        cond = cond.add(Expr::col(departments::Column::Path).binary(
+            BinOper::Custom("<@".into()),
+            Expr::val(path.clone()).cast_as(Alias::new("ltree")),
+        ));
     }
     cond
 }
@@ -92,45 +99,39 @@ pub async fn calculate_user_analytics(
     limit: u64,
 ) -> Result<UserAnalytics, DbErr> {
     // active_message = (deleted = false) AND created_at between dates (if provided)
-    let mut active_msg_cond =
-        Expr::col((messages::Entity, messages::Column::Deleted)).eq(false);
+    let mut active_msg_cond = Expr::col((messages::Entity, messages::Column::Deleted)).eq(false);
 
     if let Some(sd) = query.start_date {
         let from = day_start_utc(sd);
-        active_msg_cond = active_msg_cond.and(
-            Expr::col((messages::Entity, messages::Column::CreatedAt)).gte(from),
-        );
+        active_msg_cond = active_msg_cond
+            .and(Expr::col((messages::Entity, messages::Column::CreatedAt)).gte(from));
     }
     if let Some(ed) = query.end_date {
         let to = day_end_utc(ed);
-        active_msg_cond = active_msg_cond.and(
-            Expr::col((messages::Entity, messages::Column::CreatedAt)).lte(to),
-        );
+        active_msg_cond =
+            active_msg_cond.and(Expr::col((messages::Entity, messages::Column::CreatedAt)).lte(to));
     }
     // Requests = user-role messages
-    let user_request_cond = active_msg_cond.clone().and(
-        Expr::col((messages::Entity, messages::Column::Role))
-            .eq(messages::ChatRole::User),
-    );
-    let error_count_cond = active_msg_cond.clone().and(
-        Expr::col((messages::Entity, messages::Column::Role))
-            .eq(messages::ChatRole::System),
-    );
+    let user_request_cond = active_msg_cond
+        .clone()
+        .and(Expr::col((messages::Entity, messages::Column::Role)).eq(messages::ChatRole::User));
+    let error_count_cond = active_msg_cond
+        .clone()
+        .and(Expr::col((messages::Entity, messages::Column::Role)).eq(messages::ChatRole::System));
     let success_count_cond = active_msg_cond.clone().and(
-        Expr::col((messages::Entity, messages::Column::Role))
-            .eq(messages::ChatRole::Assistant),
+        Expr::col((messages::Entity, messages::Column::Role)).eq(messages::ChatRole::Assistant),
     );
 
-    
     // Aggregates
     let total_requests_expr = Func::sum(Expr::case(user_request_cond, 1).finally(0));
     let error_count_expr = Func::sum(Expr::case(error_count_cond, 1).finally(0));
     let success_count_expr = Func::sum(Expr::case(success_count_cond, 1).finally(0));
     let sort_email_expr = Expr::col((users::Entity, users::Column::Email));
     let sort_name_expr: SimpleExpr = Func::coalesce([
-      Expr::col((users::Entity, users::Column::Name)).into(),
-      Expr::val("").into(),
-    ]).into();
+        Expr::col((users::Entity, users::Column::Name)).into(),
+        Expr::val("").into(),
+    ])
+    .into();
     let total_tokens_expr = Func::sum(
         Expr::case(
             active_msg_cond.clone(),
@@ -191,16 +192,28 @@ pub async fn calculate_user_analytics(
         .group_by(departments::Column::Name);
 
     // Sorting: ORDER BY THE EXPRESSION (not alias)
-       if let Some(search) = &query.search{
-    select = select.filter(    
-       Condition::any()
-         .add(users::Column::Name.into_expr().ilike(format!("%{}%", search)))
-         .add(users::Column::Email.into_expr().ilike(format!("%{}%", search)))
-         .add(departments::Column::Name.into_expr().ilike(format!("%{}%", search)))
-     );
+    if let Some(search) = &query.search {
+        select = select.filter(
+            Condition::any()
+                .add(
+                    users::Column::Name
+                        .into_expr()
+                        .ilike(format!("%{}%", search)),
+                )
+                .add(
+                    users::Column::Email
+                        .into_expr()
+                        .ilike(format!("%{}%", search)),
+                )
+                .add(
+                    departments::Column::Name
+                        .into_expr()
+                        .ilike(format!("%{}%", search)),
+                ),
+        );
     }
-    if query.unassigned_department.unwrap_or(false)  {
-       select = select.filter(users::Column::DepartmentId.is_null())
+    if query.unassigned_department.unwrap_or(false) {
+        select = select.filter(users::Column::DepartmentId.is_null())
     }
     let sort_by = query.sort_by.as_deref().unwrap_or("lastActivity");
     let order = query.order.as_deref().unwrap_or("desc");
@@ -211,14 +224,14 @@ pub async fn calculate_user_analytics(
     };
 
     select = match sort_by {
-      "email" => select.order_by(sort_email_expr, ord),
-      "name" => select.order_by(sort_name_expr, ord),
-      "totalRequests" => select.order_by(Expr::expr(total_requests_expr.clone()), ord),
-      "totalTokens" => select.order_by(Expr::expr(total_tokens_expr.clone()), ord),
-      "totalCost" => select.order_by(Expr::expr(total_cost_expr.clone()), ord),
-      "averageLatency" => select.order_by(average_latency_expr.clone(), ord), // this one is already SimpleExpr
-      "lastActivity" | _ => select.order_by(Expr::expr(last_activity_expr.clone()), ord),
-   };
+        "email" => select.order_by(sort_email_expr, ord),
+        "name" => select.order_by(sort_name_expr, ord),
+        "totalRequests" => select.order_by(Expr::expr(total_requests_expr.clone()), ord),
+        "totalTokens" => select.order_by(Expr::expr(total_tokens_expr.clone()), ord),
+        "totalCost" => select.order_by(Expr::expr(total_cost_expr.clone()), ord),
+        "averageLatency" => select.order_by(average_latency_expr.clone(), ord), // this one is already SimpleExpr
+        "lastActivity" | _ => select.order_by(Expr::expr(last_activity_expr.clone()), ord),
+    };
     let paginator = select.into_model::<UserAnalyticsRow>().paginate(db, limit);
     let stats = paginator.num_items_and_pages().await?;
 
@@ -230,7 +243,7 @@ pub async fn calculate_user_analytics(
             user_id: r.user_id,
             user_email: r.user_email,
             user_name: r.user_name,
-            department:r.department_name,
+            department: r.department_name,
             department_id: r.department_id,
             total_requests: r.total_requests,
             total_tokens: r.total_tokens,
@@ -262,33 +275,27 @@ pub async fn calculate_user_analytics_scoped(
         return Ok(empty_user_analytics_response(page, limit));
     }
 
-    let mut active_msg_cond =
-        Expr::col((messages::Entity, messages::Column::Deleted)).eq(false);
+    let mut active_msg_cond = Expr::col((messages::Entity, messages::Column::Deleted)).eq(false);
 
     if let Some(sd) = query.start_date {
         let from = day_start_utc(sd);
-        active_msg_cond = active_msg_cond.and(
-            Expr::col((messages::Entity, messages::Column::CreatedAt)).gte(from),
-        );
+        active_msg_cond = active_msg_cond
+            .and(Expr::col((messages::Entity, messages::Column::CreatedAt)).gte(from));
     }
     if let Some(ed) = query.end_date {
         let to = day_end_utc(ed);
-        active_msg_cond = active_msg_cond.and(
-            Expr::col((messages::Entity, messages::Column::CreatedAt)).lte(to),
-        );
+        active_msg_cond =
+            active_msg_cond.and(Expr::col((messages::Entity, messages::Column::CreatedAt)).lte(to));
     }
 
-    let user_request_cond = active_msg_cond.clone().and(
-        Expr::col((messages::Entity, messages::Column::Role))
-            .eq(messages::ChatRole::User),
-    );
-    let error_count_cond = active_msg_cond.clone().and(
-        Expr::col((messages::Entity, messages::Column::Role))
-            .eq(messages::ChatRole::System),
-    );
+    let user_request_cond = active_msg_cond
+        .clone()
+        .and(Expr::col((messages::Entity, messages::Column::Role)).eq(messages::ChatRole::User));
+    let error_count_cond = active_msg_cond
+        .clone()
+        .and(Expr::col((messages::Entity, messages::Column::Role)).eq(messages::ChatRole::System));
     let success_count_cond = active_msg_cond.clone().and(
-        Expr::col((messages::Entity, messages::Column::Role))
-            .eq(messages::ChatRole::Assistant),
+        Expr::col((messages::Entity, messages::Column::Role)).eq(messages::ChatRole::Assistant),
     );
 
     let total_requests_expr = Func::sum(Expr::case(user_request_cond, 1).finally(0));
@@ -371,24 +378,36 @@ pub async fn calculate_user_analytics_scoped(
             .await?
             .unwrap_or_default();
         if dept_path.is_empty()
-            || !scope_paths.iter().any(|scope| is_path_within_scope(scope, &dept_path))
+            || !scope_paths
+                .iter()
+                .any(|scope| is_path_within_scope(scope, &dept_path))
         {
             return Ok(empty_user_analytics_response(page, limit));
         }
-        select = select.filter(
-            Expr::col(departments::Column::Path).binary(
-                BinOper::Custom("<@".into()),
-                Expr::val(dept_path).cast_as(Alias::new("ltree")),
-            ),
-        );
+        select = select.filter(Expr::col(departments::Column::Path).binary(
+            BinOper::Custom("<@".into()),
+            Expr::val(dept_path).cast_as(Alias::new("ltree")),
+        ));
     }
 
     if let Some(search) = &query.search {
         select = select.filter(
             Condition::any()
-                .add(users::Column::Name.into_expr().ilike(format!("%{}%", search)))
-                .add(users::Column::Email.into_expr().ilike(format!("%{}%", search)))
-                .add(departments::Column::Name.into_expr().ilike(format!("%{}%", search))),
+                .add(
+                    users::Column::Name
+                        .into_expr()
+                        .ilike(format!("%{}%", search)),
+                )
+                .add(
+                    users::Column::Email
+                        .into_expr()
+                        .ilike(format!("%{}%", search)),
+                )
+                .add(
+                    departments::Column::Name
+                        .into_expr()
+                        .ilike(format!("%{}%", search)),
+                ),
         );
     }
 
@@ -485,18 +504,15 @@ pub async fn get_department_analytics(
     }
     let offset = offset.unwrap_or(0);
     // Message window condition (kept inside CASE so departments with 0 messages still show up)
-    let mut active_msg_cond =
-        Expr::col((messages::Entity, messages::Column::Deleted)).eq(false);
+    let mut active_msg_cond = Expr::col((messages::Entity, messages::Column::Deleted)).eq(false);
 
     if let Some(sd) = start_date {
-        active_msg_cond = active_msg_cond.and(
-            Expr::col((messages::Entity, messages::Column::CreatedAt)).gte(day_start_utc(sd)),
-        );
+        active_msg_cond = active_msg_cond
+            .and(Expr::col((messages::Entity, messages::Column::CreatedAt)).gte(day_start_utc(sd)));
     }
     if let Some(ed) = end_date {
-        active_msg_cond = active_msg_cond.and(
-            Expr::col((messages::Entity, messages::Column::CreatedAt)).lte(day_end_utc(ed)),
-        );
+        active_msg_cond = active_msg_cond
+            .and(Expr::col((messages::Entity, messages::Column::CreatedAt)).lte(day_end_utc(ed)));
     }
 
     // Exclude deleted users from *all* metrics
@@ -566,7 +582,10 @@ pub async fn get_department_analytics(
     // Build query: departments -> users -> conversations -> messages
     let child_alias = Alias::new("child_dept");
     let child_subquery = Query::select()
-        .expr(Func::count(Expr::col((child_alias.clone(), departments::Column::Id))))
+        .expr(Func::count(Expr::col((
+            child_alias.clone(),
+            departments::Column::Id,
+        ))))
         .from_as(departments::Entity, child_alias.clone())
         .and_where(
             Expr::col((child_alias.clone(), departments::Column::ParentId))
@@ -594,17 +613,33 @@ pub async fn get_department_analytics(
         .group_by(departments::Column::Name);
 
     let sort_rule = sort.unwrap_or(DepartmentAnalyticsSortRule::Name);
-    let order = if ascending.unwrap_or(false) { Order::Asc } else { Order::Desc };
+    let order = if ascending.unwrap_or(false) {
+        Order::Asc
+    } else {
+        Order::Desc
+    };
     select = match sort_rule {
         DepartmentAnalyticsSortRule::Name => select.order_by(departments::Column::Name, order),
-        DepartmentAnalyticsSortRule::CreatedAt => select.order_by(departments::Column::CreatedAt, order),
-        DepartmentAnalyticsSortRule::UpdatedAt => select.order_by(departments::Column::UpdatedAt, order),
-        DepartmentAnalyticsSortRule::Members => select.order_by(Expr::expr(total_users_expr.clone()), order),
-        DepartmentAnalyticsSortRule::SubDepartments => select.order_by(Expr::expr(child_count_expr.clone()), order),
+        DepartmentAnalyticsSortRule::CreatedAt => {
+            select.order_by(departments::Column::CreatedAt, order)
+        }
+        DepartmentAnalyticsSortRule::UpdatedAt => {
+            select.order_by(departments::Column::UpdatedAt, order)
+        }
+        DepartmentAnalyticsSortRule::Members => {
+            select.order_by(Expr::expr(total_users_expr.clone()), order)
+        }
+        DepartmentAnalyticsSortRule::SubDepartments => {
+            select.order_by(Expr::expr(child_count_expr.clone()), order)
+        }
     };
 
     if let Some(search) = search.as_ref().filter(|s| !s.trim().is_empty()) {
-        select = select.filter(departments::Column::Name.into_expr().ilike(format!("%{}%", search)));
+        select = select.filter(
+            departments::Column::Name
+                .into_expr()
+                .ilike(format!("%{}%", search)),
+        );
     }
 
     let paginator = select
@@ -661,18 +696,15 @@ pub async fn get_department_analytics_scoped(
         return Ok(empty_department_analytics_response(limit, offset));
     }
 
-    let mut active_msg_cond =
-        Expr::col((messages::Entity, messages::Column::Deleted)).eq(false);
+    let mut active_msg_cond = Expr::col((messages::Entity, messages::Column::Deleted)).eq(false);
 
     if let Some(sd) = query.start_date {
-        active_msg_cond = active_msg_cond.and(
-            Expr::col((messages::Entity, messages::Column::CreatedAt)).gte(day_start_utc(sd)),
-        );
+        active_msg_cond = active_msg_cond
+            .and(Expr::col((messages::Entity, messages::Column::CreatedAt)).gte(day_start_utc(sd)));
     }
     if let Some(ed) = query.end_date {
-        active_msg_cond = active_msg_cond.and(
-            Expr::col((messages::Entity, messages::Column::CreatedAt)).lte(day_end_utc(ed)),
-        );
+        active_msg_cond = active_msg_cond
+            .and(Expr::col((messages::Entity, messages::Column::CreatedAt)).lte(day_end_utc(ed)));
     }
 
     let active_user_cond =
@@ -736,7 +768,10 @@ pub async fn get_department_analytics_scoped(
 
     let child_alias = Alias::new("child_dept");
     let child_subquery = Query::select()
-        .expr(Func::count(Expr::col((child_alias.clone(), departments::Column::Id))))
+        .expr(Func::count(Expr::col((
+            child_alias.clone(),
+            departments::Column::Id,
+        ))))
         .from_as(departments::Entity, child_alias.clone())
         .and_where(
             Expr::col((child_alias.clone(), departments::Column::ParentId))
@@ -764,13 +799,25 @@ pub async fn get_department_analytics_scoped(
         .group_by(departments::Column::Name);
 
     let sort_rule = query.sort.unwrap_or(DepartmentAnalyticsSortRule::Name);
-    let order = if query.ascending.unwrap_or(false) { Order::Asc } else { Order::Desc };
+    let order = if query.ascending.unwrap_or(false) {
+        Order::Asc
+    } else {
+        Order::Desc
+    };
     select = match sort_rule {
         DepartmentAnalyticsSortRule::Name => select.order_by(departments::Column::Name, order),
-        DepartmentAnalyticsSortRule::CreatedAt => select.order_by(departments::Column::CreatedAt, order),
-        DepartmentAnalyticsSortRule::UpdatedAt => select.order_by(departments::Column::UpdatedAt, order),
-        DepartmentAnalyticsSortRule::Members => select.order_by(Expr::expr(total_users_expr.clone()), order),
-        DepartmentAnalyticsSortRule::SubDepartments => select.order_by(Expr::expr(child_count_expr.clone()), order),
+        DepartmentAnalyticsSortRule::CreatedAt => {
+            select.order_by(departments::Column::CreatedAt, order)
+        }
+        DepartmentAnalyticsSortRule::UpdatedAt => {
+            select.order_by(departments::Column::UpdatedAt, order)
+        }
+        DepartmentAnalyticsSortRule::Members => {
+            select.order_by(Expr::expr(total_users_expr.clone()), order)
+        }
+        DepartmentAnalyticsSortRule::SubDepartments => {
+            select.order_by(Expr::expr(child_count_expr.clone()), order)
+        }
     };
 
     select = select.filter(scope_condition(scope_paths));
@@ -788,20 +835,24 @@ pub async fn get_department_analytics_scoped(
             .await?
             .unwrap_or_default();
         if dept_path.is_empty()
-            || !scope_paths.iter().any(|scope| is_path_within_scope(scope, &dept_path))
+            || !scope_paths
+                .iter()
+                .any(|scope| is_path_within_scope(scope, &dept_path))
         {
             return Ok(empty_department_analytics_response(limit, offset));
         }
-        select = select.filter(
-            Expr::col(departments::Column::Path).binary(
-                BinOper::Custom("<@".into()),
-                Expr::val(dept_path).cast_as(Alias::new("ltree")),
-            ),
-        );
+        select = select.filter(Expr::col(departments::Column::Path).binary(
+            BinOper::Custom("<@".into()),
+            Expr::val(dept_path).cast_as(Alias::new("ltree")),
+        ));
     }
 
     if let Some(search) = query.search.as_ref().filter(|s| !s.trim().is_empty()) {
-        select = select.filter(departments::Column::Name.into_expr().ilike(format!("%{}%", search)));
+        select = select.filter(
+            departments::Column::Name
+                .into_expr()
+                .ilike(format!("%{}%", search)),
+        );
     }
 
     let paginator = select
@@ -885,14 +936,12 @@ fn build_msg_filter(start: Option<NaiveDate>, end: Option<NaiveDate>) -> sea_orm
         .add(Expr::col((messages::Entity, messages::Column::Deleted)).eq(false));
 
     if let Some(sd) = start {
-        cond = cond.add(
-            Expr::col((messages::Entity, messages::Column::CreatedAt)).gte(day_start_utc(sd)),
-        );
+        cond = cond
+            .add(Expr::col((messages::Entity, messages::Column::CreatedAt)).gte(day_start_utc(sd)));
     }
     if let Some(ed) = end {
-        cond = cond.add(
-            Expr::col((messages::Entity, messages::Column::CreatedAt)).lte(day_end_utc(ed)),
-        );
+        cond = cond
+            .add(Expr::col((messages::Entity, messages::Column::CreatedAt)).lte(day_end_utc(ed)));
     }
     cond
 }
@@ -926,7 +975,10 @@ pub async fn get_overview_analytics(
         .expr_as(total_cost_expr.clone(), "total_cost")
         .filter(cur_cond);
 
-    let cur_row = cur_q.into_model::<OverviewAggRow>().one(db).await?
+    let cur_row = cur_q
+        .into_model::<OverviewAggRow>()
+        .one(db)
+        .await?
         .unwrap_or(OverviewAggRow {
             total_requests: Some(0),
             total_tokens: Some(0),
@@ -944,10 +996,16 @@ pub async fn get_overview_analytics(
 
     let active_users_q = conversations::Entity::find()
         .select_only()
-        .join(sea_orm::JoinType::InnerJoin, conversations::Relation::Messages.def())
+        .join(
+            sea_orm::JoinType::InnerJoin,
+            conversations::Relation::Messages.def(),
+        )
         .filter(active_users_cond)
         .expr_as(
-            Func::count_distinct(Expr::col((conversations::Entity, conversations::Column::UserId))),
+            Func::count_distinct(Expr::col((
+                conversations::Entity,
+                conversations::Column::UserId,
+            ))),
             "active_users",
         );
 
@@ -980,12 +1038,21 @@ pub async fn get_overview_analytics(
             ),
             "total_requests",
         )
-        .expr_as(Func::sum(Expr::col((messages::Entity, messages::Column::TotalTokens))), "total_tokens")
-        .expr_as(Func::sum(Expr::col((messages::Entity, messages::Column::Cost))), "total_cost")
+        .expr_as(
+            Func::sum(Expr::col((messages::Entity, messages::Column::TotalTokens))),
+            "total_tokens",
+        )
+        .expr_as(
+            Func::sum(Expr::col((messages::Entity, messages::Column::Cost))),
+            "total_cost",
+        )
         .filter(build_msg_filter(start_date, end_date))
         .group_by(messages::Column::ModelProvider)
         .group_by(messages::Column::ModelName)
-        .order_by_desc(Expr::expr(Func::sum(Expr::col((messages::Entity, messages::Column::Cost)))))
+        .order_by_desc(Expr::expr(Func::sum(Expr::col((
+            messages::Entity,
+            messages::Column::Cost,
+        )))))
         .limit(10);
 
     let top_model_rows = top_models_q.into_model::<TopModelRow>().all(db).await?;
@@ -1001,46 +1068,57 @@ pub async fn get_overview_analytics(
         .collect::<Vec<_>>();
 
     // growth rates (only if BOTH dates provided)
-    let (request_growth_rate, token_growth_rate, cost_growth_rate) = if let (Some(sd), Some(ed)) =
-        (start_date, end_date)
-    {
-        let days = (ed - sd).num_days() + 1; // inclusive window
-        let prev_end = sd - Duration::days(1);
-        let prev_start = prev_end - Duration::days(days - 1);
+    let (request_growth_rate, token_growth_rate, cost_growth_rate) =
+        if let (Some(sd), Some(ed)) = (start_date, end_date) {
+            let days = (ed - sd).num_days() + 1; // inclusive window
+            let prev_end = sd - Duration::days(1);
+            let prev_start = prev_end - Duration::days(days - 1);
 
-        let prev_cond = build_msg_filter(Some(prev_start), Some(prev_end));
+            let prev_cond = build_msg_filter(Some(prev_start), Some(prev_end));
 
-        let prev_q = messages::Entity::find()
-            .select_only()
-            .expr_as(total_requests_expr, "total_requests")
-            .expr_as(total_tokens_expr, "total_tokens")
-            .expr_as(total_cost_expr, "total_cost")
-            .filter(prev_cond);
+            let prev_q = messages::Entity::find()
+                .select_only()
+                .expr_as(total_requests_expr, "total_requests")
+                .expr_as(total_tokens_expr, "total_tokens")
+                .expr_as(total_cost_expr, "total_cost")
+                .filter(prev_cond);
 
-        let prev_row = prev_q.into_model::<OverviewAggRow>().one(db).await?
-            .unwrap_or(OverviewAggRow {
-                total_requests: Some(0),
-                total_tokens: Some(0),
-                total_cost: Some(Decimal::ZERO),
-            });
+            let prev_row = prev_q
+                .into_model::<OverviewAggRow>()
+                .one(db)
+                .await?
+                .unwrap_or(OverviewAggRow {
+                    total_requests: Some(0),
+                    total_tokens: Some(0),
+                    total_cost: Some(Decimal::ZERO),
+                });
 
-        let prev_requests = prev_row.total_requests.unwrap_or(0);
-        let prev_tokens = prev_row.total_tokens.unwrap_or(0);
-        let prev_cost = prev_row.total_cost.unwrap_or(Decimal::ZERO).to_string().parse().unwrap_or(0.0);
+            let prev_requests = prev_row.total_requests.unwrap_or(0);
+            let prev_tokens = prev_row.total_tokens.unwrap_or(0);
+            let prev_cost = prev_row
+                .total_cost
+                .unwrap_or(Decimal::ZERO)
+                .to_string()
+                .parse()
+                .unwrap_or(0.0);
 
-        (
-            pct_growth(total_requests, prev_requests),
-            pct_growth(total_tokens, prev_tokens),
-            if prev_cost == 0.0 {
-                if total_cost == 0.0 { 0.0 } else { 100.0 }
-            } else {
-                ((total_cost - prev_cost) / prev_cost) * 100.0
-            },
-        )
-    } else {
-        // no date range -> no growth calc
-        (0.0, 0.0, 0.0)
-    };
+            (
+                pct_growth(total_requests, prev_requests),
+                pct_growth(total_tokens, prev_tokens),
+                if prev_cost == 0.0 {
+                    if total_cost == 0.0 {
+                        0.0
+                    } else {
+                        100.0
+                    }
+                } else {
+                    ((total_cost - prev_cost) / prev_cost) * 100.0
+                },
+            )
+        } else {
+            // no date range -> no growth calc
+            (0.0, 0.0, 0.0)
+        };
 
     Ok(AnalyticsOverview {
         total_users,
@@ -1055,7 +1133,6 @@ pub async fn get_overview_analytics(
         cost_growth_rate,
     })
 }
-
 
 fn normalize_granularity(g: &str) -> &str {
     match g {
@@ -1091,25 +1168,22 @@ pub async fn get_timeseries_analytics(
     end_date: Option<NaiveDate>,
     granularity: String,
 ) -> Result<AnalyticsTimeSeries, DbErr> {
-
     // Filter used in WHERE (this endpoint is timeseries, so it’s fine to filter rows directly)
     let mut cond = sea_orm::Condition::all()
         .add(Expr::col((messages::Entity, messages::Column::Deleted)).eq(false));
 
     if let Some(sd) = start_date {
-        cond = cond.add(
-            Expr::col((messages::Entity, messages::Column::CreatedAt)).gte(day_start_utc(sd)),
-        );
+        cond = cond
+            .add(Expr::col((messages::Entity, messages::Column::CreatedAt)).gte(day_start_utc(sd)));
     }
     if let Some(ed) = end_date {
-        cond = cond.add(
-            Expr::col((messages::Entity, messages::Column::CreatedAt)).lte(day_end_utc(ed)),
-        );
+        cond = cond
+            .add(Expr::col((messages::Entity, messages::Column::CreatedAt)).lte(day_end_utc(ed)));
     }
 
     // bucket = date_trunc('day'|'hour'|'week'|'month', created_at)
     // SeaQuery builder via cust_with_exprs, still no raw SQL string query.
- let gran = normalize_granularity(&granularity); // "hour"|"day"|"week"|"month"
+    let gran = normalize_granularity(&granularity); // "hour"|"day"|"week"|"month"
 
     // date_trunc('day', messages.created_at)
     // Use a literal granularity here so GROUP BY matches SELECT exactly (avoids param mismatch).
@@ -1181,7 +1255,12 @@ pub async fn get_timeseries_analytics(
             timestamp: r.bucket.to_rfc3339(),
             total_requests: r.total_requests.unwrap_or(0),
             total_tokens: r.total_tokens.unwrap_or(0),
-            total_cost: r.total_cost.unwrap_or(Decimal::ZERO).to_string().parse().unwrap_or(0.0),
+            total_cost: r
+                .total_cost
+                .unwrap_or(Decimal::ZERO)
+                .to_string()
+                .parse()
+                .unwrap_or(0.0),
             average_latency: r.average_latency.unwrap_or(0.0),
             success_count: r.success_count.unwrap_or(0),
             error_count: r.error_count.unwrap_or(0),

@@ -1,22 +1,22 @@
-use std::collections::{HashMap, HashSet};
 use chrono::Utc;
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, JoinType, PaginatorTrait, QueryFilter, QuerySelect, RelationTrait, Set};
 use sea_orm::sea_query::{Alias, BinOper, Expr};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, JoinType,
+    PaginatorTrait, QueryFilter, QuerySelect, RelationTrait, Set,
+};
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::{
-    auth::{error::AuthError, permissions::{permission_key, split_permission_key}},
+    auth::{
+        error::AuthError,
+        permissions::{permission_key, split_permission_key},
+    },
     models::{
-        departments,
-        mcp_access_policies,
+        departments, mcp_access_policies,
         mcp_access_policies::{McpAccessTarget, McpAccessType, McpPermission},
-        mcp_servers,
-        permissions,
-        role_permissions,
-        roles,
-        user_role_assignments,
-        users,
+        mcp_servers, permissions, role_permissions, roles, user_role_assignments, users,
     },
 };
 
@@ -79,12 +79,7 @@ impl<'a> AuthorizationService<'a> {
         resource_id: Option<Uuid>,
     ) -> Result<(), AuthError> {
         let allowed = self
-            .user_has_permission(
-                actor_id,
-                permission,
-                target_department_id,
-                scope_mode,
-            )
+            .user_has_permission(actor_id, permission, target_department_id, scope_mode)
             .await?;
         if allowed {
             return Ok(());
@@ -96,13 +91,8 @@ impl<'a> AuthorizationService<'a> {
             resource_id,
             target_department_id,
         }) {
-            let _ = record_auth_event(
-                self.db,
-                "auth.permission_denied",
-                Some(actor_id),
-                payload,
-            )
-            .await;
+            let _ =
+                record_auth_event(self.db, "auth.permission_denied", Some(actor_id), payload).await;
         }
 
         Err(AuthError::PermissionDenied)
@@ -170,7 +160,10 @@ impl<'a> AuthorizationService<'a> {
         role_name: &str,
     ) -> Result<bool, AuthError> {
         let count = user_role_assignments::Entity::find()
-            .join(JoinType::InnerJoin, user_role_assignments::Relation::Roles.def())
+            .join(
+                JoinType::InnerJoin,
+                user_role_assignments::Relation::Roles.def(),
+            )
             .filter(user_role_assignments::Column::UserId.eq(user_id))
             .filter(roles::Column::Name.eq(role_name))
             .count(self.db)
@@ -193,7 +186,10 @@ impl<'a> AuthorizationService<'a> {
             .select_only()
             .column(user_role_assignments::Column::UserId)
             .column_as(roles::Column::Name, "role_name")
-            .join(JoinType::InnerJoin, user_role_assignments::Relation::Roles.def())
+            .join(
+                JoinType::InnerJoin,
+                user_role_assignments::Relation::Roles.def(),
+            )
             .filter(user_role_assignments::Column::UserId.is_in(user_ids.iter().copied()))
             .into_tuple::<(Uuid, String)>()
             .all(self.db)
@@ -234,7 +230,13 @@ impl<'a> AuthorizationService<'a> {
             .await?;
 
         let mcp_access = self
-            .compute_mcp_access(user.id, user.department_id, &role_ids, &role_names, has_mcp_admin)
+            .compute_mcp_access(
+                user.id,
+                user.department_id,
+                &role_ids,
+                &role_names,
+                has_mcp_admin,
+            )
             .await?;
 
         let effective_permissions = audit_payload(EffectivePermissionsPayload {
@@ -247,13 +249,10 @@ impl<'a> AuthorizationService<'a> {
         let mut active: users::ActiveModel = user.into();
         active.effective_permissions = Set(Some(effective_permissions));
         active.updated_at = Set(Utc::now());
-        active
-            .update(self.db)
-            .await
-            .map_err(|e| {
-                eprintln!("update effective_permissions error: {e}");
-                AuthError::DbTimeout
-            })?;
+        active.update(self.db).await.map_err(|e| {
+            eprintln!("update effective_permissions error: {e}");
+            AuthError::DbTimeout
+        })?;
 
         Ok(())
     }
@@ -320,13 +319,14 @@ impl<'a> AuthorizationService<'a> {
         let scoped_users = user_role_assignments::Entity::find()
             .select_only()
             .column(user_role_assignments::Column::UserId)
-            .join(JoinType::InnerJoin, user_role_assignments::Relation::ScopeDepartments.def())
-            .filter(
-                Expr::col(departments::Column::Path).binary(
-                    BinOper::Custom("<@".into()),
-                    Expr::val(department_path).cast_as(Alias::new("ltree")),
-                ),
+            .join(
+                JoinType::InnerJoin,
+                user_role_assignments::Relation::ScopeDepartments.def(),
             )
+            .filter(Expr::col(departments::Column::Path).binary(
+                BinOper::Custom("<@".into()),
+                Expr::val(department_path).cast_as(Alias::new("ltree")),
+            ))
             .into_tuple::<Uuid>()
             .all(self.db)
             .await
@@ -370,9 +370,7 @@ impl<'a> AuthorizationService<'a> {
         }
 
         if let Some(dept_id) = user_department_id {
-            if let Some(permission) =
-                self.resolve_mcp_department_rule(&rules, dept_id).await?
-            {
+            if let Some(permission) = self.resolve_mcp_department_rule(&rules, dept_id).await? {
                 return Ok(permission);
             }
         }
@@ -381,7 +379,10 @@ impl<'a> AuthorizationService<'a> {
             let mut saw_denied = false;
             let mut saw_full = false;
             let mut saw_read_only = false;
-            for rule in rules.iter().filter(|rule| rule.access_type == McpAccessType::Role) {
+            for rule in rules
+                .iter()
+                .filter(|rule| rule.access_type == McpAccessType::Role)
+            {
                 if let Some(role_id) = rule.role_id {
                     if !role_ids.contains(&role_id) {
                         continue;
@@ -422,7 +423,11 @@ impl<'a> AuthorizationService<'a> {
         Ok(match server.default_access {
             mcp_servers::McpDefaultAccess::AllUsers => McpPermission::Full,
             mcp_servers::McpDefaultAccess::AdminOnly => {
-                if is_admin { McpPermission::Full } else { McpPermission::Denied }
+                if is_admin {
+                    McpPermission::Full
+                } else {
+                    McpPermission::Denied
+                }
             }
             mcp_servers::McpDefaultAccess::ExplicitOnly => McpPermission::Denied,
         })
@@ -494,10 +499,16 @@ impl<'a> AuthorizationService<'a> {
 
         let mut best_rule: Option<(&mcp_access_policies::Model, i32)> = None;
         for rule in dept_rules {
-            let Some(dept_id) = rule.department_id else { continue };
-            let Some((path, depth)) = dept_lookup.get(&dept_id) else { continue };
+            let Some(dept_id) = rule.department_id else {
+                continue;
+            };
+            let Some((path, depth)) = dept_lookup.get(&dept_id) else {
+                continue;
+            };
             let is_direct = dept_id == user_department.id;
-            if is_direct || (rule.inherit_departments && is_path_within_scope(path, &user_department.path)) {
+            if is_direct
+                || (rule.inherit_departments && is_path_within_scope(path, &user_department.path))
+            {
                 match best_rule {
                     Some((_, current_depth)) if current_depth >= *depth => {}
                     _ => best_rule = Some((rule, *depth)),
@@ -595,7 +606,10 @@ impl<'a> AuthorizationService<'a> {
         let role_names = user_role_assignments::Entity::find()
             .select_only()
             .column_as(roles::Column::Name, "role_name")
-            .join(JoinType::InnerJoin, user_role_assignments::Relation::Roles.def())
+            .join(
+                JoinType::InnerJoin,
+                user_role_assignments::Relation::Roles.def(),
+            )
             .filter(user_role_assignments::Column::UserId.eq(user_id))
             .into_tuple::<String>()
             .all(self.db)
@@ -633,8 +647,14 @@ impl<'a> AuthorizationService<'a> {
             .select_only()
             .column(user_role_assignments::Column::ScopeDepartmentId)
             .column_as(Expr::cust("departments.path::text"), "scope_path")
-            .join(JoinType::LeftJoin, user_role_assignments::Relation::ScopeDepartments.def())
-            .join(JoinType::InnerJoin, user_role_assignments::Relation::Roles.def())
+            .join(
+                JoinType::LeftJoin,
+                user_role_assignments::Relation::ScopeDepartments.def(),
+            )
+            .join(
+                JoinType::InnerJoin,
+                user_role_assignments::Relation::Roles.def(),
+            )
             .join(JoinType::InnerJoin, roles::Relation::RolePermissions.def())
             .filter(user_role_assignments::Column::UserId.eq(user_id))
             .filter(role_permissions::Column::PermissionId.eq(permission_id))
@@ -659,9 +679,15 @@ impl<'a> AuthorizationService<'a> {
             .column_as(permissions::Column::Domain, "domain")
             .column_as(permissions::Column::Action, "action")
             .column_as(permissions::Column::IsScopeable, "is_scopeable")
-            .join(JoinType::InnerJoin, user_role_assignments::Relation::Roles.def())
+            .join(
+                JoinType::InnerJoin,
+                user_role_assignments::Relation::Roles.def(),
+            )
             .join(JoinType::InnerJoin, roles::Relation::RolePermissions.def())
-            .join(JoinType::InnerJoin, role_permissions::Relation::Permissions.def())
+            .join(
+                JoinType::InnerJoin,
+                role_permissions::Relation::Permissions.def(),
+            )
             .filter(user_role_assignments::Column::UserId.eq(user_id))
             .into_model::<UserPermissionRow>()
             .all(self.db)
@@ -736,7 +762,9 @@ fn evaluate_permission_assignments(
     scope_mode: PermissionScopeMode,
 ) -> bool {
     if !is_scopeable {
-        return assignments.iter().any(|row| row.scope_department_id.is_none());
+        return assignments
+            .iter()
+            .any(|row| row.scope_department_id.is_none());
     }
 
     if let Some(target_path) = target_path {

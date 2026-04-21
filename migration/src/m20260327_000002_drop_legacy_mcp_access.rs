@@ -58,9 +58,18 @@ impl MigrationTrait for Migration {
                     Table::create()
                         .table(Alias::new("mcp_server_access_rules"))
                         .if_not_exists()
-                        .col(ColumnDef::new(Alias::new("id")).uuid().not_null().primary_key())
+                        .col(
+                            ColumnDef::new(Alias::new("id"))
+                                .uuid()
+                                .not_null()
+                                .primary_key(),
+                        )
                         .col(ColumnDef::new(Alias::new("serverId")).uuid().not_null())
-                        .col(ColumnDef::new(Alias::new("subjectType")).string().not_null())
+                        .col(
+                            ColumnDef::new(Alias::new("subjectType"))
+                                .string()
+                                .not_null(),
+                        )
                         .col(ColumnDef::new(Alias::new("subjectId")).uuid().not_null())
                         .col(ColumnDef::new(Alias::new("ruleType")).string().not_null())
                         .col(ColumnDef::new(Alias::new("createdBy")).uuid().not_null())

@@ -75,11 +75,7 @@ impl MigrationTrait for Migration {
             .await?;
 
         manager
-            .drop_table(
-                Table::drop()
-                    .table(EmbeddingConfigs::Table)
-                    .to_owned(),
-            )
+            .drop_table(Table::drop().table(EmbeddingConfigs::Table).to_owned())
             .await
     }
 }

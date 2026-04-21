@@ -1,10 +1,10 @@
-use std::collections::HashMap;
-use axum::{extract::State, Json};
 use anyhow::{anyhow, Error};
+use axum::{extract::State, Json};
 use reqwest::StatusCode;
-use serde_json::Value;
-use tokio::sync::{OnceCell, RwLock};
 use sea_orm::EntityTrait;
+use serde_json::Value;
+use std::collections::HashMap;
+use tokio::sync::{OnceCell, RwLock};
 
 use crate::{
     auth::claims::Claims,
@@ -35,17 +35,7 @@ pub async fn load_models_cache(req_client: &reqwest::Client) -> Result<Providers
         return Ok(cached.clone());
     }
 
-    let providers = fetch_providers(req_client).await?;
-    let mut models_by_key = HashMap::new();
-    for provider in &providers {
-        for model in &provider.models {
-            models_by_key.entry(model.key.clone()).or_insert_with(|| model.clone());
-            models_by_key
-                .entry(model.name.clone())
-                .or_insert_with(|| model.clone());
-        }
-    }
-    let cache = ProvidersCache { providers, models_by_key };
+    let cache = build_providers_cache(fetch_providers(req_client).await?);
     let mut write_guard = providers_cache().await.write().await;
     if let Some(cached) = write_guard.as_ref() {
         return Ok(cached.clone());
@@ -54,7 +44,16 @@ pub async fn load_models_cache(req_client: &reqwest::Client) -> Result<Providers
     Ok(cache)
 }
 
-pub async fn load_providers_cached(req_client: &reqwest::Client) -> Result<Vec<ProviderInfo>, Error> {
+pub async fn refresh_models_cache(req_client: &reqwest::Client) -> Result<ProvidersCache, Error> {
+    let refreshed = build_providers_cache(fetch_providers(req_client).await?);
+    let mut write_guard = providers_cache().await.write().await;
+    *write_guard = Some(refreshed.clone());
+    Ok(refreshed)
+}
+
+pub async fn load_providers_cached(
+    req_client: &reqwest::Client,
+) -> Result<Vec<ProviderInfo>, Error> {
     Ok(load_models_cache(req_client).await?.providers)
 }
 
@@ -64,6 +63,24 @@ pub async fn get_model_info_cached(
 ) -> Result<Option<ModelInfo>, Error> {
     let cache = load_models_cache(req_client).await?;
     Ok(cache.models_by_key.get(model_key).cloned())
+}
+
+fn build_providers_cache(providers: Vec<ProviderInfo>) -> ProvidersCache {
+    let mut models_by_key = HashMap::new();
+    for provider in &providers {
+        for model in &provider.models {
+            models_by_key
+                .entry(model.key.clone())
+                .or_insert_with(|| model.clone());
+            models_by_key
+                .entry(model.name.clone())
+                .or_insert_with(|| model.clone());
+        }
+    }
+    ProvidersCache {
+        providers,
+        models_by_key,
+    }
 }
 
 async fn fetch_providers(req_client: &reqwest::Client) -> Result<Vec<ProviderInfo>, Error> {
@@ -183,7 +200,7 @@ fn get_str(value: &Value, field: &str) -> Result<String, Error> {
 )]
 pub async fn get_list_models(
     claims: Claims,
-    State(app_state):State<SharedState>,
+    State(app_state): State<SharedState>,
 ) -> (StatusCode, Json<ModelsResponse>) {
     let user = users::Entity::find_by_id(claims.user_id)
         .one(&app_state.database)
@@ -256,11 +273,16 @@ pub async fn get_list_models(
             key: provider.key,
             name: provider.name,
             icon: provider.icon,
-            icon_dark:provider.icon_dark,
+            icon_dark: provider.icon_dark,
             status: provider.status,
             models,
         });
     }
 
-    (status, Json(ModelsResponse { providers: filtered_providers }))
+    (
+        status,
+        Json(ModelsResponse {
+            providers: filtered_providers,
+        }),
+    )
 }

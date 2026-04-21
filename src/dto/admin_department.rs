@@ -1,22 +1,28 @@
+use crate::{
+    dto::{admin_user::User, common::SortRule},
+    models::{
+        departments::{ActionOnExceed, BudgetPeriod},
+        users::UserStatus,
+    },
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
-use crate::{dto::{admin_user::User, common::SortRule}, models::{departments::{ActionOnExceed, BudgetPeriod}, users::UserStatus}};
 
-#[derive(Serialize,IntoParams,ToSchema)]
-pub struct DepartmentMembersResponse{
-    pub total:i32,
-    pub members:Vec<User>
+#[derive(Serialize, IntoParams, ToSchema)]
+pub struct DepartmentMembersResponse {
+    pub total: i32,
+    pub members: Vec<User>,
 }
 
-#[derive(Serialize,IntoParams,ToSchema)]
+#[derive(Serialize, IntoParams, ToSchema)]
 pub struct DepartmentsListResponse {
-    pub departments:Vec<Department>,
-    pub total:i64,
+    pub departments: Vec<Department>,
+    pub total: i64,
 }
 
-#[derive(Deserialize,ToSchema)]
+#[derive(Deserialize, ToSchema)]
 pub struct DepartmentListQuery {
     pub parent_id: Option<String>,
     #[serde(default)]
@@ -42,20 +48,20 @@ pub struct DepartmentTreeQuery {
     pub max_depth: Option<i32>,
 }
 
-#[derive(Deserialize,ToSchema)]
+#[derive(Deserialize, ToSchema)]
 pub struct DepartmentMemeberListQuery {
     pub force: Option<bool>,
     #[serde(default)]
     pub include_sub_department: Option<bool>,
-    pub search:Option<String>,
-    pub archived:Option<bool>,
-    pub order:Option<String>,
-    pub role_id:Option<Uuid>,
-    pub status:Option<UserStatus>,
-    pub sort:Option<SortRule>,
+    pub search: Option<String>,
+    pub archived: Option<bool>,
+    pub order: Option<String>,
+    pub role_id: Option<Uuid>,
+    pub status: Option<UserStatus>,
+    pub sort: Option<SortRule>,
 }
 
-#[derive(Serialize,IntoParams,ToSchema)]
+#[derive(Serialize, IntoParams, ToSchema)]
 pub struct Department {
     pub id: Uuid,
     pub name: String,
@@ -110,7 +116,7 @@ pub struct DepartmentTree {
     pub tree: Vec<DepartmentTreeNode>,
 }
 
-#[derive(Deserialize,IntoParams,ToSchema)]
+#[derive(Deserialize, IntoParams, ToSchema)]
 pub struct DepartmentCreate {
     pub name: String,
     pub description: String,
@@ -120,7 +126,7 @@ pub struct DepartmentCreate {
     pub allowed_models: Option<Vec<DepartmentModelKey>>,
 }
 
-#[derive(Deserialize,IntoParams,ToSchema)]
+#[derive(Deserialize, IntoParams, ToSchema)]
 pub struct DepartmentUpdate {
     pub name: Option<String>,
     pub description: Option<String>,

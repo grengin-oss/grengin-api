@@ -1,17 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::dto::llm::anthropic::{AnthropicContentBlockResponse, AnthropicDelta, AnthropicStreamEvent};
 use super::{
-    build_tool_call,
-    build_tool_input_delta,
-    parse_web_search_action,
-    tool_name_is_web_search,
-    StreamParser,
-    StreamParseResult,
-    StreamWebSearchAction,
-    StreamWebSearchResult,
-    ToolInput,
+    build_tool_call, build_tool_input_delta, parse_web_search_action, tool_name_is_web_search,
+    StreamParseResult, StreamParser, StreamWebSearchAction, StreamWebSearchResult, ToolInput,
+};
+use crate::dto::llm::anthropic::{
+    AnthropicContentBlockResponse, AnthropicDelta, AnthropicStreamEvent,
 };
 
 /// Anthropic stream parser
@@ -65,10 +60,14 @@ impl StreamParser for AnthropicStreamParser {
                         .unwrap_or_default()
                         .to_string();
 
-                    let input_tokens =
-                        u64_to_u32(v.pointer("/message/usage/input_tokens").and_then(|x| x.as_u64()));
-                    let output_tokens =
-                        u64_to_u32(v.pointer("/message/usage/output_tokens").and_then(|x| x.as_u64()));
+                    let input_tokens = u64_to_u32(
+                        v.pointer("/message/usage/input_tokens")
+                            .and_then(|x| x.as_u64()),
+                    );
+                    let output_tokens = u64_to_u32(
+                        v.pointer("/message/usage/output_tokens")
+                            .and_then(|x| x.as_u64()),
+                    );
 
                     // PATCH: MessageStart now carries tokens
                     return StreamParseResult::MessageStart {
@@ -108,7 +107,10 @@ impl StreamParser for AnthropicStreamParser {
                     output_tokens: None,
                 },
 
-                AnthropicStreamEvent::ContentBlockStart { index, content_block } => match content_block {
+                AnthropicStreamEvent::ContentBlockStart {
+                    index,
+                    content_block,
+                } => match content_block {
                     AnthropicContentBlockResponse::ToolUse { id, name, input } => {
                         if let Ok(mut calls) = self.tool_calls.lock() {
                             calls.insert(index, (name.clone(), Some(id.clone())));
@@ -135,7 +137,10 @@ impl StreamParser for AnthropicStreamParser {
                         );
                         StreamParseResult::ToolCall(call)
                     }
-                    AnthropicContentBlockResponse::WebSearchToolResult { tool_use_id, content } => {
+                    AnthropicContentBlockResponse::WebSearchToolResult {
+                        tool_use_id,
+                        content,
+                    } => {
                         let results = content
                             .into_iter()
                             .map(|item| StreamWebSearchResult {
@@ -173,7 +178,8 @@ impl StreamParser for AnthropicStreamParser {
                             if let Ok(mut buffers) = self.tool_input_buffers.lock() {
                                 let buffer = buffers.entry(index).or_default();
                                 buffer.push_str(&partial_json);
-                                if let Ok(value) = serde_json::from_str::<serde_json::Value>(buffer) {
+                                if let Ok(value) = serde_json::from_str::<serde_json::Value>(buffer)
+                                {
                                     web_search = parse_web_search_action(&value);
                                 }
                             }
@@ -182,7 +188,11 @@ impl StreamParser for AnthropicStreamParser {
                         let delta = build_tool_input_delta(
                             partial_json,
                             Some(index),
-                            if tool_name.is_empty() { None } else { Some(tool_name) },
+                            if tool_name.is_empty() {
+                                None
+                            } else {
+                                Some(tool_name)
+                            },
                             tool_id,
                             web_search,
                         );

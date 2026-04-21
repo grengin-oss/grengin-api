@@ -1,8 +1,8 @@
+use crate::models::users::UserStatus;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
-use crate::models::users::UserStatus;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AnalyticsQuery {
@@ -22,10 +22,10 @@ pub struct UserAnalyticsQuery {
     pub limit: Option<u64>,
     pub sort_by: Option<String>,
     pub order: Option<String>,
-    pub search:Option<String>,
-    pub role_id:Option<Uuid>,
-    pub status:Option<UserStatus>,
-    pub unassigned_department:Option<bool>,
+    pub search: Option<String>,
+    pub role_id: Option<Uuid>,
+    pub status: Option<UserStatus>,
+    pub unassigned_department: Option<bool>,
     pub live: Option<bool>,
 }
 
@@ -52,7 +52,7 @@ pub struct DepartmentAnalyticsQuery {
     pub limit: Option<u64>,
     pub search: Option<String>,
     pub live: Option<bool>,
-    pub department_id:Option<Uuid>,
+    pub department_id: Option<Uuid>,
     pub sort: Option<DepartmentAnalyticsSortRule>,
     pub ascending: Option<bool>,
 }
@@ -111,7 +111,7 @@ pub struct UserAnalyticsItem {
     pub average_latency: f64,
     pub success_count: i64,
     pub error_count: i64,
-    pub department:Option<String>,
+    pub department: Option<String>,
     pub last_activity: Option<DateTime<Utc>>,
 }
 
