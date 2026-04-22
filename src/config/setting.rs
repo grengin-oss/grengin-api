@@ -541,7 +541,7 @@ impl RagSettings {
         let enabled = std::env::var("RAG_ENABLED")
             .ok()
             .and_then(|val| val.parse::<bool>().ok())
-            .unwrap_or(true);
+            .unwrap_or(false);
         let recent_message_pairs = std::env::var("RAG_RECENT_MESSAGE_PAIRS")
             .ok()
             .and_then(|val| val.parse::<usize>().ok())

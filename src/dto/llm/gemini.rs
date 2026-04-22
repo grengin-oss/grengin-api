@@ -87,7 +87,6 @@ pub fn normalize_gemini_parameters(schema: &Value) -> Value {
             "type",
             "properties",
             "required",
-            "additionalProperties",
             "items",
             "oneOf",
             "anyOf",
@@ -124,11 +123,6 @@ pub fn normalize_gemini_parameters(schema: &Value) -> Value {
                             Value::Array(list.iter().map(sanitize_schema).collect())
                         }
                         _ => Value::Array(Vec::new()),
-                    },
-                    "additionalProperties" => match value {
-                        Value::Bool(_) => value.clone(),
-                        Value::Object(_) => sanitize_schema(value),
-                        _ => Value::Bool(false),
                     },
                     "required" => match value {
                         Value::Array(reqs) => Value::Array(
