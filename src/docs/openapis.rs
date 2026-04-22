@@ -57,12 +57,15 @@ use crate::dto::prompts::{
     PromptMetricsQuery, PromptMetricsResponse, PromptSource, RolePromptCreate, RolePromptListQuery,
     RolePromptResponse, RolePromptUpdate, SystemPromptResponse, UserPromptPreferenceRequest,
 };
+use crate::dto::system_metrics::{
+    ContainerMetrics, DatabaseMetrics, DiskMetrics, MachineMetrics, SystemMetricsResponse,
+};
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::handlers::{
     admin_ai, admin_analytics, admin_audit, admin_department, admin_department_budgets,
-    admin_embedding, admin_mcp, admin_prompts, admin_roles, admin_sso_provider, admin_users, auth,
-    branding, chat, chat_stream, file, mcp, me, me_prompts, message, models, notifications, oidc,
-    open_error,
+    admin_embedding, admin_mcp, admin_prompts, admin_roles, admin_sso_provider, admin_system,
+    admin_users, auth, branding, chat, chat_stream, file, mcp, me, me_prompts, message, models,
+    notifications, oidc, open_error,
 };
 use crate::models::departments::{ActionOnExceed, BudgetPeriod};
 use crate::models::mcp_access_policies::{McpAccessType, McpPermission};
@@ -124,6 +127,7 @@ use utoipa::OpenApi;
         admin_audit::get_audit_actions,
         admin_audit::export_audit_logs,
         admin_audit::redact_audit_logs_for_user,
+        admin_system::get_system_metrics,
         admin_department::create_department,
         admin_department::update_department,
         admin_department::delete_department,
@@ -333,7 +337,12 @@ use utoipa::OpenApi;
             SystemPromptResponse,
             UserPromptPreferenceRequest,
             PromptFeedbackRequest,
-            PromptSource
+            PromptSource,
+            SystemMetricsResponse,
+            MachineMetrics,
+            DiskMetrics,
+            ContainerMetrics,
+            DatabaseMetrics
         )
     ),
     tags(

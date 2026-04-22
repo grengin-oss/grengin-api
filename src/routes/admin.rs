@@ -35,6 +35,7 @@ use crate::{
             delete_sso_provider_by_id, get_sso_provider_by_id, get_sso_providers,
             update_sso_provider_by_id,
         },
+        admin_system::get_system_metrics,
         admin_users::{
             add_new_user, delete_user, get_user_by_id, get_users, patch_user_status, update_user,
         },
@@ -97,6 +98,7 @@ pub fn admin_routes() -> Router<SharedState> {
         .route("/admin/audit-logs", get(get_audit_logs))
         .route("/admin/audit-logs/export", get(export_audit_logs))
         .route("/audit/actions", get(get_audit_actions))
+        .route("/admin/system-metrics", get(get_system_metrics))
         .route(
             "/admin/audit-logs/redact/{user_id}",
             post(redact_audit_logs_for_user),

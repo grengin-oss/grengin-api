@@ -8,6 +8,7 @@ pub mod admin_mcp;
 pub mod admin_prompts;
 pub mod admin_roles;
 pub mod admin_sso_provider;
+pub mod admin_system;
 pub mod admin_users;
 pub mod auth;
 pub mod branding;

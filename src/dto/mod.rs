@@ -21,3 +21,4 @@ pub mod models;
 pub mod notifications;
 pub mod oauth;
 pub mod prompts;
+pub mod system_metrics;
