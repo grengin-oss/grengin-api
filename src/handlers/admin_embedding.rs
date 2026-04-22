@@ -121,6 +121,7 @@ pub async fn get_embedding_config(
     request_body = EmbeddingConfigUpdateRequest,
     responses(
        (status = 200, body = EmbeddingConfigResponse),
+       (status = 409, content_type = "application/json", body = Error, description = "Embedding provider/model cannot be changed once configured"),
        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
        (status = 403, content_type = "application/json", body = Error, description = "Permission denied"),
        (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000)"),
@@ -143,14 +144,22 @@ pub async fn update_embedding_config(
         .await?;
 
     let config = get_or_create_embedding_config(&app_state).await?;
+
+    if let Some(provider) = req.provider.as_ref() {
+        if provider != &config.provider {
+            return Err(AuthError::DbConflict);
+        }
+    }
+    if let Some(model) = req.model.as_ref() {
+        if model != &config.model {
+            return Err(AuthError::DbConflict);
+        }
+    }
+
     let mut active = config.into_active_model();
 
-    if let Some(provider) = req.provider {
-        active.provider = Set(provider);
-    }
-    if let Some(model) = req.model {
-        active.model = Set(model);
-    }
+    // Provider and model are immutable after initial configuration.
+    // Idempotent requests with the same values are allowed.
     if let Some(dimensions) = req.dimensions {
         active.dimensions = Set(Some(dimensions));
     }

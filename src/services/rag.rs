@@ -3,6 +3,8 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DatabaseBackend, DatabaseConnection,
     EntityTrait, FromQueryResult, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Statement,
 };
+use serde::Deserialize;
+use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
@@ -10,12 +12,16 @@ use crate::{
     dto::files::File,
     error::AppError,
     llm::{
+        gemini::GEMINI_API_URL,
+        mistral::MISTRAL_API_URL,
         prompt::{Prompt, PromptTextResponse},
         provider::{AnthropicApis, OpenaiApis},
     },
     models::{conversation_summaries, messages, messages::ChatRole},
     state::SharedState,
 };
+
+const MESSAGE_EMBEDDING_VECTOR_DIM: usize = 1536;
 
 pub struct RecentMessages {
     pub prompts: Vec<Prompt>,
@@ -41,6 +47,27 @@ struct RetrievedMessageRow {
     role: String,
     #[sea_orm(from_alias = "createdAt")]
     created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MistralEmbeddingResponse {
+    data: Vec<MistralEmbeddingData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MistralEmbeddingData {
+    embedding: Vec<f32>,
+    index: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiEmbeddingResponse {
+    embedding: Option<GeminiEmbeddingData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiEmbeddingData {
+    values: Vec<f32>,
 }
 
 pub async fn load_recent_prompts(
@@ -426,6 +453,38 @@ async fn generate_embedding(
     Ok(embeddings.and_then(|mut vecs| vecs.pop()))
 }
 
+fn normalize_embedding_dimensions(mut embedding: Vec<f32>) -> Vec<f32> {
+    match embedding.len().cmp(&MESSAGE_EMBEDDING_VECTOR_DIM) {
+        std::cmp::Ordering::Equal => embedding,
+        std::cmp::Ordering::Greater => {
+            embedding.truncate(MESSAGE_EMBEDDING_VECTOR_DIM);
+            embedding
+        }
+        std::cmp::Ordering::Less => {
+            embedding.resize(MESSAGE_EMBEDDING_VECTOR_DIM, 0.0);
+            embedding
+        }
+    }
+}
+
+fn normalize_embeddings_for_storage(embeddings: Vec<Vec<f32>>) -> Vec<Vec<f32>> {
+    embeddings
+        .into_iter()
+        .map(normalize_embedding_dimensions)
+        .collect()
+}
+
+fn gemini_embedding_model_candidates(model: &str) -> Vec<String> {
+    let normalized = model.trim().trim_start_matches("models/").to_string();
+    let mut candidates = vec![normalized.clone()];
+    if normalized.eq_ignore_ascii_case("text-embedding-004")
+        || normalized.eq_ignore_ascii_case("embedding-001")
+    {
+        candidates.push("gemini-embedding-001".to_string());
+    }
+    candidates
+}
+
 async fn generate_embeddings(
     app_state: &SharedState,
     config: &EmbeddingSettings,
@@ -453,7 +512,123 @@ async fn generate_embeddings(
                 .into_iter()
                 .map(|item| item.embedding)
                 .collect::<Vec<Vec<f32>>>();
-            Ok(Some(embeddings))
+            Ok(Some(normalize_embeddings_for_storage(embeddings)))
+        }
+        "mistral" => {
+            let mistral_settings = match app_state.settings.mistral.read().await.clone() {
+                Some(settings) if settings.is_enabled => settings,
+                _ => return Ok(None),
+            };
+            let response: MistralEmbeddingResponse = app_state
+                .req_client
+                .post(format!("{MISTRAL_API_URL}/v1/embeddings"))
+                .bearer_auth(mistral_settings.api_key)
+                .header("content-type", "application/json")
+                .json(&json!({
+                    "model": config.model,
+                    "input": inputs,
+                }))
+                .send()
+                .await
+                .map_err(|e| {
+                    eprintln!("mistral embedding request error: {e}");
+                    AppError::LlmProviderNotConfigured {
+                        provider: "mistral".to_string(),
+                    }
+                })?
+                .error_for_status()
+                .map_err(|e| {
+                    eprintln!("mistral embedding status error: {e}");
+                    AppError::LlmProviderNotConfigured {
+                        provider: "mistral".to_string(),
+                    }
+                })?
+                .json()
+                .await
+                .map_err(|e| {
+                    eprintln!("mistral embedding decode error: {e}");
+                    AppError::LlmProviderNotConfigured {
+                        provider: "mistral".to_string(),
+                    }
+                })?;
+            let mut data = response.data;
+            data.sort_by_key(|item| item.index);
+            Ok(Some(normalize_embeddings_for_storage(
+                data.into_iter()
+                    .map(|item| item.embedding)
+                    .collect::<Vec<Vec<f32>>>(),
+            )))
+        }
+        "gemini" => {
+            let gemini_settings = match app_state.settings.gemini.read().await.clone() {
+                Some(settings) if settings.is_enabled => settings,
+                _ => return Ok(None),
+            };
+            let model_candidates = gemini_embedding_model_candidates(&config.model);
+            let mut embeddings = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                let mut body = serde_json::Map::new();
+                body.insert(
+                    "content".to_string(),
+                    json!({
+                        "parts": [{"text": input}]
+                    }),
+                );
+                if let Some(dimensions) = config.dimensions {
+                    body.insert("outputDimensionality".to_string(), json!(dimensions));
+                }
+                let mut embedded = None;
+                for model_name in &model_candidates {
+                    let response = app_state
+                        .req_client
+                        .post(format!(
+                            "{GEMINI_API_URL}/v1beta/models/{model_name}:embedContent"
+                        ))
+                        .header("x-goog-api-key", gemini_settings.api_key.clone())
+                        .header("content-type", "application/json")
+                        .json(&body)
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            eprintln!("gemini embedding request error: {e}");
+                            AppError::LlmProviderNotConfigured {
+                                provider: "gemini".to_string(),
+                            }
+                        })?;
+
+                    if response.status().as_u16() == 404 {
+                        continue;
+                    }
+                    if !response.status().is_success() {
+                        let status = response.status();
+                        let body = response.text().await.unwrap_or_default();
+                        eprintln!("gemini embedding status error: {status} body: {body}");
+                        return Err(AppError::LlmProviderNotConfigured {
+                            provider: "gemini".to_string(),
+                        });
+                    }
+
+                    let parsed: GeminiEmbeddingResponse = response.json().await.map_err(|e| {
+                        eprintln!("gemini embedding decode error: {e}");
+                        AppError::LlmProviderNotConfigured {
+                            provider: "gemini".to_string(),
+                        }
+                    })?;
+                    if let Some(embedding) = parsed.embedding {
+                        embedded = Some(embedding.values);
+                    }
+                    if embedded.is_some() {
+                        break;
+                    }
+                }
+                if let Some(embedding) = embedded {
+                    embeddings.push(embedding);
+                }
+            }
+            if embeddings.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(normalize_embeddings_for_storage(embeddings)))
         }
         _ => Ok(None),
     }
@@ -547,7 +722,7 @@ async fn insert_message_embedding(
         target.role.to_string().into(),
         config.provider.clone().into(),
         config.model.clone().into(),
-        config.dimensions.into(),
+        Some(embedding.len() as i32).into(),
         vector.into(),
         target.created_at.into(),
     ];
