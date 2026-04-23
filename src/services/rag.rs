@@ -1,7 +1,9 @@
 use chrono::{DateTime, Utc};
 use sea_orm::{
+    sea_query::{Alias, BinOper, Expr, Order},
     ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DatabaseBackend, DatabaseConnection,
-    EntityTrait, FromQueryResult, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Statement,
+    EntityTrait, IntoActiveModel, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait, Statement,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -17,7 +19,7 @@ use crate::{
         prompt::{Prompt, PromptTextResponse},
         provider::{AnthropicApis, OpenaiApis},
     },
-    models::{conversation_summaries, messages, messages::ChatRole},
+    models::{conversation_summaries, message_embeddings, messages, messages::ChatRole},
     state::SharedState,
 };
 
@@ -39,14 +41,10 @@ pub struct EmbeddingTarget {
 
 #[derive(Debug, sea_orm::FromQueryResult)]
 struct RetrievedMessageRow {
-    #[sea_orm(from_alias = "messageId")]
-    message_id: Uuid,
     #[sea_orm(from_alias = "messageContent")]
     message_content: String,
     #[sea_orm(from_alias = "role")]
     role: String,
-    #[sea_orm(from_alias = "createdAt")]
-    created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,58 +150,51 @@ pub async fn build_retrieval_prompt(
         None => return Ok(None),
     };
     let vector = format_pgvector(&embedding);
-    let sql = r#"
-        SELECT
-            m.id as "messageId",
-            m."messageContent" as "messageContent",
-            m.role as "role",
-            m."createdAt" as "createdAt"
-        FROM "message_embeddings" e
-        JOIN "messages" m ON m.id = e."messageId"
-        WHERE e."conversationId" = $2
-          AND e."provider" = $3
-          AND e."model" = $4
-          AND m.deleted = false
-          AND m.role IN ('user','assistant')
-          AND m."createdAt" < $5
-        ORDER BY e."embedding" <=> $1::vector
-        LIMIT $6
-    "#;
+    let distance_expr = Expr::col((message_embeddings::Entity, message_embeddings::Column::Embedding))
+        .binary(
+            BinOper::Custom("<=>".into()),
+            Expr::val(vector).cast_as(Alias::new("vector")),
+        );
 
-    let values = vec![
-        vector.into(),
-        conversation_id.into(),
-        embedding_config.provider.clone().into(),
-        embedding_config.model.clone().into(),
-        boundary.into(),
-        (app_state.settings.rag.retrieval_top_k as i64).into(),
-    ];
-
-    let rows = app_state
-        .database
-        .query_all(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            sql,
-            values,
-        ))
+    let rows = message_embeddings::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            message_embeddings::Relation::Messages.def(),
+        )
+        .filter(message_embeddings::Column::ConversationId.eq(conversation_id))
+        .filter(message_embeddings::Column::Provider.eq(embedding_config.provider.clone()))
+        .filter(message_embeddings::Column::Model.eq(embedding_config.model.clone()))
+        .filter(messages::Column::Deleted.eq(false))
+        .filter(messages::Column::Role.is_in(vec![ChatRole::User, ChatRole::Assistant]))
+        .filter(messages::Column::CreatedAt.lt(boundary))
+        .select_only()
+        .column_as(
+            Expr::col((messages::Entity, messages::Column::MessageContent)),
+            "messageContent",
+        )
+        .column_as(Expr::col((messages::Entity, messages::Column::Role)), "role")
+        .order_by(distance_expr, Order::Asc)
+        .limit(app_state.settings.rag.retrieval_top_k as u64)
+        .into_model::<RetrievedMessageRow>()
+        .all(&app_state.database)
         .await
         .map_err(|e| {
             eprintln!("rag retrieval query error: {e}");
             AppError::DbTimeout
         })?;
 
-    let mut messages = Vec::new();
-    for row in rows {
-        if let Ok(parsed) = RetrievedMessageRow::from_query_result(&row, "") {
-            let role_label = match parsed.role.as_str() {
+    let messages = rows
+        .into_iter()
+        .map(|row| {
+            let role_label = match row.role.as_str() {
                 "assistant" => "Assistant",
                 "user" => "User",
                 _ => "User",
             };
-            let snippet = truncate_text(&parsed.message_content, 500);
-            messages.push(format!("{role_label}: {snippet}"));
-        }
-    }
+            let snippet = truncate_text(&row.message_content, 500);
+            format!("{role_label}: {snippet}")
+        })
+        .collect::<Vec<_>>();
 
     if messages.is_empty() {
         return Ok(None);

@@ -543,18 +543,10 @@ struct StdioConnectionConfig {
     command: String,
     #[serde(default)]
     args: Vec<String>,
-    #[serde(default)]
-    transport_config: Option<TransportConfigInput>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct TransportConfigInput {
-    connect_timeout_ms: Option<u64>,
-    read_timeout_ms: Option<u64>,
-    write_timeout_ms: Option<u64>,
-    max_message_size: Option<usize>,
-    keep_alive_ms: Option<u64>,
-    compression: Option<bool>,
     headers: Option<HashMap<String, String>>,
 }
 

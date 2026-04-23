@@ -12,7 +12,6 @@ use super::{
 struct ToolBuffer {
     name: Option<String>,
     buffer: String,
-    index: Option<u32>,
 }
 
 pub struct MistralConversationStreamParser {
@@ -239,7 +238,6 @@ impl MistralConversationStreamParser {
                 .or_insert_with(|| ToolBuffer {
                     name: name.clone(),
                     buffer: String::new(),
-                    index: None,
                 });
             if entry.name.is_none() && name.is_some() {
                 entry.name = name.clone();
