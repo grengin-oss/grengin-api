@@ -13,7 +13,6 @@ use super::{
 #[derive(Debug, Clone)]
 struct MistralToolCallMeta {
     name: Option<String>,
-    id: String,
     buffer: String,
     index: Option<u32>,
 }
@@ -67,7 +66,6 @@ impl MistralStreamParser {
                 .entry(tool_id.clone())
                 .or_insert_with(|| MistralToolCallMeta {
                     name: name.clone(),
-                    id: tool_id.clone(),
                     buffer: String::new(),
                     index,
                 });

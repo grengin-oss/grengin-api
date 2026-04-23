@@ -78,8 +78,6 @@ struct UserAnalyticsRow {
 
     #[sea_orm(from_alias = "success_count")]
     success_count: i64,
-    #[sea_orm(from_alias = "error_count")]
-    error_count: i64,
 
     #[sea_orm(from_alias = "last_activity")]
     last_activity: Option<DateTime<Utc>>,
@@ -115,16 +113,12 @@ pub async fn calculate_user_analytics(
     let user_request_cond = active_msg_cond
         .clone()
         .and(Expr::col((messages::Entity, messages::Column::Role)).eq(messages::ChatRole::User));
-    let error_count_cond = active_msg_cond
-        .clone()
-        .and(Expr::col((messages::Entity, messages::Column::Role)).eq(messages::ChatRole::System));
     let success_count_cond = active_msg_cond.clone().and(
         Expr::col((messages::Entity, messages::Column::Role)).eq(messages::ChatRole::Assistant),
     );
 
     // Aggregates
     let total_requests_expr = Func::sum(Expr::case(user_request_cond, 1).finally(0));
-    let error_count_expr = Func::sum(Expr::case(error_count_cond, 1).finally(0));
     let success_count_expr = Func::sum(Expr::case(success_count_cond, 1).finally(0));
     let sort_email_expr = Expr::col((users::Entity, users::Column::Email));
     let sort_name_expr: SimpleExpr = Func::coalesce([
@@ -179,7 +173,6 @@ pub async fn calculate_user_analytics(
         .expr_as(total_cost_expr.clone(), "total_cost")
         .expr_as(average_latency_expr.clone(), "average_latency")
         .expr_as(last_activity_expr.clone(), "last_activity")
-        .expr_as(error_count_expr.clone(), "error_count")
         .expr_as(success_count_expr.clone(), "success_count")
         .join(JoinType::LeftJoin, users::Relation::Departments.def())
         .column_as(departments::Column::Name, "department_name")
@@ -249,8 +242,8 @@ pub async fn calculate_user_analytics(
             total_tokens: r.total_tokens,
             total_cost: r.total_cost.to_string().parse().unwrap_or(0.0),
             average_latency: r.average_latency.unwrap_or(0.0),
-            success_count: r.success_count, // if your row struct still has these
-            error_count: r.error_count,
+            success_count: r.success_count,
+            error_count: (r.total_requests - r.success_count).max(0),
             last_activity: r.last_activity,
         })
         .collect();
@@ -291,15 +284,11 @@ pub async fn calculate_user_analytics_scoped(
     let user_request_cond = active_msg_cond
         .clone()
         .and(Expr::col((messages::Entity, messages::Column::Role)).eq(messages::ChatRole::User));
-    let error_count_cond = active_msg_cond
-        .clone()
-        .and(Expr::col((messages::Entity, messages::Column::Role)).eq(messages::ChatRole::System));
     let success_count_cond = active_msg_cond.clone().and(
         Expr::col((messages::Entity, messages::Column::Role)).eq(messages::ChatRole::Assistant),
     );
 
     let total_requests_expr = Func::sum(Expr::case(user_request_cond, 1).finally(0));
-    let error_count_expr = Func::sum(Expr::case(error_count_cond, 1).finally(0));
     let success_count_expr = Func::sum(Expr::case(success_count_cond, 1).finally(0));
     let sort_email_expr = Expr::col((users::Entity, users::Column::Email));
     let sort_name_expr: SimpleExpr = Func::coalesce([
@@ -351,7 +340,6 @@ pub async fn calculate_user_analytics_scoped(
         .expr_as(total_cost_expr.clone(), "total_cost")
         .expr_as(average_latency_expr.clone(), "average_latency")
         .expr_as(last_activity_expr.clone(), "last_activity")
-        .expr_as(error_count_expr.clone(), "error_count")
         .expr_as(success_count_expr.clone(), "success_count")
         .join(JoinType::LeftJoin, users::Relation::Departments.def())
         .column_as(departments::Column::Name, "department_name")
@@ -447,7 +435,7 @@ pub async fn calculate_user_analytics_scoped(
             total_cost: r.total_cost.to_string().parse().unwrap_or(0.0),
             average_latency: r.average_latency.unwrap_or(0.0),
             success_count: r.success_count,
-            error_count: r.error_count,
+            error_count: (r.total_requests - r.success_count).max(0),
             last_activity: r.last_activity,
         })
         .collect();
@@ -483,9 +471,6 @@ struct DepartmentAnalyticsRow {
 
     #[sea_orm(from_alias = "success_count")]
     success_count: Option<i64>,
-
-    #[sea_orm(from_alias = "error_count")]
-    error_count: Option<i64>,
 }
 
 pub async fn get_department_analytics(
@@ -530,14 +515,8 @@ pub async fn get_department_analytics(
         .and(active_user_cond.clone())
         .and(Expr::col((messages::Entity, messages::Column::Role)).eq(ChatRole::Assistant));
 
-    let error_cond = active_msg_cond
-        .clone()
-        .and(active_user_cond.clone())
-        .and(Expr::col((messages::Entity, messages::Column::Role)).eq(ChatRole::System));
-
     let total_requests_expr = Func::sum(Expr::case(req_cond, 1).finally(0));
     let success_count_expr = Func::sum(Expr::case(success_cond, 1).finally(0));
-    let error_count_expr = Func::sum(Expr::case(error_cond, 1).finally(0));
 
     // Tokens + cost (only for active window + active users)
     let total_tokens_expr = Func::sum(
@@ -604,7 +583,6 @@ pub async fn get_department_analytics(
         .expr_as(total_cost_expr, "total_cost")
         .expr_as(average_latency_expr, "average_latency")
         .expr_as(success_count_expr, "success_count")
-        .expr_as(error_count_expr, "error_count")
         .expr_as(child_count_expr.clone(), "sub_departments")
         .join(JoinType::LeftJoin, departments::Relation::Users.def())
         .join(JoinType::LeftJoin, users::Relation::Conversations.def())
@@ -658,16 +636,18 @@ pub async fn get_department_analytics(
                 .to_string()
                 .parse::<f64>()
                 .unwrap_or(0.0);
+            let total_requests = r.total_requests.unwrap_or(0);
+            let success_count = r.success_count.unwrap_or(0);
 
             DepartmentAnalyticsItem {
                 department: r.department,
                 total_users: r.total_users.unwrap_or(0),
-                total_requests: r.total_requests.unwrap_or(0),
+                total_requests,
                 total_tokens: r.total_tokens.unwrap_or(0),
                 total_cost,
                 average_latency: r.average_latency.unwrap_or(0.0),
-                success_count: r.success_count.unwrap_or(0),
-                error_count: r.error_count.unwrap_or(0),
+                success_count,
+                error_count: (total_requests - success_count).max(0),
             }
         })
         .collect::<Vec<_>>();
@@ -720,14 +700,8 @@ pub async fn get_department_analytics_scoped(
         .and(active_user_cond.clone())
         .and(Expr::col((messages::Entity, messages::Column::Role)).eq(ChatRole::Assistant));
 
-    let error_cond = active_msg_cond
-        .clone()
-        .and(active_user_cond.clone())
-        .and(Expr::col((messages::Entity, messages::Column::Role)).eq(ChatRole::System));
-
     let total_requests_expr = Func::sum(Expr::case(req_cond, 1).finally(0));
     let success_count_expr = Func::sum(Expr::case(success_cond, 1).finally(0));
-    let error_count_expr = Func::sum(Expr::case(error_cond, 1).finally(0));
 
     let total_tokens_expr = Func::sum(
         Expr::case(
@@ -790,7 +764,6 @@ pub async fn get_department_analytics_scoped(
         .expr_as(total_cost_expr, "total_cost")
         .expr_as(average_latency_expr, "average_latency")
         .expr_as(success_count_expr, "success_count")
-        .expr_as(error_count_expr, "error_count")
         .expr_as(child_count_expr.clone(), "sub_departments")
         .join(JoinType::LeftJoin, departments::Relation::Users.def())
         .join(JoinType::LeftJoin, users::Relation::Conversations.def())
@@ -871,16 +844,18 @@ pub async fn get_department_analytics_scoped(
                 .to_string()
                 .parse::<f64>()
                 .unwrap_or(0.0);
+            let total_requests = r.total_requests.unwrap_or(0);
+            let success_count = r.success_count.unwrap_or(0);
 
             DepartmentAnalyticsItem {
                 department: r.department,
                 total_users: r.total_users.unwrap_or(0),
-                total_requests: r.total_requests.unwrap_or(0),
+                total_requests,
                 total_tokens: r.total_tokens.unwrap_or(0),
                 total_cost,
                 average_latency: r.average_latency.unwrap_or(0.0),
-                success_count: r.success_count.unwrap_or(0),
-                error_count: r.error_count.unwrap_or(0),
+                success_count,
+                error_count: (total_requests - success_count).max(0),
             }
         })
         .collect::<Vec<_>>();
@@ -1158,8 +1133,6 @@ struct TimeSeriesRow {
 
     #[sea_orm(from_alias = "success_count")]
     success_count: Option<i64>,
-    #[sea_orm(from_alias = "error_count")]
-    error_count: Option<i64>,
 }
 
 pub async fn get_timeseries_analytics(
@@ -1224,16 +1197,6 @@ pub async fn get_timeseries_analytics(
         .finally(0),
     );
 
-    let error_count_expr = Func::sum(
-        Expr::case(
-            Expr::col((messages::Entity, messages::Column::Role)).eq(ChatRole::System),
-            1,
-        )
-        .finally(0),
-    );
-
-    // error_count = 0 (until you have a real error signal)
-
     let q = messages::Entity::find()
         .select_only()
         .expr_as(bucket_expr.clone(), "bucket")
@@ -1242,7 +1205,6 @@ pub async fn get_timeseries_analytics(
         .expr_as(total_cost_expr.clone(), "total_cost")
         .expr_as(average_latency_expr.clone(), "average_latency")
         .expr_as(success_count_expr.clone(), "success_count")
-        .expr_as(error_count_expr.clone(), "error_count")
         .filter(cond)
         .group_by(bucket_expr.clone())
         .order_by(bucket_expr.clone(), Order::Asc);
@@ -1251,19 +1213,23 @@ pub async fn get_timeseries_analytics(
 
     let data = rows
         .into_iter()
-        .map(|r| TimeSeriesDataPoint {
-            timestamp: r.bucket.to_rfc3339(),
-            total_requests: r.total_requests.unwrap_or(0),
-            total_tokens: r.total_tokens.unwrap_or(0),
-            total_cost: r
-                .total_cost
-                .unwrap_or(Decimal::ZERO)
-                .to_string()
-                .parse()
-                .unwrap_or(0.0),
-            average_latency: r.average_latency.unwrap_or(0.0),
-            success_count: r.success_count.unwrap_or(0),
-            error_count: r.error_count.unwrap_or(0),
+        .map(|r| {
+            let total_requests = r.total_requests.unwrap_or(0);
+            let success_count = r.success_count.unwrap_or(0);
+            TimeSeriesDataPoint {
+                timestamp: r.bucket.to_rfc3339(),
+                total_requests,
+                total_tokens: r.total_tokens.unwrap_or(0),
+                total_cost: r
+                    .total_cost
+                    .unwrap_or(Decimal::ZERO)
+                    .to_string()
+                    .parse()
+                    .unwrap_or(0.0),
+                average_latency: r.average_latency.unwrap_or(0.0),
+                success_count,
+                error_count: (total_requests - success_count).max(0),
+            }
         })
         .collect();
 
