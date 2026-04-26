@@ -100,7 +100,7 @@ impl AppState {
             "azure" => {
                 let is_enabled = self
                     .settings
-                    .google
+                    .azure
                     .read()
                     .await
                     .as_ref()

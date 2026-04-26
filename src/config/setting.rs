@@ -440,6 +440,7 @@ impl AuthSettings {
 impl GoogleSettings {
     pub fn from_env() -> Result<Self, ConfigError> {
         let client_id = std::env::var("GOOGLE_CLIENT_ID")
+            .or_else(|_| std::env::var("GOOGLE_CLIENT"))
             .map_err(|_| ConfigError::Missing("GOOGLE_CLIENT_ID"))?;
         let client_secret = std::env::var("GOOGLE_CLIENT_SECRET")
             .map_err(|_| ConfigError::Missing("GOOGLE_CLIENT_SECRET"))?;
