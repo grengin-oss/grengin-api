@@ -1,10 +1,10 @@
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
-use serde::ser::{Serialize, Serializer};
 use serde::Serialize as SerdeSerialize;
+use serde::ser::{Serialize, Serializer};
 use std::collections::BTreeMap;
 use utoipa::ToSchema;
 use uuid::Uuid;

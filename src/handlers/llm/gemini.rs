@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use serde_json::Value;
 
 use crate::handlers::llm::{
-    build_tool_call, StreamParseResult, StreamParser, StreamWebSearchResult, ToolInput,
+    StreamParseResult, StreamParser, StreamWebSearchResult, ToolInput, build_tool_call,
 };
 
 #[derive(Default)]

@@ -1,20 +1,20 @@
 use crate::models::mcp_servers::McpTransportType;
 use chrono::{DateTime, Duration, Utc};
 use oauth2::{
-    basic::BasicClient, EndpointNotSet as OAuthEndpointNotSet, EndpointSet as OAuthEndpointSet,
+    EndpointNotSet as OAuthEndpointNotSet, EndpointSet as OAuthEndpointSet, basic::BasicClient,
 };
 use openidconnect::{
-    core::{CoreAuthenticationFlow, CoreClient, CoreJsonWebKeySet},
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointNotSet, EndpointSet,
     IssuerUrl, Nonce, OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
     RefreshToken, Scope, TokenUrl,
+    core::{CoreAuthenticationFlow, CoreClient, CoreJsonWebKeySet},
 };
-use reqwest::{header::ACCEPT, Client as ReqwestClient};
+use reqwest::{Client as ReqwestClient, header::ACCEPT};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::{
+    ServiceExt,
     model::{CallToolRequestParams, CallToolResult, JsonObject, Tool},
     transport::{StreamableHttpClientTransport, TokioChildProcess},
-    ServiceExt,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

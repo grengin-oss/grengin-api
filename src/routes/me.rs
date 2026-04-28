@@ -13,8 +13,8 @@ use crate::{
     state::SharedState,
 };
 use axum::{
-    routing::{get, post},
     Router,
+    routing::{get, post},
 };
 
 pub fn me_routes() -> Router<SharedState> {

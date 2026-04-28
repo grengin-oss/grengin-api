@@ -1,6 +1,6 @@
 use std::{fs, path::Path, time::Instant};
 
-use axum::{extract::State, Json};
+use axum::{Json, extract::State};
 use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
@@ -101,25 +101,25 @@ fn collect_container_metrics() -> ContainerMetrics {
         None
     };
 
-    let (memory_usage_bytes, memory_limit_bytes, cpu_quota_cores, cpu_usage_seconds) =
-        if cgroup_v2 {
-            (
-                read_u64("/sys/fs/cgroup/memory.current"),
-                read_u64_maybe_max("/sys/fs/cgroup/memory.max"),
-                read_cpu_quota_v2("/sys/fs/cgroup/cpu.max"),
-                read_cpu_usage_seconds_v2("/sys/fs/cgroup/cpu.stat"),
-            )
-        } else {
-            (
-                read_u64("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
-                read_u64_maybe_max("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
-                read_cpu_quota_v1(
-                    "/sys/fs/cgroup/cpu/cpu.cfs_quota_us",
-                    "/sys/fs/cgroup/cpu/cpu.cfs_period_us",
-                ),
-                read_cpu_usage_seconds_v1("/sys/fs/cgroup/cpuacct/cpuacct.usage"),
-            )
-        };
+    let (memory_usage_bytes, memory_limit_bytes, cpu_quota_cores, cpu_usage_seconds) = if cgroup_v2
+    {
+        (
+            read_u64("/sys/fs/cgroup/memory.current"),
+            read_u64_maybe_max("/sys/fs/cgroup/memory.max"),
+            read_cpu_quota_v2("/sys/fs/cgroup/cpu.max"),
+            read_cpu_usage_seconds_v2("/sys/fs/cgroup/cpu.stat"),
+        )
+    } else {
+        (
+            read_u64("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+            read_u64_maybe_max("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+            read_cpu_quota_v1(
+                "/sys/fs/cgroup/cpu/cpu.cfs_quota_us",
+                "/sys/fs/cgroup/cpu/cpu.cfs_period_us",
+            ),
+            read_cpu_usage_seconds_v1("/sys/fs/cgroup/cpuacct/cpuacct.usage"),
+        )
+    };
 
     let memory_available_bytes = match (memory_limit_bytes, memory_usage_bytes) {
         (Some(limit), Some(usage)) if limit > usage => Some(limit - usage),

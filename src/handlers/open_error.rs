@@ -1,8 +1,8 @@
 use crate::docs::{
-    app_error_catlog::{build_app_error_catalog, AppErrorCatalogItem},
-    auth_error_catlog::{build_auth_error_catalog, AuthErrorCatalogItem},
+    app_error_catlog::{AppErrorCatalogItem, build_app_error_catalog},
+    auth_error_catlog::{AuthErrorCatalogItem, build_auth_error_catalog},
 };
-use axum::{response::IntoResponse, Json};
+use axum::{Json, response::IntoResponse};
 
 #[utoipa::path(
     get,

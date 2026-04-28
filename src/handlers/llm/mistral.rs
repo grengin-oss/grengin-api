@@ -6,8 +6,8 @@ use serde_json::Value;
 use crate::dto::llm::mistral::{MistralChatCompletionChunk, MistralToolCallDelta};
 
 use super::{
-    build_tool_call, build_tool_input_delta, parse_web_search_action, StreamParseResult,
-    StreamParser, ToolInput,
+    StreamParseResult, StreamParser, ToolInput, build_tool_call, build_tool_input_delta,
+    parse_web_search_action,
 };
 
 #[derive(Debug, Clone)]

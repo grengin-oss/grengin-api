@@ -4,8 +4,8 @@ use std::sync::Mutex;
 use serde_json::Value;
 
 use super::{
-    build_tool_call, build_tool_input_delta, parse_web_search_action, StreamParseResult,
-    StreamParser, StreamWebSearchResult, ToolInput,
+    StreamParseResult, StreamParser, StreamWebSearchResult, ToolInput, build_tool_call,
+    build_tool_input_delta, parse_web_search_action,
 };
 
 #[derive(Debug, Clone)]

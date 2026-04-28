@@ -241,11 +241,7 @@ fn parse_variables(value: &Option<serde_json::Value>) -> Option<Vec<String>> {
             vars.push(val.to_string());
         }
     }
-    if vars.is_empty() {
-        None
-    } else {
-        Some(vars)
-    }
+    if vars.is_empty() { None } else { Some(vars) }
 }
 
 async fn increment_usage(

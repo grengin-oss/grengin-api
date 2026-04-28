@@ -7,15 +7,15 @@ use crate::{
     state::SharedState,
 };
 use axum::{
-    extract::{Path, State},
-    response::{sse::Event, Sse},
     Json,
+    extract::{Path, State},
+    response::{Sse, sse::Event},
 };
 use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{
-    sea_query, ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel,
-    QueryFilter,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
+    sea_query,
 };
 use std::convert::Infallible;
 use uuid::Uuid;

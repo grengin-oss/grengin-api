@@ -63,6 +63,30 @@ pub struct SsoProviderUpdate {
     pub client_secret: Option<String>,
     pub issuer_url: Option<String>,
     pub redirect_url: Option<String>,
+    pub frontend_hosted_url: Option<String>,
+    pub validation_token: Option<String>,
     pub allowed_domains: Option<Vec<String>>,
     pub is_enabled: Option<bool>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct SsoProviderValidationRequest {
+    pub provider: Option<String>,
+    pub tenant_id: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub issuer_url: Option<String>,
+    pub redirect_url: Option<String>,
+    pub frontend_hosted_url: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SsoProviderValidationResponse {
+    pub valid: bool,
+    pub message: String,
+    pub redirect_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_token_expires_at: Option<DateTime<Utc>>,
 }

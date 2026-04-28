@@ -9,7 +9,7 @@ use crate::{
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use migration::OnConflict;
 use sea_orm::{ActiveValue::Set, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},

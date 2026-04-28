@@ -1,5 +1,7 @@
 use crate::{
+    auth::azure::build_azure_public_client,
     auth::error::AuthError,
+    config::setting::OidcClient,
     dto::{
         auth::{AuthToken, TokenType, User},
         oauth::{AuthCallback, StartParams},
@@ -20,16 +22,16 @@ use crate::{
 };
 use axum::http::StatusCode;
 use axum::{
+    Json,
     extract::{Path, Query, State},
     response::Redirect,
-    Json,
 };
 use chrono::Utc;
 use openidconnect::TokenResponse as OidcTokenResponse;
 use openidconnect::{
-    core::{CoreAuthenticationFlow, CoreUserInfoClaims},
     AuthorizationCode, ClaimsVerificationError, CsrfToken, Nonce, OAuth2TokenResponse,
     PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
+    core::{CoreAuthenticationFlow, CoreUserInfoClaims},
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
@@ -37,6 +39,42 @@ use sea_orm::{
 };
 use std::borrow::Cow;
 use uuid::Uuid;
+
+#[derive(Clone, Copy)]
+enum CallbackExchangeMode {
+    Auto,
+    AzureMobilePublic,
+}
+
+fn is_azure_mobile_redirect_uri(provider: &AuthProvider, redirect_uri: &str) -> bool {
+    provider.eq_ignore_ascii_case("azure")
+        && redirect_uri
+            .get(..9)
+            .map(|scheme| scheme.eq_ignore_ascii_case("msauth://"))
+            .unwrap_or(false)
+}
+
+async fn build_azure_public_client_for_redirect(
+    app_state: &SharedState,
+    redirect_uri: &str,
+) -> Result<OidcClient, AuthError> {
+    let azure = app_state.settings.azure.read().await.clone().ok_or(
+        AuthError::SsoProviderNotConfigured {
+            provider: Some("azure".to_string()),
+        },
+    )?;
+    build_azure_public_client(
+        &app_state.req_client,
+        azure.client_id,
+        redirect_uri.to_string(),
+        azure.tenant_id,
+    )
+    .await
+    .map_err(|e| {
+        eprintln!("azure public oidc client build error: {e:?}");
+        AuthError::ServiceTemporarilyUnavailable
+    })
+}
 
 #[utoipa::path(
     get,
@@ -157,18 +195,26 @@ pub async fn oidc_oauth_callback_get(
     Query(cb): Query<AuthCallback>,
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode, Json<AuthToken>), AuthError> {
-    oidc_oauth_callback(provider, cb, app_state).await
+    oidc_oauth_callback(provider, cb, app_state, CallbackExchangeMode::Auto).await
 }
 
 async fn oidc_oauth_callback(
     provider: AuthProvider,
     cb: AuthCallback,
     app_state: SharedState,
+    exchange_mode: CallbackExchangeMode,
 ) -> Result<(StatusCode, Json<AuthToken>), AuthError> {
     // Check for OAuth error responses
     if let Some(error) = cb.error {
         eprintln!("OAuth error: {} - {:?}", error, cb.error_description);
         return Err(AuthError::InvalidCallbackParameters);
+    }
+    if matches!(exchange_mode, CallbackExchangeMode::AzureMobilePublic)
+        && !provider.eq_ignore_ascii_case("azure")
+    {
+        return Err(AuthError::InvalidProvider {
+            provider: Some(provider.clone()),
+        });
     }
     let code = cb.code.ok_or(AuthError::InvalidCallbackParameters)?;
     let (oidc_client_configured, column, default_redirect_uri) = app_state
@@ -177,14 +223,6 @@ async fn oidc_oauth_callback(
         .map_err(|_| AuthError::InvalidProvider {
             provider: Some(provider.clone()),
         })?;
-    let mut oidc_client =
-        oidc_client_configured
-            .read()
-            .await
-            .clone()
-            .ok_or(AuthError::SsoProviderNotConfigured {
-                provider: Some(provider.clone()),
-            })?;
     let sess = oauth_sessions::Entity::find()
         .filter(oauth_sessions::Column::State.eq(Some(cb.state.to_owned())))
         .order_by_desc(oauth_sessions::Column::CreatedAt)
@@ -195,19 +233,41 @@ async fn oidc_oauth_callback(
             AuthError::ServiceTemporarilyUnavailable
         })?
         .ok_or(AuthError::InvalidToken)?;
-    let redirect_uri = RedirectUrl::new(sess.redirect_uri.clone().unwrap_or(
-        default_redirect_uri.ok_or(AuthError::SsoProviderNotConfigured {
-            provider: Some(provider.clone()),
-        })?,
-    ))
-    .map_err(|_| AuthError::InvalidRedirectUri {
-        redirect_uri: sess.redirect_uri.clone(),
+    let redirect_uri_value = sess
+        .redirect_uri
+        .clone()
+        .unwrap_or(
+            default_redirect_uri.ok_or(AuthError::SsoProviderNotConfigured {
+                provider: Some(provider.clone()),
+            })?,
+        );
+    let is_mobile_redirect = is_azure_mobile_redirect_uri(&provider, &redirect_uri_value);
+    if matches!(exchange_mode, CallbackExchangeMode::AzureMobilePublic) && !is_mobile_redirect {
+        return Err(AuthError::InvalidRedirectUri {
+            redirect_uri: Some(redirect_uri_value),
+        });
+    }
+    let redirect_uri = RedirectUrl::new(redirect_uri_value.clone()).map_err(|_| {
+        AuthError::InvalidRedirectUri {
+            redirect_uri: sess.redirect_uri.clone(),
+        }
     })?;
     let active: oauth_sessions::ActiveModel = sess.clone().into();
     active.delete(&app_state.database).await.map_err(|e| {
         eprintln!("db error while deleting oauth_session: {e:?}");
         AuthError::ServiceTemporarilyUnavailable
     })?;
+    let use_public_azure_client = is_mobile_redirect;
+    let mut oidc_client =
+        if use_public_azure_client {
+            build_azure_public_client_for_redirect(&app_state, &redirect_uri_value).await?
+        } else {
+            oidc_client_configured.read().await.clone().ok_or(
+                AuthError::SsoProviderNotConfigured {
+                    provider: Some(provider.clone()),
+                },
+            )?
+        };
     let token_resp = oidc_client
         .exchange_code(AuthorizationCode::new(code))
         .expect("Failed to get token response")
@@ -237,19 +297,24 @@ async fn oidc_oauth_callback(
                 eprintln!("id_token claims verification failed (non-refreshable): {e:?}");
                 return Err(AuthError::InvalidToken);
             }
-            app_state
-                .refresh_oidc_client(&provider)
-                .await
-                .map_err(|err| {
-                    eprintln!("oidc client refresh error: {err:?}");
-                    AuthError::ServiceTemporarilyUnavailable
-                })?;
+            if use_public_azure_client {
+                oidc_client =
+                    build_azure_public_client_for_redirect(&app_state, &redirect_uri_value).await?;
+            } else {
+                app_state
+                    .refresh_oidc_client(&provider)
+                    .await
+                    .map_err(|err| {
+                        eprintln!("oidc client refresh error: {err:?}");
+                        AuthError::ServiceTemporarilyUnavailable
+                    })?;
 
-            oidc_client = oidc_client_configured.read().await.clone().ok_or(
-                AuthError::SsoProviderNotConfigured {
-                    provider: Some(provider.clone()),
-                },
-            )?;
+                oidc_client = oidc_client_configured.read().await.clone().ok_or(
+                    AuthError::SsoProviderNotConfigured {
+                        provider: Some(provider.clone()),
+                    },
+                )?;
+            }
 
             let verifier2 = oidc_client.id_token_verifier();
             id_token.claims(&verifier2, &nonce).map_err(|e2| {
@@ -499,5 +564,64 @@ pub async fn oidc_oauth_callback_post(
     State(app_state): State<SharedState>,
     Json(cb): Json<AuthCallback>,
 ) -> Result<(StatusCode, Json<AuthToken>), AuthError> {
-    oidc_oauth_callback(provider, cb, app_state).await
+    oidc_oauth_callback(provider, cb, app_state, CallbackExchangeMode::Auto).await
+}
+
+#[utoipa::path(
+    get,
+    path = "/auth/azure/mobile/callback",
+    tag = "auth",
+    operation_id = "azureMobileAuthCallback",
+    params(
+        ("code" = String, Query, description = "Authorization code from Azure"),
+        ("state" = String, Query, description = "CSRF state"),
+        ("error" = Option<String>, Query, description = "Error code from Azure"),
+        ("error_description" = Option<String>, Query, description = "Error description from Azure")
+    ),
+    responses(
+        (status = 200, body = AuthToken),
+        (status = 400, content_type = "application/json", body = Error, description = "Invalid callback parameters or redirect URI"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid credentials/account state/domain"),
+        (status = 409, content_type = "application/json", body = Error, description = "SSO provider not configured"),
+        (status = 503, content_type = "application/json", body = Error, description = "Auth service or DB unavailable"),
+    )
+)]
+pub async fn azure_mobile_oauth_callback_get(
+    Query(cb): Query<AuthCallback>,
+    State(app_state): State<SharedState>,
+) -> Result<(StatusCode, Json<AuthToken>), AuthError> {
+    oidc_oauth_callback(
+        "azure".to_string(),
+        cb,
+        app_state,
+        CallbackExchangeMode::AzureMobilePublic,
+    )
+    .await
+}
+
+#[utoipa::path(
+    post,
+    path = "/auth/azure/mobile/callback",
+    tag = "auth",
+    operation_id = "azureMobileAuthCallbackPost",
+    request_body(content = AuthCallback, description = "Azure mobile OAuth callback parameters"),
+    responses(
+        (status = 200, body = AuthToken),
+        (status = 400, content_type = "application/json", body = Error, description = "Invalid callback parameters or redirect URI"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid credentials/account state/domain"),
+        (status = 409, content_type = "application/json", body = Error, description = "SSO provider not configured"),
+        (status = 503, content_type = "application/json", body = Error, description = "Auth service or DB unavailable"),
+    )
+)]
+pub async fn azure_mobile_oauth_callback_post(
+    State(app_state): State<SharedState>,
+    Json(cb): Json<AuthCallback>,
+) -> Result<(StatusCode, Json<AuthToken>), AuthError> {
+    oidc_oauth_callback(
+        "azure".to_string(),
+        cb,
+        app_state,
+        CallbackExchangeMode::AzureMobilePublic,
+    )
+    .await
 }

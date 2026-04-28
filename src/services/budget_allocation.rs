@@ -5,8 +5,8 @@ use crate::{
 use chrono::{DateTime, Datelike, TimeZone, Utc, Weekday};
 use rust_decimal::Decimal;
 use sea_orm::{
-    sea_query::Expr, ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, JoinType,
-    QueryFilter, QuerySelect, RelationTrait,
+    ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QuerySelect, RelationTrait, sea_query::Expr,
 };
 use uuid::Uuid;
 

@@ -17,8 +17,8 @@ use crate::{
     state::SharedState,
 };
 use axum::{
-    extract::{Path, Query, State},
     Json,
+    extract::{Path, Query, State},
 };
 use chrono::Utc;
 use migration::extension::postgres::PgExpr;

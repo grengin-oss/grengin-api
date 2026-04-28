@@ -9,8 +9,8 @@ use crate::{
         },
         files::File,
         llm::anthropic::{
-            AnthropicContentBlock, AnthropicMessage, AnthropicRole, AnthropicTool,
-            AnthropicToolUnion, AnthropicWebSearchTool, ANTHROPIC_DEFAULT_MAX_TOKENS,
+            ANTHROPIC_DEFAULT_MAX_TOKENS, AnthropicContentBlock, AnthropicMessage, AnthropicRole,
+            AnthropicTool, AnthropicToolUnion, AnthropicWebSearchTool,
         },
         llm::gemini::{normalize_gemini_parameters, prompts_to_gemini_payload},
         llm::mistral::{MistralMessage, MistralTool, MistralToolCall, MistralToolDefinition},
@@ -18,17 +18,17 @@ use crate::{
     },
     error::{AppError, ErrorDetailVariant, ErrorResponse},
     handlers::llm::{
-        anthropic::AnthropicStreamParser, gemini::GeminiStreamParser, mistral::MistralStreamParser,
+        StreamParseResult, StreamParser, StreamWebSearchAction as ParsedWebSearchAction,
+        StreamWebSearchState, ToolCall, ToolInput, anthropic::AnthropicStreamParser,
+        gemini::GeminiStreamParser, mistral::MistralStreamParser,
         mistral_conversations::MistralConversationStreamParser, openai::OpenaiStreamParser,
-        update_web_search_action_state, update_web_search_results_state, StreamParseResult,
-        StreamParser, StreamWebSearchAction as ParsedWebSearchAction, StreamWebSearchState,
-        ToolCall, ToolInput,
+        update_web_search_action_state, update_web_search_results_state,
     },
     handlers::models::get_model_info_cached,
     llm::{
         prompt::Prompt,
         provider::{
-            get_title_generation_model, AnthropicApis, GeminiApis, MistralApis, OpenaiApis,
+            AnthropicApis, GeminiApis, MistralApis, OpenaiApis, get_title_generation_model,
         },
         tooling::mcp_server_short_id,
     },
@@ -47,12 +47,12 @@ use crate::{
         mcp_client::build_authorization_url,
         mcp_helpers::{build_oauth_config, resolve_mcp_oauth_token},
         mcp_tools::{
-            load_auto_mcp_server_ids, load_openai_mcp_tools, McpServerSummary, McpToolDescriptor,
+            McpServerSummary, McpToolDescriptor, load_auto_mcp_server_ids, load_openai_mcp_tools,
         },
         notifications::emit_budget_alerts,
         rag::{
-            assemble_prompts_with_budget, build_retrieval_prompt, embed_messages,
-            load_recent_prompts, load_summary, update_conversation_summary, EmbeddingTarget,
+            EmbeddingTarget, assemble_prompts_with_budget, build_retrieval_prompt, embed_messages,
+            load_recent_prompts, load_summary, update_conversation_summary,
         },
         system_prompts,
     },
@@ -63,12 +63,12 @@ use crate::{
     },
 };
 use axum::{
+    Json,
     extract::{Path, State},
     response::{
-        sse::{Event, KeepAlive},
         Sse,
+        sse::{Event, KeepAlive},
     },
-    Json,
 };
 use chrono::{Duration, Utc};
 use futures_util::StreamExt;
@@ -77,11 +77,11 @@ use reqwest::StatusCode;
 use reqwest_eventsource::Event as ReqwestEvent;
 use rust_decimal::prelude::FromPrimitive;
 use sea_orm::{
-    prelude::Decimal, ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait,
-    IntoActiveModel, QueryFilter, QueryOrder,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
+    QueryOrder, prelude::Decimal,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::HashMap, convert::Infallible};
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -1087,11 +1087,7 @@ pub async fn handle_chat_stream(
                 });
             }
         }
-        if tools.is_empty() {
-            None
-        } else {
-            Some(tools)
-        }
+        if tools.is_empty() { None } else { Some(tools) }
     } else {
         None
     };

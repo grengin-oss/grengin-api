@@ -17,8 +17,8 @@ use crate::{
 };
 use axum::http::StatusCode;
 use axum::{
-    extract::{Path, State},
     Json,
+    extract::{Path, State},
 };
 use chrono::{DateTime, Utc};
 use migration::Expr;

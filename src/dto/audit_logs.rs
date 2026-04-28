@@ -180,9 +180,7 @@ impl AuditLogAction {
             AuditLogAction::AdminDepartmentPromptAssigned => "admin_department_prompt_assigned",
             AuditLogAction::AdminDepartmentPromptUpdated => "admin_department_prompt_updated",
             AuditLogAction::AdminDepartmentPromptDeleted => "admin_department_prompt_deleted",
-            AuditLogAction::AdminAuditLogsRedactedForUser => {
-                "admin_audit_logs_redacted_for_user"
-            }
+            AuditLogAction::AdminAuditLogsRedactedForUser => "admin_audit_logs_redacted_for_user",
         }
     }
 }

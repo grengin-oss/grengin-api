@@ -14,9 +14,9 @@ use crate::{
         provider::{OpenaiApis, OpenaiHeaders},
     },
 };
-use anyhow::{anyhow, Error};
+use anyhow::{Error, anyhow};
 use async_trait::async_trait;
-use reqwest::{multipart, Client as ReqwestClient, RequestBuilder};
+use reqwest::{Client as ReqwestClient, RequestBuilder, multipart};
 use reqwest_eventsource::EventSource;
 use uuid::Uuid;
 

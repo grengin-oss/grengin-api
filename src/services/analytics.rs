@@ -13,12 +13,12 @@ use crate::{
     services::authorization::is_path_within_scope,
 };
 use chrono::{DateTime, Duration, NaiveDate, Utc};
-use migration::{extension::postgres::PgExpr, ExprTrait, SimpleExpr};
+use migration::{ExprTrait, SimpleExpr, extension::postgres::PgExpr};
 use rust_decimal::Decimal;
 use sea_orm::{
-    sea_query::{Alias, BinOper, Expr, Func, Query},
     ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, FromQueryResult, JoinType,
     Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+    sea_query::{Alias, BinOper, Expr, Func, Query},
 };
 use uuid::Uuid;
 
@@ -1081,11 +1081,7 @@ pub async fn get_overview_analytics(
                 pct_growth(total_requests, prev_requests),
                 pct_growth(total_tokens, prev_tokens),
                 if prev_cost == 0.0 {
-                    if total_cost == 0.0 {
-                        0.0
-                    } else {
-                        100.0
-                    }
+                    if total_cost == 0.0 { 0.0 } else { 100.0 }
                 } else {
                     ((total_cost - prev_cost) / prev_cost) * 100.0
                 },

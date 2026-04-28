@@ -13,7 +13,7 @@ use crate::{
         mcp_access_policies::{McpAccessTarget, McpAccessType, McpPermission},
         mcp_servers, mcp_tools, roles, user_role_assignments, users,
     },
-    services::authorization::{is_path_within_scope, AuthorizationService, PermissionScopeMode},
+    services::authorization::{AuthorizationService, PermissionScopeMode, is_path_within_scope},
 };
 
 #[derive(Clone, Debug)]

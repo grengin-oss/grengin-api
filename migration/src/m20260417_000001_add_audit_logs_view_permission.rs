@@ -114,7 +114,10 @@ impl Migration {
                 .and_where(Expr::col(Permissions::Domain).eq(domain))
                 .and_where(Expr::col(Permissions::Action).eq(*action))
                 .to_owned();
-            let rows = manager.get_connection().query_all(builder.build(&stmt)).await?;
+            let rows = manager
+                .get_connection()
+                .query_all(builder.build(&stmt))
+                .await?;
             for row in rows {
                 let id: Uuid = row.try_get("", "id")?;
                 ids.push(id);
@@ -137,7 +140,10 @@ impl Migration {
             .from(Roles::Table)
             .and_where(Expr::col(Roles::Name).is_in(names.iter().copied()))
             .to_owned();
-        let rows = manager.get_connection().query_all(builder.build(&stmt)).await?;
+        let rows = manager
+            .get_connection()
+            .query_all(builder.build(&stmt))
+            .await?;
         let mut ids = Vec::new();
         for row in rows {
             let id: Uuid = row.try_get("", "id")?;

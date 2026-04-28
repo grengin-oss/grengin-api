@@ -14,7 +14,7 @@ use crate::{
     state::AppState,
 };
 use anyhow::Error;
-use axum::{middleware::from_fn_with_state, routing::get, Json, Router};
+use axum::{Json, Router, middleware::from_fn_with_state, routing::get};
 use migration::MigratorTrait;
 use reqwest::StatusCode;
 use serde_json::json;

@@ -1,8 +1,11 @@
 use crate::{
-    handlers::oidc::{oidc_login_start, oidc_oauth_callback_get, oidc_oauth_callback_post},
+    handlers::oidc::{
+        azure_mobile_oauth_callback_get, azure_mobile_oauth_callback_post, oidc_login_start,
+        oidc_oauth_callback_get, oidc_oauth_callback_post,
+    },
     state::SharedState,
 };
-use axum::{routing::get, Router};
+use axum::{Router, routing::get};
 
 pub fn oidc_routes() -> Router<SharedState> {
     Router::new()
@@ -10,5 +13,9 @@ pub fn oidc_routes() -> Router<SharedState> {
         .route(
             "/auth/{provider}/callback",
             get(oidc_oauth_callback_get).post(oidc_oauth_callback_post),
+        )
+        .route(
+            "/auth/azure/mobile/callback",
+            get(azure_mobile_oauth_callback_get).post(azure_mobile_oauth_callback_post),
         )
 }

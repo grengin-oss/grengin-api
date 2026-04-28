@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    sea_query::{Alias, BinOper, Expr, Order},
     ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DatabaseBackend, DatabaseConnection,
-    EntityTrait, IntoActiveModel, JoinType, QueryFilter, QueryOrder, QuerySelect,
-    RelationTrait, Statement,
+    EntityTrait, IntoActiveModel, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+    Statement,
+    sea_query::{Alias, BinOper, Expr, Order},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -150,11 +150,14 @@ pub async fn build_retrieval_prompt(
         None => return Ok(None),
     };
     let vector = format_pgvector(&embedding);
-    let distance_expr = Expr::col((message_embeddings::Entity, message_embeddings::Column::Embedding))
-        .binary(
-            BinOper::Custom("<=>".into()),
-            Expr::val(vector).cast_as(Alias::new("vector")),
-        );
+    let distance_expr = Expr::col((
+        message_embeddings::Entity,
+        message_embeddings::Column::Embedding,
+    ))
+    .binary(
+        BinOper::Custom("<=>".into()),
+        Expr::val(vector).cast_as(Alias::new("vector")),
+    );
 
     let rows = message_embeddings::Entity::find()
         .join(
@@ -172,7 +175,10 @@ pub async fn build_retrieval_prompt(
             Expr::col((messages::Entity, messages::Column::MessageContent)),
             "messageContent",
         )
-        .column_as(Expr::col((messages::Entity, messages::Column::Role)), "role")
+        .column_as(
+            Expr::col((messages::Entity, messages::Column::Role)),
+            "role",
+        )
         .order_by(distance_expr, Order::Asc)
         .limit(app_state.settings.rag.retrieval_top_k as u64)
         .into_model::<RetrievedMessageRow>()
