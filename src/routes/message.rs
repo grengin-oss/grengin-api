@@ -3,8 +3,8 @@ use crate::{
     state::SharedState,
 };
 use axum::{
-    routing::{delete, patch},
     Router,
+    routing::{delete, patch},
 };
 
 pub fn message_routes() -> Router<SharedState> {

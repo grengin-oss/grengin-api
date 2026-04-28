@@ -8,7 +8,7 @@ use crate::{
     services::authorization::AuthorizationService,
     state::SharedState,
 };
-use axum::{extract::State, Json};
+use axum::{Json, extract::State};
 use reqwest::StatusCode;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 

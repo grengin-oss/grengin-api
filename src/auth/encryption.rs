@@ -1,8 +1,8 @@
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
     Aes256Gcm, Key,
+    aead::{Aead, AeadCore, KeyInit, OsRng},
 };
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 #[derive(Debug)]
 pub enum CryptoError {
@@ -61,7 +61,7 @@ pub fn decrypt_key(key_32bytes: &[u8; 32], payload_b64: &str) -> Result<String, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aes_gcm::aead::{rand_core::RngCore, OsRng};
+    use aes_gcm::aead::{OsRng, rand_core::RngCore};
 
     fn random_key() -> [u8; 32] {
         let mut key = [0u8; 32];

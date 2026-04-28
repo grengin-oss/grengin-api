@@ -6,7 +6,7 @@ pub mod openai;
 pub mod tool;
 
 pub use tool::{
-    tool_name_is_web_search, ToolCall, ToolInput, ToolInputDelta, ToolKind, ToolResult,
+    ToolCall, ToolInput, ToolInputDelta, ToolKind, ToolResult, tool_name_is_web_search,
 };
 
 /// Result of parsing a streaming event

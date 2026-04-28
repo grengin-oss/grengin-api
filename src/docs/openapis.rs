@@ -16,15 +16,17 @@ use crate::dto::admin_roles::{
     PermissionDto, PermissionsResponse, RoleDto, RoleRequest, RoleUpdateRequest, RolesResponse,
     UserRoleAssignmentDto, UserRoleAssignmentInput, UserRoleAssignmentsResponse,
 };
-use crate::dto::admin_sso_providers::{SsoProvider, SsoProviderUpdate};
+use crate::dto::admin_sso_providers::{
+    SsoProvider, SsoProviderUpdate, SsoProviderValidationRequest, SsoProviderValidationResponse,
+};
 use crate::dto::admin_user::{PaginatedUsers, User, UserCreate, UserPatchRequest, UserUpdate};
 use crate::dto::analytics::{
     AnalyticsOverview, AnalyticsTimeSeries, DepartmentAnalytics, DepartmentAnalyticsQuery,
     ScopedUserAnalyticsQuery, UserAnalytics,
 };
 use crate::dto::audit_logs::{
-    AuditLogAction, AuditLogEntry, AuditLogExportFormat, AuditLogRedactResponse, AuditLogsExportQuery,
-    AuditLogsQuery, AuditLogsResponse,
+    AuditLogAction, AuditLogEntry, AuditLogExportFormat, AuditLogRedactResponse,
+    AuditLogsExportQuery, AuditLogsQuery, AuditLogsResponse,
 };
 use crate::dto::auth::{AuthInit, AuthToken, RefreshToken, TokenType};
 use crate::dto::branding::{Branding, BrandingUpdate};
@@ -81,6 +83,8 @@ use utoipa::OpenApi;
         oidc::oidc_login_start,
         oidc::oidc_oauth_callback_get,
         oidc::oidc_oauth_callback_post,
+        oidc::azure_mobile_oauth_callback_get,
+        oidc::azure_mobile_oauth_callback_post,
         chat::get_chat_by_id,
         chat::get_chats,
         chat::delete_chat_by_id,
@@ -109,6 +113,7 @@ use utoipa::OpenApi;
         admin_ai::get_ai_engine_models_by_key,
         admin_sso_provider::get_sso_providers,
         admin_sso_provider::get_sso_provider_by_id,
+        admin_sso_provider::validate_sso_provider_by_id,
         admin_sso_provider::update_sso_provider_by_id,
         admin_sso_provider::delete_sso_provider_by_id,
         file::get_file_by_id,
@@ -241,6 +246,8 @@ use utoipa::OpenApi;
             AiModelCapabilities,
             SsoProvider,
             SsoProviderUpdate,
+            SsoProviderValidationRequest,
+            SsoProviderValidationResponse,
             AuthError,
             AppError,
             AuthErrorCode,

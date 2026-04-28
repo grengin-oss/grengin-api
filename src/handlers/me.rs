@@ -1,6 +1,6 @@
 use axum::{
-    extract::{Query, State},
     Json,
+    extract::{Query, State},
 };
 use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
@@ -34,9 +34,8 @@ use crate::{
         },
     },
     handlers::admin_department::{
-        department_budget_snapshot, departments_base_select, departments_tree_select,
-        load_department_admin_ids_map, ChildCountRow, DepartmentRow, DepartmentTreeRow,
-        DeptCountRow,
+        ChildCountRow, DepartmentRow, DepartmentTreeRow, DeptCountRow, department_budget_snapshot,
+        departments_base_select, departments_tree_select, load_department_admin_ids_map,
     },
     models::{
         departments, permissions, role_permissions, roles, user_role_assignments, users,
@@ -44,7 +43,7 @@ use crate::{
     },
     services::{
         analytics,
-        authorization::{is_path_within_scope, AuthorizationService},
+        authorization::{AuthorizationService, is_path_within_scope},
     },
     state::SharedState,
 };

@@ -1,10 +1,10 @@
 use std::env;
 
 use axum::{
-    extract::{Path, Query, State},
-    http::{header, HeaderValue},
-    response::{IntoResponse, Response},
     Json,
+    extract::{Path, Query, State},
+    http::{HeaderValue, header},
+    response::{IntoResponse, Response},
 };
 use reqwest::StatusCode;
 use uuid::Uuid;
@@ -22,7 +22,7 @@ use crate::{
     models::audit_logs,
     services::{
         audit_logs::{
-            list_audit_logs, parse_end_date, parse_start_date, redact_user_logs, AuditLogFilters,
+            AuditLogFilters, list_audit_logs, parse_end_date, parse_start_date, redact_user_logs,
         },
         authorization::{AuthorizationService, PermissionScopeMode},
     },

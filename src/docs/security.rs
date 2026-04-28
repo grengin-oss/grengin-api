@@ -1,9 +1,9 @@
 use utoipa::{
+    Modify,
     openapi::{
         self,
         security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
     },
-    Modify,
 };
 
 pub struct ApiSecurityAddon;

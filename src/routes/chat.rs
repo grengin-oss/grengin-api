@@ -7,9 +7,9 @@ use crate::{
     state::SharedState,
 };
 use axum::{
+    Router,
     middleware::from_extractor,
     routing::{delete, get, post},
-    Router,
 };
 
 pub fn chat_routes() -> Router<SharedState> {

@@ -1,11 +1,11 @@
 use crate::{
     auth::{
         encryption::{decrypt_key, key_from_b64},
-        jwt::{Keys, KEYS},
+        jwt::{KEYS, Keys},
     },
     models::{ai_engines, embedding_configs, sso_providers},
 };
-use openidconnect::{core::CoreClient, EndpointMaybeSet, EndpointNotSet, EndpointSet};
+use openidconnect::{EndpointMaybeSet, EndpointNotSet, EndpointSet, core::CoreClient};
 use reqwest::Url;
 use sea_orm::{DatabaseConnection, EntityTrait, QueryOrder};
 use std::collections::HashMap;

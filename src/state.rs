@@ -12,11 +12,11 @@ use sea_orm::{Database, DatabaseConnection, EntityTrait};
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::sync::{broadcast, Notify, RwLock};
+use tokio::sync::{Notify, RwLock, broadcast};
 use uuid::Uuid;
 
 pub struct AppState {

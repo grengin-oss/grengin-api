@@ -2,12 +2,12 @@ use std::collections::BTreeSet;
 
 use axum::{
     extract::{MatchedPath, Request, State},
-    http::{header, HeaderMap, Method},
+    http::{HeaderMap, Method, header},
     middleware::Next,
     response::Response,
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
@@ -18,7 +18,7 @@ use crate::{
         mcp_servers, mcp_tools, messages, notifications, role_prompts, roles,
         user_prompt_preferences, user_role_assignments, users,
     },
-    services::audit_logs::{record_audit_log, AuditLogCreate},
+    services::audit_logs::{AuditLogCreate, record_audit_log},
     state::SharedState,
 };
 
@@ -134,7 +134,8 @@ pub async fn audit_log_middleware(
         } else {
             None
         };
-        let changed_fields = compute_changed_fields(before_snapshot.as_ref(), after_snapshot.as_ref());
+        let changed_fields =
+            compute_changed_fields(before_snapshot.as_ref(), after_snapshot.as_ref());
         let details = json!({
             "method": method.as_str(),
             "route": route_path,
@@ -178,11 +179,21 @@ async fn fetch_snapshot(
         SnapshotTarget::None => None,
         SnapshotTarget::User => {
             let id = parse_uuid(resource_id)?;
-            users::Entity::find_by_id(id).one(db).await.ok().flatten().and_then(|model| serde_json::to_value(model).ok())
+            users::Entity::find_by_id(id)
+                .one(db)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|model| serde_json::to_value(model).ok())
         }
         SnapshotTarget::Department => {
             let id = parse_uuid(resource_id)?;
-            departments::Entity::find_by_id(id).one(db).await.ok().flatten().and_then(|model| serde_json::to_value(model).ok())
+            departments::Entity::find_by_id(id)
+                .one(db)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|model| serde_json::to_value(model).ok())
         }
         SnapshotTarget::DepartmentMembers => {
             let id = parse_uuid(resource_id)?;
@@ -198,7 +209,12 @@ async fn fetch_snapshot(
         }
         SnapshotTarget::Role => {
             let id = parse_uuid(resource_id)?;
-            roles::Entity::find_by_id(id).one(db).await.ok().flatten().and_then(|model| serde_json::to_value(model).ok())
+            roles::Entity::find_by_id(id)
+                .one(db)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|model| serde_json::to_value(model).ok())
         }
         SnapshotTarget::UserRolesByUser => {
             let id = parse_uuid(resource_id)?;
@@ -435,10 +451,7 @@ fn parse_uuid(value: Option<&str>) -> Option<Uuid> {
 }
 
 fn is_mutation_method(method: &Method) -> bool {
-    matches!(
-        method.as_str(),
-        "POST" | "PUT" | "PATCH" | "DELETE"
-    )
+    matches!(method.as_str(), "POST" | "PUT" | "PATCH" | "DELETE")
 }
 
 fn generic_mutation_action_name(method: &Method, route: &str) -> String {
@@ -447,7 +460,11 @@ fn generic_mutation_action_name(method: &Method, route: &str) -> String {
         .replace('/', ".")
         .replace('{', "")
         .replace('}', "");
-    format!("mutation.{}.{}", method.as_str().to_ascii_lowercase(), route_key)
+    format!(
+        "mutation.{}.{}",
+        method.as_str().to_ascii_lowercase(),
+        route_key
+    )
 }
 
 fn resolve_audit_action(method: &Method, route: &str) -> Option<AuditRouteAction> {
@@ -457,6 +474,14 @@ fn resolve_audit_action(method: &Method, route: &str) -> Option<AuditRouteAction
                 action: "login",
                 resource_type: Some("auth"),
                 resource_param: Some("provider"),
+                snapshot_target: SnapshotTarget::None,
+            })
+        }
+        ("GET", "/auth/azure/mobile/callback") | ("POST", "/auth/azure/mobile/callback") => {
+            Some(AuditRouteAction {
+                action: "login",
+                resource_type: Some("auth"),
+                resource_param: None,
                 snapshot_target: SnapshotTarget::None,
             })
         }
@@ -835,5 +860,7 @@ fn extract_user_id(headers: &HeaderMap) -> Option<Uuid> {
     let token = value
         .strip_prefix("Bearer ")
         .or_else(|| value.strip_prefix("bearer "))?;
-    Claims::from_token_string(token).ok().map(|claims| claims.user_id)
+    Claims::from_token_string(token)
+        .ok()
+        .map(|claims| claims.user_id)
 }

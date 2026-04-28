@@ -8,14 +8,21 @@ use crate::{
     },
     dto::admin_sso_providers::{
         EditableField, SsoProvider, SsoProviderEditable, SsoProviderUpdate,
+        SsoProviderValidationRequest, SsoProviderValidationResponse,
     },
     models::sso_providers,
-    services::authorization::{AuthorizationService, PermissionScopeMode},
+    services::{
+        authorization::{AuthorizationService, PermissionScopeMode},
+        sso_validation::{
+            build_draft_config, config_hash, has_sensitive_changes, issue_validation_token,
+            validate_sso_draft, validate_validation_token,
+        },
+    },
     state::SharedState,
 };
 use axum::{
-    extract::{Path, State},
     Json,
+    extract::{Path, State},
 };
 use chrono::Utc;
 use reqwest::StatusCode;
@@ -33,6 +40,7 @@ struct SsoProviderSeed {
     issuer_url: String,
     redirect_url: String,
     allowed_domains: Vec<String>,
+    has_credentials: bool,
     is_enabled: bool,
 }
 
@@ -54,7 +62,7 @@ fn env_seed_for_template(
         "google" => {
             let client_id = read_non_empty_env(&["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT"]);
             let client_secret = read_non_empty_env(&["GOOGLE_CLIENT_SECRET"]);
-            let is_enabled = client_id.is_some() && client_secret.is_some();
+            let has_credentials = client_id.is_some() && client_secret.is_some();
             SsoProviderSeed {
                 provider: template.provider,
                 name: template.name,
@@ -64,7 +72,8 @@ fn env_seed_for_template(
                 issuer_url: "https://accounts.google.com".to_string(),
                 redirect_url: format!("{}/auth/google/callback", app_redirect_url),
                 allowed_domains: Vec::new(),
-                is_enabled,
+                has_credentials,
+                is_enabled: false,
             }
         }
         "azure" => {
@@ -72,7 +81,7 @@ fn env_seed_for_template(
             let client_secret = read_non_empty_env(&["AZURE_CLIENT_SECRET"]);
             let tenant_id =
                 read_non_empty_env(&["AZURE_TENANT_ID"]).unwrap_or_else(|| "common".to_string());
-            let is_enabled = client_id.is_some() && client_secret.is_some();
+            let has_credentials = client_id.is_some() && client_secret.is_some();
             SsoProviderSeed {
                 provider: template.provider,
                 name: template.name,
@@ -82,7 +91,8 @@ fn env_seed_for_template(
                 issuer_url: format!("https://login.microsoftonline.com/{tenant_id}/v2.0"),
                 redirect_url: format!("{}/auth/azure/callback", app_redirect_url),
                 allowed_domains: Vec::new(),
-                is_enabled,
+                has_credentials,
+                is_enabled: false,
             }
         }
         _ => SsoProviderSeed {
@@ -94,6 +104,7 @@ fn env_seed_for_template(
             issuer_url: template.issuer_url,
             redirect_url: template.redirect_url,
             allowed_domains: Vec::new(),
+            has_credentials: false,
             is_enabled: false,
         },
     }
@@ -123,7 +134,7 @@ fn encrypted_seed_secret(
     app_state: &SharedState,
     seed: &SsoProviderSeed,
 ) -> Result<String, AuthError> {
-    if !seed.is_enabled {
+    if !seed.has_credentials {
         return Ok(EMPTY_VALUE.to_string());
     }
     encrypt_key(
@@ -169,7 +180,7 @@ async fn ensure_sso_providers_from_env(
             .iter()
             .position(|model| model.provider == seed.provider)
         {
-            if seed.is_enabled && model_needs_env_backfill(app_state, &models[index]) {
+            if seed.has_credentials && model_needs_env_backfill(app_state, &models[index]) {
                 let mut active_model = models[index].clone().into_active_model();
                 active_model.name = Set(seed.name.clone());
                 active_model.tenant_id = Set(seed.tenant_id.clone());
@@ -178,7 +189,7 @@ async fn ensure_sso_providers_from_env(
                 active_model.issuer_url = Set(seed.issuer_url.clone());
                 active_model.redirect_url = Set(seed.redirect_url.clone());
                 active_model.allowed_domains = Set(seed.allowed_domains.clone());
-                active_model.is_enabled = Set(true);
+                active_model.is_enabled = Set(false);
                 active_model.updated_at = Set(Utc::now());
                 let updated_model =
                     active_model
@@ -377,6 +388,74 @@ pub async fn get_sso_provider_by_id(
 }
 
 #[utoipa::path(
+    post,
+    path = "/admin/sso-providers/{provider_id}/validate",
+    tag = "admin",
+    responses(
+       (status = 200, body = SsoProviderValidationResponse),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = Error, description = "Sso Provider not found (code=5003)"),
+       (status = 503, content_type = "application/json", body = Error, description = "Validation service unavailable"),
+    )
+)]
+pub async fn validate_sso_provider_by_id(
+    claims: Claims,
+    Path(provider_id): Path<Uuid>,
+    State(app_state): State<SharedState>,
+    Json(req): Json<SsoProviderValidationRequest>,
+) -> Result<(StatusCode, Json<SsoProviderValidationResponse>), AuthError> {
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_SSO_PROVIDERS_MANAGE,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            Some(provider_id),
+        )
+        .await?;
+    let model = sso_providers::Entity::find_by_id(provider_id)
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("Db get one error: {}", e);
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::DbNotFound)?;
+
+    let draft = build_draft_config(
+        &app_state,
+        &model,
+        req.provider.as_ref(),
+        req.tenant_id.as_ref(),
+        req.client_id.as_ref(),
+        req.client_secret.as_ref(),
+        req.issuer_url.as_ref(),
+        req.redirect_url.as_ref(),
+        req.frontend_hosted_url.as_ref(),
+    )?;
+
+    let (valid, message) = validate_sso_draft(&app_state, &draft).await?;
+    let (validation_token, validation_token_expires_at) = if valid {
+        let (token, expires_at) = issue_validation_token(provider_id, claims.user_id, &draft);
+        (Some(token), Some(expires_at))
+    } else {
+        (None, None)
+    };
+
+    Ok((
+        StatusCode::OK,
+        Json(SsoProviderValidationResponse {
+            valid,
+            message,
+            redirect_url: draft.redirect_url,
+            validation_token,
+            validation_token_expires_at,
+        }),
+    ))
+}
+
+#[utoipa::path(
     delete,
     path = "/admin/sso-providers/{provider_id}",
     tag = "admin",
@@ -462,9 +541,33 @@ pub async fn update_sso_provider_by_id(
             AuthError::DbTimeout
         })?
         .ok_or(AuthError::DbNotFound)?;
+    let draft = build_draft_config(
+        &app_state,
+        &model,
+        req.provider.as_ref(),
+        req.tenant_id.as_ref(),
+        req.client_id.as_ref(),
+        req.client_secret.as_ref(),
+        req.issuer_url.as_ref(),
+        req.redirect_url.as_ref(),
+        req.frontend_hosted_url.as_ref(),
+    )?;
+    if has_sensitive_changes(&app_state, &model, &draft) {
+        let validation_token = req
+            .validation_token
+            .as_deref()
+            .ok_or(AuthError::InvalidToken)?;
+        validate_validation_token(
+            validation_token,
+            provider_id,
+            claims.user_id,
+            &config_hash(&draft),
+        )?;
+    }
+
     let mut active_model = model.into_active_model();
     if let Some(provider) = req.provider {
-        active_model.provider = Set(provider);
+        active_model.provider = Set(provider.to_lowercase());
     }
     if let Some(name) = req.name {
         active_model.name = Set(name);
@@ -481,10 +584,12 @@ pub async fn update_sso_provider_by_id(
     if let Some(issuer_url) = req.issuer_url {
         active_model.issuer_url = Set(issuer_url);
     }
-    if let Some(redirect_url) = req.redirect_url {
-        active_model.redirect_url = Set(redirect_url);
+    if req.redirect_url.is_some() || req.frontend_hosted_url.is_some() {
+        active_model.redirect_url = Set(draft.redirect_url.clone());
     }
-    active_model.tenant_id = Set(req.tenant_id);
+    if let Some(tenant_id) = req.tenant_id {
+        active_model.tenant_id = Set(Some(tenant_id));
+    }
     if let Some(client_secret) = req.client_secret {
         active_model.client_secret = Set(encrypt_key(
             &app_state.settings.auth.app_key,

@@ -96,11 +96,11 @@ impl MigratorTrait for Migrator {
             Box::new(m20260327_000001_mcp_access_refactor::Migration),
             Box::new(m20260327_000002_drop_legacy_mcp_access::Migration),
             Box::new(m20260327_000003_add_mcp_access_role_id::Migration),
-          Box::new(m20260407_000001_create_system_prompts::Migration),
-          Box::new(m20260407_000002_add_department_policies::Migration),
-          Box::new(m20260415_000001_role_prompts_role_id::Migration),
-          Box::new(m20260416_000001_create_audit_logs::Migration),
-          Box::new(m20260417_000001_add_audit_logs_view_permission::Migration),
-         ]
+            Box::new(m20260407_000001_create_system_prompts::Migration),
+            Box::new(m20260407_000002_add_department_policies::Migration),
+            Box::new(m20260415_000001_role_prompts_role_id::Migration),
+            Box::new(m20260416_000001_create_audit_logs::Migration),
+            Box::new(m20260417_000001_add_audit_logs_view_permission::Migration),
+        ]
     }
 }

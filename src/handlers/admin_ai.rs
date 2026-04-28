@@ -23,8 +23,8 @@ use crate::{
     state::SharedState,
 };
 use axum::{
-    extract::{Path, State},
     Json,
+    extract::{Path, State},
 };
 use chrono::Utc;
 use reqwest::StatusCode;
@@ -45,10 +45,12 @@ fn normalize_bearer_token(raw: &str) -> String {
 }
 
 async fn load_models_response(app_state: &SharedState) -> Result<ModelsResponse, AuthError> {
-    let providers = load_providers_cached(&app_state.req_client).await.map_err(|e| {
-        eprintln!("providers cache error: {e}");
-        AuthError::DbTimeout
-    })?;
+    let providers = load_providers_cached(&app_state.req_client)
+        .await
+        .map_err(|e| {
+            eprintln!("providers cache error: {e}");
+            AuthError::DbTimeout
+        })?;
     Ok(ModelsResponse { providers })
 }
 

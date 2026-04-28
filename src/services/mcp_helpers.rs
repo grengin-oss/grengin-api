@@ -14,7 +14,7 @@ use crate::{
         roles, users,
     },
     services::mcp_client::{
-        oauth_config_from_connection, refresh_token, McpOAuthConfig, McpOAuthTokens,
+        McpOAuthConfig, McpOAuthTokens, oauth_config_from_connection, refresh_token,
     },
     state::SharedState,
 };

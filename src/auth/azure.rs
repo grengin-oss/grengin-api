@@ -1,12 +1,12 @@
 use crate::config::setting::OidcClient;
 use anyhow::Error;
 use openidconnect::{
+    AuthUrl, ClientId, ClientSecret, EmptyAdditionalProviderMetadata, IssuerUrl, JsonWebKeySetUrl,
+    RedirectUrl, ResponseTypes, TokenUrl, UserInfoUrl,
     core::{
         CoreClient, CoreJwsSigningAlgorithm, CoreProviderMetadata, CoreResponseType,
         CoreSubjectIdentifierType,
     },
-    AuthUrl, ClientId, ClientSecret, EmptyAdditionalProviderMetadata, IssuerUrl, JsonWebKeySetUrl,
-    RedirectUrl, ResponseTypes, TokenUrl, UserInfoUrl,
 };
 use reqwest::Client as ReqwestClient;
 
@@ -75,6 +75,50 @@ pub async fn build_azure_client<S: Into<String>>(
             ))?;
             let provider = CoreProviderMetadata::discover_async(issuer, req_client).await?;
             CoreClient::from_provider_metadata(provider, client_id, Some(client_secret))
+        }
+    }
+    .set_redirect_uri(redirect_uri);
+    Ok(client)
+}
+
+pub async fn build_azure_public_client<C, R, T>(
+    req_client: &ReqwestClient,
+    client_id: C,
+    redirect_url: R,
+    tenant_id: T,
+) -> Result<OidcClient, Error>
+where
+    C: Into<String>,
+    R: Into<String>,
+    T: Into<String>,
+{
+    let client_id = ClientId::new(client_id.into());
+    let tenant_id = tenant_id.into();
+    let redirect_uri = RedirectUrl::new(redirect_url.into())?;
+    let client = match tenant_id.as_str() {
+        "common" | "organizations" | "consumers" => {
+            let (issuer, auth, token, jwks, userinfo) = mk_urls(&tenant_id)?;
+            let provider = CoreProviderMetadata::new(
+                issuer,
+                auth,
+                jwks,
+                vec![ResponseTypes::new(vec![CoreResponseType::Code])],
+                vec![CoreSubjectIdentifierType::Public],
+                vec![CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256],
+                EmptyAdditionalProviderMetadata {},
+            )
+            .set_token_endpoint(Some(token))
+            .set_userinfo_endpoint(userinfo);
+
+            CoreClient::from_provider_metadata(provider, client_id, None)
+        }
+        _ => {
+            let issuer = IssuerUrl::new(format!(
+                "https://login.microsoftonline.com/{}/v2.0",
+                tenant_id
+            ))?;
+            let provider = CoreProviderMetadata::discover_async(issuer, req_client).await?;
+            CoreClient::from_provider_metadata(provider, client_id, None)
         }
     }
     .set_redirect_uri(redirect_uri);

@@ -1,9 +1,9 @@
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
-use serde::{ser::Serializer, Serialize};
+use serde::{Serialize, ser::Serializer};
 use std::collections::BTreeMap;
 use utoipa::ToSchema;
 

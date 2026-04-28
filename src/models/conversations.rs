@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::*;
 use sea_orm::FromQueryResult;
+use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]

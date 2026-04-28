@@ -33,7 +33,7 @@ use crate::{
         },
         admin_sso_provider::{
             delete_sso_provider_by_id, get_sso_provider_by_id, get_sso_providers,
-            update_sso_provider_by_id,
+            update_sso_provider_by_id, validate_sso_provider_by_id,
         },
         admin_system::get_system_metrics,
         admin_users::{
@@ -44,8 +44,8 @@ use crate::{
     state::SharedState,
 };
 use axum::{
-    routing::{delete, get, patch, post, put},
     Router,
+    routing::{delete, get, patch, post, put},
 };
 
 pub fn admin_routes() -> Router<SharedState> {
@@ -82,6 +82,10 @@ pub fn admin_routes() -> Router<SharedState> {
             get(get_ai_engine_models_by_key),
         )
         .route("/admin/sso-providers", get(get_sso_providers))
+        .route(
+            "/admin/sso-providers/{provider_id}/validate",
+            post(validate_sso_provider_by_id),
+        )
         .route(
             "/admin/sso-providers/{provider_id}",
             put(update_sso_provider_by_id)
