@@ -305,21 +305,22 @@ pub async fn update_conversation_summary(
         None => return Ok(()),
     };
 
-    let summary_model = match provider.to_lowercase().as_str() {
-        "openai" => app_state
-            .settings
-            .rag
-            .summary_model_openai
-            .clone()
-            .unwrap_or_else(|| model_name.to_string()),
-        "anthropic" => app_state
-            .settings
-            .rag
-            .summary_model_anthropic
-            .clone()
-            .unwrap_or_else(|| model_name.to_string()),
-        _ => return Ok(()),
-    };
+    let summary_provider = app_state
+        .settings
+        .rag
+        .summary_llm_provider
+        .clone()
+        .unwrap_or_else(|| provider.to_string())
+        .to_lowercase();
+    let summary_model = app_state
+        .settings
+        .rag
+        .summary_llm_model
+        .clone()
+        .unwrap_or_else(|| model_name.to_string());
+    if summary_provider != "openai" && summary_provider != "anthropic" {
+        return Ok(());
+    }
 
     let existing_summary = load_summary(&app_state.database, conversation_id).await?;
     let mut condition = Condition::all()
@@ -368,7 +369,8 @@ pub async fn update_conversation_summary(
     );
 
     let summary_response =
-        generate_summary_text(app_state, provider, &summary_model, summary_prompt).await?;
+        generate_summary_text(app_state, &summary_provider, &summary_model, summary_prompt)
+            .await?;
     let summary_text = summary_response.text.trim().to_string();
 
     let now = Utc::now();
