@@ -108,8 +108,8 @@ pub struct RagSettings {
     pub recent_message_pairs: usize,
     pub retrieval_top_k: usize,
     pub max_context_tokens: usize,
-    pub summary_model_openai: Option<String>,
-    pub summary_model_anthropic: Option<String>,
+    pub summary_llm_provider: Option<String>,
+    pub summary_llm_model: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -153,13 +153,15 @@ impl Settings {
             .one(database)
             .await
             .map_err(|e| ConfigError::DbError(e.to_string()))?;
-        let embedding_config = config.map(|config| EmbeddingSettings {
-            provider: config.provider,
-            model: config.model,
-            dimensions: config.dimensions,
-            is_enabled: config.is_enabled,
-        });
-        *self.embedding.write().await = embedding_config;
+        if let Some(config) = config {
+            let embedding_config = EmbeddingSettings {
+                provider: config.provider,
+                model: config.model,
+                dimensions: config.dimensions,
+                is_enabled: config.is_enabled,
+            };
+            *self.embedding.write().await = Some(embedding_config);
+        }
         Ok(())
     }
 
@@ -395,7 +397,7 @@ impl Settings {
             mistral: RwLock::new(MistralSettings::from_env().ok()),
             gemini: RwLock::new(GeminiSettings::from_env().ok()),
             ai_engines_cache: RwLock::new(HashMap::new()),
-            embedding: RwLock::new(None),
+            embedding: RwLock::new(EmbeddingSettings::from_env()),
             rag: RagSettings::from_env(),
         })
     }
@@ -537,6 +539,23 @@ impl GeminiSettings {
     }
 }
 
+impl EmbeddingSettings {
+    pub fn from_env() -> Option<Self> {
+        let is_enabled = std::env::var("RAG_EMBEDDING_ENABLED")
+            .ok()
+            .and_then(|val| val.parse::<bool>().ok())
+            .unwrap_or(false);
+        let provider = std::env::var("RAG_EMBEDDING_LLM_PROVIDER").ok()?;
+        let model = std::env::var("RAG_EMBEDDING_LLM_MODEL").ok()?;
+        Some(Self {
+            provider,
+            model,
+            dimensions: None,
+            is_enabled,
+        })
+    }
+}
+
 impl RagSettings {
     pub fn from_env() -> Self {
         let enabled = std::env::var("RAG_ENABLED")
@@ -555,15 +574,20 @@ impl RagSettings {
             .ok()
             .and_then(|val| val.parse::<usize>().ok())
             .unwrap_or(8000);
-        let summary_model_openai = std::env::var("RAG_SUMMARY_MODEL_OPENAI").ok();
-        let summary_model_anthropic = std::env::var("RAG_SUMMARY_MODEL_ANTHROPIC").ok();
+        let summary_llm_provider = std::env::var("RAG_SUMMARY_LLM_PROVIDER").ok();
+        let summary_llm_model = std::env::var("RAG_SUMMARY_LLM_MODEL").ok().or_else(|| {
+            // Backward compatibility for existing deployments using provider-specific model env vars.
+            std::env::var("RAG_SUMMARY_MODEL_OPENAI")
+                .ok()
+                .or_else(|| std::env::var("RAG_SUMMARY_MODEL_ANTHROPIC").ok())
+        });
         Self {
             enabled,
             recent_message_pairs,
             retrieval_top_k,
             max_context_tokens,
-            summary_model_openai,
-            summary_model_anthropic,
+            summary_llm_provider,
+            summary_llm_model,
         }
     }
 }
@@ -588,4 +612,129 @@ pub enum ConfigError {
     ReqwestClientBuildError(String),
     #[error("{0}")]
     Custom(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EmbeddingSettings, RagSettings};
+    use std::sync::{LazyLock, Mutex};
+
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    fn clear_embedding_env() {
+        // SAFETY: tests serialize env mutations with ENV_LOCK.
+        unsafe {
+            std::env::remove_var("RAG_EMBEDDING_ENABLED");
+            std::env::remove_var("RAG_EMBEDDING_LLM_PROVIDER");
+            std::env::remove_var("RAG_EMBEDDING_LLM_MODEL");
+        }
+    }
+
+    fn clear_rag_summary_env() {
+        // SAFETY: tests serialize env mutations with ENV_LOCK.
+        unsafe {
+            std::env::remove_var("RAG_SUMMARY_LLM_PROVIDER");
+            std::env::remove_var("RAG_SUMMARY_LLM_MODEL");
+            std::env::remove_var("RAG_SUMMARY_MODEL_OPENAI");
+            std::env::remove_var("RAG_SUMMARY_MODEL_ANTHROPIC");
+        }
+    }
+
+    #[test]
+    fn embedding_from_env_none_when_provider_or_model_missing() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_embedding_env();
+        // SAFETY: tests serialize env mutations with ENV_LOCK.
+        unsafe {
+            std::env::set_var("RAG_EMBEDDING_ENABLED", "true");
+        }
+        assert!(EmbeddingSettings::from_env().is_none());
+
+        // SAFETY: tests serialize env mutations with ENV_LOCK.
+        unsafe {
+            std::env::set_var("RAG_EMBEDDING_LLM_PROVIDER", "openai");
+        }
+        assert!(EmbeddingSettings::from_env().is_none());
+
+        clear_embedding_env();
+    }
+
+    #[test]
+    fn embedding_from_env_reads_provider_model_and_enabled() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_embedding_env();
+        // SAFETY: tests serialize env mutations with ENV_LOCK.
+        unsafe {
+            std::env::set_var("RAG_EMBEDDING_ENABLED", "true");
+            std::env::set_var("RAG_EMBEDDING_LLM_PROVIDER", "openai");
+            std::env::set_var("RAG_EMBEDDING_LLM_MODEL", "text-embedding-3-small");
+        }
+
+        let config = EmbeddingSettings::from_env().expect("embedding config from env");
+        assert_eq!(config.provider, "openai");
+        assert_eq!(config.model, "text-embedding-3-small");
+        assert!(config.is_enabled);
+        assert_eq!(config.dimensions, None);
+
+        clear_embedding_env();
+    }
+
+    #[test]
+    fn embedding_enabled_defaults_false_when_missing_or_invalid() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_embedding_env();
+        // SAFETY: tests serialize env mutations with ENV_LOCK.
+        unsafe {
+            std::env::set_var("RAG_EMBEDDING_LLM_PROVIDER", "openai");
+            std::env::set_var("RAG_EMBEDDING_LLM_MODEL", "text-embedding-3-small");
+        }
+        let config = EmbeddingSettings::from_env().expect("embedding config from env");
+        assert!(!config.is_enabled);
+
+        // SAFETY: tests serialize env mutations with ENV_LOCK.
+        unsafe {
+            std::env::set_var("RAG_EMBEDDING_ENABLED", "not-a-bool");
+        }
+        let config = EmbeddingSettings::from_env().expect("embedding config from env");
+        assert!(!config.is_enabled);
+
+        clear_embedding_env();
+    }
+
+    #[test]
+    fn rag_summary_model_prefers_new_env_and_falls_back_to_legacy() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_rag_summary_env();
+
+        // SAFETY: tests serialize env mutations with ENV_LOCK.
+        unsafe {
+            std::env::set_var("RAG_SUMMARY_MODEL_OPENAI", "legacy-openai-model");
+        }
+        let rag = RagSettings::from_env();
+        assert_eq!(rag.summary_llm_model.as_deref(), Some("legacy-openai-model"));
+
+        // SAFETY: tests serialize env mutations with ENV_LOCK.
+        unsafe {
+            std::env::set_var("RAG_SUMMARY_LLM_MODEL", "new-model");
+        }
+        let rag = RagSettings::from_env();
+        assert_eq!(rag.summary_llm_model.as_deref(), Some("new-model"));
+
+        clear_rag_summary_env();
+    }
+
+    #[test]
+    fn rag_summary_provider_reads_new_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_rag_summary_env();
+        // SAFETY: tests serialize env mutations with ENV_LOCK.
+        unsafe {
+            std::env::set_var("RAG_SUMMARY_LLM_PROVIDER", "anthropic");
+        }
+
+        let rag = RagSettings::from_env();
+        assert_eq!(rag.summary_llm_provider.as_deref(), Some("anthropic"));
+
+        clear_rag_summary_env();
+    }
 }
