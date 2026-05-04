@@ -1,4 +1,5 @@
 FROM rust:1.91-alpine AS builder
+ARG TARGETARCH
 
 # sys deps (no openssl needed now)
 RUN apk add --no-cache build-base curl pkgconfig perl clang lld musl-dev ca-certificates
@@ -6,7 +7,11 @@ RUN apk add --no-cache build-base curl pkgconfig perl clang lld musl-dev ca-cert
 # install rustup + musl target
 ENV CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/root/.rustup PATH=/usr/local/cargo/bin:$PATH
 RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
- && rustup target add x86_64-unknown-linux-musl
+ && case "$TARGETARCH" in \
+      amd64) rustup target add x86_64-unknown-linux-musl ;; \
+      arm64) rustup target add aarch64-unknown-linux-musl ;; \
+      *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac
 
 WORKDIR /usr/src/grengin-api
 
@@ -31,7 +36,11 @@ COPY swagger-overrides .
 ENV SWAGGER_UI_OVERWRITE_FOLDER=/swagger-overrides
 
 # build (fully static by default on musl)
-RUN RUST_TARGET=x86_64-unknown-linux-musl \
+RUN case "$TARGETARCH" in \
+      amd64) RUST_TARGET="x86_64-unknown-linux-musl" ;; \
+      arm64) RUST_TARGET="aarch64-unknown-linux-musl" ;; \
+      *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
  && cargo build --release --target "$RUST_TARGET" -p grengin-api -p sqlx-mcp \
  && cp "/usr/src/grengin-api/target/$RUST_TARGET/release/grengin-api" /usr/local/bin/grengin-api \
  && cp "/usr/src/grengin-api/target/$RUST_TARGET/release/sqlx-mcp" /usr/local/bin/sqlx-mcp
