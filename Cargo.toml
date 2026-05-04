@@ -1,10 +1,10 @@
 [package]
 name = "grengin-api"
-version = "0.2.57"
+version = "0.2.58"
 edition = "2024"
 
 [workspace]
-members = [".","migration"]
+members = [".", "migration", "sqlx-mcp"]
 
 [dependencies]
 anyhow = { version = "1.0.100", features = ["backtrace"] }
