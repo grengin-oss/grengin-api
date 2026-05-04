@@ -14,32 +14,33 @@ WORKDIR /usr/src/grengin-api
 # copy the minimal set that makes dependency resolution stable
 COPY Cargo.* ./
 COPY migration/Cargo.toml migration/Cargo.toml
+COPY sqlx-mcp/Cargo.toml sqlx-mcp/Cargo.toml
 # create empty src trees so cargo can resolve features without invalidating cache
-RUN mkdir -p src migration/src && echo "fn main(){}" > src/main.rs && echo "" > migration/src/lib.rs
+RUN mkdir -p src migration/src sqlx-mcp/src \
+ && echo "fn main(){}" > src/main.rs \
+ && echo "" > migration/src/lib.rs \
+ && echo "fn main(){}" > sqlx-mcp/src/main.rs
 RUN cargo fetch
-# install prebuilt rbdc-mcp binary (avoids source build failures)
 ENV RUSTFLAGS="-C target-feature=+crt-static"
-RUN curl -fsSL \
-    https://github.com/rbatis/rbdc-mcp/releases/download/v0.1.7/rbdc-mcp-linux-x86_64 \
-    -o /usr/local/cargo/bin/rbdc-mcp \
- && chmod +x /usr/local/cargo/bin/rbdc-mcp
 
 # now copy real sources
 COPY src ./src
 COPY migration ./migration
+COPY sqlx-mcp ./sqlx-mcp
 COPY swagger-overrides .
 ENV SWAGGER_UI_OVERWRITE_FOLDER=/swagger-overrides
 
 # build (fully static by default on musl)
 RUN RUST_TARGET=x86_64-unknown-linux-musl \
- && cargo build --release --target "$RUST_TARGET" \
- && cp "/usr/src/grengin-api/target/$RUST_TARGET/release/grengin-api" /usr/local/bin/grengin-api
+ && cargo build --release --target "$RUST_TARGET" -p grengin-api -p sqlx-mcp \
+ && cp "/usr/src/grengin-api/target/$RUST_TARGET/release/grengin-api" /usr/local/bin/grengin-api \
+ && cp "/usr/src/grengin-api/target/$RUST_TARGET/release/sqlx-mcp" /usr/local/bin/sqlx-mcp
 
 # runtime: static binary; only certs if your app makes HTTPS requests
 FROM scratch
 # for HTTPS/TLS trust store:
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /usr/local/bin/grengin-api /usr/local/bin/app
-COPY --from=builder /usr/local/cargo/bin/rbdc-mcp /usr/local/cargo/bin/rbdc-mcp
+COPY --from=builder /usr/local/bin/sqlx-mcp /usr/local/bin/sqlx-mcp
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/app"]

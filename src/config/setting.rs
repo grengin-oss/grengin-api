@@ -711,7 +711,10 @@ mod tests {
             std::env::set_var("RAG_SUMMARY_MODEL_OPENAI", "legacy-openai-model");
         }
         let rag = RagSettings::from_env();
-        assert_eq!(rag.summary_llm_model.as_deref(), Some("legacy-openai-model"));
+        assert_eq!(
+            rag.summary_llm_model.as_deref(),
+            Some("legacy-openai-model")
+        );
 
         // SAFETY: tests serialize env mutations with ENV_LOCK.
         unsafe {

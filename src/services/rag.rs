@@ -369,8 +369,7 @@ pub async fn update_conversation_summary(
     );
 
     let summary_response =
-        generate_summary_text(app_state, &summary_provider, &summary_model, summary_prompt)
-            .await?;
+        generate_summary_text(app_state, &summary_provider, &summary_model, summary_prompt).await?;
     let summary_text = summary_response.text.trim().to_string();
 
     let now = Utc::now();
