@@ -149,7 +149,10 @@ fn calculate_cost_decimal(
     Decimal::from_f64(cost).unwrap_or_else(|| Decimal::from(0))
 }
 
-fn build_mcp_server_context(servers: &[McpServerSummary]) -> Option<String> {
+fn build_mcp_server_context(
+    servers: &[McpServerSummary],
+    tool_lookup: &HashMap<String, McpToolDescriptor>,
+) -> Option<String> {
     if servers.is_empty() {
         return None;
     }
@@ -174,6 +177,16 @@ fn build_mcp_server_context(servers: &[McpServerSummary]) -> Option<String> {
     lines.push(
         "Tools starting with mcp__<short>__ map to the corresponding server above.".to_string(),
     );
+    let has_sqlx_query_tool = tool_lookup.values().any(|tool| {
+        tool.original_name == "sql_query" && tool.server_name.to_ascii_lowercase().contains("sqlx")
+    });
+    if has_sqlx_query_tool {
+        lines.push("SQL dialect hint: The sqlx MCP server uses PostgreSQL. Do not use sqlite_master, PRAGMA, or SHOW TABLES.".to_string());
+        lines.push(
+            "Use PostgreSQL catalog queries such as information_schema.tables when listing tables."
+                .to_string(),
+        );
+    }
     Some(lines.join("\n"))
 }
 
@@ -997,7 +1010,7 @@ pub async fn handle_chat_stream(
         );
     }
     if supports_mcp_tools {
-        if let Some(context) = build_mcp_server_context(&mcp_server_summaries) {
+        if let Some(context) = build_mcp_server_context(&mcp_server_summaries, &mcp_tool_lookup) {
             let insert_at = previous_prompts
                 .iter()
                 .position(|prompt| prompt.role != ChatRole::System)

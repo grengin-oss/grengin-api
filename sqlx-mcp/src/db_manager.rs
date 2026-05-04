@@ -40,6 +40,16 @@ impl DatabaseManager {
         if !is_read_only_sql(sql) {
             return Err(anyhow!("Read-only query validation failed"));
         }
+        if looks_like_non_postgres_table_listing_query(sql) {
+            return Err(anyhow!(
+                "PostgreSQL dialect expected. Do not use sqlite_master or SHOW TABLES. \
+Use information_schema.tables, for example: \
+SELECT table_schema, table_name \
+FROM information_schema.tables \
+WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
+ORDER BY table_schema, table_name"
+            ));
+        }
 
         if can_wrap_as_subquery(sql) {
             match self.execute_wrapped_query(sql, &params).await {
@@ -51,26 +61,6 @@ impl DatabaseManager {
         }
 
         self.execute_raw_query(sql, &params).await
-    }
-
-    pub async fn execute_modification(&self, sql: &str, params: Vec<Value>) -> Result<Value> {
-        if self.read_only {
-            return Err(anyhow!("Read-only mode blocks SQL modifications."));
-        }
-
-        let arguments = build_arguments(&params)?;
-        let result = query_with(sql, arguments)
-            .execute(&self.pool)
-            .await
-            .context("modification operation failed")?;
-
-        Ok(json!({
-            "rows_affected": result.rows_affected()
-        }))
-    }
-
-    pub fn read_only_enabled(&self) -> bool {
-        self.read_only
     }
 
     pub async fn get_pool_state(&self) -> Value {
@@ -239,6 +229,13 @@ fn trim_single_trailing_semicolon(sql: &str) -> &str {
     } else {
         trimmed
     }
+}
+
+fn looks_like_non_postgres_table_listing_query(sql: &str) -> bool {
+    let normalized = sql.to_ascii_lowercase();
+    normalized.contains("sqlite_master")
+        || normalized.contains("pragma table_info")
+        || normalized.contains("show tables")
 }
 
 #[cfg(test)]

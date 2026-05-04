@@ -19,16 +19,7 @@ pub struct SqlxDatabaseHandler {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SqlQueryParams {
-    /// SQL query statement to execute
-    sql: String,
-    /// SQL parameter array, optional
-    #[serde(default)]
-    params: Vec<serde_json::Value>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct SqlExecParams {
-    /// SQL modification statement to execute
+    /// Read-only PostgreSQL SQL query statement to execute
     sql: String,
     /// SQL parameter array, optional
     #[serde(default)]
@@ -44,7 +35,10 @@ impl SqlxDatabaseHandler {
         }
     }
 
-    #[tool(description = "Execute SQL query and return results")]
+    #[tool(
+        description = "Execute a single read-only PostgreSQL SQL query and return results as JSON rows. Use PostgreSQL syntax (for table listing, query information_schema.tables).",
+        annotations(read_only_hint = true)
+    )]
     async fn sql_query(
         &self,
         _context: RequestContext<RoleServer>,
@@ -69,44 +63,16 @@ impl SqlxDatabaseHandler {
                 Ok(CallToolResult::success(vec![content]))
             }
             Err(err) => Err(McpError::internal_error(
-                format!("SQL query failed: {err}"),
+                format!("SQL query failed: {err:#}"),
                 None,
             )),
         }
     }
 
-    #[tool(description = "Execute SQL modification statements (INSERT/UPDATE/DELETE)")]
-    async fn sql_exec(
-        &self,
-        _context: RequestContext<RoleServer>,
-        Parameters(params): Parameters<SqlExecParams>,
-    ) -> Result<CallToolResult, McpError> {
-        if self.db_manager.read_only_enabled() {
-            return Err(McpError::invalid_params(
-                "Read-only mode blocks SQL modifications. Configure the database itself for read-only access and use sql_query only for single read-only statements.".to_string(),
-                None,
-            ));
-        }
-
-        match self
-            .db_manager
-            .execute_modification(&params.sql, params.params)
-            .await
-        {
-            Ok(results) => {
-                let content = Content::json(results).map_err(|e| {
-                    McpError::internal_error(format!("Result serialization failed: {e}"), None)
-                })?;
-                Ok(CallToolResult::success(vec![content]))
-            }
-            Err(err) => Err(McpError::internal_error(
-                format!("SQL execution failed: {err}"),
-                None,
-            )),
-        }
-    }
-
-    #[tool(description = "Get database connection pool status information")]
+    #[tool(
+        description = "Get SQLx MCP database status, including database_type and read_only mode.",
+        annotations(read_only_hint = true)
+    )]
     async fn db_status(
         &self,
         _context: RequestContext<RoleServer>,
@@ -128,7 +94,7 @@ impl ServerHandler for SqlxDatabaseHandler {
         server_info.version = env!("CARGO_PKG_VERSION").to_string();
 
         ServerInfo {
-            instructions: Some("SQLx database MCP server providing SQL query, execution and status check tools. sql_query accepts only single read-only SQL statements.".to_string()),
+            instructions: Some("SQLx PostgreSQL MCP server. Exposes read-only tools only. Use PostgreSQL syntax (not SQLite/MySQL metadata commands). For listing tables, query information_schema.tables.".to_string()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info,
             ..Default::default()
