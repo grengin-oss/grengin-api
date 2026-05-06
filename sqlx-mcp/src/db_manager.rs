@@ -1,11 +1,11 @@
 use crate::read_only::is_read_only_sql;
-use anyhow::{Context, Result, anyhow};
-use serde_json::{Map, Value, json};
+use anyhow::{anyhow, Context, Result};
+use serde_json::{json, Map, Value};
 use sqlx::{
-    Arguments, Column, Row, TypeInfo, ValueRef,
     postgres::{PgArguments, PgPool, PgPoolOptions, PgRow},
     query_with,
     types::Json,
+    Arguments, Column, Row, TypeInfo, ValueRef,
 };
 use std::time::Duration;
 
@@ -71,6 +71,108 @@ ORDER BY table_schema, table_name"
             "num_idle": self.pool.num_idle(),
             "is_closed": self.pool.is_closed(),
         })
+    }
+
+    pub async fn list_tables(&self, schema: Option<String>, include_views: bool) -> Result<Value> {
+        let sql = "SELECT table_schema, table_name, table_type
+FROM information_schema.tables
+WHERE ($1::text IS NULL OR table_schema = $1)
+  AND (
+    table_type = 'BASE TABLE'
+    OR ($2::boolean = true AND table_type = 'VIEW')
+  )
+  AND table_schema NOT IN ('pg_catalog', 'information_schema')
+ORDER BY table_schema, table_name";
+        let params = vec![
+            schema.map(Value::String).unwrap_or(Value::Null),
+            Value::Bool(include_views),
+        ];
+        self.execute_raw_query(sql, &params).await
+    }
+
+    pub async fn describe_table(&self, schema: Option<String>, table: String) -> Result<Value> {
+        let sql = "SELECT
+  c.table_schema,
+  c.table_name,
+  c.ordinal_position,
+  c.column_name,
+  c.data_type,
+  c.udt_name,
+  c.is_nullable,
+  c.column_default,
+  c.character_maximum_length,
+  c.numeric_precision,
+  c.numeric_scale,
+  EXISTS (
+    SELECT 1
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu
+      ON tc.constraint_name = kcu.constraint_name
+      AND tc.table_schema = kcu.table_schema
+      AND tc.table_name = kcu.table_name
+    WHERE tc.constraint_type = 'PRIMARY KEY'
+      AND tc.table_schema = c.table_schema
+      AND tc.table_name = c.table_name
+      AND kcu.column_name = c.column_name
+  ) AS is_primary_key
+FROM information_schema.columns c
+WHERE c.table_name = $1
+  AND ($2::text IS NULL OR c.table_schema = $2)
+  AND c.table_schema NOT IN ('pg_catalog', 'information_schema')
+ORDER BY c.table_schema, c.table_name, c.ordinal_position";
+        let params = vec![
+            Value::String(table),
+            schema.map(Value::String).unwrap_or(Value::Null),
+        ];
+        self.execute_raw_query(sql, &params).await
+    }
+
+    pub async fn list_foreign_keys(
+        &self,
+        schema: Option<String>,
+        table: Option<String>,
+    ) -> Result<Value> {
+        let sql = "SELECT
+  tc.table_schema,
+  tc.table_name,
+  kcu.column_name,
+  tc.constraint_name,
+  ccu.table_schema AS foreign_table_schema,
+  ccu.table_name AS foreign_table_name,
+  ccu.column_name AS foreign_column_name
+FROM information_schema.table_constraints tc
+JOIN information_schema.key_column_usage kcu
+  ON tc.constraint_name = kcu.constraint_name
+  AND tc.table_schema = kcu.table_schema
+JOIN information_schema.constraint_column_usage ccu
+  ON ccu.constraint_name = tc.constraint_name
+  AND ccu.constraint_schema = tc.constraint_schema
+WHERE tc.constraint_type = 'FOREIGN KEY'
+  AND ($1::text IS NULL OR tc.table_schema = $1)
+  AND ($2::text IS NULL OR tc.table_name = $2)
+  AND tc.table_schema NOT IN ('pg_catalog', 'information_schema')
+ORDER BY tc.table_schema, tc.table_name, tc.constraint_name, kcu.ordinal_position";
+        let params = vec![
+            schema.map(Value::String).unwrap_or(Value::Null),
+            table.map(Value::String).unwrap_or(Value::Null),
+        ];
+        self.execute_raw_query(sql, &params).await
+    }
+
+    pub async fn list_ltree_columns(&self, schema: Option<String>) -> Result<Value> {
+        let sql = "SELECT
+  c.table_schema,
+  c.table_name,
+  c.column_name,
+  c.udt_name,
+  c.data_type
+FROM information_schema.columns c
+WHERE c.udt_name = 'ltree'
+  AND ($1::text IS NULL OR c.table_schema = $1)
+  AND c.table_schema NOT IN ('pg_catalog', 'information_schema')
+ORDER BY c.table_schema, c.table_name, c.ordinal_position";
+        let params = vec![schema.map(Value::String).unwrap_or(Value::Null)];
+        self.execute_raw_query(sql, &params).await
     }
 
     pub async fn test_connection(&self) -> Result<()> {
@@ -260,9 +362,56 @@ mod tests {
             .expect("read-only query should succeed");
         assert_eq!(rows, json!([{ "ok": 1 }]));
 
+        let tables = manager
+            .list_tables(Some("public".to_string()), false)
+            .await
+            .expect("list_tables should succeed");
+        let tables = tables
+            .as_array()
+            .expect("list_tables should return array of rows");
+        assert!(
+            tables
+                .iter()
+                .any(|row| row.get("table_name") == Some(&json!("departments"))),
+            "public.departments must be discoverable via list_tables"
+        );
+
+        let departments_columns = manager
+            .describe_table(Some("public".to_string()), "departments".to_string())
+            .await
+            .expect("describe_table should succeed");
+        let departments_columns = departments_columns
+            .as_array()
+            .expect("describe_table should return array of rows");
+        assert!(
+            departments_columns
+                .iter()
+                .any(|row| row.get("column_name") == Some(&json!("path"))
+                    && row.get("udt_name") == Some(&json!("ltree"))),
+            "departments.path ltree column must be discoverable"
+        );
+
+        let ltree_columns = manager
+            .list_ltree_columns(Some("public".to_string()))
+            .await
+            .expect("list_ltree_columns should succeed");
+        let ltree_columns = ltree_columns
+            .as_array()
+            .expect("list_ltree_columns should return array of rows");
+        assert!(
+            ltree_columns
+                .iter()
+                .any(|row| row.get("table_name") == Some(&json!("departments"))
+                    && row.get("column_name") == Some(&json!("path"))),
+            "ltree tool must report departments.path"
+        );
+
         let write_attempt = manager
-            .execute_modification("CREATE TEMP TABLE _sqlx_mcp_smoke(id INT)", vec![])
+            .execute_query("UPDATE users SET name = 'x'", vec![])
             .await;
-        assert!(write_attempt.is_err(), "read-only mode must block writes");
+        assert!(
+            write_attempt.is_err(),
+            "read-only query validation must block writes"
+        );
     }
 }
