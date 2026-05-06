@@ -1,13 +1,12 @@
 use crate::db_manager::DatabaseManager;
 use crate::read_only::is_read_only_sql;
 use rmcp::{
-    ErrorData as McpError, ServerHandler,
     handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters,
     model::*,
     schemars,
     service::{RequestContext, RoleServer},
-    tool, tool_handler, tool_router,
+    tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler,
 };
 use std::sync::Arc;
 
@@ -24,6 +23,42 @@ pub struct SqlQueryParams {
     /// SQL parameter array, optional
     #[serde(default)]
     params: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListTablesParams {
+    /// Target schema name (defaults to all non-system schemas)
+    #[serde(default)]
+    schema: Option<String>,
+    /// Include views in response
+    #[serde(default)]
+    include_views: bool,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DescribeTableParams {
+    /// Table name
+    table: String,
+    /// Target schema name (optional)
+    #[serde(default)]
+    schema: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListForeignKeysParams {
+    /// Target schema name (defaults to all non-system schemas)
+    #[serde(default)]
+    schema: Option<String>,
+    /// Filter by source table name (optional)
+    #[serde(default)]
+    table: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListLtreeColumnsParams {
+    /// Target schema name (defaults to all non-system schemas)
+    #[serde(default)]
+    schema: Option<String>,
 }
 
 #[tool_router]
@@ -70,6 +105,110 @@ impl SqlxDatabaseHandler {
     }
 
     #[tool(
+        description = "List tables (and optionally views) in PostgreSQL schemas. Use this before writing complex SQL so you reference existing tables.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_tables(
+        &self,
+        _context: RequestContext<RoleServer>,
+        Parameters(params): Parameters<ListTablesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .db_manager
+            .list_tables(params.schema, params.include_views)
+            .await
+        {
+            Ok(results) => {
+                let content = Content::json(results).map_err(|e| {
+                    McpError::internal_error(format!("Result serialization failed: {e}"), None)
+                })?;
+                Ok(CallToolResult::success(vec![content]))
+            }
+            Err(err) => Err(McpError::internal_error(
+                format!("list_tables failed: {err:#}"),
+                None,
+            )),
+        }
+    }
+
+    #[tool(
+        description = "Describe a table's columns and key metadata (type, nullability, defaults, PK membership).",
+        annotations(read_only_hint = true)
+    )]
+    async fn describe_table(
+        &self,
+        _context: RequestContext<RoleServer>,
+        Parameters(params): Parameters<DescribeTableParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .db_manager
+            .describe_table(params.schema, params.table)
+            .await
+        {
+            Ok(results) => {
+                let content = Content::json(results).map_err(|e| {
+                    McpError::internal_error(format!("Result serialization failed: {e}"), None)
+                })?;
+                Ok(CallToolResult::success(vec![content]))
+            }
+            Err(err) => Err(McpError::internal_error(
+                format!("describe_table failed: {err:#}"),
+                None,
+            )),
+        }
+    }
+
+    #[tool(
+        description = "List foreign-key relationships to understand how tables are connected.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_foreign_keys(
+        &self,
+        _context: RequestContext<RoleServer>,
+        Parameters(params): Parameters<ListForeignKeysParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .db_manager
+            .list_foreign_keys(params.schema, params.table)
+            .await
+        {
+            Ok(results) => {
+                let content = Content::json(results).map_err(|e| {
+                    McpError::internal_error(format!("Result serialization failed: {e}"), None)
+                })?;
+                Ok(CallToolResult::success(vec![content]))
+            }
+            Err(err) => Err(McpError::internal_error(
+                format!("list_foreign_keys failed: {err:#}"),
+                None,
+            )),
+        }
+    }
+
+    #[tool(
+        description = "List all ltree columns. Useful for hierarchical data stored in a single table (for example departments/sub-departments).",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_ltree_columns(
+        &self,
+        _context: RequestContext<RoleServer>,
+        Parameters(params): Parameters<ListLtreeColumnsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self.db_manager.list_ltree_columns(params.schema).await {
+            Ok(results) => {
+                let content = Content::json(results).map_err(|e| {
+                    McpError::internal_error(format!("Result serialization failed: {e}"), None)
+                })?;
+                Ok(CallToolResult::success(vec![content]))
+            }
+            Err(err) => Err(McpError::internal_error(
+                format!("list_ltree_columns failed: {err:#}"),
+                None,
+            )),
+        }
+    }
+
+    #[tool(
         description = "Get SQLx MCP database status, including database_type and read_only mode.",
         annotations(read_only_hint = true)
     )]
@@ -94,7 +233,7 @@ impl ServerHandler for SqlxDatabaseHandler {
         server_info.version = env!("CARGO_PKG_VERSION").to_string();
 
         ServerInfo {
-            instructions: Some("SQLx PostgreSQL MCP server. Exposes read-only tools only. Use PostgreSQL syntax (not SQLite/MySQL metadata commands). For listing tables, query information_schema.tables.".to_string()),
+            instructions: Some("SQLx PostgreSQL MCP server with read-only tools for query + schema discovery. Use list_tables/describe_table/list_foreign_keys/list_ltree_columns before complex SQL. Use PostgreSQL syntax (not SQLite/MySQL metadata commands).".to_string()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info,
             ..Default::default()
