@@ -65,9 +65,9 @@ use crate::dto::system_metrics::{
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::handlers::{
     admin_ai, admin_analytics, admin_audit, admin_department, admin_department_budgets,
-    admin_embedding, admin_mcp, admin_prompts, admin_roles, admin_sso_provider, admin_system,
-    admin_users, auth, branding, chat, chat_stream, file, mcp, me, me_prompts, message, models,
-    notifications, oidc, open_error,
+    admin_embedding, admin_mcp, admin_prompts, admin_reconfigure, admin_roles, admin_sso_provider,
+    admin_system, admin_users, auth, branding, chat, chat_stream, file, mcp, me, me_prompts,
+    message, models, notifications, oidc, open_error,
 };
 use crate::models::departments::{ActionOnExceed, BudgetPeriod};
 use crate::models::mcp_access_policies::{McpAccessType, McpPermission};
@@ -167,6 +167,9 @@ use utoipa::OpenApi;
         admin_prompts::update_department_prompt,
         admin_prompts::delete_department_prompt,
         admin_prompts::get_prompt_metrics,
+        admin_reconfigure::start_reconfigure,
+        admin_reconfigure::reconfigure_domain,
+        admin_reconfigure::update_binaries,
         me_prompts::get_my_system_prompt,
         me_prompts::set_my_system_prompt,
         me_prompts::reset_my_system_prompt,
@@ -345,6 +348,12 @@ use utoipa::OpenApi;
             UserPromptPreferenceRequest,
             PromptFeedbackRequest,
             PromptSource,
+            admin_reconfigure::ReconfigureStartRequest,
+            admin_reconfigure::ReconfigureStartResponse,
+            admin_reconfigure::DomainReconfigureRequest,
+            admin_reconfigure::DomainReconfigureResponse,
+            admin_reconfigure::BinariesUpdateRequest,
+            admin_reconfigure::BinariesUpdateResponse,
             SystemMetricsResponse,
             MachineMetrics,
             DiskMetrics,

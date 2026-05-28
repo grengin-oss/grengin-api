@@ -1,11 +1,11 @@
 use crate::read_only::is_read_only_sql;
-use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Map, Value};
+use anyhow::{Context, Result, anyhow};
+use serde_json::{Map, Value, json};
 use sqlx::{
+    Arguments, Column, Row, TypeInfo, ValueRef,
     postgres::{PgArguments, PgPool, PgPoolOptions, PgRow},
     query_with,
     types::Json,
-    Arguments, Column, Row, TypeInfo, ValueRef,
 };
 use std::time::Duration;
 

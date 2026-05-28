@@ -27,6 +27,7 @@ use crate::{
             delete_role_prompt, get_prompt_metrics, get_role_prompt, list_department_prompts,
             list_role_prompts, update_department_prompt, update_role_prompt,
         },
+        admin_reconfigure::{reconfigure_domain, start_reconfigure, update_binaries},
         admin_roles::{
             assign_role_to_user, create_role, delete_role, get_permissions, get_role_by_id,
             list_roles, list_user_role_assignments, remove_role_from_user, update_role,
@@ -182,4 +183,10 @@ pub fn admin_routes() -> Router<SharedState> {
             put(update_department_prompt).delete(delete_department_prompt),
         )
         .route("/admin/prompt-metrics", get(get_prompt_metrics))
+        .route("/admin/reconfigure/start", post(start_reconfigure))
+        .route("/admin/reconfigure/domain", post(reconfigure_domain))
+        .route("/admin/reconfigure/binaries", post(update_binaries))
+        .route("/api/admin/reconfigure/start", post(start_reconfigure))
+        .route("/api/admin/reconfigure/domain", post(reconfigure_domain))
+        .route("/api/admin/reconfigure/binaries", post(update_binaries))
 }
