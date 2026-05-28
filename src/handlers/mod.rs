@@ -6,6 +6,7 @@ pub mod admin_department_budgets;
 pub mod admin_embedding;
 pub mod admin_mcp;
 pub mod admin_prompts;
+pub mod admin_reconfigure;
 pub mod admin_roles;
 pub mod admin_sso_provider;
 pub mod admin_system;

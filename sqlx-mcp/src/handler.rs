@@ -1,12 +1,13 @@
 use crate::db_manager::DatabaseManager;
 use crate::read_only::is_read_only_sql;
 use rmcp::{
+    ErrorData as McpError, ServerHandler,
     handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters,
     model::*,
     schemars,
     service::{RequestContext, RoleServer},
-    tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler,
+    tool, tool_handler, tool_router,
 };
 use std::sync::Arc;
 

@@ -813,6 +813,42 @@ fn resolve_audit_action(method: &Method, route: &str) -> Option<AuditRouteAction
             resource_param: Some("user_id"),
             snapshot_target: SnapshotTarget::None,
         }),
+        ("POST", "/admin/reconfigure/start") => Some(AuditRouteAction {
+            action: "admin_reconfigure_started",
+            resource_type: Some("system_configuration"),
+            resource_param: None,
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("POST", "/admin/reconfigure/domain") => Some(AuditRouteAction {
+            action: "admin_domain_reconfigured",
+            resource_type: Some("system_configuration"),
+            resource_param: None,
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("POST", "/admin/reconfigure/binaries") => Some(AuditRouteAction {
+            action: "admin_binaries_updated",
+            resource_type: Some("system_configuration"),
+            resource_param: None,
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("POST", "/api/admin/reconfigure/domain") => Some(AuditRouteAction {
+            action: "admin_domain_reconfigured",
+            resource_type: Some("system_configuration"),
+            resource_param: None,
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("POST", "/api/admin/reconfigure/start") => Some(AuditRouteAction {
+            action: "admin_reconfigure_started",
+            resource_type: Some("system_configuration"),
+            resource_param: None,
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("POST", "/api/admin/reconfigure/binaries") => Some(AuditRouteAction {
+            action: "admin_binaries_updated",
+            resource_type: Some("system_configuration"),
+            resource_param: None,
+            snapshot_target: SnapshotTarget::None,
+        }),
         _ => None,
     }
 }
