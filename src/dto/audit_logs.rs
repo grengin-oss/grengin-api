@@ -59,7 +59,6 @@ pub enum AuditLogAction {
     AdminDepartmentPromptUpdated,
     AdminDepartmentPromptDeleted,
     AdminAuditLogsRedactedForUser,
-    AdminReconfigureStarted,
     AdminDomainReconfigured,
     AdminBinariesUpdated,
 }
@@ -120,7 +119,6 @@ impl AuditLogAction {
             AuditLogAction::AdminDepartmentPromptUpdated,
             AuditLogAction::AdminDepartmentPromptDeleted,
             AuditLogAction::AdminAuditLogsRedactedForUser,
-            AuditLogAction::AdminReconfigureStarted,
             AuditLogAction::AdminDomainReconfigured,
             AuditLogAction::AdminBinariesUpdated,
         ]
@@ -187,7 +185,6 @@ impl AuditLogAction {
             AuditLogAction::AdminDepartmentPromptUpdated => "admin_department_prompt_updated",
             AuditLogAction::AdminDepartmentPromptDeleted => "admin_department_prompt_deleted",
             AuditLogAction::AdminAuditLogsRedactedForUser => "admin_audit_logs_redacted_for_user",
-            AuditLogAction::AdminReconfigureStarted => "admin_reconfigure_started",
             AuditLogAction::AdminDomainReconfigured => "admin_domain_reconfigured",
             AuditLogAction::AdminBinariesUpdated => "admin_binaries_updated",
         }

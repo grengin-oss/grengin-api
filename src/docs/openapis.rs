@@ -12,6 +12,10 @@ use crate::dto::admin_department::{
 use crate::dto::admin_department_budget::{DepartmentBudgetStatus, SubDepartmentBudgetDto};
 use crate::dto::admin_embedding::{EmbeddingConfigResponse, EmbeddingConfigUpdateRequest};
 use crate::dto::admin_mcp::{McpAccessDefault, McpServerAccess};
+use crate::dto::admin_reconfigure_dto::{
+    BinariesUpdateRequest, BinariesUpdateResponse, DomainReconfigureRequest,
+    DomainReconfigureResponse, ReconfigureAvailableResponse, ReconfigureScriptAvailability,
+};
 use crate::dto::admin_roles::{
     PermissionDto, PermissionsResponse, RoleDto, RoleRequest, RoleUpdateRequest, RolesResponse,
     UserRoleAssignmentDto, UserRoleAssignmentInput, UserRoleAssignmentsResponse,
@@ -167,7 +171,7 @@ use utoipa::OpenApi;
         admin_prompts::update_department_prompt,
         admin_prompts::delete_department_prompt,
         admin_prompts::get_prompt_metrics,
-        admin_reconfigure::start_reconfigure,
+        admin_reconfigure::get_reconfigure_available,
         admin_reconfigure::reconfigure_domain,
         admin_reconfigure::update_binaries,
         me_prompts::get_my_system_prompt,
@@ -348,12 +352,12 @@ use utoipa::OpenApi;
             UserPromptPreferenceRequest,
             PromptFeedbackRequest,
             PromptSource,
-            admin_reconfigure::ReconfigureStartRequest,
-            admin_reconfigure::ReconfigureStartResponse,
-            admin_reconfigure::DomainReconfigureRequest,
-            admin_reconfigure::DomainReconfigureResponse,
-            admin_reconfigure::BinariesUpdateRequest,
-            admin_reconfigure::BinariesUpdateResponse,
+            DomainReconfigureRequest,
+            DomainReconfigureResponse,
+            BinariesUpdateRequest,
+            BinariesUpdateResponse,
+            ReconfigureScriptAvailability,
+            ReconfigureAvailableResponse,
             SystemMetricsResponse,
             MachineMetrics,
             DiskMetrics,
