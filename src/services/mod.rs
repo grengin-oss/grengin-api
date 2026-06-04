@@ -11,6 +11,7 @@ pub mod mcp_helpers;
 pub mod mcp_tools;
 pub mod notifications;
 pub mod rag;
+pub mod reconfigure;
 pub mod search;
 pub mod sso_validation;
 pub mod system_prompts;

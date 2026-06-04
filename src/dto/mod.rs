@@ -3,6 +3,7 @@ pub mod admin_department;
 pub mod admin_department_budget;
 pub mod admin_embedding;
 pub mod admin_mcp;
+pub mod admin_reconfigure_dto;
 pub mod admin_roles;
 pub mod admin_sso_providers;
 pub mod admin_user;
