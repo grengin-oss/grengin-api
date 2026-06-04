@@ -10,7 +10,7 @@ use crate::{
     auth::{
         claims::Claims,
         error::{AuthError, Error},
-        permissions::PERMISSION_ANALYTICS_VIEW,
+        permissions::PERMISSION_SYSTEM_MAINTAIN,
     },
     dto::system_metrics::{
         ContainerMetrics, DatabaseMetrics, DiskMetrics, MachineMetrics, SystemMetricsResponse,
@@ -38,7 +38,7 @@ pub async fn get_system_metrics(
     authz
         .ensure_permission(
             claims.user_id,
-            PERMISSION_ANALYTICS_VIEW,
+            PERMISSION_SYSTEM_MAINTAIN,
             None,
             PermissionScopeMode::RequireOrgWide,
             None,

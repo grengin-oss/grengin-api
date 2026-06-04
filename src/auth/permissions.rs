@@ -96,6 +96,11 @@ pub const PERMISSIONS: &[PermissionDefinition] = &[
         action: "assign",
         is_scopeable: true,
     },
+    PermissionDefinition {
+        domain: "system",
+        action: "maintain",
+        is_scopeable: false,
+    },
 ];
 
 pub const ROLE_SUPER_ADMIN: &str = "Super Admin";
@@ -124,6 +129,7 @@ pub const PERMISSION_SSO_PROVIDERS_MANAGE: &str = "sso_providers:manage";
 pub const PERMISSION_ROLES_VIEW: &str = "roles:view";
 pub const PERMISSION_ROLES_MANAGE: &str = "roles:manage";
 pub const PERMISSION_ROLES_ASSIGN: &str = "roles:assign";
+pub const PERMISSION_SYSTEM_MAINTAIN: &str = "system:maintain";
 
 pub fn permission_key(domain: &str, action: &str) -> String {
     format!("{domain}:{action}")
