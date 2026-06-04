@@ -5,7 +5,7 @@ use crate::{
     auth::{
         claims::Claims,
         error::{AuthError, Error},
-        permissions::{PERMISSION_ROLES_MANAGE, ROLE_SUPER_ADMIN},
+        permissions::PERMISSION_SYSTEM_MAINTAIN,
     },
     dto::admin_reconfigure_dto::{
         BinariesUpdateRequest, BinariesUpdateResponse, DomainReconfigureRequest,
@@ -56,7 +56,7 @@ fn build_script_availability(
     }
 }
 
-async fn ensure_super_admin(
+async fn ensure_system_maintainer(
     claims: &Claims,
     app_state: &SharedState,
     headers: &HeaderMap,
@@ -65,19 +65,12 @@ async fn ensure_super_admin(
     authz
         .ensure_permission(
             claims.user_id,
-            PERMISSION_ROLES_MANAGE,
+            PERMISSION_SYSTEM_MAINTAIN,
             None,
             PermissionScopeMode::RequireOrgWide,
             None,
         )
         .await?;
-
-    let is_super_admin = authz
-        .user_has_role_name(claims.user_id, ROLE_SUPER_ADMIN)
-        .await?;
-    if !is_super_admin {
-        return Err(AuthError::PermissionDenied);
-    }
 
     if let Some(expected_token) = reconfigure::expected_reconfigure_token() {
         let Some(provided_token) = reconfigure::provided_reconfigure_token(headers) else {
@@ -98,7 +91,7 @@ async fn ensure_super_admin(
     responses(
        (status = 200, body = ReconfigureAvailableResponse),
        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
-       (status = 403, content_type = "application/json", body = Error, description = "Forbidden - Super Admin role required"),
+       (status = 403, content_type = "application/json", body = Error, description = "Forbidden - system:maintain permission required"),
     )
 )]
 pub async fn get_reconfigure_available(
@@ -106,7 +99,7 @@ pub async fn get_reconfigure_available(
     State(app_state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<(StatusCode, Json<ReconfigureAvailableResponse>), AuthError> {
-    ensure_super_admin(&claims, &app_state, &headers).await?;
+    ensure_system_maintainer(&claims, &app_state, &headers).await?;
 
     let domain = build_script_availability(
         reconfigure::domain_reconfigure_script_path(),
@@ -147,7 +140,7 @@ pub async fn get_reconfigure_available(
     responses(
        (status = 200, body = DomainReconfigureResponse),
        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
-       (status = 403, content_type = "application/json", body = Error, description = "Forbidden - Super Admin role required"),
+       (status = 403, content_type = "application/json", body = Error, description = "Forbidden - system:maintain permission required"),
        (status = 503, content_type = "application/json", body = Error, description = "Service unavailable"),
     )
 )]
@@ -157,7 +150,7 @@ pub async fn reconfigure_domain(
     headers: HeaderMap,
     Json(request): Json<DomainReconfigureRequest>,
 ) -> Result<(StatusCode, Json<DomainReconfigureResponse>), AuthError> {
-    ensure_super_admin(&claims, &app_state, &headers).await?;
+    ensure_system_maintainer(&claims, &app_state, &headers).await?;
 
     let script_path = reconfigure::domain_reconfigure_script_path();
     let domain = request.domain.trim().to_ascii_lowercase();
@@ -216,24 +209,26 @@ pub async fn reconfigure_domain(
         ));
     }
 
-    let use_sudo =
-        match reconfigure::resolve_script_sudo_usage(reconfigure::domain_reconfigure_use_sudo(), "DOMAIN_RECONFIGURE") {
-            Ok(value) => value,
-            Err(message) => {
-                return Ok((
-                    StatusCode::OK,
-                    Json(DomainReconfigureResponse {
-                        success: false,
-                        message,
-                        domain,
-                        ssl_mode,
-                        redirect_url: String::new(),
-                        script_path,
-                        output: vec![],
-                    }),
-                ))
-            }
-        };
+    let use_sudo = match reconfigure::resolve_script_sudo_usage(
+        reconfigure::domain_reconfigure_use_sudo(),
+        "DOMAIN_RECONFIGURE",
+    ) {
+        Ok(value) => value,
+        Err(message) => {
+            return Ok((
+                StatusCode::OK,
+                Json(DomainReconfigureResponse {
+                    success: false,
+                    message,
+                    domain,
+                    ssl_mode,
+                    redirect_url: String::new(),
+                    script_path,
+                    output: vec![],
+                }),
+            ));
+        }
+    };
 
     let mut script_args = vec![
         "--domain".to_string(),
@@ -305,7 +300,7 @@ pub async fn reconfigure_domain(
     responses(
        (status = 200, body = BinariesUpdateResponse),
        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
-       (status = 403, content_type = "application/json", body = Error, description = "Forbidden - Super Admin role required"),
+       (status = 403, content_type = "application/json", body = Error, description = "Forbidden - system:maintain permission required"),
        (status = 503, content_type = "application/json", body = Error, description = "Service unavailable"),
     )
 )]
@@ -315,7 +310,7 @@ pub async fn update_binaries(
     headers: HeaderMap,
     Json(request): Json<BinariesUpdateRequest>,
 ) -> Result<(StatusCode, Json<BinariesUpdateResponse>), AuthError> {
-    ensure_super_admin(&claims, &app_state, &headers).await?;
+    ensure_system_maintainer(&claims, &app_state, &headers).await?;
 
     let script_path = reconfigure::binaries_update_script_path();
     let Some(version) = reconfigure::normalized_release_version(request.version.as_deref()) else {
@@ -390,28 +385,30 @@ pub async fn update_binaries(
         ));
     }
 
-    let use_sudo =
-        match reconfigure::resolve_script_sudo_usage(reconfigure::binaries_update_use_sudo(), "BINARY_UPDATE") {
-            Ok(value) => value,
-            Err(message) => {
-                return Ok((
-                    StatusCode::OK,
-                    Json(BinariesUpdateResponse {
-                        success: false,
-                        message,
-                        version,
-                        release_base_url,
-                        arch,
-                        update_installer,
-                        update_api,
-                        update_webapp,
-                        verify_checksums,
-                        script_path,
-                        output: vec![],
-                    }),
-                ))
-            }
-        };
+    let use_sudo = match reconfigure::resolve_script_sudo_usage(
+        reconfigure::binaries_update_use_sudo(),
+        "BINARY_UPDATE",
+    ) {
+        Ok(value) => value,
+        Err(message) => {
+            return Ok((
+                StatusCode::OK,
+                Json(BinariesUpdateResponse {
+                    success: false,
+                    message,
+                    version,
+                    release_base_url,
+                    arch,
+                    update_installer,
+                    update_api,
+                    update_webapp,
+                    verify_checksums,
+                    script_path,
+                    output: vec![],
+                }),
+            ));
+        }
+    };
 
     let mut script_args = vec![
         "--release-base-url".to_string(),

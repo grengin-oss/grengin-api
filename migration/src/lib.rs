@@ -47,6 +47,7 @@ mod m20260407_000002_add_department_policies;
 mod m20260415_000001_role_prompts_role_id;
 mod m20260416_000001_create_audit_logs;
 mod m20260417_000001_add_audit_logs_view_permission;
+mod m20260604_000001_add_system_maintain_permission;
 
 pub struct Migrator;
 
@@ -101,6 +102,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260415_000001_role_prompts_role_id::Migration),
             Box::new(m20260416_000001_create_audit_logs::Migration),
             Box::new(m20260417_000001_add_audit_logs_view_permission::Migration),
+            Box::new(m20260604_000001_add_system_maintain_permission::Migration),
         ]
     }
 }
