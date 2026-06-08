@@ -6,3 +6,4 @@ pub mod google;
 pub mod jwt;
 pub mod permissions;
 pub mod sso_provider;
+pub mod sso_proxy;

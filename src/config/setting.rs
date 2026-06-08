@@ -54,6 +54,7 @@ pub struct GoogleSettings {
     pub redirect_url: String,
     pub is_enabled: bool,
     pub allowed_domains: Vec<String>,
+    pub use_grengin_proxy: bool,
 }
 
 #[derive(Clone)]
@@ -64,6 +65,7 @@ pub struct AzureSettings {
     pub redirect_url: String,
     pub is_enabled: bool,
     pub allowed_domains: Vec<String>,
+    pub use_grengin_proxy: bool,
 }
 
 #[derive(Clone)]
@@ -343,6 +345,7 @@ impl Settings {
                 sso_provider.tenant_id,
                 true,
                 sso_provider.allowed_domains,
+                sso_provider.use_grengin_proxy,
             )
             .await?;
         }
@@ -358,6 +361,7 @@ impl Settings {
         tenant_id: Option<S>,
         is_enabled: bool,
         allowed_domains: Vec<S>,
+        use_grengin_proxy: bool,
     ) -> Result<(), ConfigError> {
         match provider.into().as_str() {
             "azure" => {
@@ -369,6 +373,7 @@ impl Settings {
                     redirect_url: redirect_url.into(),
                     is_enabled,
                     allowed_domains: allowed_domains.into_iter().map(|d| d.into()).collect(),
+                    use_grengin_proxy,
                 });
             }
             "google" => {
@@ -379,6 +384,7 @@ impl Settings {
                     redirect_url: redirect_url.into(),
                     is_enabled,
                     allowed_domains: allowed_domains.into_iter().map(|d| d.into()).collect(),
+                    use_grengin_proxy,
                 });
             }
             _ => {}
@@ -455,6 +461,7 @@ impl GoogleSettings {
             redirect_url,
             is_enabled: true,
             allowed_domains: Vec::new(),
+            use_grengin_proxy: false,
         })
     }
 }
@@ -477,6 +484,7 @@ impl AzureSettings {
             tenant_id,
             is_enabled: true,
             allowed_domains: Vec::new(),
+            use_grengin_proxy: false,
         })
     }
 }

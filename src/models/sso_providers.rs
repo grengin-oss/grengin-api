@@ -19,6 +19,7 @@ pub struct Model {
     pub allowed_domains: Vec<String>,
     pub is_enabled: bool,
     pub is_default: bool,
+    pub use_grengin_proxy: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

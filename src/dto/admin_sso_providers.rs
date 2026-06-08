@@ -26,8 +26,16 @@ pub struct SsoProvider {
     pub tenant_id: Option<String>,
     pub allowed_domains: Vec<String>,
     pub is_enabled: bool,
+    pub use_grengin_proxy: bool,
+    pub grengin_proxy_available: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct GrenginProxySetupRequest {
+    pub allowed_domains: Vec<String>,
+    pub tenant_id: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]

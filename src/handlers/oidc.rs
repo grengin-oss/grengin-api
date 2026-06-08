@@ -1,6 +1,7 @@
 use crate::{
     auth::azure::build_azure_public_client,
     auth::error::AuthError,
+    auth::sso_proxy::{build_proxy_state_jwt, replace_state_in_url, sso_proxy_shared_secret},
     config::setting::OidcClient,
     dto::{
         auth::{AuthToken, TokenType, User},
@@ -146,9 +147,32 @@ pub async fn oidc_login_start(
         .set_pkce_challenge(pkce_challenge)
         .url();
 
-    let state_str = csrf_state.secret().to_string();
+    // In proxy mode the CSRF state is wrapped in a signed JWT so the Cloudflare
+    // worker at sso.grengin.com can extract the instance origin and relay the
+    // callback.  The JWT is stored as-is in oauth_sessions so the callback
+    // handler can look it up without any special parsing.
+    let use_proxy = match provider.to_lowercase().as_str() {
+        "google" => app_state.settings.google.read().await.as_ref().map(|s| s.use_grengin_proxy).unwrap_or(false),
+        "azure"  => app_state.settings.azure.read().await.as_ref().map(|s| s.use_grengin_proxy).unwrap_or(false),
+        _        => false,
+    };
+
+    let (final_auth_url, state_to_store) = if use_proxy {
+        let instance_origin = std::env::var("REDIRECT_URL")
+            .unwrap_or_else(|_| "http://localhost:8080".to_string());
+        let secret = sso_proxy_shared_secret().ok_or(AuthError::SsoProviderNotConfigured {
+            provider: Some(provider.clone()),
+        })?;
+        let proxy_jwt = build_proxy_state_jwt(csrf_state.secret(), &instance_origin, &secret)
+            .ok_or(AuthError::ServiceTemporarilyUnavailable)?;
+        let patched = replace_state_in_url(auth_url, &proxy_jwt);
+        (patched, proxy_jwt)
+    } else {
+        (auth_url, csrf_state.secret().to_string())
+    };
+
     let sess = oauth_sessions::ActiveModel {
-        state: Set(state_str.into()),
+        state: Set(state_to_store),
         pkce_verifier: Set(pkce_verifier.secret().to_string()),
         nonce: Set(nonce.secret().to_string()),
         redirect_uri: Set(Some(redirect_uri.to_string())),
@@ -158,7 +182,7 @@ pub async fn oidc_login_start(
         eprintln!("{:?}", e);
         AuthError::ServiceTemporarilyUnavailable
     })?;
-    Ok(Redirect::to(auth_url.as_str()))
+    Ok(Redirect::to(final_auth_url.as_str()))
 }
 
 #[utoipa::path(
