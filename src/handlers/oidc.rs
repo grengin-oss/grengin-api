@@ -1,7 +1,7 @@
 use crate::{
     auth::azure::build_azure_public_client,
     auth::error::AuthError,
-    auth::sso_proxy::{build_proxy_state_jwt, replace_state_in_url, sso_proxy_shared_secret},
+    auth::sso_proxy::{build_proxy_authorize_url, sso_proxy_jwks_url},
     config::setting::OidcClient,
     dto::{
         auth::{AuthToken, TokenType, User},
@@ -28,16 +28,22 @@ use axum::{
     response::Redirect,
 };
 use chrono::Utc;
+use jsonwebtoken::{
+    Algorithm, DecodingKey, Validation, decode, decode_header,
+    jwk::{Jwk, JwkSet},
+};
 use openidconnect::TokenResponse as OidcTokenResponse;
 use openidconnect::{
     AuthorizationCode, ClaimsVerificationError, CsrfToken, Nonce, OAuth2TokenResponse,
     PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
     core::{CoreAuthenticationFlow, CoreUserInfoClaims},
 };
+use reqwest::Url;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, TryIntoModel,
 };
+use serde::Deserialize;
 use std::borrow::Cow;
 use uuid::Uuid;
 
@@ -45,6 +51,23 @@ use uuid::Uuid;
 enum CallbackExchangeMode {
     Auto,
     AzureMobilePublic,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct ProxyAssertionClaims {
+    aud: String,
+    // Optional: Graph /oidc/userinfo may omit email for some Azure account types.
+    email: Option<String>,
+    exp: u64,
+    iat: u64,
+    iss: String,
+    name: Option<String>,
+    nonce: Option<String>,
+    picture: Option<String>,
+    provider: String,
+    // Optional: guard against null/missing sub from some identity providers.
+    provider_sub: Option<String>,
 }
 
 fn is_azure_mobile_redirect_uri(provider: &AuthProvider, redirect_uri: &str) -> bool {
@@ -75,6 +98,107 @@ async fn build_azure_public_client_for_redirect(
         eprintln!("azure public oidc client build error: {e:?}");
         AuthError::ServiceTemporarilyUnavailable
     })
+}
+
+async fn provider_uses_proxy(app_state: &SharedState, provider: &AuthProvider) -> bool {
+    match provider.to_lowercase().as_str() {
+        "google" => app_state
+            .settings
+            .google
+            .read()
+            .await
+            .as_ref()
+            .map(|s| s.use_grengin_proxy)
+            .unwrap_or(false),
+        "azure" => app_state
+            .settings
+            .azure
+            .read()
+            .await
+            .as_ref()
+            .map(|s| s.use_grengin_proxy)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn origin_from_url(value: &str) -> Option<String> {
+    let parsed = Url::parse(value).ok()?;
+    Some(parsed.origin().ascii_serialization())
+}
+
+fn select_assertion_jwk<'a>(jwks: &'a JwkSet, kid: Option<&str>) -> Option<&'a Jwk> {
+    if let Some(kid) = kid {
+        if let Some(found) = jwks.find(kid) {
+            return Some(found);
+        }
+    }
+    jwks.keys.iter().find(|key| key.common.key_id.is_some()).or_else(|| jwks.keys.first())
+}
+
+async fn verify_proxy_assertion(
+    app_state: &SharedState,
+    provider: &AuthProvider,
+    assertion: &str,
+    expected_nonce: &str,
+    expected_audience: &str,
+) -> Result<ProxyAssertionClaims, AuthError> {
+    let header = decode_header(assertion).map_err(|e| {
+        eprintln!("proxy assertion header decode error: {e:?}");
+        AuthError::InvalidToken
+    })?;
+    if header.alg != Algorithm::EdDSA {
+        return Err(AuthError::InvalidToken);
+    }
+
+    let jwks_url = sso_proxy_jwks_url();
+    let jwks = app_state
+        .req_client
+        .get(jwks_url)
+        .send()
+        .await
+        .map_err(|e| {
+            eprintln!("proxy jwks fetch error: {e:?}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?
+        .error_for_status()
+        .map_err(|e| {
+            eprintln!("proxy jwks http error: {e:?}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?
+        .json::<JwkSet>()
+        .await
+        .map_err(|e| {
+            eprintln!("proxy jwks parse error: {e:?}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
+    let jwk = select_assertion_jwk(&jwks, header.kid.as_deref()).ok_or_else(|| {
+        eprintln!("proxy jwks key selection failed for kid={:?}", header.kid);
+        AuthError::InvalidToken
+    })?;
+    let key = DecodingKey::from_jwk(jwk).map_err(|e| {
+        eprintln!("proxy jwk decoding key error: {e:?}");
+        AuthError::InvalidToken
+    })?;
+
+    let mut validation = Validation::new(Algorithm::EdDSA);
+    validation.set_required_spec_claims(&["exp", "aud", "iss", "sub"]);
+    validation.set_audience(&[expected_audience]);
+
+    let token = decode::<ProxyAssertionClaims>(assertion, &key, &validation).map_err(|e| {
+        eprintln!("proxy assertion validation error: {e:?}");
+        AuthError::InvalidToken
+    })?;
+    let claims = token.claims;
+
+    if !claims.provider.eq_ignore_ascii_case(provider) {
+        return Err(AuthError::InvalidToken);
+    }
+    if claims.nonce.as_deref() != Some(expected_nonce) {
+        return Err(AuthError::InvalidToken);
+    }
+
+    Ok(claims)
 }
 
 #[utoipa::path(
@@ -114,21 +238,50 @@ pub async fn oidc_login_start(
             provider: Some(provider.clone()),
         });
     }
-    let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     let (oidc_client, _, default_redirect_uri) = app_state
         .get_oidc_client_and_column_and_redirect_uri(&provider)
         .await
         .map_err(|_| AuthError::InvalidProvider {
             provider: Some(provider.clone()),
         })?;
-    let redirect_uri = RedirectUrl::new(query.redirect_uri.clone().unwrap_or(
+
+    let redirect_uri_value = query.redirect_uri.clone().unwrap_or(
         default_redirect_uri.ok_or(AuthError::SsoProviderNotConfigured {
             provider: Some(provider.clone()),
         })?,
-    ))
-    .map_err(|_| AuthError::InvalidRedirectUri {
-        redirect_uri: query.redirect_uri.clone(),
+    );
+    let redirect_uri = RedirectUrl::new(redirect_uri_value.clone()).map_err(|_| {
+        AuthError::InvalidRedirectUri {
+            redirect_uri: query.redirect_uri.clone(),
+        }
     })?;
+
+    let use_proxy = provider_uses_proxy(&app_state, &provider).await;
+    if use_proxy {
+        let csrf_state = CsrfToken::new_random();
+        let nonce = Nonce::new_random();
+        let proxy_authorize_url = build_proxy_authorize_url(
+            &provider,
+            redirect_uri.as_str(),
+            csrf_state.secret(),
+            nonce.secret(),
+        )
+        .ok_or(AuthError::ServiceTemporarilyUnavailable)?;
+        let sess = oauth_sessions::ActiveModel {
+            state: Set(csrf_state.secret().to_string()),
+            pkce_verifier: Set("proxy-managed".to_string()),
+            nonce: Set(nonce.secret().to_string()),
+            redirect_uri: Set(Some(redirect_uri.to_string())),
+            created_at: Set(Utc::now()),
+        };
+        sess.insert(&app_state.database).await.map_err(|e| {
+            eprintln!("{:?}", e);
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
+        return Ok(Redirect::to(&proxy_authorize_url));
+    }
+
+    let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     let (auth_url, csrf_state, nonce) = oidc_client
         .read()
         .await
@@ -146,33 +299,8 @@ pub async fn oidc_login_start(
         .add_scope(Scope::new("profile".to_string()))
         .set_pkce_challenge(pkce_challenge)
         .url();
-
-    // In proxy mode the CSRF state is wrapped in a signed JWT so the Cloudflare
-    // worker at sso.grengin.com can extract the instance origin and relay the
-    // callback.  The JWT is stored as-is in oauth_sessions so the callback
-    // handler can look it up without any special parsing.
-    let use_proxy = match provider.to_lowercase().as_str() {
-        "google" => app_state.settings.google.read().await.as_ref().map(|s| s.use_grengin_proxy).unwrap_or(false),
-        "azure"  => app_state.settings.azure.read().await.as_ref().map(|s| s.use_grengin_proxy).unwrap_or(false),
-        _        => false,
-    };
-
-    let (final_auth_url, state_to_store) = if use_proxy {
-        let instance_origin = std::env::var("REDIRECT_URL")
-            .unwrap_or_else(|_| "http://localhost:8080".to_string());
-        let secret = sso_proxy_shared_secret().ok_or(AuthError::SsoProviderNotConfigured {
-            provider: Some(provider.clone()),
-        })?;
-        let proxy_jwt = build_proxy_state_jwt(csrf_state.secret(), &instance_origin, &secret)
-            .ok_or(AuthError::ServiceTemporarilyUnavailable)?;
-        let patched = replace_state_in_url(auth_url, &proxy_jwt);
-        (patched, proxy_jwt)
-    } else {
-        (auth_url, csrf_state.secret().to_string())
-    };
-
     let sess = oauth_sessions::ActiveModel {
-        state: Set(state_to_store),
+        state: Set(csrf_state.secret().to_string()),
         pkce_verifier: Set(pkce_verifier.secret().to_string()),
         nonce: Set(nonce.secret().to_string()),
         redirect_uri: Set(Some(redirect_uri.to_string())),
@@ -182,7 +310,7 @@ pub async fn oidc_login_start(
         eprintln!("{:?}", e);
         AuthError::ServiceTemporarilyUnavailable
     })?;
-    Ok(Redirect::to(final_auth_url.as_str()))
+    Ok(Redirect::to(auth_url.as_str()))
 }
 
 #[utoipa::path(
@@ -193,6 +321,7 @@ pub async fn oidc_login_start(
     params(
         ("provider" = String, Path, description = "Auth provider identifier (e.g., google, azure, keycloak)"),
         ("code" = String, Query, description = "Authorization code from provider"),
+        ("assertion" = Option<String>, Query, description = "Signed identity assertion from Grengin SSO proxy"),
         ("state" = String, Query, description = "CSRF state"),
         ("error" = Option<String>, Query, description = "Error code from provider"),
         ("error_description" = Option<String>, Query, description = "Error description from provider")
@@ -240,7 +369,6 @@ async fn oidc_oauth_callback(
             provider: Some(provider.clone()),
         });
     }
-    let code = cb.code.ok_or(AuthError::InvalidCallbackParameters)?;
     let (oidc_client_configured, column, default_redirect_uri) = app_state
         .get_oidc_client_and_column_and_redirect_uri(&provider)
         .await
@@ -281,9 +409,30 @@ async fn oidc_oauth_callback(
         eprintln!("db error while deleting oauth_session: {e:?}");
         AuthError::ServiceTemporarilyUnavailable
     })?;
-    let use_public_azure_client = is_mobile_redirect;
-    let mut oidc_client =
-        if use_public_azure_client {
+    let (sub, email, display_name, picture, hd) = if let Some(assertion) = cb.assertion.clone() {
+        let expected_audience =
+            origin_from_url(&redirect_uri_value).ok_or(AuthError::InvalidRedirectUri {
+                redirect_uri: Some(redirect_uri_value.clone()),
+            })?;
+        let claims = verify_proxy_assertion(
+            &app_state,
+            &provider,
+            &assertion,
+            &sess.nonce,
+            &expected_audience,
+        )
+        .await?;
+        (
+            claims.provider_sub.ok_or(AuthError::InvalidToken)?,
+            claims.email,
+            claims.name,
+            claims.picture,
+            None,
+        )
+    } else {
+        let code = cb.code.ok_or(AuthError::InvalidCallbackParameters)?;
+        let use_public_azure_client = is_mobile_redirect;
+        let mut oidc_client = if use_public_azure_client {
             build_azure_public_client_for_redirect(&app_state, &redirect_uri_value).await?
         } else {
             oidc_client_configured.read().await.clone().ok_or(
@@ -292,72 +441,88 @@ async fn oidc_oauth_callback(
                 },
             )?
         };
-    let token_resp = oidc_client
-        .exchange_code(AuthorizationCode::new(code))
-        .expect("Failed to get token response")
-        .set_pkce_verifier(PkceCodeVerifier::new(sess.pkce_verifier.clone()))
-        .set_redirect_uri(Cow::Owned(redirect_uri))
-        .request_async(&app_state.req_client)
-        .await
-        .map_err(|e| {
-            eprintln!("token exchange err: {e:?}");
-            AuthError::ServiceTemporarilyUnavailable
-        })?;
-    let nonce = Nonce::new(sess.nonce.clone());
-    let id_token = token_resp
-        .id_token()
-        .ok_or(AuthError::ServiceTemporarilyUnavailable)?;
-    let claims = match {
-        let verifier = oidc_client.id_token_verifier();
-        id_token.claims(&verifier, &nonce)
-    } {
-        Ok(c) => c,
-        Err(e) => {
-            let should_refresh = matches!(
-                e,
-                ClaimsVerificationError::SignatureVerification(_) // includes NoMatchingKey, CryptoError, etc.
-            );
-            if !should_refresh {
-                eprintln!("id_token claims verification failed (non-refreshable): {e:?}");
-                return Err(AuthError::InvalidToken);
-            }
-            if use_public_azure_client {
-                oidc_client =
-                    build_azure_public_client_for_redirect(&app_state, &redirect_uri_value).await?;
-            } else {
-                app_state
-                    .refresh_oidc_client(&provider)
-                    .await
-                    .map_err(|err| {
-                        eprintln!("oidc client refresh error: {err:?}");
-                        AuthError::ServiceTemporarilyUnavailable
-                    })?;
+        let token_resp = oidc_client
+            .exchange_code(AuthorizationCode::new(code))
+            .expect("Failed to get token response")
+            .set_pkce_verifier(PkceCodeVerifier::new(sess.pkce_verifier.clone()))
+            .set_redirect_uri(Cow::Owned(redirect_uri))
+            .request_async(&app_state.req_client)
+            .await
+            .map_err(|e| {
+                eprintln!("token exchange err: {e:?}");
+                AuthError::ServiceTemporarilyUnavailable
+            })?;
+        let nonce = Nonce::new(sess.nonce.clone());
+        let id_token = token_resp
+            .id_token()
+            .ok_or(AuthError::ServiceTemporarilyUnavailable)?;
+        let claims = match {
+            let verifier = oidc_client.id_token_verifier();
+            id_token.claims(&verifier, &nonce)
+        } {
+            Ok(c) => c,
+            Err(e) => {
+                let should_refresh = matches!(
+                    e,
+                    ClaimsVerificationError::SignatureVerification(_) // includes NoMatchingKey, CryptoError, etc.
+                );
+                if !should_refresh {
+                    eprintln!("id_token claims verification failed (non-refreshable): {e:?}");
+                    return Err(AuthError::InvalidToken);
+                }
+                if use_public_azure_client {
+                    oidc_client =
+                        build_azure_public_client_for_redirect(&app_state, &redirect_uri_value)
+                            .await?;
+                } else {
+                    app_state
+                        .refresh_oidc_client(&provider)
+                        .await
+                        .map_err(|err| {
+                            eprintln!("oidc client refresh error: {err:?}");
+                            AuthError::ServiceTemporarilyUnavailable
+                        })?;
 
-                oidc_client = oidc_client_configured.read().await.clone().ok_or(
-                    AuthError::SsoProviderNotConfigured {
-                        provider: Some(provider.clone()),
-                    },
-                )?;
-            }
+                    oidc_client = oidc_client_configured.read().await.clone().ok_or(
+                        AuthError::SsoProviderNotConfigured {
+                            provider: Some(provider.clone()),
+                        },
+                    )?;
+                }
 
-            let verifier2 = oidc_client.id_token_verifier();
-            id_token.claims(&verifier2, &nonce).map_err(|e2| {
-                eprintln!("id_token claims verification failed after refresh: {e2:?}");
-                AuthError::InvalidToken
-            })?
+                let verifier2 = oidc_client.id_token_verifier();
+                id_token.claims(&verifier2, &nonce).map_err(|e2| {
+                    eprintln!("id_token claims verification failed after refresh: {e2:?}");
+                    AuthError::InvalidToken
+                })?
+            }
+        };
+        let sub = claims.subject().as_str().to_string();
+        let mut email = claims.email().map(|e| e.as_str().to_string());
+        let picture = claims
+            .picture()
+            .and_then(|pic_claim| pic_claim.get(None))
+            .map(|url| url.as_str().to_owned());
+        let hd = claims
+            .website()
+            .and_then(|website_claim| website_claim.get(None))
+            .map(|url| url.as_str().to_owned());
+        let mut display_name = claims.name().and_then(|n| n.get(None).map(|s| s.to_string()));
+        if email.is_none() {
+            let info: CoreUserInfoClaims = oidc_client
+                .user_info(token_resp.access_token().to_owned(), None)
+                .expect("userinfo req")
+                .request_async(&app_state.req_client)
+                .await
+                .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
+            email = info.email().map(|e| e.as_str().to_string());
+            if display_name.is_none() {
+                display_name = info.name().and_then(|n| n.get(None).map(|s| s.to_string()));
+            }
         }
+        (sub, email, display_name, picture, hd)
     };
-    let sub = claims.subject().as_str().to_string();
-    let mut email = claims.email().map(|e| e.as_str().to_string());
-    let mut display_name: Option<String> = None;
-    let picture = claims
-        .picture()
-        .and_then(|pic_claim| pic_claim.get(None)) // default locale
-        .map(|url| url.as_str().to_owned());
-    let hd = claims
-        .website()
-        .and_then(|website_claim| website_claim.get(None)) // default locale
-        .map(|url| url.as_str().to_owned());
+
     let google_id = if provider == "google" {
         Some(sub.clone())
     } else {
@@ -368,22 +533,6 @@ async fn oidc_oauth_callback(
     } else {
         None
     };
-    if email.is_none() {
-        let info: CoreUserInfoClaims = oidc_client
-            .user_info(token_resp.access_token().to_owned(), None)
-            .expect("userinfo req")
-            .request_async(&app_state.req_client)
-            .await
-            .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
-        email = info.email().map(|e| e.as_str().to_string());
-        if display_name.is_none() {
-            display_name = info.name().and_then(|n| n.get(None).map(|s| s.to_string()));
-        }
-    } else {
-        display_name = claims
-            .name()
-            .and_then(|n| n.get(None).map(|s| s.to_string()));
-    }
     if let Some(email) = email.as_ref() {
         let (is_allowed, domain) = app_state.is_email_domain_allowed(email, &provider).await;
         if !is_allowed {

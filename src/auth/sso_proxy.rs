@@ -1,72 +1,44 @@
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use serde::Serialize;
-
-const PROXY_STATE_TTL_SECS: i64 = 3600; // 1 hour — matches Google/Azure auth timeout
-
-#[derive(Serialize)]
-struct ProxyStateClaims<'a> {
-    /// Inner CSRF nonce — stored as oauth_sessions.state on the instance
-    n: &'a str,
-    /// Origin URL of the Grengin instance, e.g. https://acme.grengin.com
-    o: &'a str,
-    iat: i64,
-    exp: i64,
-}
+use reqwest::Url;
 
 /// Returns the SSO proxy URL (where the Cloudflare worker is deployed).
 pub fn sso_proxy_url() -> String {
     std::env::var("SSO_PROXY_URL")
         .unwrap_or_else(|_| "https://sso.grengin.com".to_string())
+        .trim_end_matches('/')
+        .to_string()
 }
 
-/// Returns the shared HMAC secret used to sign proxy state JWTs, if configured.
-pub fn sso_proxy_shared_secret() -> Option<String> {
-    std::env::var("SSO_PROXY_SHARED_SECRET")
+/// Returns the JWKS URL for verifying SSO proxy assertions.
+pub fn sso_proxy_jwks_url() -> String {
+    std::env::var("SSO_PROXY_JWKS_URL")
         .ok()
-        .filter(|s| !s.is_empty())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("{}/.well-known/jwks.json", sso_proxy_url()))
 }
 
-/// Build a signed JWT to use as the OAuth `state` parameter in proxy mode.
+/// Build the worker authorize URL for SSO proxy mode.
 ///
-/// The JWT encodes the inner CSRF nonce (which gets stored in oauth_sessions.state
-/// on the instance) and the instance's public origin. The Cloudflare worker at
-/// sso.grengin.com verifies this JWT, extracts the origin, and redirects the
-/// OAuth callback to the correct instance.
-pub fn build_proxy_state_jwt(inner_nonce: &str, instance_origin: &str, secret: &str) -> Option<String> {
-    let now = chrono::Utc::now().timestamp();
-    let claims = ProxyStateClaims {
-        n: inner_nonce,
-        o: instance_origin,
-        iat: now,
-        exp: now + PROXY_STATE_TTL_SECS,
-    };
-    encode(
-        &Header::new(Algorithm::HS256),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
-    .ok()
-}
-
-/// Rewrite the `state` query parameter in an authorization URL.
-///
-/// The openidconnect crate generates a random CSRF token and embeds it as
-/// `state=`. In proxy mode we replace that value with our signed JWT so the
-/// Cloudflare worker can extract the instance origin on the callback.
-pub fn replace_state_in_url(auth_url: url::Url, new_state: &str) -> url::Url {
-    let params: Vec<(String, String)> = auth_url
-        .query_pairs()
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect();
-
-    let mut out = auth_url.clone();
-    out.set_query(None);
-    for (k, v) in params {
-        if k == "state" {
-            out.query_pairs_mut().append_pair("state", new_state);
-        } else {
-            out.query_pairs_mut().append_pair(&k, &v);
-        }
-    }
-    out
+/// Query params:
+/// - redirect_uri: Grengin API callback URL (e.g. https://app.example.com/auth/google/callback)
+/// - state: CSRF nonce generated and stored by the API
+/// - nonce: OIDC nonce generated and stored by the API
+pub fn build_proxy_authorize_url(
+    provider: &str,
+    callback_redirect_uri: &str,
+    state: &str,
+    nonce: &str,
+) -> Option<String> {
+    let base = sso_proxy_url();
+    let mut url = Url::parse(&format!(
+        "{}/authorize/{}",
+        base,
+        provider.to_ascii_lowercase()
+    ))
+    .ok()?;
+    url.query_pairs_mut()
+        .append_pair("redirect_uri", callback_redirect_uri)
+        .append_pair("state", state)
+        .append_pair("nonce", nonce);
+    Some(url.to_string())
 }
