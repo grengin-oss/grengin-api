@@ -14,6 +14,7 @@ pub struct StartParams {
 pub struct AuthCallback {
     pub code: Option<String>,
     pub state: String,
+    pub assertion: Option<String>,
     pub error: Option<String>,
     pub error_description: Option<String>,
 }

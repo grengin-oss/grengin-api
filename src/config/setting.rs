@@ -54,6 +54,7 @@ pub struct GoogleSettings {
     pub redirect_url: String,
     pub is_enabled: bool,
     pub allowed_domains: Vec<String>,
+    pub use_grengin_proxy: bool,
 }
 
 #[derive(Clone)]
@@ -64,6 +65,7 @@ pub struct AzureSettings {
     pub redirect_url: String,
     pub is_enabled: bool,
     pub allowed_domains: Vec<String>,
+    pub use_grengin_proxy: bool,
 }
 
 #[derive(Clone)]
@@ -117,6 +119,42 @@ pub struct AiEngineStateCache {
     pub api_key: Option<String>,
     pub is_enabled: bool,
     pub whitelist_models: Vec<String>,
+}
+
+fn read_non_empty_env(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn env_flag_any(names: &[&str]) -> bool {
+    names.iter().any(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|raw| {
+                matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "y" | "on"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn csv_env(name: &str) -> Vec<String> {
+    std::env::var(name)
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl Settings {
@@ -343,6 +381,7 @@ impl Settings {
                 sso_provider.tenant_id,
                 true,
                 sso_provider.allowed_domains,
+                sso_provider.use_grengin_proxy,
             )
             .await?;
         }
@@ -358,6 +397,7 @@ impl Settings {
         tenant_id: Option<S>,
         is_enabled: bool,
         allowed_domains: Vec<S>,
+        use_grengin_proxy: bool,
     ) -> Result<(), ConfigError> {
         match provider.into().as_str() {
             "azure" => {
@@ -369,6 +409,7 @@ impl Settings {
                     redirect_url: redirect_url.into(),
                     is_enabled,
                     allowed_domains: allowed_domains.into_iter().map(|d| d.into()).collect(),
+                    use_grengin_proxy,
                 });
             }
             "google" => {
@@ -379,6 +420,7 @@ impl Settings {
                     redirect_url: redirect_url.into(),
                     is_enabled,
                     allowed_domains: allowed_domains.into_iter().map(|d| d.into()).collect(),
+                    use_grengin_proxy,
                 });
             }
             _ => {}
@@ -441,42 +483,120 @@ impl AuthSettings {
 
 impl GoogleSettings {
     pub fn from_env() -> Result<Self, ConfigError> {
-        let client_id = std::env::var("GOOGLE_CLIENT_ID")
-            .or_else(|_| std::env::var("GOOGLE_CLIENT"))
-            .map_err(|_| ConfigError::Missing("GOOGLE_CLIENT_ID"))?;
-        let client_secret = std::env::var("GOOGLE_CLIENT_SECRET")
-            .map_err(|_| ConfigError::Missing("GOOGLE_CLIENT_SECRET"))?;
-        let app_redirect_url =
-            std::env::var("REDIRECT_URL").map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
-        let redirect_url = format!("{}/auth/google/callback", app_redirect_url);
+        let google_client_id_local = read_non_empty_env(&["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT"]);
+        let google_client_secret_local = read_non_empty_env(&["GOOGLE_CLIENT_SECRET"]);
+        let has_local_google_credentials =
+            google_client_id_local.is_some() && google_client_secret_local.is_some();
+        let use_proxy =
+            env_flag_any(&["SSO_PROXY_AUTO_ENABLE", "SSO_PROXY_ENABLED"])
+                || !has_local_google_credentials;
+
+        let (client_id, client_secret, redirect_url, allowed_domains, use_grengin_proxy) =
+            if use_proxy {
+                let app_redirect_url = std::env::var("REDIRECT_URL")
+                    .map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
+                let client_id = read_non_empty_env(&[
+                    "GRENGIN_PROXY_GOOGLE_CLIENT_ID",
+                    "GOOGLE_CLIENT_ID",
+                    "GOOGLE_CLIENT",
+                ])
+                .unwrap_or_else(|| "managed-by-grengin-proxy".to_string());
+                let client_secret = read_non_empty_env(&[
+                    "GRENGIN_PROXY_GOOGLE_CLIENT_SECRET",
+                    "GOOGLE_CLIENT_SECRET",
+                ])
+                .unwrap_or_else(|| "managed-by-grengin-proxy".to_string());
+                (
+                    client_id,
+                    client_secret,
+                    format!("{}/auth/google/callback", app_redirect_url),
+                    csv_env("GRENGIN_PROXY_ALLOWED_DOMAINS"),
+                    true,
+                )
+            } else {
+                let client_id = google_client_id_local.ok_or(ConfigError::Missing("GOOGLE_CLIENT_ID"))?;
+                let client_secret =
+                    google_client_secret_local.ok_or(ConfigError::Missing("GOOGLE_CLIENT_SECRET"))?;
+                let app_redirect_url = std::env::var("REDIRECT_URL")
+                    .map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
+                (
+                    client_id,
+                    client_secret,
+                    format!("{}/auth/google/callback", app_redirect_url),
+                    Vec::new(),
+                    false,
+                )
+            };
+
         Ok(Self {
             client_id,
             client_secret,
             redirect_url,
             is_enabled: true,
-            allowed_domains: Vec::new(),
+            allowed_domains,
+            use_grengin_proxy,
         })
     }
 }
 
 impl AzureSettings {
     pub fn from_env() -> Result<Self, ConfigError> {
-        let client_id = std::env::var("AZURE_CLIENT_ID")
-            .map_err(|_| ConfigError::Missing("AZURE_CLIENT_ID"))?;
-        let client_secret = std::env::var("AZURE_CLIENT_SECRET")
-            .map_err(|_| ConfigError::Missing("AZURE_CLIENT_SECRET"))?;
-        let tenant_id = std::env::var("AZURE_TENANT_ID")
-            .map_err(|_| ConfigError::Missing("AZURE_TENANT_ID"))?;
-        let app_redirect_url =
-            std::env::var("REDIRECT_URL").map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
-        let redirect_url = format!("{}/auth/azure/callback", app_redirect_url);
+        let azure_client_id_local = read_non_empty_env(&["AZURE_CLIENT_ID"]);
+        let azure_client_secret_local = read_non_empty_env(&["AZURE_CLIENT_SECRET"]);
+        let has_local_azure_credentials =
+            azure_client_id_local.is_some() && azure_client_secret_local.is_some();
+        let use_proxy =
+            env_flag_any(&["SSO_PROXY_AUTO_ENABLE", "SSO_PROXY_ENABLED"])
+                || !has_local_azure_credentials;
+
+        let (client_id, client_secret, tenant_id, redirect_url, allowed_domains, use_grengin_proxy) =
+            if use_proxy {
+                let app_redirect_url = std::env::var("REDIRECT_URL")
+                    .map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
+                let client_id =
+                    read_non_empty_env(&["GRENGIN_PROXY_AZURE_CLIENT_ID"])
+                        .unwrap_or_else(|| "managed-by-grengin-proxy".to_string());
+                let client_secret = read_non_empty_env(&[
+                    "GRENGIN_PROXY_AZURE_CLIENT_SECRET",
+                ])
+                .unwrap_or_else(|| "managed-by-grengin-proxy".to_string());
+                let tenant_id =
+                    read_non_empty_env(&["GRENGIN_PROXY_AZURE_TENANT_ID", "AZURE_TENANT_ID"])
+                        .unwrap_or_else(|| "common".to_string());
+                (
+                    client_id,
+                    client_secret,
+                    tenant_id,
+                    format!("{}/auth/azure/callback", app_redirect_url),
+                    csv_env("GRENGIN_PROXY_ALLOWED_DOMAINS"),
+                    true,
+                )
+            } else {
+                let client_id = azure_client_id_local.ok_or(ConfigError::Missing("AZURE_CLIENT_ID"))?;
+                let client_secret =
+                    azure_client_secret_local.ok_or(ConfigError::Missing("AZURE_CLIENT_SECRET"))?;
+                let tenant_id = std::env::var("AZURE_TENANT_ID")
+                    .map_err(|_| ConfigError::Missing("AZURE_TENANT_ID"))?;
+                let app_redirect_url = std::env::var("REDIRECT_URL")
+                    .map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
+                (
+                    client_id,
+                    client_secret,
+                    tenant_id,
+                    format!("{}/auth/azure/callback", app_redirect_url),
+                    Vec::new(),
+                    false,
+                )
+            };
+
         Ok(Self {
             client_id,
             client_secret,
             redirect_url,
             tenant_id,
             is_enabled: true,
-            allowed_domains: Vec::new(),
+            allowed_domains,
+            use_grengin_proxy,
         })
     }
 }

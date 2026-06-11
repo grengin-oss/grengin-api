@@ -318,15 +318,11 @@ impl AppState {
     }
 
     async fn refresh_google_client(&self) -> Result<(), ConfigError> {
-        let google =
-            self.settings
-                .google
-                .read()
-                .await
-                .clone()
-                .ok_or(ConfigError::NotConfigured(
-                    "google settings not configured in App State",
-                ))?;
+        let google = self.settings.google.read().await.clone();
+        let Some(google) = google else {
+            *self.google_client.write().await = None;
+            return Ok(());
+        };
         let google_client = build_google_client(
             &self.req_client,
             google.client_id,
@@ -339,15 +335,11 @@ impl AppState {
     }
 
     async fn refresh_azure_client(&self) -> Result<(), ConfigError> {
-        let azure = self
-            .settings
-            .azure
-            .read()
-            .await
-            .clone()
-            .ok_or(ConfigError::NotConfigured(
-                "Azure settings not configured in App State",
-            ))?;
+        let azure = self.settings.azure.read().await.clone();
+        let Some(azure) = azure else {
+            *self.azure_client.write().await = None;
+            return Ok(());
+        };
         let azure_client = build_azure_client(
             &self.req_client,
             azure.client_id,

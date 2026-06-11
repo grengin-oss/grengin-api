@@ -7,8 +7,8 @@ use crate::{
         sso_provider::{is_editable, sso_providers_list},
     },
     dto::admin_sso_providers::{
-        EditableField, SsoProvider, SsoProviderEditable, SsoProviderUpdate,
-        SsoProviderValidationRequest, SsoProviderValidationResponse,
+        EditableField, GrenginProxySetupRequest, SsoProvider, SsoProviderEditable,
+        SsoProviderUpdate, SsoProviderValidationRequest, SsoProviderValidationResponse,
     },
     models::sso_providers,
     services::{
@@ -42,6 +42,7 @@ struct SsoProviderSeed {
     allowed_domains: Vec<String>,
     has_credentials: bool,
     is_enabled: bool,
+    use_grengin_proxy: bool,
 }
 
 fn read_non_empty_env(names: &[&str]) -> Option<String> {
@@ -56,10 +57,36 @@ fn read_non_empty_env(names: &[&str]) -> Option<String> {
 fn env_seed_for_template(
     template: crate::dto::admin_sso_providers::SsoProviderTemplate,
 ) -> SsoProviderSeed {
+    let proxy_auto_enabled = std::env::var("SSO_PROXY_AUTO_ENABLE")
+        .or_else(|_| std::env::var("SSO_PROXY_ENABLED"))
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "y" | "on"
+            )
+        })
+        .unwrap_or(false);
     let app_redirect_url =
         std::env::var("REDIRECT_URL").unwrap_or("http://localhost:8080".to_string());
     match template.provider.as_str() {
         "google" => {
+            if proxy_auto_enabled {
+                return SsoProviderSeed {
+                    provider: template.provider,
+                    name: template.name,
+                    tenant_id: None,
+                    client_id: "managed-by-grengin-proxy".to_string(),
+                    client_secret: "managed-by-grengin-proxy".to_string(),
+                    issuer_url: "https://accounts.google.com".to_string(),
+                    redirect_url: format!("{}/auth/google/callback", app_redirect_url),
+                    allowed_domains: Vec::new(),
+                    has_credentials: true,
+                    is_enabled: true,
+                    use_grengin_proxy: true,
+                };
+            }
+
             let client_id = read_non_empty_env(&["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT"]);
             let client_secret = read_non_empty_env(&["GOOGLE_CLIENT_SECRET"]);
             let has_credentials = client_id.is_some() && client_secret.is_some();
@@ -74,9 +101,29 @@ fn env_seed_for_template(
                 allowed_domains: Vec::new(),
                 has_credentials,
                 is_enabled: false,
+                use_grengin_proxy: false,
             }
         }
         "azure" => {
+            if proxy_auto_enabled {
+                let tenant_id = read_non_empty_env(&["GRENGIN_PROXY_AZURE_TENANT_ID"])
+                    .or_else(|| read_non_empty_env(&["AZURE_TENANT_ID"]))
+                    .unwrap_or_else(|| "common".to_string());
+                return SsoProviderSeed {
+                    provider: template.provider,
+                    name: template.name,
+                    tenant_id: Some(tenant_id.clone()),
+                    client_id: "managed-by-grengin-proxy".to_string(),
+                    client_secret: "managed-by-grengin-proxy".to_string(),
+                    issuer_url: format!("https://login.microsoftonline.com/{tenant_id}/v2.0"),
+                    redirect_url: format!("{}/auth/azure/callback", app_redirect_url),
+                    allowed_domains: Vec::new(),
+                    has_credentials: true,
+                    is_enabled: true,
+                    use_grengin_proxy: true,
+                };
+            }
+
             let client_id = read_non_empty_env(&["AZURE_CLIENT_ID"]);
             let client_secret = read_non_empty_env(&["AZURE_CLIENT_SECRET"]);
             let tenant_id =
@@ -93,6 +140,7 @@ fn env_seed_for_template(
                 allowed_domains: Vec::new(),
                 has_credentials,
                 is_enabled: false,
+                use_grengin_proxy: false,
             }
         }
         _ => SsoProviderSeed {
@@ -106,6 +154,7 @@ fn env_seed_for_template(
             allowed_domains: Vec::new(),
             has_credentials: false,
             is_enabled: false,
+            use_grengin_proxy: false,
         },
     }
 }
@@ -151,17 +200,17 @@ async fn load_seed_in_state(app_state: &SharedState, seed: &SsoProviderSeed) {
     if !seed.is_enabled {
         return;
     }
-    let allowed_domains = seed.allowed_domains.iter().map(|d| d.as_str()).collect();
     let _ = app_state
         .settings
         .load_sso_provider_in_state(
-            seed.provider.as_str(),
-            seed.client_secret.as_str(),
-            seed.client_id.as_str(),
-            seed.redirect_url.as_str(),
-            seed.tenant_id.as_deref(),
+            seed.provider.clone(),
+            seed.client_secret.clone(),
+            seed.client_id.clone(),
+            seed.redirect_url.clone(),
+            seed.tenant_id.clone(),
             seed.is_enabled,
-            allowed_domains,
+            seed.allowed_domains.clone(),
+            seed.use_grengin_proxy,
         )
         .await;
     let _ = app_state.refresh_oidc_client(&seed.provider).await;
@@ -189,7 +238,8 @@ async fn ensure_sso_providers_from_env(
                 active_model.issuer_url = Set(seed.issuer_url.clone());
                 active_model.redirect_url = Set(seed.redirect_url.clone());
                 active_model.allowed_domains = Set(seed.allowed_domains.clone());
-                active_model.is_enabled = Set(false);
+                active_model.is_enabled = Set(seed.is_enabled);
+                active_model.use_grengin_proxy = Set(seed.use_grengin_proxy);
                 active_model.updated_at = Set(Utc::now());
                 let updated_model =
                     active_model
@@ -219,6 +269,7 @@ async fn ensure_sso_providers_from_env(
                 allowed_domains: Set(seed.allowed_domains.clone()),
                 is_enabled: Set(seed.is_enabled),
                 is_default: Set(false),
+                use_grengin_proxy: Set(seed.use_grengin_proxy),
                 created_at: Set(Utc::now()),
                 updated_at: Set(Utc::now()),
             },
@@ -289,21 +340,26 @@ pub async fn get_sso_providers(
     let models = ensure_sso_providers_from_env(&app_state, models).await?;
     let response = models
         .into_iter()
-        .map(|model| SsoProvider {
-            id: model.id,
-            redirect_url: model.redirect_url,
-            provider: model.provider,
-            name: model.name,
-            client_id: model.client_id,
-            client_secret: app_state
-                .get_decrypted_api_key_preview(&Some(model.client_secret))
-                .unwrap_or(EMPTY_VALUE.to_string()),
-            issuer_url: model.issuer_url,
-            tenant_id: model.tenant_id,
-            allowed_domains: model.allowed_domains,
-            is_enabled: model.is_enabled,
-            created_at: model.created_at,
-            updated_at: model.updated_at,
+        .map(|model| {
+            let grengin_proxy_available = grengin_proxy_available_for_provider(&model.provider);
+            SsoProvider {
+                id: model.id,
+                redirect_url: model.redirect_url,
+                provider: model.provider,
+                name: model.name,
+                client_id: model.client_id,
+                client_secret: app_state
+                    .get_decrypted_api_key_preview(&Some(model.client_secret))
+                    .unwrap_or(EMPTY_VALUE.to_string()),
+                issuer_url: model.issuer_url,
+                tenant_id: model.tenant_id,
+                allowed_domains: model.allowed_domains,
+                is_enabled: model.is_enabled,
+                use_grengin_proxy: model.use_grengin_proxy,
+                grengin_proxy_available,
+                created_at: model.created_at,
+                updated_at: model.updated_at,
+            }
         })
         .collect();
     Ok((StatusCode::OK, Json(response)))
@@ -627,10 +683,12 @@ pub async fn update_sso_provider_by_id(
                 updated_model.tenant_id.as_ref(),
                 updated_model.is_enabled,
                 allowed_domains,
+                updated_model.use_grengin_proxy,
             )
             .await;
         let _ = app_state.refresh_oidc_client(&updated_model.provider).await;
     }
+    let grengin_proxy_available = grengin_proxy_available_for_provider(&updated_model.provider);
     let response = SsoProvider {
         id: updated_model.id,
         provider: updated_model.provider,
@@ -644,8 +702,114 @@ pub async fn update_sso_provider_by_id(
         tenant_id: updated_model.tenant_id,
         allowed_domains: updated_model.allowed_domains,
         is_enabled: updated_model.is_enabled,
+        use_grengin_proxy: updated_model.use_grengin_proxy,
+        grengin_proxy_available,
         created_at: updated_model.created_at,
         updated_at: updated_model.updated_at,
     };
     Ok((StatusCode::OK, Json(response)))
+}
+
+// ─── Grengin SSO Proxy ────────────────────────────────────────────────────────
+
+/// Returns true when provider can use Grengin's managed SSO proxy flow.
+fn grengin_proxy_available_for_provider(provider: &str) -> bool {
+    matches!(provider, "google" | "azure")
+}
+
+/// POST /admin/sso-providers/:provider_id/quick-setup
+///
+/// Activate the Grengin SSO proxy for a provider. The instance does not need
+/// local OAuth client credentials. OAuth exchange happens on the Grengin worker
+/// and the callback is relayed back to this instance with a signed assertion.
+///
+/// The admin only needs to supply:
+///   - `allowed_domains` — email domains permitted to sign in (e.g. ["acme.com"])
+///   - `tenant_id`       — Azure only: the directory tenant (defaults to "common")
+pub async fn quick_setup_grengin_proxy(
+    claims: Claims,
+    Path(provider_id): Path<Uuid>,
+    State(app_state): State<SharedState>,
+    Json(body): Json<GrenginProxySetupRequest>,
+) -> Result<StatusCode, AuthError> {
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_SSO_PROVIDERS_MANAGE,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
+
+    let model = sso_providers::Entity::find_by_id(provider_id)
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db error fetching provider: {e:?}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+
+    let proxy_client_id = "managed-by-grengin-proxy".to_string();
+    let proxy_client_secret_plain = "managed-by-grengin-proxy".to_string();
+
+    let proxy_secret_encrypted = encrypt_key(
+        &app_state.settings.auth.app_key,
+        proxy_client_secret_plain.as_bytes(),
+    )
+    .map_err(|e| {
+        eprintln!("encryption error: {e:?}");
+        AuthError::ServiceTemporarilyUnavailable
+    })?;
+
+    let app_redirect_url =
+        std::env::var("REDIRECT_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
+    let proxy_redirect_url =
+        format!("{}/auth/{}/callback", app_redirect_url.trim_end_matches('/'), model.provider);
+
+    let tenant_id = match model.provider.as_str() {
+        "azure" => Some(
+            body.tenant_id
+                .clone()
+                .unwrap_or_else(|| "common".to_string()),
+        ),
+        _ => None,
+    };
+
+    let now = Utc::now();
+    let mut active = model.into_active_model();
+    active.client_id = Set(proxy_client_id);
+    active.client_secret = Set(proxy_secret_encrypted);
+    active.redirect_url = Set(proxy_redirect_url.clone());
+    active.allowed_domains = Set(body.allowed_domains.clone());
+    active.is_enabled = Set(true);
+    active.use_grengin_proxy = Set(true);
+    active.updated_at = Set(now);
+    if let Some(ref tid) = tenant_id {
+        active.tenant_id = Set(Some(tid.clone()));
+    }
+
+    let saved = active.update(&app_state.database).await.map_err(|e| {
+        eprintln!("db update error: {e:?}");
+        AuthError::DbTimeout
+    })?;
+
+    let _ = app_state
+        .settings
+        .load_sso_provider_in_state(
+            saved.provider.clone(),
+            proxy_client_secret_plain,
+            saved.client_id.clone(),
+            proxy_redirect_url,
+            tenant_id,
+            true,
+            body.allowed_domains,
+            true,
+        )
+        .await;
+    let _ = app_state.refresh_oidc_client(&saved.provider).await;
+
+    Ok(StatusCode::OK)
 }
