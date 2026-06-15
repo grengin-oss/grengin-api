@@ -20,6 +20,7 @@ pub struct Model {
     pub is_enabled: bool,
     pub is_default: bool,
     pub use_grengin_proxy: bool,
+    pub jit_provisioning: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

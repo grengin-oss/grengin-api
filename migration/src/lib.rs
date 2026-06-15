@@ -49,6 +49,7 @@ mod m20260416_000001_create_audit_logs;
 mod m20260417_000001_add_audit_logs_view_permission;
 mod m20260604_000001_add_system_maintain_permission;
 mod m20260608_000001_add_use_grengin_proxy_to_sso_providers;
+mod m20260615_000001_add_allow_self_registration_to_sso_providers;
 
 pub struct Migrator;
 
@@ -105,6 +106,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260417_000001_add_audit_logs_view_permission::Migration),
             Box::new(m20260604_000001_add_system_maintain_permission::Migration),
             Box::new(m20260608_000001_add_use_grengin_proxy_to_sso_providers::Migration),
+            Box::new(m20260615_000001_add_allow_self_registration_to_sso_providers::Migration),
         ]
     }
 }

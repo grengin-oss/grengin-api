@@ -43,6 +43,7 @@ struct SsoProviderSeed {
     has_credentials: bool,
     is_enabled: bool,
     use_grengin_proxy: bool,
+    jit_provisioning: bool,
 }
 
 fn read_non_empty_env(names: &[&str]) -> Option<String> {
@@ -84,6 +85,7 @@ fn env_seed_for_template(
                     has_credentials: true,
                     is_enabled: true,
                     use_grengin_proxy: true,
+                    jit_provisioning: true,
                 };
             }
 
@@ -102,6 +104,7 @@ fn env_seed_for_template(
                 has_credentials,
                 is_enabled: false,
                 use_grengin_proxy: false,
+                jit_provisioning: true,
             }
         }
         "azure" => {
@@ -121,6 +124,7 @@ fn env_seed_for_template(
                     has_credentials: true,
                     is_enabled: true,
                     use_grengin_proxy: true,
+                    jit_provisioning: true,
                 };
             }
 
@@ -141,6 +145,7 @@ fn env_seed_for_template(
                 has_credentials,
                 is_enabled: false,
                 use_grengin_proxy: false,
+                jit_provisioning: true,
             }
         }
         _ => SsoProviderSeed {
@@ -155,6 +160,7 @@ fn env_seed_for_template(
             has_credentials: false,
             is_enabled: false,
             use_grengin_proxy: false,
+            jit_provisioning: true,
         },
     }
 }
@@ -211,6 +217,7 @@ async fn load_seed_in_state(app_state: &SharedState, seed: &SsoProviderSeed) {
             seed.is_enabled,
             seed.allowed_domains.clone(),
             seed.use_grengin_proxy,
+            seed.jit_provisioning,
         )
         .await;
     let _ = app_state.refresh_oidc_client(&seed.provider).await;
@@ -270,6 +277,7 @@ async fn ensure_sso_providers_from_env(
                 is_enabled: Set(seed.is_enabled),
                 is_default: Set(false),
                 use_grengin_proxy: Set(seed.use_grengin_proxy),
+                jit_provisioning: Set(seed.jit_provisioning),
                 created_at: Set(Utc::now()),
                 updated_at: Set(Utc::now()),
             },
@@ -356,6 +364,7 @@ pub async fn get_sso_providers(
                 allowed_domains: model.allowed_domains,
                 is_enabled: model.is_enabled,
                 use_grengin_proxy: model.use_grengin_proxy,
+                jit_provisioning: model.jit_provisioning,
                 grengin_proxy_available,
                 created_at: model.created_at,
                 updated_at: model.updated_at,
@@ -435,6 +444,7 @@ pub async fn get_sso_provider_by_id(
                 },
                 allowed_domains: model.allowed_domains,
                 is_enabled: model.is_enabled,
+                jit_provisioning: model.jit_provisioning,
                 created_at: model.created_at,
                 updated_at: model.updated_at,
             }
@@ -656,6 +666,9 @@ pub async fn update_sso_provider_by_id(
             AuthError::DbTimeout
         })?);
     }
+    if let Some(jit_provisioning) = req.jit_provisioning {
+        active_model.jit_provisioning = Set(jit_provisioning);
+    }
     active_model.updated_at = Set(Utc::now());
     let updated_model = active_model
         .update(&app_state.database)
@@ -684,6 +697,7 @@ pub async fn update_sso_provider_by_id(
                 updated_model.is_enabled,
                 allowed_domains,
                 updated_model.use_grengin_proxy,
+                updated_model.jit_provisioning,
             )
             .await;
         let _ = app_state.refresh_oidc_client(&updated_model.provider).await;
@@ -703,6 +717,7 @@ pub async fn update_sso_provider_by_id(
         allowed_domains: updated_model.allowed_domains,
         is_enabled: updated_model.is_enabled,
         use_grengin_proxy: updated_model.use_grengin_proxy,
+        jit_provisioning: updated_model.jit_provisioning,
         grengin_proxy_available,
         created_at: updated_model.created_at,
         updated_at: updated_model.updated_at,
@@ -807,6 +822,7 @@ pub async fn quick_setup_grengin_proxy(
             true,
             body.allowed_domains,
             true,
+            saved.jit_provisioning,
         )
         .await;
     let _ = app_state.refresh_oidc_client(&saved.provider).await;

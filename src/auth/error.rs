@@ -32,6 +32,7 @@ pub enum AuthErrorCode {
     InvalidUserStatus = 6104,
     AccountDeactivated = 6105,
     EmailAlreadyExist = 6106,
+    AccountPendingApproval = 6107,
 
     // 6200-6299: provider / oauth / redirect
     InvalidProvider = 6200,
@@ -50,6 +51,7 @@ pub enum AuthErrorCode {
     // 6400-6499: SSO config / admin controls
     SsoProviderNotConfigured = 6400,
     SsoProviderDisabledByAdmin = 6401,
+    SsoJitProvisioningDisabled = 6402,
 }
 
 impl Serialize for AuthErrorCode {
@@ -122,9 +124,11 @@ pub enum AuthError {
 
     InvalidUserStatus,
     AccountDeactivated,
+    AccountPendingApproval,
 
     SsoProviderNotConfigured { provider: Option<String> },
     SsoProviderDisabledByAdmin { provider: Option<String> },
+    SsoJitProvisioningDisabled { provider: Option<String> },
 
     EmailDomainNotAllowed { domain: Option<String> },
     McpServerNameConflict { name: Option<String> },
@@ -384,6 +388,28 @@ impl AuthError {
                     StatusCode::UNAUTHORIZED,
                     ErrorDetail {
                         code: AuthErrorCode::AccountDeactivated,
+                        description: Self::render(description_tpl, &params),
+                        solution: Self::render(solution_tpl, &params),
+                        description_key,
+                        solution_key,
+                        params,
+                        external_code: None,
+                    },
+                )
+            }
+
+            AuthError::AccountPendingApproval => {
+                let params = Self::base_params();
+                let description_key = "error.auth.account_pending_approval.description".to_string();
+                let solution_key = "error.auth.account_pending_approval.solution".to_string();
+
+                let description_tpl = "Your account is pending administrator approval.";
+                let solution_tpl = "Contact your admin to approve your account before signing in.";
+
+                (
+                    StatusCode::FORBIDDEN,
+                    ErrorDetail {
+                        code: AuthErrorCode::AccountPendingApproval,
                         description: Self::render(description_tpl, &params),
                         solution: Self::render(solution_tpl, &params),
                         description_key,
@@ -728,6 +754,37 @@ impl AuthError {
                     StatusCode::FORBIDDEN,
                     ErrorDetail {
                         code: AuthErrorCode::SsoProviderDisabledByAdmin,
+                        description: Self::render(description_tpl, &params),
+                        solution: Self::render(solution_tpl, &params),
+                        description_key,
+                        solution_key,
+                        params,
+                        external_code: None,
+                    },
+                )
+            }
+
+            AuthError::SsoJitProvisioningDisabled { provider } => {
+                let mut params = Self::base_params();
+                params.insert(
+                    "provider".to_string(),
+                    provider.clone().unwrap_or_else(|| "unknown".to_string()),
+                );
+
+                let description_key =
+                    "error.auth.sso.jit_provisioning_disabled.description".to_string();
+                let solution_key =
+                    "error.auth.sso.jit_provisioning_disabled.solution".to_string();
+
+                let description_tpl =
+                    "Self-registration via `{provider}` SSO is disabled by an administrator.";
+                let solution_tpl =
+                    "Contact your administrator to create an account for you.";
+
+                (
+                    StatusCode::FORBIDDEN,
+                    ErrorDetail {
+                        code: AuthErrorCode::SsoJitProvisioningDisabled,
                         description: Self::render(description_tpl, &params),
                         solution: Self::render(solution_tpl, &params),
                         description_key,
