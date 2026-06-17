@@ -68,6 +68,15 @@ fn env_seed_for_template(
             )
         })
         .unwrap_or(false);
+    let proxy_jit = std::env::var("GRENGIN_PROXY_JIT_PROVISIONING")
+        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off"))
+        .unwrap_or(false);
+    let proxy_allowed_domains: Vec<String> = std::env::var("GRENGIN_PROXY_ALLOWED_DOMAINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     let app_redirect_url =
         std::env::var("REDIRECT_URL").unwrap_or("http://localhost:8080".to_string());
     match template.provider.as_str() {
@@ -81,11 +90,11 @@ fn env_seed_for_template(
                     client_secret: "managed-by-grengin-proxy".to_string(),
                     issuer_url: "https://accounts.google.com".to_string(),
                     redirect_url: format!("{}/auth/google/callback", app_redirect_url),
-                    allowed_domains: Vec::new(),
+                    allowed_domains: proxy_allowed_domains.clone(),
                     has_credentials: true,
                     is_enabled: true,
                     use_grengin_proxy: true,
-                    jit_provisioning: true,
+                    jit_provisioning: proxy_jit,
                 };
             }
 
@@ -120,11 +129,11 @@ fn env_seed_for_template(
                     client_secret: "managed-by-grengin-proxy".to_string(),
                     issuer_url: format!("https://login.microsoftonline.com/{tenant_id}/v2.0"),
                     redirect_url: format!("{}/auth/azure/callback", app_redirect_url),
-                    allowed_domains: Vec::new(),
+                    allowed_domains: proxy_allowed_domains.clone(),
                     has_credentials: true,
                     is_enabled: true,
                     use_grengin_proxy: true,
-                    jit_provisioning: true,
+                    jit_provisioning: proxy_jit,
                 };
             }
 
@@ -236,17 +245,27 @@ async fn ensure_sso_providers_from_env(
             .iter()
             .position(|model| model.provider == seed.provider)
         {
-            if seed.has_credentials && model_needs_env_backfill(app_state, &models[index]) {
+            let needs_backfill =
+                seed.has_credentials && model_needs_env_backfill(app_state, &models[index]);
+            // For proxy providers, always sync policy fields from env so that
+            // allowed_domains and jit_provisioning are never frozen at initial seed values.
+            let policy_changed = seed.use_grengin_proxy
+                && (models[index].allowed_domains != seed.allowed_domains
+                    || models[index].jit_provisioning != seed.jit_provisioning);
+            if needs_backfill || policy_changed {
                 let mut active_model = models[index].clone().into_active_model();
-                active_model.name = Set(seed.name.clone());
-                active_model.tenant_id = Set(seed.tenant_id.clone());
-                active_model.client_id = Set(seed.client_id.clone());
-                active_model.client_secret = Set(encrypted_seed_secret(app_state, &seed)?);
-                active_model.issuer_url = Set(seed.issuer_url.clone());
-                active_model.redirect_url = Set(seed.redirect_url.clone());
+                if needs_backfill {
+                    active_model.name = Set(seed.name.clone());
+                    active_model.tenant_id = Set(seed.tenant_id.clone());
+                    active_model.client_id = Set(seed.client_id.clone());
+                    active_model.client_secret = Set(encrypted_seed_secret(app_state, &seed)?);
+                    active_model.issuer_url = Set(seed.issuer_url.clone());
+                    active_model.redirect_url = Set(seed.redirect_url.clone());
+                    active_model.is_enabled = Set(seed.is_enabled);
+                    active_model.use_grengin_proxy = Set(seed.use_grengin_proxy);
+                }
                 active_model.allowed_domains = Set(seed.allowed_domains.clone());
-                active_model.is_enabled = Set(seed.is_enabled);
-                active_model.use_grengin_proxy = Set(seed.use_grengin_proxy);
+                active_model.jit_provisioning = Set(seed.jit_provisioning);
                 active_model.updated_at = Set(Utc::now());
                 let updated_model =
                     active_model
