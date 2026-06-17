@@ -184,6 +184,8 @@ async fn verify_proxy_assertion(
     let mut validation = Validation::new(Algorithm::EdDSA);
     validation.set_required_spec_claims(&["exp", "aud", "iss", "sub"]);
     validation.set_audience(&[expected_audience]);
+    let expected_issuer = crate::auth::sso_proxy::sso_proxy_url();
+    validation.set_issuer(&[&expected_issuer]);
 
     let token = decode::<ProxyAssertionClaims>(assertion, &key, &validation).map_err(|e| {
         eprintln!("proxy assertion validation error: {e:?}");
@@ -245,11 +247,26 @@ pub async fn oidc_login_start(
             provider: Some(provider.clone()),
         })?;
 
-    let redirect_uri_value = query.redirect_uri.clone().unwrap_or(
-        default_redirect_uri.ok_or(AuthError::SsoProviderNotConfigured {
+    // Accept a caller-supplied redirect_uri only when it exactly matches the
+    // configured value or is a recognised mobile scheme (msauth://).  Arbitrary
+    // redirect_uris are an open-redirect / CSRF vector: an attacker could steer
+    // the OAuth dance to their own endpoint, capture the assertion JWT, and then
+    // replay it against the real instance.
+    let redirect_uri_value = match &query.redirect_uri {
+        Some(provided) => {
+            let is_mobile = is_azure_mobile_redirect_uri(&provider, provided);
+            let matches_configured = default_redirect_uri.as_deref() == Some(provided.as_str());
+            if !is_mobile && !matches_configured {
+                return Err(AuthError::InvalidRedirectUri {
+                    redirect_uri: Some(provided.clone()),
+                });
+            }
+            provided.clone()
+        }
+        None => default_redirect_uri.ok_or(AuthError::SsoProviderNotConfigured {
             provider: Some(provider.clone()),
         })?,
-    );
+    };
     let redirect_uri = RedirectUrl::new(redirect_uri_value.clone()).map_err(|_| {
         AuthError::InvalidRedirectUri {
             redirect_uri: query.redirect_uri.clone(),
@@ -385,6 +402,10 @@ async fn oidc_oauth_callback(
             AuthError::ServiceTemporarilyUnavailable
         })?
         .ok_or(AuthError::InvalidToken)?;
+    // Reject sessions older than 15 minutes — prevents indefinitely-valid state tokens.
+    if sess.created_at < Utc::now() - chrono::Duration::minutes(15) {
+        return Err(AuthError::InvalidToken);
+    }
     let redirect_uri_value = sess
         .redirect_uri
         .clone()
@@ -554,6 +575,9 @@ async fn oidc_oauth_callback(
             UserStatus::Deactivated | UserStatus::Suspended => {
                 return Err(AuthError::AccountDeactivated);
             }
+            UserStatus::Pending => {
+                return Err(AuthError::AccountPendingApproval);
+            }
             _ => (),
         }
         let mut active_user: users::ActiveModel = u.clone().into();
@@ -582,9 +606,22 @@ async fn oidc_oauth_callback(
                     }
                     _ => (),
                 }
+                // Only link the provider ID when the slot is currently empty.
+                // Never overwrite an existing ID — that would let an attacker
+                // with a stolen assertion silently hijack an existing account.
+                let can_link_google = google_id.is_some() && u.google_id.is_none();
+                let can_link_azure = azure_id.is_some() && u.azure_id.is_none();
+                if !can_link_google && !can_link_azure {
+                    // Slot already occupied by a different provider sub — reject.
+                    return Err(AuthError::InvalidToken);
+                }
                 let mut active_user: users::ActiveModel = u.clone().into();
-                active_user.google_id = Set(google_id.clone());
-                active_user.azure_id = Set(azure_id.clone());
+                if can_link_google {
+                    active_user.google_id = Set(google_id.clone());
+                }
+                if can_link_azure {
+                    active_user.azure_id = Set(azure_id.clone());
+                }
                 active_user.updated_at = Set(Utc::now());
                 active_user.last_login_at = Set(Utc::now());
                 active_user.update(&app_state.database).await.map_err(|e| {
@@ -603,6 +640,17 @@ async fn oidc_oauth_callback(
                 AuthError::ServiceTemporarilyUnavailable
             })?
             == 0;
+        let jit_provisioning = app_state.sso_jit_provisioning_enabled(&provider).await;
+        if !is_first_user && !jit_provisioning {
+            return Err(AuthError::SsoJitProvisioningDisabled {
+                provider: Some(provider.clone()),
+            });
+        }
+        let initial_status = if is_first_user {
+            UserStatus::Active
+        } else {
+            UserStatus::Pending
+        };
         let new_user = users::ActiveModel {
             id: Set(Uuid::new_v4()),
             email: Set(email
@@ -619,7 +667,7 @@ async fn oidc_oauth_callback(
             department_id: Set(None),
             is_independent: Set(false),
             effective_permissions: Set(None),
-            status: Set(UserStatus::Active),
+            status: Set(initial_status),
             mfa_enabled: Set(false),
             mfa_secret: Set(None),
             picture: Set(picture.clone()),
@@ -665,7 +713,11 @@ async fn oidc_oauth_callback(
         let _ = authz
             .recompute_effective_permissions(inserted_user.id)
             .await;
+        let pending_approval = !is_first_user && jit_provisioning;
         user = Some(inserted_user);
+        if pending_approval {
+            return Err(AuthError::AccountPendingApproval);
+        }
     };
     let user = user.ok_or(AuthError::EmailDoesNotExist)?;
 

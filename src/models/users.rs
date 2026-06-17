@@ -17,6 +17,7 @@ pub enum UserStatus {
     Deactivated,
     Deleted,
     Suspended,
+    Pending,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]

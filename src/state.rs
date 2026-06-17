@@ -170,6 +170,28 @@ impl AppState {
         (false, None)
     }
 
+    pub async fn sso_jit_provisioning_enabled(&self, provider: &AuthProvider) -> bool {
+        match provider.to_lowercase().as_str() {
+            "azure" => self
+                .settings
+                .azure
+                .read()
+                .await
+                .as_ref()
+                .map(|s| s.jit_provisioning)
+                .unwrap_or(true),
+            "google" => self
+                .settings
+                .google
+                .read()
+                .await
+                .as_ref()
+                .map(|s| s.jit_provisioning)
+                .unwrap_or(true),
+            _ => true,
+        }
+    }
+
     pub async fn check_ai_engine_is_enabled(&self, ai_engine_key: &str) -> Option<bool> {
         match ai_engine_key.to_lowercase().as_str() {
             "openai" => {

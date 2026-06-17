@@ -27,6 +27,7 @@ pub struct SsoProvider {
     pub allowed_domains: Vec<String>,
     pub is_enabled: bool,
     pub use_grengin_proxy: bool,
+    pub jit_provisioning: bool,
     pub grengin_proxy_available: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -58,6 +59,7 @@ pub struct SsoProviderEditable {
     pub tenant_id: Option<EditableField>,
     pub allowed_domains: Vec<String>,
     pub is_enabled: bool,
+    pub jit_provisioning: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -75,6 +77,7 @@ pub struct SsoProviderUpdate {
     pub validation_token: Option<String>,
     pub allowed_domains: Option<Vec<String>>,
     pub is_enabled: Option<bool>,
+    pub jit_provisioning: Option<bool>,
 }
 
 #[derive(Deserialize, ToSchema)]

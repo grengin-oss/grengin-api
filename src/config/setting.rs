@@ -55,6 +55,7 @@ pub struct GoogleSettings {
     pub is_enabled: bool,
     pub allowed_domains: Vec<String>,
     pub use_grengin_proxy: bool,
+    pub jit_provisioning: bool,
 }
 
 #[derive(Clone)]
@@ -66,6 +67,7 @@ pub struct AzureSettings {
     pub is_enabled: bool,
     pub allowed_domains: Vec<String>,
     pub use_grengin_proxy: bool,
+    pub jit_provisioning: bool,
 }
 
 #[derive(Clone)]
@@ -382,6 +384,7 @@ impl Settings {
                 true,
                 sso_provider.allowed_domains,
                 sso_provider.use_grengin_proxy,
+                sso_provider.jit_provisioning,
             )
             .await?;
         }
@@ -398,6 +401,7 @@ impl Settings {
         is_enabled: bool,
         allowed_domains: Vec<S>,
         use_grengin_proxy: bool,
+        jit_provisioning: bool,
     ) -> Result<(), ConfigError> {
         match provider.into().as_str() {
             "azure" => {
@@ -410,6 +414,7 @@ impl Settings {
                     is_enabled,
                     allowed_domains: allowed_domains.into_iter().map(|d| d.into()).collect(),
                     use_grengin_proxy,
+                    jit_provisioning,
                 });
             }
             "google" => {
@@ -421,6 +426,7 @@ impl Settings {
                     is_enabled,
                     allowed_domains: allowed_domains.into_iter().map(|d| d.into()).collect(),
                     use_grengin_proxy,
+                    jit_provisioning,
                 });
             }
             _ => {}
@@ -535,6 +541,7 @@ impl GoogleSettings {
             is_enabled: true,
             allowed_domains,
             use_grengin_proxy,
+            jit_provisioning: true,
         })
     }
 }
@@ -597,6 +604,7 @@ impl AzureSettings {
             is_enabled: true,
             allowed_domains,
             use_grengin_proxy,
+            jit_provisioning: true,
         })
     }
 }
