@@ -67,11 +67,16 @@ use crate::dto::system_metrics::{
     ContainerMetrics, DatabaseMetrics, DiskMetrics, MachineMetrics, SystemMetricsResponse,
 };
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
+use crate::dto::projects::{
+    AddMemberRequest, AddSourceRequest, InstructionsUpdateRequest, LinkProjectRequest,
+    ProjectCreateRequest, ProjectDetailResponse, ProjectListQuery, ProjectListResponse,
+    ProjectResponse, ProjectSourceResponse, ProjectUpdateRequest, ShareProjectResponse,
+};
 use crate::handlers::{
     admin_ai, admin_analytics, admin_audit, admin_department, admin_department_budgets,
     admin_embedding, admin_mcp, admin_prompts, admin_reconfigure, admin_roles, admin_sso_provider,
     admin_system, admin_users, auth, branding, chat, chat_stream, file, mcp, me, me_prompts,
-    message, models, notifications, oidc, open_error,
+    message, models, notifications, oidc, open_error, projects,
 };
 use crate::models::departments::{ActionOnExceed, BudgetPeriod};
 use crate::models::mcp_access_policies::{McpAccessType, McpPermission};
@@ -207,6 +212,20 @@ use utoipa::OpenApi;
         me::get_my_administered_departments_list,
         me::get_my_administered_departments_tree,
         admin_department_budgets::get_department_budget,
+        projects::list_projects,
+        projects::create_project,
+        projects::get_project,
+        projects::get_project_detail,
+        projects::update_project,
+        projects::delete_project,
+        projects::add_project_member,
+        projects::remove_project_member,
+        projects::update_project_instructions,
+        projects::add_project_source,
+        projects::delete_project_source,
+        projects::share_project,
+        projects::link_project_to_conversation,
+        projects::unlink_project_from_conversation,
     ),
     components(
         schemas(
@@ -362,7 +381,19 @@ use utoipa::OpenApi;
             MachineMetrics,
             DiskMetrics,
             ContainerMetrics,
-            DatabaseMetrics
+            DatabaseMetrics,
+            ProjectCreateRequest,
+            ProjectUpdateRequest,
+            ProjectListQuery,
+            ProjectResponse,
+            ProjectListResponse,
+            ProjectDetailResponse,
+            ProjectSourceResponse,
+            AddMemberRequest,
+            InstructionsUpdateRequest,
+            AddSourceRequest,
+            ShareProjectResponse,
+            LinkProjectRequest,
         )
     ),
     tags(

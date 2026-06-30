@@ -25,3 +25,4 @@ pub mod models;
 pub mod notifications;
 pub mod oidc;
 pub mod open_error;
+pub mod projects;
