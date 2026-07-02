@@ -33,13 +33,13 @@ use crate::{
         tooling::mcp_server_short_id,
     },
     models::{
-        conversations,
+        conversation_projects, conversations,
         departments::ActionOnExceed,
         mcp_access_policies::McpPermission,
         mcp_executions, mcp_oauth_states, mcp_servers,
         mcp_servers::McpTransportType,
         messages::{self, ChatRole},
-        users,
+        projects, users,
     },
     services::{
         budget_allocation::{get_department_budget_status, refresh_department_budget_available},
@@ -78,7 +78,7 @@ use reqwest_eventsource::Event as ReqwestEvent;
 use rust_decimal::prelude::FromPrimitive;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
-    QueryOrder, prelude::Decimal,
+    QueryOrder, QuerySelect, prelude::Decimal,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -969,6 +969,52 @@ pub async fn handle_chat_stream(
                     files: Vec::new(),
                 },
             );
+        }
+    }
+    // Inject project instructions as the top-priority system prompt block.
+    // Two-step query to avoid camelCase column aliasing issues in Sea-ORM JOINs.
+    let project_ids: Vec<Uuid> = conversation_projects::Entity::find()
+        .select_only()
+        .column(conversation_projects::Column::ProjectId)
+        .filter(conversation_projects::Column::ConversationId.eq(conversation_id))
+        .into_tuple::<Uuid>()
+        .all(&app_state.database)
+        .await
+        .unwrap_or_default();
+    if !project_ids.is_empty() {
+        let linked_projects = projects::Entity::find()
+            .filter(projects::Column::Id.is_in(project_ids))
+            .all(&app_state.database)
+            .await
+            .unwrap_or_default();
+        let mut project_blocks: Vec<String> = linked_projects
+            .into_iter()
+            .filter_map(|p| {
+                let instr = p.instructions?;
+                let trimmed = instr.trim().to_string();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                Some(format!("## Project: {}\n{}", p.name, trimmed))
+            })
+            .collect();
+        if !project_blocks.is_empty() {
+            project_blocks.sort();
+            let project_text = format!(
+                "You are working within the context of the following project(s). Follow their instructions carefully.\n\n{}",
+                project_blocks.join("\n\n---\n\n")
+            );
+            // Prepend to the existing system prompt so providers that accept only one
+            // system block (e.g. Anthropic) don't silently discard it.
+            if let Some(existing) = previous_prompts.iter_mut().find(|p| p.role == ChatRole::System) {
+                existing.text = format!("{}\n\n---\n\n{}", project_text, existing.text);
+            } else {
+                previous_prompts.insert(0, Prompt {
+                    role: ChatRole::System,
+                    text: project_text,
+                    files: Vec::new(),
+                });
+            }
         }
     }
     let provider_is_openai = provider.to_lowercase() == "openai";
