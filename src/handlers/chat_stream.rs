@@ -3,9 +3,9 @@ use crate::{
     config::setting::{AnthropicSettings, GeminiSettings, MistralSettings, OpenaiSettings},
     dto::{
         chat_stream::{
-            BudgetWarningPayload, ChatInput, ChatStream, ChatStreamEvent, ChatStreamEvents,
-            ChatStreamPayload, ChatStreamToolCall, ChatStreamToolResult, ChatStreamWebSearchAction,
-            ChatToolKind,
+            BudgetWarningPayload, ChatInput, ChatStream, ChatStreamEvent,
+            ChatStreamEvents, ChatStreamPayload, ChatStreamToolCall, ChatStreamToolResult,
+            ChatStreamWebSearchAction, ChatToolKind,
         },
         files::File,
         llm::anthropic::{
@@ -42,6 +42,7 @@ use crate::{
         projects, users,
     },
     services::{
+        artifacts::{extract_artifacts, filter_artifact_chunk},
         budget_allocation::{get_department_budget_status, refresh_department_budget_available},
         department_policies::check_model_allowed,
         mcp_client::build_authorization_url,
@@ -118,6 +119,7 @@ struct McpOauthErrorPayload {
     server_id: Uuid,
     server_name: String,
 }
+
 
 #[derive(Deserialize)]
 struct LlmErrorObject {
@@ -387,6 +389,18 @@ async fn build_mcp_oauth_prompt(
         "data": { "tool_result": { "tool_name": "web_search_call", "tool_id": "ws_123", "kind": "web_search", "web_search": { "query": "latest rust release", "results": [{ "title": "...", "url": "https://example.com" }] } } }
       })
     )),
+    ("artifact" = (
+      description = "event:artifact — emitted when the response contains a standalone document (HTML page, Markdown file, etc.). Sent before event:done. Only fired when the conversation is linked to a project.",
+      value = json!({
+        "event": "artifact",
+        "data": {
+          "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+          "title": "Hello World HTML Page",
+          "contentType": "text/html",
+          "content": "<!DOCTYPE html><html><body><h1>Hello World</h1></body></html>"
+        }
+      })
+    )),
     ("done" = (
       description = "event:done",
       value = json!({
@@ -468,6 +482,18 @@ pub async fn handle_chat_stream_path_doc() {}
       value = json!({
         "event": "tool_result",
         "data": { "tool_result": { "tool_name": "web_search_call", "tool_id": "ws_123", "kind": "web_search", "web_search": { "query": "latest rust release", "results": [{ "title": "...", "url": "https://example.com" }] } } }
+      })
+    )),
+    ("artifact" = (
+      description = "event:artifact — emitted when the response contains a standalone document (HTML page, Markdown file, etc.). Sent before event:done. Only fired when the conversation is linked to a project.",
+      value = json!({
+        "event": "artifact",
+        "data": {
+          "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+          "title": "Hello World HTML Page",
+          "contentType": "text/html",
+          "content": "<!DOCTYPE html><html><body><h1>Hello World</h1></body></html>"
+        }
       })
     )),
     ("done" = (
@@ -740,7 +766,6 @@ pub async fn handle_chat_stream(
                 eprintln!("Db update one error {:?}", e);
                 AppError::DbTimeout
             })?;
-        println!("Chat updated timestamp updated");
         if app_state.settings.rag.enabled {
             let recent = load_recent_prompts(
                 &app_state.database,
@@ -1016,6 +1041,23 @@ pub async fn handle_chat_stream(
                 });
             }
         }
+    }
+    const ARTIFACT_PROMPT: &str = "When your response includes a standalone document \
+(complete HTML page, full Markdown file, or long code file) that is best viewed separately, \
+wrap it in an artifact block:\n\n\
+<artifact title=\"Descriptive title\" contentType=\"text/html\">\n\
+...complete content here...\n\
+</artifact>\n\n\
+Valid contentType values: text/html, text/markdown\n\
+Do not repeat the artifact content in your conversational reply.";
+    if let Some(existing) = previous_prompts.iter_mut().find(|p| p.role == ChatRole::System) {
+        existing.text.push_str(&format!("\n\n---\n\n{}", ARTIFACT_PROMPT));
+    } else {
+        previous_prompts.insert(0, Prompt {
+            role: ChatRole::System,
+            text: ARTIFACT_PROMPT.to_string(),
+            files: Vec::new(),
+        });
     }
     let provider_is_openai = provider.to_lowercase() == "openai";
     let provider_is_anthropic = provider.to_lowercase() == "anthropic";
@@ -1360,14 +1402,8 @@ pub async fn handle_chat_stream(
                 .await
         }
     }
-    .map_err(|e| {
-        eprintln!(
-            "event source loading error {} for llm provider {}",
-            e, &provider
-        );
-        AppError::LlmProviderNotConfigured {
-            provider: provider.clone(),
-        }
+    .map_err(|_| AppError::LlmProviderNotConfigured {
+        provider: provider.clone(),
     })?;
     // Create stream parser based on provider
     let stream_parser: Box<dyn StreamParser> = match &provider_config {
@@ -1386,6 +1422,9 @@ pub async fn handle_chat_stream(
     let sse_stream = async_stream::try_stream! {
        let mut message_content = String::new();
        let mut stream_message_content = String::new();
+       // Artifact delta filter state — strips <artifact>…</artifact> from the live delta stream.
+       let mut artifact_filter_in_progress = false;
+       let mut artifact_filter_buf = String::new();
        let mut request_tokens = 0;
        let mut response_tokens = 0;
        let mut total_tokens = 0;
@@ -1527,9 +1566,7 @@ pub async fn handle_chat_stream(
                ev = event_source.next() => ev,
            } {
            match event {
-               Ok(ReqwestEvent::Open) => {
-                   println!("SSE connection open for provider: {}", &provider);
-               }
+               Ok(ReqwestEvent::Open) => {}
                Ok(ReqwestEvent::Message(msg)) => {
                    if provider.to_lowercase() == "openai" && std::env::var("OPENAI_STREAM_DEBUG").as_deref() == Ok("1") {
                        println!("openai raw event: {}", msg.data);
@@ -1593,21 +1630,29 @@ pub async fn handle_chat_stream(
                              .update(&app_state.database)
                              .await
                              .expect("failed to update in new llm response in table messages");
-                           let chat_stream = ChatStream {
-                               id:None,
-                               title:None,
-                               message_id:None,
-                               is_new:None,
-                               content: Some(text.clone()),
-                               input_tokens:None,
-                               output_tokens:None,
-                               latency_ms:None,
-                               cost:None,
-                               event:None,
-                               tool_call:None,
-                               tool_result:None,
-                           };
-                           yield Event::default().event(ChatStreamEvents::Delta.to_string()).data(chat_stream.to_string());
+                           let visible = filter_artifact_chunk(
+                               text,
+                               &mut artifact_filter_in_progress,
+                               &mut artifact_filter_buf,
+                               false,
+                           );
+                           if !visible.is_empty() {
+                               let chat_stream = ChatStream {
+                                   id:None,
+                                   title:None,
+                                   message_id:None,
+                                   is_new:None,
+                                   content: Some(visible),
+                                   input_tokens:None,
+                                   output_tokens:None,
+                                   latency_ms:None,
+                                   cost:None,
+                                   event:None,
+                                   tool_call:None,
+                                   tool_result:None,
+                               };
+                               yield Event::default().event(ChatStreamEvents::Delta.to_string()).data(chat_stream.to_string());
+                           }
                        }
                        StreamParseResult::TokenUsage{ request_id:req_id,input_tokens, output_tokens, total_tokens:t_tokens} => {
                           let accumulate_tokens = mcp_tooling_enabled && tool_round > 0;
@@ -2776,6 +2821,26 @@ pub async fn handle_chat_stream(
                        let _ = embed_messages(&state, targets).await;
                        let _ = update_conversation_summary(&state, conversation_id, &provider_clone, &model_clone).await;
                    });
+               }
+               // Flush any remaining look-ahead buffer as visible text.
+               let flushed = filter_artifact_chunk(
+                   "",
+                   &mut artifact_filter_in_progress,
+                   &mut artifact_filter_buf,
+                   true,
+               );
+               if !flushed.is_empty() {
+                   let chat_stream = ChatStream {
+                       id: None, title: None, message_id: None, is_new: None,
+                       content: Some(flushed), input_tokens: None, output_tokens: None,
+                       latency_ms: None, cost: None, event: None, tool_call: None, tool_result: None,
+                   };
+                   yield Event::default().event(ChatStreamEvents::Delta.to_string()).data(chat_stream.to_string());
+               }
+               let artifacts = extract_artifacts(&message_content);
+               for artifact in artifacts {
+                   let data = serde_json::to_string(&artifact).unwrap_or_else(|_| "{}".to_string());
+                   yield Event::default().event(ChatStreamEvents::Artifact.to_string()).data(data);
                }
                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
                break;

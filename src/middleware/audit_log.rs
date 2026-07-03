@@ -885,6 +885,12 @@ fn resolve_audit_action(method: &Method, route: &str) -> Option<AuditRouteAction
             resource_param: Some("id"),
             snapshot_target: SnapshotTarget::None,
         }),
+        ("POST", "/projects/{id}/artifacts") => Some(AuditRouteAction {
+            action: "project_artifact_added",
+            resource_type: Some("project_source"),
+            resource_param: Some("id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
         ("POST", "/projects/{id}/share") => Some(AuditRouteAction {
             action: "project_shared",
             resource_type: Some("project"),

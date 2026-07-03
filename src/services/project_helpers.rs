@@ -176,6 +176,7 @@ pub async fn fetch_project_sources(
             file_name: s.file_name,
             file_type: s.file_type,
             file_size: s.file_size,
+            origin: s.origin,
             uploaded_at: s.uploaded_at,
         })
         .collect())

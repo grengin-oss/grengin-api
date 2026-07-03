@@ -1,4 +1,5 @@
 pub mod analytics;
+pub mod artifacts;
 pub mod analytics_cache;
 pub mod audit_logs;
 pub mod auth_audit;

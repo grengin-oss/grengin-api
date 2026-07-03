@@ -65,7 +65,16 @@ pub struct ProjectSourceResponse {
     pub file_name: String,
     pub file_type: String,
     pub file_size: i64,
+    pub origin: String,
     pub uploaded_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactCreateRequest {
+    pub title: String,
+    pub content: String,
+    pub content_type: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -130,4 +139,38 @@ pub struct ShareProjectResponse {
 #[serde(rename_all = "camelCase")]
 pub struct LinkProjectRequest {
     pub project_id: Uuid,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMemberResponse {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub name: Option<String>,
+    pub email: String,
+    pub picture: Option<String>,
+    pub role: String,
+    pub joined_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UserSearchItem {
+    pub id: Uuid,
+    pub name: Option<String>,
+    pub email: String,
+    pub picture: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UserSearchResponse {
+    pub users: Vec<UserSearchItem>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberSearchQuery {
+    pub q: Option<String>,
+    pub limit: Option<u64>,
 }

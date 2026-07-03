@@ -23,10 +23,20 @@ pub enum ChatStreamEvents {
     ToolResult,
     Cancelled,
     Done,
+    Artifact,
     #[serde(rename = "budget_warning")]
     DepartmentBudgetWarning,
     #[serde(rename = "llm_token_exhausted")]
     LlmTokenExhausted,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactStreamEvent {
+    pub id: String,
+    pub title: String,
+    pub content_type: String,
+    pub content: String,
 }
 
 impl ChatStreamEvents {

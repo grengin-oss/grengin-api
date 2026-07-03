@@ -16,11 +16,13 @@ use uuid::Uuid;
 use crate::{
     auth::{claims::Claims, error::{AuthError, Error}},
     dto::projects::{
-        AddMemberRequest, AddSourceRequest, InstructionsUpdateRequest, LinkProjectRequest,
-        ProjectCreateRequest, ProjectDetailResponse, ProjectListQuery, ProjectListResponse,
-        ProjectResponse, ProjectSourceResponse, ProjectUpdateRequest, ShareProjectResponse,
+        AddMemberRequest, AddSourceRequest, ArtifactCreateRequest, InstructionsUpdateRequest,
+        LinkProjectRequest, MemberSearchQuery, ProjectCreateRequest, ProjectDetailResponse,
+        ProjectListQuery, ProjectListResponse, ProjectMemberResponse, ProjectResponse,
+        ProjectSourceResponse, ProjectUpdateRequest, ShareProjectResponse, UserSearchItem,
+        UserSearchResponse,
     },
-    models::{conversation_projects, conversations, project_members, project_sources, projects},
+    models::{conversation_projects, conversations, project_members, project_sources, projects, users},
     services::project_helpers::*,
     state::SharedState,
 };
@@ -513,6 +515,7 @@ pub async fn add_project_source(
         file_name: inserted.file_name,
         file_type: inserted.file_type,
         file_size: inserted.file_size,
+        origin: inserted.origin,
         uploaded_at: inserted.uploaded_at,
     })))
 }
@@ -691,4 +694,265 @@ pub async fn unlink_project_from_conversation(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    get,
+    path = "/projects/{id}/members",
+    tag = "projects",
+    params(("id" = Uuid, Path, description = "Project id")),
+    responses(
+        (status = 200, body = Vec<ProjectMemberResponse>),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token"),
+        (status = 403, content_type = "application/json", body = Error, description = "Access denied"),
+        (status = 404, content_type = "application/json", body = Error, description = "Project not found"),
+    )
+)]
+pub async fn list_project_members(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Path(id): Path<Uuid>,
+) -> Result<(StatusCode, Json<Vec<ProjectMemberResponse>>), AuthError> {
+    let project = get_project_or_404(id, &app_state.database).await?;
+    ensure_project_read_access(claims.user_id, &project, &app_state.database).await?;
+
+    let members = project_members::Entity::find()
+        .filter(project_members::Column::ProjectId.eq(id))
+        .order_by_asc(project_members::Column::CreatedAt)
+        .all(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db member list error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    if members.is_empty() {
+        return Ok((StatusCode::OK, Json(Vec::new())));
+    }
+
+    let user_ids: Vec<Uuid> = members.iter().map(|m| m.user_id).collect();
+    let user_rows = users::Entity::find()
+        .filter(users::Column::Id.is_in(user_ids))
+        .all(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db user fetch error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    let user_map: HashMap<Uuid, users::Model> = user_rows.into_iter().map(|u| (u.id, u)).collect();
+
+    let result = members
+        .into_iter()
+        .filter_map(|m| {
+            let user = user_map.get(&m.user_id)?;
+            Some(ProjectMemberResponse {
+                id: m.id,
+                user_id: m.user_id,
+                name: user.name.clone(),
+                email: user.email.clone(),
+                picture: user.picture.clone(),
+                role: m.role,
+                joined_at: m.created_at,
+            })
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(result)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/projects/{id}/members/search",
+    tag = "projects",
+    params(
+        ("id" = Uuid, Path, description = "Project id"),
+        ("q" = Option<String>, Query, description = "Search query (name or email)"),
+        ("limit" = Option<u64>, Query, description = "Max results (default: 20, max: 50)"),
+    ),
+    responses(
+        (status = 200, body = UserSearchResponse),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token"),
+        (status = 403, content_type = "application/json", body = Error, description = "Only project owner can search users"),
+        (status = 404, content_type = "application/json", body = Error, description = "Project not found"),
+    )
+)]
+pub async fn search_users_for_project(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<MemberSearchQuery>,
+) -> Result<(StatusCode, Json<UserSearchResponse>), AuthError> {
+    let project = get_project_or_404(id, &app_state.database).await?;
+    ensure_project_owner(claims.user_id, &project)?;
+
+    let q = query.q.as_deref().unwrap_or("").trim().to_string();
+    if q.is_empty() {
+        return Ok((StatusCode::OK, Json(UserSearchResponse { users: Vec::new() })));
+    }
+
+    let limit = query.limit.unwrap_or(20).min(50);
+
+    let member_user_ids: Vec<Uuid> = project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::UserId)
+        .filter(project_members::Column::ProjectId.eq(id))
+        .into_tuple::<Uuid>()
+        .all(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db member ids error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    let mut excluded = member_user_ids;
+    excluded.push(project.owner_id);
+    excluded.dedup();
+
+    let pattern = format!("%{q}%");
+    let mut user_query = users::Entity::find()
+        .filter(
+            Condition::any()
+                .add(users::Column::Name.into_expr().ilike(&pattern))
+                .add(users::Column::Email.into_expr().ilike(&pattern)),
+        )
+        .limit(limit);
+
+    if !excluded.is_empty() {
+        user_query = user_query.filter(users::Column::Id.is_not_in(excluded));
+    }
+
+    let found = user_query.all(&app_state.database).await.map_err(|e| {
+        eprintln!("db user search error: {e}");
+        AuthError::DbTimeout
+    })?;
+
+    let result = found
+        .into_iter()
+        .map(|u| UserSearchItem { id: u.id, name: u.name, email: u.email, picture: u.picture })
+        .collect();
+
+    Ok((StatusCode::OK, Json(UserSearchResponse { users: result })))
+}
+
+#[utoipa::path(
+    get,
+    path = "/projects/{id}/artifacts",
+    tag = "projects",
+    params(("id" = Uuid, Path, description = "Project id")),
+    responses(
+        (status = 200, body = Vec<ProjectSourceResponse>),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token"),
+        (status = 403, content_type = "application/json", body = Error, description = "Access denied"),
+        (status = 404, content_type = "application/json", body = Error, description = "Project not found"),
+    )
+)]
+pub async fn list_project_artifacts(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Path(id): Path<Uuid>,
+) -> Result<(StatusCode, Json<Vec<ProjectSourceResponse>>), AuthError> {
+    let project = get_project_or_404(id, &app_state.database).await?;
+    ensure_project_read_access(claims.user_id, &project, &app_state.database).await?;
+
+    let artifacts = project_sources::Entity::find()
+        .filter(project_sources::Column::ProjectId.eq(id))
+        .filter(project_sources::Column::Origin.eq("artifact"))
+        .order_by_desc(project_sources::Column::UploadedAt)
+        .all(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db artifacts fetch error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    let result = artifacts
+        .into_iter()
+        .map(|s| ProjectSourceResponse {
+            id: s.id,
+            project_id: s.project_id,
+            file_name: s.file_name,
+            file_type: s.file_type,
+            file_size: s.file_size,
+            origin: s.origin,
+            uploaded_at: s.uploaded_at,
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(result)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/projects/{id}/artifacts",
+    tag = "projects",
+    params(("id" = Uuid, Path, description = "Project id")),
+    request_body = ArtifactCreateRequest,
+    responses(
+        (status = 201, body = ProjectSourceResponse),
+        (status = 400, content_type = "application/json", body = Error, description = "Invalid or missing fields"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token"),
+        (status = 403, content_type = "application/json", body = Error, description = "Access denied"),
+        (status = 404, content_type = "application/json", body = Error, description = "Project not found"),
+    )
+)]
+pub async fn add_project_artifact(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ArtifactCreateRequest>,
+) -> Result<(StatusCode, Json<ProjectSourceResponse>), AuthError> {
+    let project = get_project_or_404(id, &app_state.database).await?;
+    ensure_project_read_access(claims.user_id, &project, &app_state.database).await?;
+
+    let title = req.title.trim().to_string();
+    if title.is_empty() {
+        return Err(AuthError::InvalidRequest { field: "title" });
+    }
+    if req.content.is_empty() {
+        return Err(AuthError::InvalidRequest { field: "content" });
+    }
+
+    let content_type = req.content_type.trim().to_ascii_lowercase();
+    let ext = match content_type.as_str() {
+        "text/html" => "html",
+        "text/markdown" => "md",
+        _ => return Err(AuthError::InvalidRequest { field: "contentType" }),
+    };
+
+    let sanitized: String = title
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("_");
+    let file_name = format!("{sanitized}.{ext}");
+    let file_size = req.content.len() as i64;
+
+    let inserted = project_sources::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        project_id: Set(id),
+        file_name: Set(file_name),
+        file_type: Set(content_type),
+        file_size: Set(file_size),
+        origin: Set("artifact".to_string()),
+        uploaded_at: Set(Utc::now()),
+    }
+    .insert(&app_state.database)
+    .await
+    .map_err(|e| {
+        eprintln!("db artifact insert error: {e}");
+        AuthError::DbTimeout
+    })?;
+
+    Ok((StatusCode::CREATED, Json(ProjectSourceResponse {
+        id: inserted.id,
+        project_id: inserted.project_id,
+        file_name: inserted.file_name,
+        file_type: inserted.file_type,
+        file_size: inserted.file_size,
+        origin: inserted.origin,
+        uploaded_at: inserted.uploaded_at,
+    })))
 }
