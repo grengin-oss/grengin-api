@@ -172,15 +172,8 @@ impl StreamParser for MistralStreamParser {
         };
 
         if let Ok(chunk) = serde_json::from_value::<MistralChatCompletionChunk>(value.clone()) {
-            if let Some(usage) = chunk.usage {
-                return StreamParseResult::TokenUsage {
-                    request_id: Some(chunk.id),
-                    input_tokens: Some(usage.prompt_tokens),
-                    output_tokens: Some(usage.completion_tokens),
-                    total_tokens: Some(usage.total_tokens),
-                };
-            }
-
+            // Process choices (text / tool calls) BEFORE checking usage so that a chunk
+            // carrying both finish_reason:"tool_calls" and usage doesn't lose the tool call.
             if let Some(choice) = chunk.choices.first() {
                 let finish_reason = choice.finish_reason.as_deref();
                 if let Some(text) = choice.delta.content.clone() {
@@ -203,6 +196,15 @@ impl StreamParser for MistralStreamParser {
                         return result;
                     }
                 }
+            }
+
+            if let Some(usage) = chunk.usage {
+                return StreamParseResult::TokenUsage {
+                    request_id: Some(chunk.id),
+                    input_tokens: Some(usage.prompt_tokens),
+                    output_tokens: Some(usage.completion_tokens),
+                    total_tokens: Some(usage.total_tokens),
+                };
             }
         }
 

@@ -3,8 +3,8 @@ use crate::{
     config::setting::{AnthropicSettings, GeminiSettings, MistralSettings, OpenaiSettings},
     dto::{
         chat_stream::{
-            BudgetWarningPayload, ChatInput, ChatStream, ChatStreamEvent,
-            ChatStreamEvents, ChatStreamPayload, ChatStreamToolCall, ChatStreamToolResult,
+            ArtifactStreamEvent, BudgetWarningPayload, ChatInput, ChatStream, ChatStreamEvent,
+            ChatStreamEvents, ChatStreamPayload, ChatStreamToolCall, ChatStreamToolInput, ChatStreamToolResult,
             ChatStreamWebSearchAction, ChatToolKind,
         },
         files::File,
@@ -42,7 +42,6 @@ use crate::{
         projects, users,
     },
     services::{
-        artifacts::{extract_artifacts, filter_artifact_chunk},
         budget_allocation::{get_department_budget_status, refresh_department_budget_available},
         department_policies::check_model_allowed,
         mcp_client::build_authorization_url,
@@ -205,7 +204,11 @@ fn resolve_mcp_tool_descriptor<'a>(
     } else {
         None
     };
-    let truncated_prefix = if is_mcp_name {
+    // truncated_prefix handles names like "mcp__server__tool__1a" (partial hash).
+    // Only valid when there are 3+ double-underscore separators; otherwise rsplit_once
+    // would strip the tool name itself and yield a server-only prefix that matches
+    // every tool on the same server.
+    let truncated_prefix = if is_mcp_name && tool_name.matches("__").count() >= 3 {
         tool_name
             .rsplit_once("__")
             .map(|(prefix, _)| format!("{prefix}__"))
@@ -389,18 +392,6 @@ async fn build_mcp_oauth_prompt(
         "data": { "tool_result": { "tool_name": "web_search_call", "tool_id": "ws_123", "kind": "web_search", "web_search": { "query": "latest rust release", "results": [{ "title": "...", "url": "https://example.com" }] } } }
       })
     )),
-    ("artifact" = (
-      description = "event:artifact — emitted when the response contains a standalone document (HTML page, Markdown file, etc.). Sent before event:done. Only fired when the conversation is linked to a project.",
-      value = json!({
-        "event": "artifact",
-        "data": {
-          "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-          "title": "Hello World HTML Page",
-          "contentType": "text/html",
-          "content": "<!DOCTYPE html><html><body><h1>Hello World</h1></body></html>"
-        }
-      })
-    )),
     ("done" = (
       description = "event:done",
       value = json!({
@@ -482,18 +473,6 @@ pub async fn handle_chat_stream_path_doc() {}
       value = json!({
         "event": "tool_result",
         "data": { "tool_result": { "tool_name": "web_search_call", "tool_id": "ws_123", "kind": "web_search", "web_search": { "query": "latest rust release", "results": [{ "title": "...", "url": "https://example.com" }] } } }
-      })
-    )),
-    ("artifact" = (
-      description = "event:artifact — emitted when the response contains a standalone document (HTML page, Markdown file, etc.). Sent before event:done. Only fired when the conversation is linked to a project.",
-      value = json!({
-        "event": "artifact",
-        "data": {
-          "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-          "title": "Hello World HTML Page",
-          "contentType": "text/html",
-          "content": "<!DOCTYPE html><html><body><h1>Hello World</h1></body></html>"
-        }
       })
     )),
     ("done" = (
@@ -1042,23 +1021,6 @@ pub async fn handle_chat_stream(
             }
         }
     }
-    const ARTIFACT_PROMPT: &str = "When your response includes a standalone document \
-(complete HTML page, full Markdown file, or long code file) that is best viewed separately, \
-wrap it in an artifact block:\n\n\
-<artifact title=\"Descriptive title\" contentType=\"text/html\">\n\
-...complete content here...\n\
-</artifact>\n\n\
-Valid contentType values: text/html, text/markdown\n\
-Do not repeat the artifact content in your conversational reply.";
-    if let Some(existing) = previous_prompts.iter_mut().find(|p| p.role == ChatRole::System) {
-        existing.text.push_str(&format!("\n\n---\n\n{}", ARTIFACT_PROMPT));
-    } else {
-        previous_prompts.insert(0, Prompt {
-            role: ChatRole::System,
-            text: ARTIFACT_PROMPT.to_string(),
-            files: Vec::new(),
-        });
-    }
     let provider_is_openai = provider.to_lowercase() == "openai";
     let provider_is_anthropic = provider.to_lowercase() == "anthropic";
     let provider_is_mistral = provider.to_lowercase() == "mistral";
@@ -1113,16 +1075,35 @@ Do not repeat the artifact content in your conversational reply.";
             );
         }
     }
+    const ARTIFACT_TOOL_NAME: &str = "create_artifact";
+    const ARTIFACT_TOOL_DESC: &str = "Use this tool to output a standalone document — \
+a complete HTML page, a full Markdown file, or a long code file — \
+that is best viewed separately from your conversational reply. \
+Do not repeat the artifact content in your reply.";
+    let artifact_tool_schema = json!({
+        "type": "object",
+        "properties": {
+            "title":       { "type": "string", "description": "Short descriptive title for the artifact" },
+            "contentType": { "type": "string", "enum": ["text/html", "text/markdown"], "description": "MIME type of the content" },
+            "content":     { "type": "string", "description": "Full content of the artifact" }
+        },
+        "required": ["title", "contentType", "content"]
+    });
+
     let mut openai_tools = Vec::new();
     if web_search {
         openai_tools.push(OpenaiTool::web_search());
     }
     openai_tools.extend(mcp_openai_tools);
-    let openai_tools = if openai_tools.is_empty() {
-        None
-    } else {
-        Some(openai_tools)
-    };
+    if req.artifacts {
+        openai_tools.push(OpenaiTool::Function {
+            name: ARTIFACT_TOOL_NAME.to_string(),
+            description: Some(ARTIFACT_TOOL_DESC.to_string()),
+            parameters: artifact_tool_schema.clone(),
+            strict: None,
+        });
+    }
+    let openai_tools = if openai_tools.is_empty() { None } else { Some(openai_tools) };
     let mut anthropic_tools = Vec::new();
     if web_search {
         anthropic_tools.push(AnthropicToolUnion::WebSearchTool(
@@ -1142,11 +1123,14 @@ Do not repeat the artifact content in your conversational reply.";
             }));
         }
     }
-    let anthropic_tools = if anthropic_tools.is_empty() {
-        None
-    } else {
-        Some(anthropic_tools)
-    };
+    if req.artifacts {
+        anthropic_tools.push(AnthropicToolUnion::ClientTool(AnthropicTool {
+            name: ARTIFACT_TOOL_NAME.to_string(),
+            description: ARTIFACT_TOOL_DESC.to_string(),
+            input_schema: artifact_tool_schema.clone(),
+        }));
+    }
+    let anthropic_tools = if anthropic_tools.is_empty() { None } else { Some(anthropic_tools) };
     let mut mistral_tools = Vec::new();
     if !mistral_use_conversations && supports_mcp_tools {
         for descriptor in mcp_tool_lookup.values() {
@@ -1163,11 +1147,17 @@ Do not repeat the artifact content in your conversational reply.";
             });
         }
     }
-    let mistral_tools = if mistral_tools.is_empty() {
-        None
-    } else {
-        Some(mistral_tools)
+    let mistral_artifact_fn = MistralTool::Function {
+        function: MistralToolDefinition {
+            name: ARTIFACT_TOOL_NAME.to_string(),
+            description: Some(ARTIFACT_TOOL_DESC.to_string()),
+            parameters: artifact_tool_schema.clone(),
+        },
     };
+    if req.artifacts {
+        mistral_tools.push(mistral_artifact_fn.clone());
+    }
+    let mistral_tools = if mistral_tools.is_empty() { None } else { Some(mistral_tools) };
     let mistral_conversation_tools = if mistral_use_conversations {
         let mut tools = Vec::new();
         if web_search {
@@ -1188,7 +1178,10 @@ Do not repeat the artifact content in your conversational reply.";
                 });
             }
         }
-        if tools.is_empty() { None } else { Some(tools) }
+        if req.artifacts {
+            tools.push(mistral_artifact_fn);
+        }
+        Some(tools)
     } else {
         None
     };
@@ -1207,32 +1200,29 @@ Do not repeat the artifact content in your conversational reply.";
         if web_search {
             tools.push(json!({ "google_search": {} }));
         }
+        let mut function_declarations: Vec<Value> = Vec::new();
         if supports_mcp_tools && !mcp_tool_lookup.is_empty() {
-            let function_declarations = mcp_tool_lookup
-                .values()
-                .map(|descriptor| {
-                    let description = descriptor
-                        .description
-                        .clone()
-                        .unwrap_or_else(|| descriptor.original_name.clone());
-                    json!({
-                        "name": descriptor.openai_name.clone(),
-                        "description": description,
-                        "parameters": normalize_gemini_parameters(&descriptor.input_schema),
-                    })
-                })
-                .collect::<Vec<Value>>();
-            if !function_declarations.is_empty() {
-                tools.push(json!({
-                    "function_declarations": function_declarations
+            for descriptor in mcp_tool_lookup.values() {
+                let description = descriptor
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| descriptor.original_name.clone());
+                function_declarations.push(json!({
+                    "name": descriptor.openai_name.clone(),
+                    "description": description,
+                    "parameters": normalize_gemini_parameters(&descriptor.input_schema),
                 }));
             }
         }
-        if tools.is_empty() {
-            None
-        } else {
-            Some(Value::Array(tools))
+        if req.artifacts {
+            function_declarations.push(json!({
+                "name": ARTIFACT_TOOL_NAME,
+                "description": ARTIFACT_TOOL_DESC,
+                "parameters": normalize_gemini_parameters(&artifact_tool_schema),
+            }));
         }
+        tools.push(json!({ "function_declarations": function_declarations }));
+        Some(Value::Array(tools))
     } else {
         None
     };
@@ -1253,12 +1243,10 @@ Do not repeat the artifact content in your conversational reply.";
                     "allowed_function_names": [tool_name],
                 }),
             );
-        } else if !mcp_tool_lookup.is_empty() {
+        } else {
             config.insert(
                 "function_calling_config".to_string(),
-                json!({
-                    "mode": "AUTO",
-                }),
+                json!({ "mode": "AUTO" }),
             );
         }
         if config.is_empty() {
@@ -1270,7 +1258,23 @@ Do not repeat the artifact content in your conversational reply.";
         None
     };
     let (gemini_system_instruction, gemini_contents_seed) = if provider_is_gemini {
-        prompts_to_gemini_payload(&previous_prompts)
+        let (sys, contents) = prompts_to_gemini_payload(&previous_prompts);
+        let artifact_hint = "When the user asks you to produce a standalone HTML page, \
+Markdown document, or a complete self-contained code file, always call the \
+`create_artifact` tool instead of writing the content inline in your reply.";
+        let sys = Some(match sys {
+            Some(mut existing) => {
+                let current = existing["parts"][0]["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                existing["parts"][0]["text"] =
+                    json!(format!("{}\n\n{}", current, artifact_hint));
+                existing
+            }
+            None => json!({ "parts": [{ "text": artifact_hint }] }),
+        });
+        (sys, contents)
     } else {
         (None, Vec::new())
     };
@@ -1422,9 +1426,6 @@ Do not repeat the artifact content in your conversational reply.";
     let sse_stream = async_stream::try_stream! {
        let mut message_content = String::new();
        let mut stream_message_content = String::new();
-       // Artifact delta filter state — strips <artifact>…</artifact> from the live delta stream.
-       let mut artifact_filter_in_progress = false;
-       let mut artifact_filter_buf = String::new();
        let mut request_tokens = 0;
        let mut response_tokens = 0;
        let mut total_tokens = 0;
@@ -1449,6 +1450,10 @@ Do not repeat the artifact content in your conversational reply.";
        let mut tool_round: usize = 0;
        let max_tool_rounds: usize = 3;
        let mut pending_mcp_tool_calls: Vec<ToolCall> = Vec::new();
+       // tool_id → tool_name for every tool_call SSE emitted to the client (non-artifact).
+       // Used to flush unresolved calls as failed results when the stream ends early.
+       let mut emitted_tc: HashMap<String, String> = HashMap::new();
+       let mut completed_tr: std::collections::HashSet<String> = std::collections::HashSet::new();
        let mut anthropic_messages: Option<Vec<AnthropicMessage>> = None;
        let mut anthropic_system_prompt: Option<String> = None;
        let mut mistral_messages: Option<Vec<MistralMessage>> = None;
@@ -1630,19 +1635,13 @@ Do not repeat the artifact content in your conversational reply.";
                              .update(&app_state.database)
                              .await
                              .expect("failed to update in new llm response in table messages");
-                           let visible = filter_artifact_chunk(
-                               text,
-                               &mut artifact_filter_in_progress,
-                               &mut artifact_filter_buf,
-                               false,
-                           );
-                           if !visible.is_empty() {
+                           if !text.is_empty() {
                                let chat_stream = ChatStream {
                                    id:None,
                                    title:None,
                                    message_id:None,
                                    is_new:None,
-                                   content: Some(visible),
+                                   content: Some(text.to_string()),
                                    input_tokens:None,
                                    output_tokens:None,
                                    latency_ms:None,
@@ -1779,6 +1778,42 @@ Do not repeat the artifact content in your conversational reply.";
                                    parsed_input = Some(value);
                                }
                            }
+                           // Emit artifact once complete JSON is accumulated (Anthropic streams
+                           // args via ToolInput; Mistral/Gemini emit complete JSON in ToolCall).
+                           if resolved_name == ARTIFACT_TOOL_NAME {
+                               if let (Some(tool_id), Some(args)) =
+                                   (tool_input.tool_id.as_ref(), parsed_input.as_ref())
+                               {
+                                   let content = args["content"].as_str().unwrap_or("");
+                                   if !content.is_empty() && seen_tool_call_ids.insert(tool_id.clone()) {
+                                       let tc = ChatStream {
+                                           id: None, title: None, message_id: None, is_new: None,
+                                           content: None, input_tokens: None, output_tokens: None,
+                                           latency_ms: None, cost: None, event: None,
+                                           tool_call: Some(ChatStreamToolCall {
+                                               tool_name: ARTIFACT_TOOL_NAME.to_string(),
+                                               tool_id: Some(tool_id.clone()),
+                                               input_text: None,
+                                               input: Some(ChatStreamToolInput::Json { value: args.clone() }),
+                                               kind: Some(ChatToolKind::Other),
+                                               web_search: None,
+                                           }),
+                                           tool_result: None,
+                                       };
+                                       yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(tc.to_string());
+                                       let artifact = ArtifactStreamEvent {
+                                           id: uuid::Uuid::new_v4().to_string(),
+                                           title: args["title"].as_str().unwrap_or("Untitled").to_string(),
+                                           content_type: args["contentType"].as_str().unwrap_or("text/html").to_string(),
+                                           content: content.to_string(),
+                                       };
+                                       if let Ok(data) = serde_json::to_string(&artifact) {
+                                           yield Event::default().event(ChatStreamEvents::Artifact.to_string()).data(data);
+                                       }
+                                   }
+                               }
+                               continue;
+                           }
                            if is_web_search {
                                let _ = update_web_search_action_state(
                                    &mut web_search_state,
@@ -1822,6 +1857,18 @@ Do not repeat the artifact content in your conversational reply.";
                            };
                            yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(chat_stream.to_string());
 
+                           // Track every MCP tool_call SSE for pending flush — even partial
+                           // streaming events where JSON is not yet complete.
+                           if mcp_tooling_enabled
+                               && !is_web_search
+                               && resolve_mcp_tool_descriptor(&mcp_tool_lookup, &resolved_name).is_some()
+                           {
+                               if let Some(tool_id) = tool_input.tool_id.as_ref() {
+                                   emitted_tc.entry(tool_id.clone())
+                                       .or_insert_with(|| resolved_name.clone());
+                               }
+                           }
+
                            if mcp_tooling_enabled
                                && resolve_mcp_tool_descriptor(&mcp_tool_lookup, &resolved_name).is_some()
                            {
@@ -1838,6 +1885,7 @@ Do not repeat the artifact content in your conversational reply.";
                                            web_search: tool_input.web_search.clone(),
                                        };
                                        pending_mcp_tool_calls.push(call);
+                                       emitted_tc.insert(tool_id.clone(), resolved_name.clone());
 
                                        let resolved_call = ChatStreamToolCall {
                                            tool_name: resolved_name.clone(),
@@ -1912,6 +1960,51 @@ Do not repeat the artifact content in your conversational reply.";
                            yield Event::default().event(ChatStreamEvents::Event.to_string()).data(chat_stream.to_string());
                        }
                        StreamParseResult::ToolCall(call) => {
+                           // Intercept create_artifact BEFORE seen_tool_call_ids insertion.
+                           // Anthropic fires ToolCall at ContentBlockStart with empty input {};
+                           // actual args accumulate via ToolInput into tool_inputs. Read from
+                           // there first, fall back to call.input (Mistral/Gemini have it complete).
+                           if call.tool_name == ARTIFACT_TOOL_NAME {
+                               let args = call.tool_id.as_ref()
+                                   .and_then(|id| tool_inputs.get(id))
+                                   .cloned()
+                                   .unwrap_or_else(|| tool_input_to_value(call.input.as_ref()));
+                               let content = args["content"].as_str().unwrap_or("").to_string();
+                               if !content.is_empty() {
+                                   let can_emit = call.tool_id.as_ref()
+                                       .map(|id| seen_tool_call_ids.insert(id.clone()))
+                                       .unwrap_or(true);
+                                   if can_emit {
+                                       let tc = ChatStream {
+                                           id: None, title: None, message_id: None, is_new: None,
+                                           content: None, input_tokens: None, output_tokens: None,
+                                           latency_ms: None, cost: None, event: None,
+                                           tool_call: Some(ChatStreamToolCall {
+                                               tool_name: ARTIFACT_TOOL_NAME.to_string(),
+                                               tool_id: call.tool_id.clone(),
+                                               input_text: None,
+                                               input: Some(ChatStreamToolInput::Json { value: args.clone() }),
+                                               kind: Some(ChatToolKind::Other),
+                                               web_search: None,
+                                           }),
+                                           tool_result: None,
+                                       };
+                                       yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(tc.to_string());
+                                       let artifact = ArtifactStreamEvent {
+                                           id: uuid::Uuid::new_v4().to_string(),
+                                           title: args["title"].as_str().unwrap_or("Untitled").to_string(),
+                                           content_type: args["contentType"].as_str().unwrap_or("text/html").to_string(),
+                                           content,
+                                       };
+                                       if let Ok(data) = serde_json::to_string(&artifact) {
+                                           yield Event::default().event(ChatStreamEvents::Artifact.to_string()).data(data);
+                                       }
+                                   }
+                               }
+                               // Empty content = Anthropic's initial empty ToolCall.
+                               // Skip without inserting seen_tool_call_ids so ToolInput can emit.
+                               continue;
+                           }
                            if let Some(id) = call.tool_id.as_ref() {
                                if !seen_tool_call_ids.insert(id.clone()) {
                                    continue;
@@ -1930,6 +2023,9 @@ Do not repeat the artifact content in your conversational reply.";
                                && resolve_mcp_tool_descriptor(&mcp_tool_lookup, &call.tool_name).is_some()
                            {
                                pending_mcp_tool_calls.push(call.clone());
+                               if let Some(id) = call.tool_id.as_ref() {
+                                   emitted_tc.insert(id.clone(), call.tool_name.clone());
+                               }
                            }
                            if is_web_search {
                                let _ = update_web_search_action_state(
@@ -2030,6 +2126,7 @@ Do not repeat the artifact content in your conversational reply.";
                                results.clone(),
                            );
                            if let Some((resolved_id, entry)) = entry {
+                               completed_tr.insert(resolved_id.clone());
                                let tool_result = ChatStreamToolResult {
                                    tool_name: Some("web_search_call".to_string()),
                                    tool_id: Some(resolved_id),
@@ -2064,6 +2161,9 @@ Do not repeat the artifact content in your conversational reply.";
                            }
                        }
                        StreamParseResult::ToolResult(result) => {
+                           if let Some(id) = result.tool_id.as_ref() {
+                               completed_tr.insert(id.clone());
+                           }
                            let is_web_search = result.is_web_search();
                            let tool_result = ChatStreamToolResult {
                                tool_name: result.tool_name.clone(),
@@ -2341,6 +2441,9 @@ Do not repeat the artifact content in your conversational reply.";
                                    eprintln!("mcp execution insert error: {e}");
                                }
 
+                               if let Some(id) = call.tool_id.as_ref() {
+                                   completed_tr.insert(id.clone());
+                               }
                                let tool_result = ChatStreamToolResult {
                                    tool_name: Some(call.tool_name.clone()),
                                    tool_id: call.tool_id.clone(),
@@ -2822,25 +2925,26 @@ Do not repeat the artifact content in your conversational reply.";
                        let _ = update_conversation_summary(&state, conversation_id, &provider_clone, &model_clone).await;
                    });
                }
-               // Flush any remaining look-ahead buffer as visible text.
-               let flushed = filter_artifact_chunk(
-                   "",
-                   &mut artifact_filter_in_progress,
-                   &mut artifact_filter_buf,
-                   true,
-               );
-               if !flushed.is_empty() {
-                   let chat_stream = ChatStream {
-                       id: None, title: None, message_id: None, is_new: None,
-                       content: Some(flushed), input_tokens: None, output_tokens: None,
-                       latency_ms: None, cost: None, event: None, tool_call: None, tool_result: None,
-                   };
-                   yield Event::default().event(ChatStreamEvents::Delta.to_string()).data(chat_stream.to_string());
-               }
-               let artifacts = extract_artifacts(&message_content);
-               for artifact in artifacts {
-                   let data = serde_json::to_string(&artifact).unwrap_or_else(|_| "{}".to_string());
-                   yield Event::default().event(ChatStreamEvents::Artifact.to_string()).data(data);
+               // Flush any tool calls that were emitted to the client but never got a result.
+               // Happens when the stream errors or is cancelled mid-execution.
+               for (tool_id, tool_name) in emitted_tc.iter() {
+                   if !completed_tr.contains(tool_id) {
+                       let failed = ChatStreamToolResult {
+                           tool_name: Some(tool_name.clone()),
+                           tool_id: Some(tool_id.clone()),
+                           kind: Some(ChatToolKind::Other),
+                           status: Some("error".to_string()),
+                           output: Some(json!({"error": "Tool execution did not complete"})),
+                           web_search: None,
+                       };
+                       let chat_stream = ChatStream {
+                           id: None, title: None, message_id: None, is_new: None,
+                           content: None, input_tokens: None, output_tokens: None,
+                           latency_ms: None, cost: None, event: None, tool_call: None,
+                           tool_result: Some(failed),
+                       };
+                       yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(chat_stream.to_string());
+                   }
                }
                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
                break;
