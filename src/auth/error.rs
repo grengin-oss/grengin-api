@@ -47,6 +47,7 @@ pub enum AuthErrorCode {
     BudgetExceedsParentAvailable = 6304,
     SuperAdminSelfStatusConflict = 6305,
     McpServerNameConflict = 6306,
+    InvalidRequestField = 6307,
 
     // 6400-6499: SSO config / admin controls
     SsoProviderNotConfigured = 6400,
@@ -132,6 +133,7 @@ pub enum AuthError {
 
     EmailDomainNotAllowed { domain: Option<String> },
     McpServerNameConflict { name: Option<String> },
+    InvalidRequest { field: &'static str },
 }
 
 impl AuthError {
@@ -618,6 +620,31 @@ impl AuthError {
                         code: AuthErrorCode::McpServerNameConflict,
                         description: Self::render(description_tpl, &params),
                         solution: Self::render(solution_tpl, &params),
+                        description_key,
+                        solution_key,
+                        params,
+                        external_code: None,
+                    },
+                )
+            }
+
+            AuthError::InvalidRequest { field } => {
+                let mut params = Self::base_params();
+                params.insert("field".to_string(), (*field).to_string());
+                let description_key = "error.validation.invalid_field.description".to_string();
+                let solution_key = "error.validation.invalid_field.solution".to_string();
+                (
+                    StatusCode::BAD_REQUEST,
+                    ErrorDetail {
+                        code: AuthErrorCode::InvalidRequestField,
+                        description: Self::render(
+                            "The value provided for `{field}` is invalid.",
+                            &params,
+                        ),
+                        solution: Self::render(
+                            "Check the allowed values for `{field}` and try again.",
+                            &params,
+                        ),
                         description_key,
                         solution_key,
                         params,

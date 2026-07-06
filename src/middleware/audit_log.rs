@@ -837,6 +837,80 @@ fn resolve_audit_action(method: &Method, route: &str) -> Option<AuditRouteAction
             resource_param: None,
             snapshot_target: SnapshotTarget::None,
         }),
+        ("POST", "/projects") => Some(AuditRouteAction {
+            action: "project_created",
+            resource_type: Some("project"),
+            resource_param: None,
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("PATCH", "/projects/{id}") => Some(AuditRouteAction {
+            action: "project_updated",
+            resource_type: Some("project"),
+            resource_param: Some("id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("DELETE", "/projects/{id}") => Some(AuditRouteAction {
+            action: "project_deleted",
+            resource_type: Some("project"),
+            resource_param: Some("id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("PUT", "/projects/{id}/instructions") => Some(AuditRouteAction {
+            action: "project_instructions_updated",
+            resource_type: Some("project"),
+            resource_param: Some("id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("POST", "/projects/{id}/members") => Some(AuditRouteAction {
+            action: "project_member_added",
+            resource_type: Some("project_member"),
+            resource_param: Some("id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("DELETE", "/projects/{id}/members/{user_id}") => Some(AuditRouteAction {
+            action: "project_member_removed",
+            resource_type: Some("project_member"),
+            resource_param: Some("id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("POST", "/projects/{id}/sources") => Some(AuditRouteAction {
+            action: "project_source_added",
+            resource_type: Some("project_source"),
+            resource_param: Some("id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("DELETE", "/projects/{id}/sources/{source_id}") => Some(AuditRouteAction {
+            action: "project_source_removed",
+            resource_type: Some("project_source"),
+            resource_param: Some("id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("POST", "/projects/{id}/artifacts") => Some(AuditRouteAction {
+            action: "project_artifact_added",
+            resource_type: Some("project_source"),
+            resource_param: Some("id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("POST", "/projects/{id}/share") => Some(AuditRouteAction {
+            action: "project_shared",
+            resource_type: Some("project"),
+            resource_param: Some("id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("POST", "/conversations/{conversation_id}/projects") => Some(AuditRouteAction {
+            action: "project_linked_to_conversation",
+            resource_type: Some("conversation_project"),
+            resource_param: Some("conversation_id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("DELETE", "/conversations/{conversation_id}/projects/{project_id}") => {
+            Some(AuditRouteAction {
+                action: "project_unlinked_from_conversation",
+                resource_type: Some("conversation_project"),
+                resource_param: Some("conversation_id"),
+                snapshot_target: SnapshotTarget::None,
+            })
+        }
         _ => None,
     }
 }

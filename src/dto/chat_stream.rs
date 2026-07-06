@@ -23,10 +23,20 @@ pub enum ChatStreamEvents {
     ToolResult,
     Cancelled,
     Done,
+    Artifact,
     #[serde(rename = "budget_warning")]
     DepartmentBudgetWarning,
     #[serde(rename = "llm_token_exhausted")]
     LlmTokenExhausted,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactStreamEvent {
+    pub id: String,
+    pub title: String,
+    pub content_type: String,
+    pub content: String,
 }
 
 impl ChatStreamEvents {
@@ -171,6 +181,8 @@ pub struct ChatInput {
     pub config: Option<serde_json::Value>,
     #[serde(default)]
     pub web_search: bool,
+    #[serde(default)]
+    pub artifacts: bool,
     pub selected_tools: Option<Vec<String>>,
     pub selected_mcp_servers: Option<Vec<Uuid>>,
     pub conversation_id: Option<Uuid>,

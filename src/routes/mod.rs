@@ -9,4 +9,5 @@ pub mod message;
 pub mod models;
 pub mod oidc;
 pub mod open_error;
+pub mod projects;
 pub mod swagger_ui;

@@ -1,4 +1,8 @@
 pub mod ai_engines;
+pub mod conversation_projects;
+pub mod project_members;
+pub mod project_sources;
+pub mod projects;
 pub mod analytics;
 pub mod audit_logs;
 pub mod auth_audit_events;

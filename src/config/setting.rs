@@ -256,6 +256,9 @@ impl Settings {
     ) -> Result<(), ConfigError> {
         let engine_key = engine_key.into();
         let cache_key = engine_key.to_lowercase();
+        // Trim whitespace from API keys — copy-paste often adds trailing newlines which
+        // make HeaderValue::try_from fail and cause CannotCloneRequestError downstream.
+        let api_key = api_key.map(|k| k.trim().to_string());
         self.set_ai_engine_cache(
             cache_key.clone(),
             api_key.clone(),
