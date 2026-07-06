@@ -2927,6 +2927,7 @@ Markdown document, or a complete self-contained code file, always call the \
                }
                // Flush any tool calls that were emitted to the client but never got a result.
                // Happens when the stream errors or is cancelled mid-execution.
+               let mut flush_dirty = false;
                for (tool_id, tool_name) in emitted_tc.iter() {
                    if !completed_tr.contains(tool_id) {
                        let failed = ChatStreamToolResult {
@@ -2937,6 +2938,9 @@ Markdown document, or a complete self-contained code file, always call the \
                            output: Some(json!({"error": "Tool execution did not complete"})),
                            web_search: None,
                        };
+                       tool_results.push(serde_json::to_value(&failed).unwrap_or_else(|_| json!({})));
+                       new_llm_message.tools_results = Set(tool_results.clone());
+                       flush_dirty = true;
                        let chat_stream = ChatStream {
                            id: None, title: None, message_id: None, is_new: None,
                            content: None, input_tokens: None, output_tokens: None,
@@ -2945,6 +2949,10 @@ Markdown document, or a complete self-contained code file, always call the \
                        };
                        yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(chat_stream.to_string());
                    }
+               }
+               if flush_dirty {
+                   new_llm_message.updated_at = Set(Utc::now());
+                   let _ = new_llm_message.clone().update(&app_state.database).await;
                }
                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
                break;
