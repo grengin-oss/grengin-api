@@ -105,6 +105,23 @@ pub struct ProjectDetailResponse {
     pub updated_at: DateTime<Utc>,
     pub sources: Vec<ProjectSourceResponse>,
     pub chats: Vec<ProjectChatResponse>,
+    pub mcp_servers: Vec<ProjectMcpServerResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMcpServerResponse {
+    pub id: Uuid,
+    pub server_id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub added_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AddMcpServerRequest {
+    pub server_id: Uuid,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

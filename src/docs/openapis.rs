@@ -68,10 +68,11 @@ use crate::dto::system_metrics::{
 };
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::dto::projects::{
-    AddMemberRequest, AddSourceRequest, ArtifactCreateRequest, InstructionsUpdateRequest,
-    LinkProjectRequest, ProjectCreateRequest, ProjectDetailResponse, ProjectListQuery,
-    ProjectListResponse, ProjectMemberResponse, ProjectResponse, ProjectSourceResponse,
-    ProjectUpdateRequest, ShareProjectResponse, UserSearchItem, UserSearchResponse,
+    AddMcpServerRequest, AddMemberRequest, AddSourceRequest, ArtifactCreateRequest,
+    InstructionsUpdateRequest, LinkProjectRequest, ProjectCreateRequest, ProjectDetailResponse,
+    ProjectListQuery, ProjectListResponse, ProjectMcpServerResponse, ProjectMemberResponse,
+    ProjectResponse, ProjectSourceResponse, ProjectUpdateRequest, ShareProjectResponse,
+    UserSearchItem, UserSearchResponse,
 };
 use crate::handlers::{
     admin_ai, admin_analytics, admin_audit, admin_department, admin_department_budgets,
@@ -231,6 +232,9 @@ use utoipa::OpenApi;
         projects::share_project,
         projects::link_project_to_conversation,
         projects::unlink_project_from_conversation,
+        projects::list_project_mcp_servers,
+        projects::add_project_mcp_server,
+        projects::remove_project_mcp_server,
     ),
     components(
         schemas(
@@ -403,6 +407,8 @@ use utoipa::OpenApi;
             ArtifactCreateRequest,
             ShareProjectResponse,
             LinkProjectRequest,
+            ProjectMcpServerResponse,
+            AddMcpServerRequest,
         )
     ),
     tags(

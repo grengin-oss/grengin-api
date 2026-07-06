@@ -16,13 +16,16 @@ use uuid::Uuid;
 use crate::{
     auth::{claims::Claims, error::{AuthError, Error}},
     dto::projects::{
-        AddMemberRequest, AddSourceRequest, ArtifactCreateRequest, InstructionsUpdateRequest,
-        LinkProjectRequest, MemberSearchQuery, ProjectCreateRequest, ProjectDetailResponse,
-        ProjectListQuery, ProjectListResponse, ProjectMemberResponse, ProjectResponse,
-        ProjectSourceResponse, ProjectUpdateRequest, ShareProjectResponse, UserSearchItem,
-        UserSearchResponse,
+        AddMcpServerRequest, AddMemberRequest, AddSourceRequest, ArtifactCreateRequest,
+        InstructionsUpdateRequest, LinkProjectRequest, MemberSearchQuery, ProjectCreateRequest,
+        ProjectDetailResponse, ProjectListQuery, ProjectListResponse, ProjectMcpServerResponse,
+        ProjectMemberResponse, ProjectResponse, ProjectSourceResponse, ProjectUpdateRequest,
+        ShareProjectResponse, UserSearchItem, UserSearchResponse,
     },
-    models::{conversation_projects, conversations, project_members, project_sources, projects, users},
+    models::{
+        conversation_projects, conversations, mcp_servers, project_mcp_servers, project_members,
+        project_sources, projects, users,
+    },
     services::project_helpers::*,
     state::SharedState,
 };
@@ -202,6 +205,7 @@ pub async fn get_project_detail(
         fetch_counts(&[id], &app_state.database).await?;
     let sources = fetch_project_sources(id, &app_state.database).await?;
     let chats = fetch_project_chats(id, &app_state.database).await?;
+    let mcp_servers = fetch_project_mcp_servers(id, &app_state.database).await?;
 
     Ok((StatusCode::OK, Json(ProjectDetailResponse {
         id: project.id,
@@ -219,6 +223,7 @@ pub async fn get_project_detail(
         updated_at: project.updated_at,
         sources,
         chats,
+        mcp_servers,
     })))
 }
 
@@ -955,4 +960,189 @@ pub async fn add_project_artifact(
         origin: inserted.origin,
         uploaded_at: inserted.uploaded_at,
     })))
+}
+
+// --- project MCP server helpers ---
+
+async fn fetch_project_mcp_servers(
+    project_id: Uuid,
+    db: &sea_orm::DatabaseConnection,
+) -> Result<Vec<ProjectMcpServerResponse>, AuthError> {
+    let rows = project_mcp_servers::Entity::find()
+        .filter(project_mcp_servers::Column::ProjectId.eq(project_id))
+        .all(db)
+        .await
+        .map_err(|e| {
+            eprintln!("db project mcp servers fetch error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let server_ids: Vec<Uuid> = rows.iter().map(|r| r.server_id).collect();
+    let servers = mcp_servers::Entity::find()
+        .filter(mcp_servers::Column::Id.is_in(server_ids))
+        .all(db)
+        .await
+        .map_err(|e| {
+            eprintln!("db mcp servers fetch error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    let server_map: HashMap<Uuid, mcp_servers::Model> =
+        servers.into_iter().map(|s| (s.id, s)).collect();
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let server = server_map.get(&row.server_id)?;
+            Some(ProjectMcpServerResponse {
+                id: row.id,
+                server_id: row.server_id,
+                name: server.name.clone(),
+                description: server.description.clone(),
+                added_at: row.created_at,
+            })
+        })
+        .collect())
+}
+
+// --- project MCP server CRUD ---
+
+#[utoipa::path(
+    get,
+    path = "/projects/{id}/mcp-servers",
+    tag = "projects",
+    params(("id" = Uuid, Path, description = "Project id")),
+    responses(
+        (status = 200, body = Vec<ProjectMcpServerResponse>),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token"),
+        (status = 404, content_type = "application/json", body = Error, description = "Project not found"),
+    )
+)]
+pub async fn list_project_mcp_servers(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Path(id): Path<Uuid>,
+) -> Result<(StatusCode, Json<Vec<ProjectMcpServerResponse>>), AuthError> {
+    let project = get_project_or_404(id, &app_state.database).await?;
+    ensure_project_read_access(claims.user_id, &project, &app_state.database).await?;
+    let result = fetch_project_mcp_servers(id, &app_state.database).await?;
+    Ok((StatusCode::OK, Json(result)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/projects/{id}/mcp-servers",
+    tag = "projects",
+    params(("id" = Uuid, Path, description = "Project id")),
+    request_body = AddMcpServerRequest,
+    responses(
+        (status = 201, body = ProjectMcpServerResponse),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token"),
+        (status = 403, content_type = "application/json", body = Error, description = "Only project owner/admin can modify"),
+        (status = 404, content_type = "application/json", body = Error, description = "Project or MCP server not found"),
+        (status = 409, content_type = "application/json", body = Error, description = "Server already attached"),
+    )
+)]
+pub async fn add_project_mcp_server(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<AddMcpServerRequest>,
+) -> Result<(StatusCode, Json<ProjectMcpServerResponse>), AuthError> {
+    let project = get_project_or_404(id, &app_state.database).await?;
+    ensure_project_write_access(claims.user_id, &project, &app_state.database).await?;
+
+    let server = mcp_servers::Entity::find_by_id(req.server_id)
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db mcp server lookup error: {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+
+    let existing = project_mcp_servers::Entity::find()
+        .filter(project_mcp_servers::Column::ProjectId.eq(id))
+        .filter(project_mcp_servers::Column::ServerId.eq(req.server_id))
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db project mcp server check error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    if existing.is_some() {
+        return Err(AuthError::DbConflict);
+    }
+
+    let now = Utc::now();
+    let inserted = project_mcp_servers::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        project_id: Set(id),
+        server_id: Set(req.server_id),
+        created_at: Set(now),
+    }
+    .insert(&app_state.database)
+    .await
+    .map_err(|e| {
+        eprintln!("db project mcp server insert error: {e}");
+        AuthError::DbTimeout
+    })?;
+
+    Ok((StatusCode::CREATED, Json(ProjectMcpServerResponse {
+        id: inserted.id,
+        server_id: inserted.server_id,
+        name: server.name,
+        description: server.description,
+        added_at: inserted.created_at,
+    })))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/projects/{id}/mcp-servers/{server_id}",
+    tag = "projects",
+    params(
+        ("id" = Uuid, Path, description = "Project id"),
+        ("server_id" = Uuid, Path, description = "MCP server id"),
+    ),
+    responses(
+        (status = 204),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token"),
+        (status = 403, content_type = "application/json", body = Error, description = "Only project owner/admin can modify"),
+        (status = 404, content_type = "application/json", body = Error, description = "Not found"),
+    )
+)]
+pub async fn remove_project_mcp_server(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Path((id, server_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, AuthError> {
+    let project = get_project_or_404(id, &app_state.database).await?;
+    ensure_project_write_access(claims.user_id, &project, &app_state.database).await?;
+
+    let row = project_mcp_servers::Entity::find()
+        .filter(project_mcp_servers::Column::ProjectId.eq(id))
+        .filter(project_mcp_servers::Column::ServerId.eq(server_id))
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db project mcp server find error: {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+
+    project_mcp_servers::Entity::delete_by_id(row.id)
+        .exec(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db project mcp server delete error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
