@@ -1,5 +1,6 @@
 pub mod ai_engine_helpers;
 pub mod artifacts;
+pub mod department_helpers;
 pub mod chat_stream_builder;
 pub mod me_helpers;
 pub mod sso_seed;

@@ -34,7 +34,7 @@ use crate::{
             MeDepartmentUsersResponse,
         },
     },
-    handlers::admin_department::{
+    services::department_helpers::{
         department_budget_snapshot, departments_base_select, departments_tree_select,
         load_department_admin_ids_map,
     },
