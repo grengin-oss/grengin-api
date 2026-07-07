@@ -1,6 +1,7 @@
 pub mod ai_engine_helpers;
 pub mod artifacts;
 pub mod department_helpers;
+pub mod mcp_service;
 pub mod oidc_proxy;
 pub mod oidc_service;
 pub mod chat_stream_builder;
