@@ -1,7 +1,7 @@
 use crate::{
     auth::error::AuthError,
     dto::models::ModelsResponse,
-    handlers::models::{load_providers_cached, refresh_models_cache},
+    services::models_cache::{load_providers_cached, refresh_models_cache},
     state::SharedState,
 };
 

@@ -23,7 +23,7 @@ use crate::{
         mistral_conversations::MistralConversationStreamParser, openai::OpenaiStreamParser,
         update_web_search_action_state, update_web_search_results_state,
     },
-    handlers::models::get_model_info_cached,
+    services::models_cache::get_model_info_cached,
     llm::{
         prompt::Prompt,
         provider::{

@@ -13,7 +13,7 @@ use crate::{
         conversations::{self, ConversationWithCount},
         messages::{self},
     },
-    services::search,
+    services::{chat_helpers::resolve_web_search_enabled, search},
     state::SharedState,
 };
 use axum::{
@@ -30,12 +30,6 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
-fn resolve_web_search_enabled(metadata: Option<&serde_json::Value>) -> bool {
-    metadata
-        .and_then(|value| value.get("webSearch"))
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-}
 
 #[utoipa::path(
     get,
