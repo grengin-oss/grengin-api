@@ -50,6 +50,29 @@ pub fn ensure_project_owner(user_id: Uuid, project: &projects::Model) -> Result<
     if project.owner_id == user_id { Ok(()) } else { Err(AuthError::PermissionDenied) }
 }
 
+pub async fn ensure_project_write_access(
+    user_id: Uuid,
+    project: &projects::Model,
+    db: &DatabaseConnection,
+) -> Result<(), AuthError> {
+    if project.owner_id == user_id {
+        return Ok(());
+    }
+    let member = project_members::Entity::find()
+        .filter(project_members::Column::ProjectId.eq(project.id))
+        .filter(project_members::Column::UserId.eq(user_id))
+        .one(db)
+        .await
+        .map_err(|e| {
+            eprintln!("db member check error: {e}");
+            AuthError::DbTimeout
+        })?;
+    match member {
+        Some(m) if m.role == "admin" => Ok(()),
+        _ => Err(AuthError::PermissionDenied),
+    }
+}
+
 pub fn build_visibility_condition(user_id: Uuid, member_project_ids: Vec<Uuid>) -> Condition {
     let mut cond = Condition::any()
         .add(projects::Column::OwnerId.eq(user_id))

@@ -181,8 +181,6 @@ pub struct ChatInput {
     pub config: Option<serde_json::Value>,
     #[serde(default)]
     pub web_search: bool,
-    #[serde(default)]
-    pub artifacts: bool,
     pub selected_tools: Option<Vec<String>>,
     pub selected_mcp_servers: Option<Vec<Uuid>>,
     pub conversation_id: Option<Uuid>,

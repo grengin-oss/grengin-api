@@ -39,7 +39,7 @@ use crate::{
         mcp_executions, mcp_oauth_states, mcp_servers,
         mcp_servers::McpTransportType,
         messages::{self, ChatRole},
-        projects, users,
+        project_mcp_servers, projects, users,
     },
     services::{
         budget_allocation::{get_department_budget_status, refresh_department_budget_available},
@@ -47,7 +47,7 @@ use crate::{
         mcp_client::build_authorization_url,
         mcp_helpers::{build_oauth_config, resolve_mcp_oauth_token},
         mcp_tools::{
-            McpServerSummary, McpToolDescriptor, load_auto_mcp_server_ids, load_openai_mcp_tools,
+            McpServerSummary, McpToolDescriptor, load_openai_mcp_tools,
         },
         notifications::emit_budget_alerts,
         rag::{
@@ -987,7 +987,7 @@ pub async fn handle_chat_stream(
         .unwrap_or_default();
     if !project_ids.is_empty() {
         let linked_projects = projects::Entity::find()
-            .filter(projects::Column::Id.is_in(project_ids))
+            .filter(projects::Column::Id.is_in(project_ids.clone()))
             .all(&app_state.database)
             .await
             .unwrap_or_default();
@@ -1021,6 +1021,20 @@ pub async fn handle_chat_stream(
             }
         }
     }
+    // Auto-load MCP servers from linked projects when none are explicitly selected.
+    if selected_mcp_servers.is_empty() && !project_ids.is_empty() {
+        let project_server_ids: Vec<Uuid> = project_mcp_servers::Entity::find()
+            .select_only()
+            .column(project_mcp_servers::Column::ServerId)
+            .filter(project_mcp_servers::Column::ProjectId.is_in(project_ids.clone()))
+            .into_tuple::<Uuid>()
+            .all(&app_state.database)
+            .await
+            .unwrap_or_default();
+        if !project_server_ids.is_empty() {
+            selected_mcp_servers = project_server_ids;
+        }
+    }
     let provider_is_openai = provider.to_lowercase() == "openai";
     let provider_is_anthropic = provider.to_lowercase() == "anthropic";
     let provider_is_mistral = provider.to_lowercase() == "mistral";
@@ -1031,11 +1045,6 @@ pub async fn handle_chat_stream(
         && request_selected_mcp_servers.is_empty();
     let supports_mcp_tools =
         provider_is_openai || provider_is_anthropic || provider_is_mistral || provider_is_gemini;
-    let should_auto_select_mcp =
-        supports_mcp_tools && selected_mcp_servers.is_empty() && !gemini_web_search_only;
-    if should_auto_select_mcp {
-        selected_mcp_servers = load_auto_mcp_server_ids(&app_state).await?;
-    }
     let (mcp_openai_tools, mcp_tool_lookup, mcp_server_summaries) =
         if supports_mcp_tools && !gemini_web_search_only {
             load_openai_mcp_tools(
@@ -1095,14 +1104,12 @@ Do not repeat the artifact content in your reply.";
         openai_tools.push(OpenaiTool::web_search());
     }
     openai_tools.extend(mcp_openai_tools);
-    if req.artifacts {
-        openai_tools.push(OpenaiTool::Function {
-            name: ARTIFACT_TOOL_NAME.to_string(),
-            description: Some(ARTIFACT_TOOL_DESC.to_string()),
-            parameters: artifact_tool_schema.clone(),
-            strict: None,
-        });
-    }
+    openai_tools.push(OpenaiTool::Function {
+        name: ARTIFACT_TOOL_NAME.to_string(),
+        description: Some(ARTIFACT_TOOL_DESC.to_string()),
+        parameters: artifact_tool_schema.clone(),
+        strict: None,
+    });
     let openai_tools = if openai_tools.is_empty() { None } else { Some(openai_tools) };
     let mut anthropic_tools = Vec::new();
     if web_search {
@@ -1123,13 +1130,11 @@ Do not repeat the artifact content in your reply.";
             }));
         }
     }
-    if req.artifacts {
-        anthropic_tools.push(AnthropicToolUnion::ClientTool(AnthropicTool {
-            name: ARTIFACT_TOOL_NAME.to_string(),
-            description: ARTIFACT_TOOL_DESC.to_string(),
-            input_schema: artifact_tool_schema.clone(),
-        }));
-    }
+    anthropic_tools.push(AnthropicToolUnion::ClientTool(AnthropicTool {
+        name: ARTIFACT_TOOL_NAME.to_string(),
+        description: ARTIFACT_TOOL_DESC.to_string(),
+        input_schema: artifact_tool_schema.clone(),
+    }));
     let anthropic_tools = if anthropic_tools.is_empty() { None } else { Some(anthropic_tools) };
     let mut mistral_tools = Vec::new();
     if !mistral_use_conversations && supports_mcp_tools {
@@ -1154,9 +1159,7 @@ Do not repeat the artifact content in your reply.";
             parameters: artifact_tool_schema.clone(),
         },
     };
-    if req.artifacts {
-        mistral_tools.push(mistral_artifact_fn.clone());
-    }
+    mistral_tools.push(mistral_artifact_fn.clone());
     let mistral_tools = if mistral_tools.is_empty() { None } else { Some(mistral_tools) };
     let mistral_conversation_tools = if mistral_use_conversations {
         let mut tools = Vec::new();
@@ -1178,9 +1181,7 @@ Do not repeat the artifact content in your reply.";
                 });
             }
         }
-        if req.artifacts {
-            tools.push(mistral_artifact_fn);
-        }
+        tools.push(mistral_artifact_fn);
         Some(tools)
     } else {
         None
@@ -1214,13 +1215,11 @@ Do not repeat the artifact content in your reply.";
                 }));
             }
         }
-        if req.artifacts {
-            function_declarations.push(json!({
-                "name": ARTIFACT_TOOL_NAME,
-                "description": ARTIFACT_TOOL_DESC,
-                "parameters": normalize_gemini_parameters(&artifact_tool_schema),
-            }));
-        }
+        function_declarations.push(json!({
+            "name": ARTIFACT_TOOL_NAME,
+            "description": ARTIFACT_TOOL_DESC,
+            "parameters": normalize_gemini_parameters(&artifact_tool_schema),
+        }));
         tools.push(json!({ "function_declarations": function_declarations }));
         Some(Value::Array(tools))
     } else {
