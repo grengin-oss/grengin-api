@@ -37,6 +37,7 @@ use crate::{
         notifications::emit_budget_alerts,
     },
     state::SharedState,
+    utils::ltree::ltree_label_from_uuid,
 };
 use axum::{
     Json,
@@ -58,10 +59,6 @@ use sea_orm::{
 };
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
-
-fn ltree_label_from_uuid(id: uuid::Uuid) -> String {
-    id.simple().to_string()
-}
 
 fn build_ltree_path(parent_path: Option<&str>, id: uuid::Uuid) -> Result<String, AuthError> {
     let mut tree = if let Some(p) = parent_path {

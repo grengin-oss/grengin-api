@@ -8,6 +8,7 @@ use crate::{
         oauth::{AuthCallback, CallbackExchangeMode, StartParams},
     },
     state::SharedState,
+    utils::uri::{is_azure_mobile_redirect_uri, origin_from_url},
 };
 use crate::{
     auth::{
@@ -38,7 +39,6 @@ use openidconnect::{
     PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
     core::{CoreAuthenticationFlow, CoreUserInfoClaims},
 };
-use reqwest::Url;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, TryIntoModel,
@@ -62,14 +62,6 @@ struct ProxyAssertionClaims {
     provider: String,
     // Optional: guard against null/missing sub from some identity providers.
     provider_sub: Option<String>,
-}
-
-fn is_azure_mobile_redirect_uri(provider: &AuthProvider, redirect_uri: &str) -> bool {
-    provider.eq_ignore_ascii_case("azure")
-        && redirect_uri
-            .get(..9)
-            .map(|scheme| scheme.eq_ignore_ascii_case("msauth://"))
-            .unwrap_or(false)
 }
 
 async fn build_azure_public_client_for_redirect(
@@ -114,11 +106,6 @@ async fn provider_uses_proxy(app_state: &SharedState, provider: &AuthProvider) -
             .unwrap_or(false),
         _ => false,
     }
-}
-
-fn origin_from_url(value: &str) -> Option<String> {
-    let parsed = Url::parse(value).ok()?;
-    Some(parsed.origin().ascii_serialization())
 }
 
 fn select_assertion_jwk<'a>(jwks: &'a JwkSet, kid: Option<&str>) -> Option<&'a Jwk> {
