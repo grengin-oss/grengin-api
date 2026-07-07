@@ -1,10 +1,9 @@
 use crate::{
     auth::{claims::Claims, error::Error},
-    config::setting::{AnthropicSettings, GeminiSettings, MistralSettings, OpenaiSettings},
     dto::{
         chat_stream::{
-            ArtifactStreamEvent, BudgetWarningPayload, ChatInput, ChatStream, ChatStreamEvent,
-            ChatStreamEvents, ChatStreamPayload, ChatStreamToolCall, ChatStreamToolInput, ChatStreamToolResult,
+            BudgetWarningPayload, ChatInput, ChatStream, ChatStreamEvent,
+            ChatStreamEvents, ChatStreamPayload, ChatStreamToolCall, ChatStreamToolResult,
             ChatStreamWebSearchAction, ChatToolKind,
         },
         files::File,
@@ -30,25 +29,30 @@ use crate::{
         provider::{
             AnthropicApis, GeminiApis, MistralApis, OpenaiApis, get_title_generation_model,
         },
-        tooling::mcp_server_short_id,
     },
     models::{
         conversation_projects, conversations,
         departments::ActionOnExceed,
         mcp_access_policies::McpPermission,
-        mcp_executions, mcp_oauth_states, mcp_servers,
+        mcp_executions,
         mcp_servers::McpTransportType,
         messages::{self, ChatRole},
         project_mcp_servers, projects, users,
     },
     services::{
-        budget_allocation::{get_department_budget_status, refresh_department_budget_available},
-        department_policies::check_model_allowed,
-        mcp_client::build_authorization_url,
-        mcp_helpers::{build_oauth_config, resolve_mcp_oauth_token},
-        mcp_tools::{
-            McpServerSummary, McpToolDescriptor, load_openai_mcp_tools,
+        artifacts::{
+            ARTIFACT_TOOL_NAME, ARTIFACT_TOOL_DESC, ARTIFACT_SYSTEM_HINT,
+            artifact_tool_schema, build_artifact_emit,
         },
+        budget_allocation::{get_department_budget_status, refresh_department_budget_available},
+        chat_stream_builder::LlmProviderConfig,
+        department_policies::check_model_allowed,
+        mcp_helpers::{
+            build_mcp_oauth_prompt, build_mcp_server_context,
+            resolve_mcp_oauth_token, resolve_mcp_tool_descriptor,
+            McpOauthErrorPayload, McpOauthPrompt, McpOauthRequiredEvent,
+        },
+        mcp_tools::load_openai_mcp_tools,
         notifications::emit_budget_alerts,
         rag::{
             EmbeddingTarget, assemble_prompts_with_budget, build_retrieval_prompt, embed_messages,
@@ -58,6 +62,7 @@ use crate::{
     },
     state::SharedState,
     utils::chat_stream::{
+        calculate_cost_decimal, is_rate_limit_error,
         to_chat_tool_input, to_chat_web_search_result, tool_input_to_value,
         tool_result_status_from_output,
     },
@@ -70,260 +75,21 @@ use axum::{
         sse::{Event, KeepAlive},
     },
 };
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use futures_util::StreamExt;
 use num_traits::ToPrimitive;
 use reqwest::StatusCode;
 use reqwest_eventsource::Event as ReqwestEvent;
-use rust_decimal::prelude::FromPrimitive;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
     QueryOrder, QuerySelect, prelude::Decimal,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::HashMap, convert::Infallible};
 use tokio::time::Instant;
 use uuid::Uuid;
 
-/// Provider configuration enum for handling different LLM providers
-enum LlmProviderConfig {
-    OpenAI(OpenaiSettings),
-    Anthropic(AnthropicSettings),
-    Mistral(MistralSettings),
-    Gemini(GeminiSettings),
-}
 
-#[derive(Clone)]
-struct McpOauthPrompt {
-    authorization_url: String,
-    server_name: String,
-}
-
-#[derive(Serialize)]
-struct McpOauthRequiredEvent {
-    text: String,
-    server_id: Uuid,
-    server_name: String,
-    authorization_url: String,
-    tool_name: String,
-    tool_call_id: Option<String>,
-}
-
-#[derive(Serialize)]
-struct McpOauthErrorPayload {
-    error: String,
-    is_error: bool,
-    authorization_url: String,
-    server_id: Uuid,
-    server_name: String,
-}
-
-
-#[derive(Deserialize)]
-struct LlmErrorObject {
-    #[serde(rename = "type")]
-    kind: Option<String>,
-    code: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct LlmErrorEnvelope {
-    #[serde(rename = "type")]
-    kind: Option<String>,
-    error: Option<LlmErrorObject>,
-}
-
-fn calculate_cost_decimal(
-    input_tokens: i32,
-    output_tokens: i32,
-    input_rate: Option<f64>,
-    output_rate: Option<f64>,
-) -> Decimal {
-    let input_rate = input_rate.unwrap_or(0.0);
-    let output_rate = output_rate.unwrap_or(0.0);
-    if input_rate == 0.0 && output_rate == 0.0 {
-        return Decimal::from(0);
-    }
-    let cost =
-        (input_tokens as f64 * input_rate + output_tokens as f64 * output_rate) / 1_000_000.0;
-    Decimal::from_f64(cost).unwrap_or_else(|| Decimal::from(0))
-}
-
-fn build_mcp_server_context(
-    servers: &[McpServerSummary],
-    tool_lookup: &HashMap<String, McpToolDescriptor>,
-) -> Option<String> {
-    if servers.is_empty() {
-        return None;
-    }
-    let mut lines = Vec::new();
-    lines.push("MCP servers selected for this request:".to_string());
-    for server in servers {
-        let short_id = mcp_server_short_id(&server.server_id);
-        let mut line = format!(
-            "- {} (id: {}, short: {})",
-            server.name, server.server_id, short_id
-        );
-        if let Some(description) = server
-            .description
-            .as_ref()
-            .map(|text| text.trim())
-            .filter(|text| !text.is_empty())
-        {
-            line.push_str(&format!(" — {}", description));
-        }
-        lines.push(line);
-    }
-    lines.push(
-        "Tools starting with mcp__<short>__ map to the corresponding server above.".to_string(),
-    );
-    let has_sqlx_query_tool = tool_lookup.values().any(|tool| {
-        tool.original_name == "sql_query" && tool.server_name.to_ascii_lowercase().contains("sqlx")
-    });
-    if has_sqlx_query_tool {
-        lines.push("SQL dialect hint: The sqlx MCP server uses PostgreSQL. Do not use sqlite_master, PRAGMA, or SHOW TABLES.".to_string());
-        lines.push(
-            "Use PostgreSQL catalog queries such as information_schema.tables when listing tables."
-                .to_string(),
-        );
-    }
-    Some(lines.join("\n"))
-}
-
-fn resolve_mcp_tool_descriptor<'a>(
-    lookup: &'a HashMap<String, McpToolDescriptor>,
-    tool_name: &str,
-) -> Option<&'a McpToolDescriptor> {
-    if let Some(found) = lookup.get(tool_name) {
-        return Some(found);
-    }
-    let is_mcp_name = tool_name.starts_with("mcp__");
-    let full_prefix = if is_mcp_name {
-        Some(format!("{tool_name}__"))
-    } else {
-        None
-    };
-    // truncated_prefix handles names like "mcp__server__tool__1a" (partial hash).
-    // Only valid when there are 3+ double-underscore separators; otherwise rsplit_once
-    // would strip the tool name itself and yield a server-only prefix that matches
-    // every tool on the same server.
-    let truncated_prefix = if is_mcp_name && tool_name.matches("__").count() >= 3 {
-        tool_name
-            .rsplit_once("__")
-            .map(|(prefix, _)| format!("{prefix}__"))
-    } else {
-        None
-    };
-
-    let matches: Vec<&McpToolDescriptor> = lookup
-        .iter()
-        .filter_map(|(name, descriptor)| {
-            if !is_mcp_name && descriptor.original_name == tool_name {
-                return Some(descriptor);
-            }
-            if !is_mcp_name {
-                return None;
-            }
-
-            // Providers may emit a non-canonical function name without the hash suffix,
-            // or with a truncated hash. Match by stable MCP prefix in those cases.
-            if full_prefix
-                .as_ref()
-                .map(|prefix| name.starts_with(prefix))
-                .unwrap_or(false)
-            {
-                return Some(descriptor);
-            }
-            if truncated_prefix
-                .as_ref()
-                .map(|prefix| name.starts_with(prefix))
-                .unwrap_or(false)
-            {
-                return Some(descriptor);
-            }
-            None
-        })
-        .collect();
-
-    if matches.len() == 1 {
-        matches.first().copied()
-    } else {
-        None
-    }
-}
-
-fn is_rate_limit_error(body: &str) -> bool {
-    let Ok(parsed) = serde_json::from_str::<LlmErrorEnvelope>(body) else {
-        return false;
-    };
-    if parsed.kind.as_deref() == Some("rate_limit_error") {
-        return true;
-    }
-    if let Some(error) = parsed.error {
-        if error.kind.as_deref() == Some("rate_limit_error") {
-            return true;
-        }
-        if error.code.as_deref() == Some("rate_limit_error") {
-            return true;
-        }
-    }
-    false
-}
-
-async fn build_mcp_oauth_prompt(
-    state: &SharedState,
-    server_id: Uuid,
-    user_id: Uuid,
-) -> Result<McpOauthPrompt, AppError> {
-    let server = mcp_servers::Entity::find_by_id(server_id)
-        .one(&state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("mcp server lookup error: {e}");
-            AppError::DbTimeout
-        })?
-        .ok_or(AppError::McpServerNotFound)?;
-
-    if !server.enabled {
-        return Err(AppError::McpServerNotFound);
-    }
-
-    if !matches!(
-        server.transport_type,
-        McpTransportType::Http | McpTransportType::Sse
-    ) {
-        return Err(AppError::ServiceTemporarilyUnavailable);
-    }
-
-    let oauth_config = build_oauth_config(state, &server)?;
-    let authorization = build_authorization_url(&oauth_config).map_err(|e| {
-        eprintln!("mcp oauth authorize url error: {e}");
-        AppError::ServiceTemporarilyUnavailable
-    })?;
-
-    let now = Utc::now();
-    let expires_at = now + Duration::minutes(10);
-    let model = mcp_oauth_states::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        server_id: Set(server_id),
-        user_id: Set(user_id),
-        state: Set(authorization.state.clone()),
-        pkce_verifier: Set(authorization.pkce_verifier.clone()),
-        redirect_uri: Set(None),
-        expires_at: Set(Some(expires_at)),
-        created_at: Set(now),
-    };
-    model.insert(&state.database).await.map_err(|e| {
-        eprintln!("mcp oauth state insert error: {e}");
-        AppError::DbTimeout
-    })?;
-
-    Ok(McpOauthPrompt {
-        authorization_url: authorization.authorization_url,
-        server_name: server.name,
-    })
-}
 
 #[utoipa::path(
     post,
@@ -1021,6 +787,17 @@ pub async fn handle_chat_stream(
             }
         }
     }
+    // Append artifact hint to the system prompt so all providers instruct the model
+    // to use create_artifact instead of writing standalone documents inline.
+    if let Some(sys) = previous_prompts.iter_mut().find(|p| p.role == ChatRole::System) {
+        sys.text = format!("{}\n\n{}", sys.text, ARTIFACT_SYSTEM_HINT);
+    } else {
+        previous_prompts.insert(0, Prompt {
+            role: ChatRole::System,
+            text: ARTIFACT_SYSTEM_HINT.to_string(),
+            files: Vec::new(),
+        });
+    }
     // Auto-load MCP servers from linked projects when none are explicitly selected.
     if selected_mcp_servers.is_empty() && !project_ids.is_empty() {
         let project_server_ids: Vec<Uuid> = project_mcp_servers::Entity::find()
@@ -1084,20 +861,7 @@ pub async fn handle_chat_stream(
             );
         }
     }
-    const ARTIFACT_TOOL_NAME: &str = "create_artifact";
-    const ARTIFACT_TOOL_DESC: &str = "Use this tool to output a standalone document — \
-a complete HTML page, a full Markdown file, or a long code file — \
-that is best viewed separately from your conversational reply. \
-Do not repeat the artifact content in your reply.";
-    let artifact_tool_schema = json!({
-        "type": "object",
-        "properties": {
-            "title":       { "type": "string", "description": "Short descriptive title for the artifact" },
-            "contentType": { "type": "string", "enum": ["text/html", "text/markdown"], "description": "MIME type of the content" },
-            "content":     { "type": "string", "description": "Full content of the artifact" }
-        },
-        "required": ["title", "contentType", "content"]
-    });
+    let artifact_tool_schema = artifact_tool_schema();
 
     let mut openai_tools = Vec::new();
     if web_search {
@@ -1258,21 +1022,6 @@ Do not repeat the artifact content in your reply.";
     };
     let (gemini_system_instruction, gemini_contents_seed) = if provider_is_gemini {
         let (sys, contents) = prompts_to_gemini_payload(&previous_prompts);
-        let artifact_hint = "When the user asks you to produce a standalone HTML page, \
-Markdown document, or a complete self-contained code file, always call the \
-`create_artifact` tool instead of writing the content inline in your reply.";
-        let sys = Some(match sys {
-            Some(mut existing) => {
-                let current = existing["parts"][0]["text"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
-                existing["parts"][0]["text"] =
-                    json!(format!("{}\n\n{}", current, artifact_hint));
-                existing
-            }
-            None => json!({ "parts": [{ "text": artifact_hint }] }),
-        });
         (sys, contents)
     } else {
         (None, Vec::new())
@@ -1783,31 +1532,21 @@ Markdown document, or a complete self-contained code file, always call the \
                                if let (Some(tool_id), Some(args)) =
                                    (tool_input.tool_id.as_ref(), parsed_input.as_ref())
                                {
-                                   let content = args["content"].as_str().unwrap_or("");
-                                   if !content.is_empty() && seen_tool_call_ids.insert(tool_id.clone()) {
-                                       let tc = ChatStream {
-                                           id: None, title: None, message_id: None, is_new: None,
-                                           content: None, input_tokens: None, output_tokens: None,
-                                           latency_ms: None, cost: None, event: None,
-                                           tool_call: Some(ChatStreamToolCall {
-                                               tool_name: ARTIFACT_TOOL_NAME.to_string(),
-                                               tool_id: Some(tool_id.clone()),
-                                               input_text: None,
-                                               input: Some(ChatStreamToolInput::Json { value: args.clone() }),
-                                               kind: Some(ChatToolKind::Other),
-                                               web_search: None,
-                                           }),
-                                           tool_result: None,
-                                       };
-                                       yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(tc.to_string());
-                                       let artifact = ArtifactStreamEvent {
-                                           id: uuid::Uuid::new_v4().to_string(),
-                                           title: args["title"].as_str().unwrap_or("Untitled").to_string(),
-                                           content_type: args["contentType"].as_str().unwrap_or("text/html").to_string(),
-                                           content: content.to_string(),
-                                       };
-                                       if let Ok(data) = serde_json::to_string(&artifact) {
-                                           yield Event::default().event(ChatStreamEvents::Artifact.to_string()).data(data);
+                                   if !seen_tool_call_ids.contains(tool_id) {
+                                       if let Some(emit) = build_artifact_emit(args, Some(tool_id.clone())) {
+                                           seen_tool_call_ids.insert(tool_id.clone());
+                                           tool_calls.push(serde_json::to_value(&emit.tool_call_event.tool_call).unwrap_or_else(|_| json!({})));
+                                           new_llm_message.tools_calls = Set(tool_calls.clone());
+                                           tool_results.push(serde_json::to_value(&emit.tool_result_event.tool_result).unwrap_or_else(|_| json!({})));
+                                           new_llm_message.tools_results = Set(tool_results.clone());
+                                           new_llm_message.updated_at = Set(Utc::now());
+                                           new_llm_message.clone().update(&app_state.database).await
+                                               .expect("failed to save artifact tool call/result");
+                                           yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(emit.tool_call_event.to_string());
+                                           if let Ok(data) = serde_json::to_string(&emit.artifact_event) {
+                                               yield Event::default().event(ChatStreamEvents::Artifact.to_string()).data(data);
+                                           }
+                                           yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(emit.tool_result_event.to_string());
                                        }
                                    }
                                }
@@ -1959,49 +1698,37 @@ Markdown document, or a complete self-contained code file, always call the \
                            yield Event::default().event(ChatStreamEvents::Event.to_string()).data(chat_stream.to_string());
                        }
                        StreamParseResult::ToolCall(call) => {
-                           // Intercept create_artifact BEFORE seen_tool_call_ids insertion.
                            // Anthropic fires ToolCall at ContentBlockStart with empty input {};
-                           // actual args accumulate via ToolInput into tool_inputs. Read from
-                           // there first, fall back to call.input (Mistral/Gemini have it complete).
+                           // actual args accumulate via ToolInput into tool_inputs. For
+                           // Mistral/Gemini/OpenAI the complete args arrive here directly.
+                           // Only insert into seen_tool_call_ids when we actually emit.
                            if call.tool_name == ARTIFACT_TOOL_NAME {
                                let args = call.tool_id.as_ref()
                                    .and_then(|id| tool_inputs.get(id))
                                    .cloned()
                                    .unwrap_or_else(|| tool_input_to_value(call.input.as_ref()));
-                               let content = args["content"].as_str().unwrap_or("").to_string();
-                               if !content.is_empty() {
-                                   let can_emit = call.tool_id.as_ref()
-                                       .map(|id| seen_tool_call_ids.insert(id.clone()))
-                                       .unwrap_or(true);
-                                   if can_emit {
-                                       let tc = ChatStream {
-                                           id: None, title: None, message_id: None, is_new: None,
-                                           content: None, input_tokens: None, output_tokens: None,
-                                           latency_ms: None, cost: None, event: None,
-                                           tool_call: Some(ChatStreamToolCall {
-                                               tool_name: ARTIFACT_TOOL_NAME.to_string(),
-                                               tool_id: call.tool_id.clone(),
-                                               input_text: None,
-                                               input: Some(ChatStreamToolInput::Json { value: args.clone() }),
-                                               kind: Some(ChatToolKind::Other),
-                                               web_search: None,
-                                           }),
-                                           tool_result: None,
-                                       };
-                                       yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(tc.to_string());
-                                       let artifact = ArtifactStreamEvent {
-                                           id: uuid::Uuid::new_v4().to_string(),
-                                           title: args["title"].as_str().unwrap_or("Untitled").to_string(),
-                                           content_type: args["contentType"].as_str().unwrap_or("text/html").to_string(),
-                                           content,
-                                       };
-                                       if let Ok(data) = serde_json::to_string(&artifact) {
+                               let already_emitted = call.tool_id.as_ref()
+                                   .map(|id| seen_tool_call_ids.contains(id))
+                                   .unwrap_or(false);
+                               if !already_emitted {
+                                   if let Some(emit) = build_artifact_emit(&args, call.tool_id.clone()) {
+                                       if let Some(id) = call.tool_id.as_ref() {
+                                           seen_tool_call_ids.insert(id.clone());
+                                       }
+                                       tool_calls.push(serde_json::to_value(&emit.tool_call_event.tool_call).unwrap_or_else(|_| json!({})));
+                                       new_llm_message.tools_calls = Set(tool_calls.clone());
+                                       tool_results.push(serde_json::to_value(&emit.tool_result_event.tool_result).unwrap_or_else(|_| json!({})));
+                                       new_llm_message.tools_results = Set(tool_results.clone());
+                                       new_llm_message.updated_at = Set(Utc::now());
+                                       new_llm_message.clone().update(&app_state.database).await
+                                           .expect("failed to save artifact tool call/result");
+                                       yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(emit.tool_call_event.to_string());
+                                       if let Ok(data) = serde_json::to_string(&emit.artifact_event) {
                                            yield Event::default().event(ChatStreamEvents::Artifact.to_string()).data(data);
                                        }
+                                       yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(emit.tool_result_event.to_string());
                                    }
                                }
-                               // Empty content = Anthropic's initial empty ToolCall.
-                               // Skip without inserting seen_tool_call_ids so ToolInput can emit.
                                continue;
                            }
                            if let Some(id) = call.tool_id.as_ref() {
