@@ -4,7 +4,74 @@ use crate::{
     },
     handlers::llm::{StreamWebSearchState, ToolInput},
 };
+use rust_decimal::prelude::{Decimal, FromPrimitive};
+use serde::Deserialize;
 use serde_json::Value;
+
+#[derive(Deserialize)]
+pub struct LlmErrorObject {
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub code: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct LlmErrorEnvelope {
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub error: Option<LlmErrorObject>,
+    pub message: Option<String>,
+}
+
+pub fn extract_llm_error_message(body: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<LlmErrorEnvelope>(body).ok()?;
+    if let Some(msg) = parsed.error.as_ref().and_then(|e| e.message.as_deref()) {
+        if !msg.is_empty() {
+            return Some(msg.to_string());
+        }
+    }
+    if let Some(msg) = parsed.message.as_deref() {
+        if !msg.is_empty() {
+            return Some(msg.to_string());
+        }
+    }
+    None
+}
+
+pub fn is_rate_limit_error(body: &str) -> bool {
+    let Ok(parsed) = serde_json::from_str::<LlmErrorEnvelope>(body) else {
+        return false;
+    };
+    if parsed.kind.as_deref() == Some("rate_limit_error") {
+        return true;
+    }
+    if let Some(error) = parsed.error {
+        if error.kind.as_deref() == Some("rate_limit_error") {
+            return true;
+        }
+        if error.code.as_deref() == Some("rate_limit_error") {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn calculate_cost_decimal(
+    input_tokens: i32,
+    output_tokens: i32,
+    input_rate: Option<f64>,
+    output_rate: Option<f64>,
+) -> Decimal {
+    let input_rate = input_rate.unwrap_or(0.0);
+    let output_rate = output_rate.unwrap_or(0.0);
+    if input_rate == 0.0 && output_rate == 0.0 {
+        return Decimal::from(0);
+    }
+    let cost =
+        (input_tokens as f64 * input_rate + output_tokens as f64 * output_rate) / 1_000_000.0;
+    Decimal::from_f64(cost).unwrap_or_else(|| Decimal::from(0))
+}
 
 pub fn to_chat_web_search_result(state: &StreamWebSearchState) -> ChatStreamWebSearchResult {
     ChatStreamWebSearchResult {

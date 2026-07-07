@@ -1,7 +1,8 @@
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect, Set,
 };
+use serde::Serialize;
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -9,12 +10,17 @@ use crate::{
     auth::encryption::{decrypt_key, encrypt_key},
     dto::mcp::{McpAccessRule, McpServer, McpTool, McpToolExecution},
     error::AppError,
+    llm::tooling::mcp_server_short_id,
     models::{
-        departments, mcp_access_policies, mcp_connections, mcp_executions, mcp_servers, mcp_tools,
-        roles, users,
+        departments, mcp_access_policies, mcp_connections, mcp_executions, mcp_oauth_states,
+        mcp_servers, mcp_servers::McpTransportType, mcp_tools, roles, users,
     },
-    services::mcp_client::{
-        McpOAuthConfig, McpOAuthTokens, oauth_config_from_connection, refresh_token,
+    services::{
+        mcp_client::{
+            McpOAuthConfig, McpOAuthTokens, build_authorization_url, oauth_config_from_connection,
+            refresh_token,
+        },
+        mcp_tools::{McpServerSummary, McpToolDescriptor},
     },
     state::SharedState,
 };
@@ -417,4 +423,182 @@ pub fn build_oauth_config(
             AppError::ServiceTemporarilyUnavailable
         },
     )
+}
+
+#[derive(Clone)]
+pub struct McpOauthPrompt {
+    pub authorization_url: String,
+    pub server_name: String,
+}
+
+#[derive(Serialize)]
+pub struct McpOauthRequiredEvent {
+    pub text: String,
+    pub server_id: Uuid,
+    pub server_name: String,
+    pub authorization_url: String,
+    pub tool_name: String,
+    pub tool_call_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct McpOauthErrorPayload {
+    pub error: String,
+    pub is_error: bool,
+    pub authorization_url: String,
+    pub server_id: Uuid,
+    pub server_name: String,
+}
+
+pub fn build_mcp_server_context(
+    servers: &[McpServerSummary],
+    tool_lookup: &HashMap<String, McpToolDescriptor>,
+) -> Option<String> {
+    if servers.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    lines.push("MCP servers selected for this request:".to_string());
+    for server in servers {
+        let short_id = mcp_server_short_id(&server.server_id);
+        let mut line = format!(
+            "- {} (id: {}, short: {})",
+            server.name, server.server_id, short_id
+        );
+        if let Some(description) = server
+            .description
+            .as_ref()
+            .map(|text| text.trim())
+            .filter(|text| !text.is_empty())
+        {
+            line.push_str(&format!(" — {}", description));
+        }
+        lines.push(line);
+    }
+    lines.push(
+        "Tools starting with mcp__<short>__ map to the corresponding server above.".to_string(),
+    );
+    let has_sqlx_query_tool = tool_lookup.values().any(|tool| {
+        tool.original_name == "sql_query" && tool.server_name.to_ascii_lowercase().contains("sqlx")
+    });
+    if has_sqlx_query_tool {
+        lines.push("SQL dialect hint: The sqlx MCP server uses PostgreSQL. Do not use sqlite_master, PRAGMA, or SHOW TABLES.".to_string());
+        lines.push(
+            "Use PostgreSQL catalog queries such as information_schema.tables when listing tables."
+                .to_string(),
+        );
+    }
+    Some(lines.join("\n"))
+}
+
+pub fn resolve_mcp_tool_descriptor<'a>(
+    lookup: &'a HashMap<String, McpToolDescriptor>,
+    tool_name: &str,
+) -> Option<&'a McpToolDescriptor> {
+    if let Some(found) = lookup.get(tool_name) {
+        return Some(found);
+    }
+    let is_mcp_name = tool_name.starts_with("mcp__");
+    let full_prefix = if is_mcp_name {
+        Some(format!("{tool_name}__"))
+    } else {
+        None
+    };
+    // Only valid when there are 3+ double-underscore separators; otherwise rsplit_once
+    // would strip the tool name itself and yield a server-only prefix that matches
+    // every tool on the same server.
+    let truncated_prefix = if is_mcp_name && tool_name.matches("__").count() >= 3 {
+        tool_name
+            .rsplit_once("__")
+            .map(|(prefix, _)| format!("{prefix}__"))
+    } else {
+        None
+    };
+
+    let matches: Vec<&McpToolDescriptor> = lookup
+        .iter()
+        .filter_map(|(name, descriptor)| {
+            if !is_mcp_name && descriptor.original_name == tool_name {
+                return Some(descriptor);
+            }
+            if !is_mcp_name {
+                return None;
+            }
+            if full_prefix
+                .as_ref()
+                .map(|prefix| name.starts_with(prefix))
+                .unwrap_or(false)
+            {
+                return Some(descriptor);
+            }
+            if truncated_prefix
+                .as_ref()
+                .map(|prefix| name.starts_with(prefix))
+                .unwrap_or(false)
+            {
+                return Some(descriptor);
+            }
+            None
+        })
+        .collect();
+
+    if matches.len() == 1 {
+        matches.first().copied()
+    } else {
+        None
+    }
+}
+
+pub async fn build_mcp_oauth_prompt(
+    state: &SharedState,
+    server_id: Uuid,
+    user_id: Uuid,
+) -> Result<McpOauthPrompt, AppError> {
+    let server = mcp_servers::Entity::find_by_id(server_id)
+        .one(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp server lookup error: {e}");
+            AppError::DbTimeout
+        })?
+        .ok_or(AppError::McpServerNotFound)?;
+
+    if !server.enabled {
+        return Err(AppError::McpServerNotFound);
+    }
+
+    if !matches!(
+        server.transport_type,
+        McpTransportType::Http | McpTransportType::Sse
+    ) {
+        return Err(AppError::ServiceTemporarilyUnavailable);
+    }
+
+    let oauth_config = build_oauth_config(state, &server)?;
+    let authorization = build_authorization_url(&oauth_config).map_err(|e| {
+        eprintln!("mcp oauth authorize url error: {e}");
+        AppError::ServiceTemporarilyUnavailable
+    })?;
+
+    let now = Utc::now();
+    let expires_at = now + Duration::minutes(10);
+    let model = mcp_oauth_states::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        server_id: Set(server_id),
+        user_id: Set(user_id),
+        state: Set(authorization.state.clone()),
+        pkce_verifier: Set(authorization.pkce_verifier.clone()),
+        redirect_uri: Set(None),
+        expires_at: Set(Some(expires_at)),
+        created_at: Set(now),
+    };
+    model.insert(&state.database).await.map_err(|e| {
+        eprintln!("mcp oauth state insert error: {e}");
+        AppError::DbTimeout
+    })?;
+
+    Ok(McpOauthPrompt {
+        authorization_url: authorization.authorization_url,
+        server_name: server.name,
+    })
 }
