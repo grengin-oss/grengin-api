@@ -9,17 +9,18 @@ use crate::{
     },
     dto::{
         admin_department::{
-            Department, DepartmentCreate, DepartmentListQuery, DepartmentMembersResponse,
-            DepartmentMemeberListQuery, DepartmentModelKey, DepartmentMove, DepartmentSortRule,
-            DepartmentTree, DepartmentTreeNode, DepartmentTreeQuery, DepartmentUpdate,
-            DepartmentsListResponse, RoleAssignmentPayload,
+            ChildCountRow, Department, DepartmentCreate, DepartmentListQuery,
+            DepartmentMembersResponse, DepartmentMemeberListQuery, DepartmentModelKey,
+            DepartmentMove, DepartmentRow, DepartmentSortRule, DepartmentTree, DepartmentTreeNode,
+            DepartmentTreeQuery, DepartmentTreeRow, DepartmentUpdate, DepartmentsListResponse,
+            DeptCountRow, RoleAssignmentPayload,
         },
         admin_user::User,
         common::SortRule,
     },
     models::{
         department_allowed_models,
-        departments::{self, ActionOnExceed, BudgetPeriod},
+        departments::{self, BudgetPeriod},
         roles, user_role_assignments,
         users::{self, UserStatus},
     },
@@ -41,12 +42,12 @@ use axum::{
     Json,
     extract::{Path, Query, State},
 };
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use migration::{Alias, BinOper, Func, SimpleExpr, extension::postgres::PgExpr};
 use reqwest::StatusCode;
 use rust_decimal::Decimal;
 use sea_orm::{
-    ActiveModelTrait, Condition, DatabaseConnection, EntityName as _, FromQueryResult, JoinType,
+    ActiveModelTrait, Condition, DatabaseConnection, EntityName as _, JoinType,
     Order, PaginatorTrait, QueryOrder, QuerySelect, RelationTrait,
     sea_query::{Expr, PostgresQueryBuilder, Query as SqlQuery},
 };
@@ -57,50 +58,6 @@ use sea_orm::{
 };
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
-
-#[derive(Debug, Clone, FromQueryResult)]
-pub(crate) struct DepartmentRow {
-    pub id: Uuid,
-    pub name: String,
-    pub description: String,
-    #[sea_orm(from_alias = "parentId")]
-    pub parent_id: Option<Uuid>,
-    pub depth: i32,
-    pub path: String, // comes from path::text alias
-    #[sea_orm(from_alias = "budgetAllocated")]
-    pub budget_allocated: Decimal,
-    #[sea_orm(from_alias = "budgetPeriod")]
-    pub budget_period: BudgetPeriod,
-    #[sea_orm(from_alias = "actionOnExceed")]
-    pub action_on_exceed: ActionOnExceed,
-    #[sea_orm(from_alias = "retentionDays")]
-    pub retention_days: Option<i32>,
-    #[sea_orm(from_alias = "createdAt")]
-    pub created_at: DateTime<Utc>,
-    #[sea_orm(from_alias = "updatedAt")]
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, FromQueryResult)]
-pub(crate) struct DepartmentTreeRow {
-    pub id: Uuid,
-    pub name: String,
-    pub description: String,
-    #[sea_orm(from_alias = "parentId")]
-    pub parent_id: Option<Uuid>,
-    pub depth: i32,
-    pub path: String,
-    #[sea_orm(from_alias = "budgetAllocated")]
-    pub budget_allocated: Decimal,
-    #[sea_orm(from_alias = "budgetPeriod")]
-    pub budget_period: BudgetPeriod,
-    #[sea_orm(from_alias = "retentionDays")]
-    pub retention_days: Option<i32>,
-    #[sea_orm(from_alias = "createdAt")]
-    pub created_at: DateTime<Utc>,
-    #[sea_orm(from_alias = "updatedAt")]
-    pub updated_at: DateTime<Utc>,
-}
 
 fn ltree_label_from_uuid(id: uuid::Uuid) -> String {
     id.simple().to_string()
@@ -572,20 +529,6 @@ pub async fn create_department(
     }
     let (_, Json(response)) = get_department_by_id(claims, State(app_state), Path(id)).await?;
     Ok((StatusCode::CREATED, Json(response)))
-}
-
-#[derive(Debug, FromQueryResult)]
-pub(crate) struct DeptCountRow {
-    #[sea_orm(from_alias = "departmentId")]
-    pub(crate) department_id: Uuid,
-    pub(crate) cnt: i64,
-}
-
-#[derive(Debug, FromQueryResult)]
-pub(crate) struct ChildCountRow {
-    #[sea_orm(from_alias = "parentId")]
-    pub(crate) parent_id: Uuid,
-    pub(crate) cnt: i64,
 }
 
 #[utoipa::path(

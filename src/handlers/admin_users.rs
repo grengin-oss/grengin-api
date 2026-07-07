@@ -5,7 +5,7 @@ use crate::{
         permissions::{PERMISSION_USERS_MANAGE, PERMISSION_USERS_VIEW},
     },
     dto::{
-        admin_user::{PaginatedUsers, User, UserCreate, UserPatchRequest, UserUpdate},
+        admin_user::{PaginatedUsers, User, UserCreate, UserDepartmentRow, UserPatchRequest, UserUpdate},
         common::{PaginationQuery, SortRule},
     },
     models::{
@@ -19,13 +19,12 @@ use axum::{
     Json,
     extract::{Path, Query, State},
 };
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, EntityTrait, FromQueryResult,
-    IntoActiveModel, JoinType, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
-    RelationTrait,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, EntityTrait, IntoActiveModel,
+    JoinType, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
 };
 use uuid::Uuid;
 
@@ -92,25 +91,6 @@ pub async fn get_user_by_id(
         effective_permissions: user.effective_permissions,
     };
     Ok((StatusCode::OK, Json(user_response)))
-}
-
-#[derive(Debug, Clone, FromQueryResult)]
-pub struct UserDepartmentRow {
-    pub id: Uuid,
-    pub email: String,
-    pub name: Option<String>,
-    pub status: users::UserStatus,
-    pub department_id: Option<Uuid>,
-    pub google_id: Option<String>,
-    pub azure_id: Option<String>,
-    pub picture: Option<String>,
-    pub password: Option<String>,
-    pub mfa_enabled: bool,
-    // from departments table (must be Option because LEFT JOIN)
-    pub department_name: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub last_login_at: DateTime<Utc>,
 }
 
 #[utoipa::path(

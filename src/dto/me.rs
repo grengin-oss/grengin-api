@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+pub enum PermissionScope {
+    Missing,
+    OrgWide,
+    Scoped(Vec<Uuid>),
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct AdministeredDepartmentsResponse {
     pub administered_departments: Vec<Uuid>,

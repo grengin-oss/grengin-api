@@ -6,6 +6,8 @@ use crate::{
     },
 };
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use sea_orm::FromQueryResult;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
@@ -156,4 +158,62 @@ pub struct RoleAssignmentPayload {
     pub user_id: Uuid,
     pub role_id: Uuid,
     pub scope_department_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+pub struct DepartmentRow {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    #[sea_orm(from_alias = "parentId")]
+    pub parent_id: Option<Uuid>,
+    pub depth: i32,
+    pub path: String,
+    #[sea_orm(from_alias = "budgetAllocated")]
+    pub budget_allocated: Decimal,
+    #[sea_orm(from_alias = "budgetPeriod")]
+    pub budget_period: BudgetPeriod,
+    #[sea_orm(from_alias = "actionOnExceed")]
+    pub action_on_exceed: ActionOnExceed,
+    #[sea_orm(from_alias = "retentionDays")]
+    pub retention_days: Option<i32>,
+    #[sea_orm(from_alias = "createdAt")]
+    pub created_at: DateTime<Utc>,
+    #[sea_orm(from_alias = "updatedAt")]
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+pub struct DepartmentTreeRow {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    #[sea_orm(from_alias = "parentId")]
+    pub parent_id: Option<Uuid>,
+    pub depth: i32,
+    pub path: String,
+    #[sea_orm(from_alias = "budgetAllocated")]
+    pub budget_allocated: Decimal,
+    #[sea_orm(from_alias = "budgetPeriod")]
+    pub budget_period: BudgetPeriod,
+    #[sea_orm(from_alias = "retentionDays")]
+    pub retention_days: Option<i32>,
+    #[sea_orm(from_alias = "createdAt")]
+    pub created_at: DateTime<Utc>,
+    #[sea_orm(from_alias = "updatedAt")]
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromQueryResult)]
+pub struct DeptCountRow {
+    #[sea_orm(from_alias = "departmentId")]
+    pub department_id: Uuid,
+    pub cnt: i64,
+}
+
+#[derive(Debug, FromQueryResult)]
+pub struct ChildCountRow {
+    #[sea_orm(from_alias = "parentId")]
+    pub parent_id: Uuid,
+    pub cnt: i64,
 }

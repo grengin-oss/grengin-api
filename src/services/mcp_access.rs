@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
 use sea_orm::sea_query::Expr;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect};
 use uuid::Uuid;
 
 use crate::{
-    auth::permissions::PERMISSION_MCP_ADMIN,
+    auth::{error::AuthError, permissions::PERMISSION_MCP_ADMIN},
     dto::mcp::McpResolvedVia,
     error::AppError,
     models::{
@@ -359,4 +359,42 @@ pub async fn resolve_tool_access_with_rules(
         resolved_via: McpResolvedVia::ToolDefault,
         priority: 0,
     })
+}
+
+pub async fn resolve_role_reference(
+    db: &DatabaseConnection,
+    access_type: mcp_access_policies::McpAccessType,
+    role_id: Option<Uuid>,
+    role_name: Option<String>,
+) -> Result<(Option<Uuid>, Option<String>), AuthError> {
+    if access_type != mcp_access_policies::McpAccessType::Role {
+        return Ok((None, None));
+    }
+
+    if let Some(role_id) = role_id {
+        let role = roles::Entity::find_by_id(role_id)
+            .one(db)
+            .await
+            .map_err(|e| {
+                eprintln!("role lookup error: {e}");
+                AuthError::DbTimeout
+            })?
+            .ok_or(AuthError::ResourceNotFound)?;
+        return Ok((Some(role.id), Some(role.name)));
+    }
+
+    if let Some(role_name) = role_name {
+        let role = roles::Entity::find()
+            .filter(roles::Column::Name.eq(role_name))
+            .one(db)
+            .await
+            .map_err(|e| {
+                eprintln!("role lookup error: {e}");
+                AuthError::DbTimeout
+            })?
+            .ok_or(AuthError::ResourceNotFound)?;
+        return Ok((Some(role.id), Some(role.name)));
+    }
+
+    Err(AuthError::ResourceNotFound)
 }

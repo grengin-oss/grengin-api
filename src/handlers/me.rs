@@ -20,8 +20,9 @@ use crate::{
     },
     dto::{
         admin_department::{
-            Department, DepartmentListQuery, DepartmentSortRule, DepartmentTree,
-            DepartmentTreeNode, DepartmentTreeQuery, DepartmentsListResponse,
+            ChildCountRow, Department, DepartmentListQuery, DepartmentRow, DepartmentSortRule,
+            DepartmentTree, DepartmentTreeNode, DepartmentTreeQuery, DepartmentTreeRow,
+            DepartmentsListResponse, DeptCountRow,
         },
         admin_user::User,
         analytics::{
@@ -30,12 +31,12 @@ use crate::{
         common::SortRule,
         me::{
             AdministeredDepartmentUsersQuery, EffectivePermissionsResponse,
-            MeDepartmentUsersResponse,
+            MeDepartmentUsersResponse, PermissionScope,
         },
     },
     handlers::admin_department::{
-        ChildCountRow, DepartmentRow, DepartmentTreeRow, DeptCountRow, department_budget_snapshot,
-        departments_base_select, departments_tree_select, load_department_admin_ids_map,
+        department_budget_snapshot, departments_base_select, departments_tree_select,
+        load_department_admin_ids_map,
     },
     models::{
         departments, permissions, role_permissions, roles, user_role_assignments, users,
@@ -140,12 +141,6 @@ fn needs_effective_permissions_refresh(value: &Option<Value>) -> bool {
         Some(_) => true,
         None => true,
     }
-}
-
-enum PermissionScope {
-    Missing,
-    OrgWide,
-    Scoped(Vec<Uuid>),
 }
 
 fn parse_permission_scope(permissions: &Value, key: &str) -> PermissionScope {

@@ -1,5 +1,6 @@
-use crate::models::users::UserStatus;
+use crate::models::users::{self, UserStatus};
 use chrono::{DateTime, Utc};
+use sea_orm::FromQueryResult;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -63,4 +64,22 @@ pub struct UserUpdate {
 #[derive(Deserialize, ToSchema)]
 pub struct UserPatchRequest {
     pub status: UserStatus,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+pub struct UserDepartmentRow {
+    pub id: Uuid,
+    pub email: String,
+    pub name: Option<String>,
+    pub status: users::UserStatus,
+    pub department_id: Option<Uuid>,
+    pub google_id: Option<String>,
+    pub azure_id: Option<String>,
+    pub picture: Option<String>,
+    pub password: Option<String>,
+    pub mfa_enabled: bool,
+    pub department_name: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_login_at: DateTime<Utc>,
 }

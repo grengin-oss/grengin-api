@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use sea_orm::FromQueryResult;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -90,4 +91,20 @@ pub struct RoleAssignmentPayload {
     pub user_id: Uuid,
     pub role_id: Uuid,
     pub scope_department_id: Option<Uuid>,
+}
+
+#[derive(Debug, FromQueryResult)]
+pub struct RolePermissionRow {
+    #[sea_orm(from_alias = "roleId")]
+    pub role_id: Uuid,
+    pub domain: String,
+    pub action: String,
+}
+
+#[derive(Debug, FromQueryResult)]
+pub struct RoleUserCountRow {
+    #[sea_orm(from_alias = "role_id")]
+    pub role_id: Uuid,
+    #[sea_orm(from_alias = "user_count")]
+    pub user_count: i64,
 }

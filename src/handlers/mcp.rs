@@ -37,12 +37,12 @@ use crate::{
         mcp_access_policies::McpAccessTarget,
         mcp_connections, mcp_executions, mcp_oauth_states, mcp_servers,
         mcp_servers::{McpDefaultAccess, McpTransportType},
-        mcp_tools, roles,
+        mcp_tools,
     },
     services::authorization::{AuthorizationService, PermissionScopeMode},
     services::mcp_access::{
-        build_access_context, load_server_rules, load_tool_rules, resolve_server_access_with_rules,
-        resolve_tool_access_with_rules,
+        build_access_context, load_server_rules, load_tool_rules, resolve_role_reference,
+        resolve_server_access_with_rules, resolve_tool_access_with_rules,
     },
     services::mcp_client::{build_authorization_url, exchange_code},
     services::mcp_helpers::{
@@ -1631,40 +1631,3 @@ fn map_mcp_access_error(err: AppError) -> AuthError {
     }
 }
 
-async fn resolve_role_reference(
-    db: &sea_orm::DatabaseConnection,
-    access_type: mcp_access_policies::McpAccessType,
-    role_id: Option<Uuid>,
-    role_name: Option<String>,
-) -> Result<(Option<Uuid>, Option<String>), AuthError> {
-    if access_type != mcp_access_policies::McpAccessType::Role {
-        return Ok((None, None));
-    }
-
-    if let Some(role_id) = role_id {
-        let role = roles::Entity::find_by_id(role_id)
-            .one(db)
-            .await
-            .map_err(|e| {
-                eprintln!("role lookup error: {e}");
-                AuthError::DbTimeout
-            })?
-            .ok_or(AuthError::ResourceNotFound)?;
-        return Ok((Some(role.id), Some(role.name)));
-    }
-
-    if let Some(role_name) = role_name {
-        let role = roles::Entity::find()
-            .filter(roles::Column::Name.eq(role_name))
-            .one(db)
-            .await
-            .map_err(|e| {
-                eprintln!("role lookup error: {e}");
-                AuthError::DbTimeout
-            })?
-            .ok_or(AuthError::ResourceNotFound)?;
-        return Ok((Some(role.id), Some(role.name)));
-    }
-
-    Err(AuthError::ResourceNotFound)
-}

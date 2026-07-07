@@ -5,7 +5,7 @@ use crate::{
     config::setting::OidcClient,
     dto::{
         auth::{AuthToken, TokenType, User},
-        oauth::{AuthCallback, StartParams},
+        oauth::{AuthCallback, CallbackExchangeMode, StartParams},
     },
     state::SharedState,
 };
@@ -46,12 +46,6 @@ use sea_orm::{
 use serde::Deserialize;
 use std::borrow::Cow;
 use uuid::Uuid;
-
-#[derive(Clone, Copy)]
-enum CallbackExchangeMode {
-    Auto,
-    AzureMobilePublic,
-}
 
 #[allow(dead_code)]
 #[derive(Deserialize)]
