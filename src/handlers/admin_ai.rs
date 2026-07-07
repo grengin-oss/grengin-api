@@ -5,14 +5,13 @@ use crate::{
         error::{AuthError, Error},
         permissions::{PERMISSION_AI_PLATFORM_MANAGE, PERMISSION_AI_PLATFORM_VIEW},
     },
-    dto::{
-        admin_ai::{
-            AIEngineDetail, AIEngineModels, AIEngineUpdate, AIEngineValidation, AiModel,
-            AiModelCapabilities,
-        },
-        models::ModelsResponse,
+    dto::admin_ai::{
+        AIEngineDetail, AIEngineModels, AIEngineUpdate, AIEngineValidation, AiModel,
+        AiModelCapabilities,
     },
-    handlers::models::{load_providers_cached, refresh_models_cache},
+    services::ai_engine_helpers::{
+        load_models_response, load_models_response_refreshed, normalize_bearer_token,
+    },
     llm::{
         gemini::GEMINI_API_URL,
         mistral::MISTRAL_API_URL,
@@ -34,43 +33,6 @@ use sea_orm::{
 };
 use std::collections::HashSet;
 use uuid::Uuid;
-
-fn normalize_bearer_token(raw: &str) -> String {
-    let trimmed = raw.trim();
-    let without_prefix = trimmed
-        .strip_prefix("Bearer ")
-        .or_else(|| trimmed.strip_prefix("bearer "))
-        .unwrap_or(trimmed);
-    without_prefix.trim().to_string()
-}
-
-async fn load_models_response(app_state: &SharedState) -> Result<ModelsResponse, AuthError> {
-    let providers = load_providers_cached(&app_state.req_client)
-        .await
-        .map_err(|e| {
-            eprintln!("providers cache error: {e}");
-            AuthError::DbTimeout
-        })?;
-    Ok(ModelsResponse { providers })
-}
-
-async fn load_models_response_refreshed(
-    app_state: &SharedState,
-) -> Result<ModelsResponse, AuthError> {
-    let providers = match refresh_models_cache(&app_state.req_client).await {
-        Ok(cache) => cache.providers,
-        Err(error) => {
-            eprintln!("providers cache refresh error: {error}");
-            load_providers_cached(&app_state.req_client)
-                .await
-                .map_err(|e| {
-                    eprintln!("providers cache fallback error: {e}");
-                    AuthError::DbTimeout
-                })?
-        }
-    };
-    Ok(ModelsResponse { providers })
-}
 
 #[utoipa::path(
     get,

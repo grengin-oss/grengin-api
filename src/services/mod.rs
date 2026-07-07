@@ -1,5 +1,8 @@
+pub mod ai_engine_helpers;
 pub mod artifacts;
 pub mod chat_stream_builder;
+pub mod me_helpers;
+pub mod sso_seed;
 pub mod analytics;
 pub mod analytics_cache;
 pub mod audit_logs;
