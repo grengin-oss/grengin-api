@@ -11,11 +11,14 @@ pub const ARTIFACT_TOOL_NAME: &str = "create_artifact";
 pub const ARTIFACT_TOOL_DESC: &str = "Use this tool to output a standalone document — \
 a complete HTML page, a full Markdown file, or a long code file — \
 that is best viewed separately from your conversational reply. \
-Do not repeat the artifact content in your reply.";
+Before calling this tool, briefly describe in your reply what you are building. \
+After this tool completes, write a short description of what you built.";
 
 pub const ARTIFACT_SYSTEM_HINT: &str = "When the user asks you to produce a standalone HTML page, \
-Markdown document, or a complete self-contained code file, always call the \
-`create_artifact` tool instead of writing the content inline in your reply.";
+Markdown document, or a complete self-contained code file: \
+first write one sentence in your reply saying what you are about to create, \
+then call the `create_artifact` tool with the full content, \
+then after the tool call write a brief description of what you built.";
 
 pub fn artifact_tool_schema() -> Value {
     json!({
@@ -35,8 +38,6 @@ pub struct ArtifactEmit {
     pub tool_result_event: ChatStream,
 }
 
-/// Build the two SSE events for an artifact emission from parsed tool args.
-/// Returns `None` when content is empty (Anthropic's initial empty ToolCall block).
 pub fn build_artifact_emit(args: &Value, tool_id: Option<String>) -> Option<ArtifactEmit> {
     let content = args["content"].as_str().unwrap_or("").to_string();
     if content.is_empty() {
@@ -64,6 +65,7 @@ pub fn build_artifact_emit(args: &Value, tool_id: Option<String>) -> Option<Arti
                 value: serde_json::json!({
                     "title": title,
                     "contentType": content_type,
+                    "content": args["content"],
                 }),
             }),
             kind: Some(ChatToolKind::Other),
