@@ -1,7 +1,20 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
-use serde_json::Value;
+use anyhow::Error;
+use reqwest::Client as ReqwestClient;
+use reqwest_eventsource::EventSource;
+use serde_json::{Value, json};
+
+use crate::{
+    config::setting::GeminiSettings,
+    dto::llm::gemini::normalize_gemini_parameters,
+    llm::provider::GeminiApis,
+    services::{
+        artifacts::{ARTIFACT_TOOL_DESC, ARTIFACT_TOOL_NAME},
+        mcp_tools::McpToolDescriptor,
+    },
+};
 
 use crate::handlers::llm::{
     StreamParseResult, StreamParser, StreamWebSearchResult, ToolInput, build_tool_call,
@@ -212,4 +225,88 @@ impl StreamParser for GeminiStreamParser {
             first
         }
     }
+}
+
+pub fn build_gemini_tools(
+    web_search: bool,
+    mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
+    artifact_schema: &Value,
+) -> Option<Value> {
+    let mut tools: Vec<Value> = Vec::new();
+    if web_search {
+        tools.push(json!({ "google_search": {} }));
+    }
+    let mut function_declarations: Vec<Value> = Vec::new();
+    for descriptor in mcp_tool_lookup.values() {
+        let description = descriptor
+            .description
+            .clone()
+            .unwrap_or_else(|| descriptor.original_name.clone());
+        function_declarations.push(json!({
+            "name": descriptor.openai_name.clone(),
+            "description": description,
+            "parameters": normalize_gemini_parameters(&descriptor.input_schema),
+        }));
+    }
+    function_declarations.push(json!({
+        "name": ARTIFACT_TOOL_NAME,
+        "description": ARTIFACT_TOOL_DESC,
+        "parameters": normalize_gemini_parameters(artifact_schema),
+    }));
+    tools.push(json!({ "function_declarations": function_declarations }));
+    Some(Value::Array(tools))
+}
+
+pub fn build_gemini_tool_config(
+    web_search: bool,
+    selected_tools: &[String],
+    mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
+) -> Option<Value> {
+    let mut config = serde_json::Map::new();
+    if web_search && !mcp_tool_lookup.is_empty() {
+        config.insert(
+            "include_server_side_tool_invocations".to_string(),
+            json!(true),
+        );
+    }
+    if !selected_tools.is_empty() && mcp_tool_lookup.len() == 1 {
+        let tool_name = mcp_tool_lookup.keys().next().cloned().unwrap_or_default();
+        config.insert(
+            "function_calling_config".to_string(),
+            json!({ "mode": "ANY", "allowed_function_names": [tool_name] }),
+        );
+    } else {
+        config.insert(
+            "function_calling_config".to_string(),
+            json!({ "mode": "AUTO" }),
+        );
+    }
+    if config.is_empty() {
+        None
+    } else {
+        Some(Value::Object(config))
+    }
+}
+
+pub async fn continue_gemini_stream(
+    client: &ReqwestClient,
+    settings: &GeminiSettings,
+    model_name: String,
+    temperature: Option<f32>,
+    system_instruction: Option<Value>,
+    contents: Vec<Value>,
+    tools: Option<Value>,
+    tool_config: Option<Value>,
+) -> Result<EventSource, Error> {
+    client
+        .gemini_chat_stream_with_contents(
+            settings,
+            model_name,
+            temperature,
+            system_instruction,
+            Value::Array(contents),
+            tools,
+            tool_config,
+        )
+        .await
 }

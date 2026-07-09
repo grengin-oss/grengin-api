@@ -1,9 +1,23 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use serde_json::Value;
+use anyhow::Error;
+use reqwest::Client as ReqwestClient;
+use reqwest_eventsource::EventSource;
+use serde_json::{Value, json};
 
-use crate::dto::llm::mistral::{MistralChatCompletionChunk, MistralToolCallDelta};
+use crate::{
+    config::setting::MistralSettings,
+    dto::llm::mistral::{
+        MistralChatCompletionChunk, MistralMessage, MistralTool, MistralToolCallDelta,
+        MistralToolDefinition,
+    },
+    llm::provider::MistralApis,
+    services::{
+        artifacts::{ARTIFACT_TOOL_DESC, ARTIFACT_TOOL_NAME},
+        mcp_tools::McpToolDescriptor,
+    },
+};
 
 use super::{
     StreamParseResult, StreamParser, ToolInput, build_tool_call, build_tool_input_delta,
@@ -231,4 +245,69 @@ impl StreamParser for MistralStreamParser {
 
         StreamParseResult::None
     }
+}
+
+pub fn build_mistral_artifact_fn(artifact_schema: Value) -> MistralTool {
+    MistralTool::Function {
+        function: MistralToolDefinition {
+            name: ARTIFACT_TOOL_NAME.to_string(),
+            description: Some(ARTIFACT_TOOL_DESC.to_string()),
+            parameters: artifact_schema,
+        },
+    }
+}
+
+pub fn build_mistral_tools(
+    use_conversations: bool,
+    mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
+    artifact_schema: Value,
+) -> Option<Vec<MistralTool>> {
+    let mut tools = Vec::new();
+    if !use_conversations {
+        for descriptor in mcp_tool_lookup.values() {
+            let description = descriptor
+                .description
+                .clone()
+                .unwrap_or_else(|| descriptor.original_name.clone());
+            tools.push(MistralTool::Function {
+                function: MistralToolDefinition {
+                    name: descriptor.openai_name.clone(),
+                    description: Some(description),
+                    parameters: descriptor.input_schema.clone(),
+                },
+            });
+        }
+    }
+    tools.push(build_mistral_artifact_fn(artifact_schema));
+    if tools.is_empty() { None } else { Some(tools) }
+}
+
+pub fn build_mistral_tool_choice(
+    selected_tools: &[String],
+    mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
+    has_tools: bool,
+) -> Option<Value> {
+    if !has_tools {
+        return None;
+    }
+    if !selected_tools.is_empty() && mcp_tool_lookup.len() == 1 {
+        let tool_name = mcp_tool_lookup.keys().next().cloned().unwrap_or_default();
+        Some(json!({"type":"function","function":{"name": tool_name}}))
+    } else {
+        Some(json!("auto"))
+    }
+}
+
+pub async fn continue_mistral_stream(
+    client: &ReqwestClient,
+    settings: &MistralSettings,
+    model_name: String,
+    temperature: Option<f32>,
+    messages: Vec<MistralMessage>,
+    tools: Option<Vec<MistralTool>>,
+    tool_choice: Option<Value>,
+) -> Result<EventSource, Error> {
+    client
+        .mistral_chat_stream_with_messages(settings, model_name, temperature, messages, tools, tool_choice)
+        .await
 }

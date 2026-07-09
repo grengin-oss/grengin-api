@@ -8,7 +8,7 @@ use sea_orm::{
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::models::audit_logs;
+use crate::{dto::audit_logs::AuditLogEntry, models::audit_logs};
 
 const DEFAULT_RETENTION_DAYS: i64 = 365;
 const DEFAULT_PAGE: u64 = 1;
@@ -191,4 +191,64 @@ fn audit_log_retention_days() -> i64 {
         .and_then(|raw| raw.parse::<i64>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(DEFAULT_RETENTION_DAYS)
+}
+
+pub const EXPORT_BATCH_LIMIT: u64 = 500;
+
+pub fn to_entry(model: audit_logs::Model) -> AuditLogEntry {
+    AuditLogEntry {
+        id: model.id,
+        user_id: model.user_id,
+        action: model.action,
+        resource_type: model.resource_type,
+        resource_id: model.resource_id,
+        details: model.details,
+        ip_address: model.ip_address,
+        user_agent: model.user_agent,
+        created_at: model.created_at,
+    }
+}
+
+pub fn export_max_rows() -> u64 {
+    env::var("AUDIT_LOG_EXPORT_MAX_ROWS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(50_000)
+}
+
+pub fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        return format!("\"{}\"", value.replace('"', "\"\""));
+    }
+    value.to_string()
+}
+
+pub fn render_csv(entries: &[AuditLogEntry]) -> String {
+    let mut lines = Vec::with_capacity(entries.len() + 1);
+    lines.push(
+        "id,user_id,action,resource_type,resource_id,ip_address,user_agent,created_at,details"
+            .to_string(),
+    );
+    for entry in entries {
+        let details = entry
+            .details
+            .as_ref()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let row = [
+            csv_escape(&entry.id.to_string()),
+            csv_escape(&entry.user_id.map(|v| v.to_string()).unwrap_or_default()),
+            csv_escape(&entry.action),
+            csv_escape(&entry.resource_type.clone().unwrap_or_default()),
+            csv_escape(&entry.resource_id.clone().unwrap_or_default()),
+            csv_escape(&entry.ip_address.clone().unwrap_or_default()),
+            csv_escape(&entry.user_agent.clone().unwrap_or_default()),
+            csv_escape(&entry.created_at.to_rfc3339()),
+            csv_escape(&details),
+        ]
+        .join(",");
+        lines.push(row);
+    }
+    lines.join("\n")
 }

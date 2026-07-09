@@ -10,7 +10,6 @@ use sea_orm::{
     QueryFilter, QueryOrder, QuerySelect,
 };
 use uuid::Uuid;
-
 use crate::{
     auth::{
         claims::Claims,

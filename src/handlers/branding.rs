@@ -1,3 +1,8 @@
+use axum::{Json, extract::State};
+use chrono::Utc;
+use reqwest::StatusCode;
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, IntoActiveModel};
+
 use crate::{
     auth::{
         claims::Claims,
@@ -5,66 +10,13 @@ use crate::{
         permissions::PERMISSION_AI_PLATFORM_MANAGE,
     },
     dto::branding::{Branding, BrandingUpdate},
-    models::branding,
-    services::authorization::{AuthorizationService, PermissionScopeMode},
+    services::{
+        authorization::{AuthorizationService, PermissionScopeMode},
+        branding_helpers::{get_or_create_branding, model_to_response},
+    },
     state::SharedState,
 };
-use axum::{Json, extract::State};
-use chrono::Utc;
-use reqwest::StatusCode;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, IntoActiveModel};
-use uuid::Uuid;
 
-fn create_default_branding() -> branding::Model {
-    branding::Model {
-        id: Uuid::new_v4(),
-        name: "Grengin".into(),
-        logo_url: None,
-        color_primary: "#4079c5".into(),
-        color_accent: "#2d906b".into(),
-        font_family: "Coustard".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    }
-}
-
-fn model_to_response(model: &branding::Model) -> Branding {
-    Branding {
-        name: model.name.clone(),
-        logo_url: model.logo_url.clone(),
-        color_primary: model.color_primary.clone(),
-        color_accent: model.color_accent.clone(),
-        font_family: model.font_family.clone(),
-    }
-}
-
-async fn get_or_create_branding(app_state: &SharedState) -> Result<branding::Model, AuthError> {
-    let branding_model = branding::Entity::find()
-        .one(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("branding query error: {e}");
-            AuthError::DbTimeout
-        })?;
-
-    if let Some(model) = branding_model {
-        Ok(model)
-    } else {
-        let default_branding = create_default_branding();
-        default_branding
-            .clone()
-            .into_active_model()
-            .insert(&app_state.database)
-            .await
-            .map_err(|e| {
-                eprintln!("branding insert error: {e}");
-                AuthError::DbTimeout
-            })?;
-        Ok(default_branding)
-    }
-}
-
-/// Get branding configuration (public, no auth required)
 #[utoipa::path(
     get,
     path = "/branding",
@@ -81,7 +33,6 @@ pub async fn get_branding(
     Ok((StatusCode::OK, Json(model_to_response(&branding))))
 }
 
-/// Get branding configuration (admin)
 #[utoipa::path(
     get,
     path = "/admin/branding",
@@ -111,7 +62,6 @@ pub async fn get_admin_branding(
     Ok((StatusCode::OK, Json(model_to_response(&branding))))
 }
 
-/// Update branding configuration (admin)
 #[utoipa::path(
     put,
     path = "/admin/branding",

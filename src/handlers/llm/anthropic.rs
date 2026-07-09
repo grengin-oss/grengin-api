@@ -1,12 +1,26 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use anyhow::Error;
+use reqwest::Client as ReqwestClient;
+use reqwest_eventsource::EventSource;
+use serde_json::Value;
+
 use super::{
     StreamParseResult, StreamParser, StreamWebSearchAction, StreamWebSearchResult, ToolInput,
     build_tool_call, build_tool_input_delta, parse_web_search_action, tool_name_is_web_search,
 };
-use crate::dto::llm::anthropic::{
-    AnthropicContentBlockResponse, AnthropicDelta, AnthropicStreamEvent,
+use crate::{
+    config::setting::AnthropicSettings,
+    dto::llm::anthropic::{
+        AnthropicContentBlockResponse, AnthropicDelta, AnthropicMessage, AnthropicStreamEvent,
+        AnthropicTool, AnthropicToolUnion, AnthropicWebSearchTool,
+    },
+    llm::provider::AnthropicApis,
+    services::{
+        artifacts::{ARTIFACT_TOOL_DESC, ARTIFACT_TOOL_NAME},
+        mcp_tools::McpToolDescriptor,
+    },
 };
 
 /// Anthropic stream parser
@@ -218,4 +232,55 @@ impl StreamParser for AnthropicStreamParser {
             Err(_) => StreamParseResult::None,
         }
     }
+}
+
+pub fn build_anthropic_tools(
+    web_search: bool,
+    mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
+    artifact_schema: Value,
+) -> Option<Vec<AnthropicToolUnion>> {
+    let mut tools = Vec::new();
+    if web_search {
+        tools.push(AnthropicToolUnion::WebSearchTool(AnthropicWebSearchTool::new(Some(5))));
+    }
+    for descriptor in mcp_tool_lookup.values() {
+        let description = descriptor
+            .description
+            .clone()
+            .unwrap_or_else(|| descriptor.original_name.clone());
+        tools.push(AnthropicToolUnion::ClientTool(AnthropicTool {
+            name: descriptor.openai_name.clone(),
+            description,
+            input_schema: descriptor.input_schema.clone(),
+        }));
+    }
+    tools.push(AnthropicToolUnion::ClientTool(AnthropicTool {
+        name: ARTIFACT_TOOL_NAME.to_string(),
+        description: ARTIFACT_TOOL_DESC.to_string(),
+        input_schema: artifact_schema,
+    }));
+    if tools.is_empty() { None } else { Some(tools) }
+}
+
+pub async fn continue_anthropic_stream(
+    client: &ReqwestClient,
+    settings: &AnthropicSettings,
+    model_name: String,
+    max_tokens: i32,
+    temperature: Option<f32>,
+    messages: Vec<AnthropicMessage>,
+    system_prompt: Option<String>,
+    tools: Option<Vec<AnthropicToolUnion>>,
+) -> Result<EventSource, Error> {
+    client
+        .anthropic_chat_stream_with_messages(
+            settings,
+            model_name,
+            max_tokens,
+            temperature,
+            messages,
+            system_prompt,
+            tools,
+        )
+        .await
 }

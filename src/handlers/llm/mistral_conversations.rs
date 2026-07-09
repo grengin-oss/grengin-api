@@ -1,7 +1,20 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use serde_json::Value;
+use anyhow::Error;
+use reqwest::Client as ReqwestClient;
+use reqwest_eventsource::EventSource;
+use serde_json::{Value, json};
+
+use crate::{
+    config::setting::MistralSettings,
+    dto::llm::mistral::{MistralTool, MistralToolDefinition},
+    llm::provider::MistralApis,
+    services::{
+        artifacts::{ARTIFACT_TOOL_DESC, ARTIFACT_TOOL_NAME},
+        mcp_tools::McpToolDescriptor,
+    },
+};
 
 use super::{
     StreamParseResult, StreamParser, StreamWebSearchResult, ToolInput, build_tool_call,
@@ -355,4 +368,82 @@ impl StreamParser for MistralConversationStreamParser {
 
         StreamParseResult::None
     }
+}
+
+pub fn build_mistral_conversation_tools(
+    web_search: bool,
+    mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
+    artifact_schema: Value,
+) -> Option<Vec<MistralTool>> {
+    let mut tools = Vec::new();
+    if web_search {
+        tools.push(MistralTool::WebSearch);
+    }
+    for descriptor in mcp_tool_lookup.values() {
+        let description = descriptor
+            .description
+            .clone()
+            .unwrap_or_else(|| descriptor.original_name.clone());
+        tools.push(MistralTool::Function {
+            function: MistralToolDefinition {
+                name: descriptor.openai_name.clone(),
+                description: Some(description),
+                parameters: descriptor.input_schema.clone(),
+            },
+        });
+    }
+    tools.push(MistralTool::Function {
+        function: MistralToolDefinition {
+            name: ARTIFACT_TOOL_NAME.to_string(),
+            description: Some(ARTIFACT_TOOL_DESC.to_string()),
+            parameters: artifact_schema,
+        },
+    });
+    if tools.is_empty() { None } else { Some(tools) }
+}
+
+pub fn build_mistral_conversation_start_args(
+    temperature: Option<f32>,
+    selected_tools: &[String],
+    mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
+) -> Option<Value> {
+    let mut map = serde_json::Map::new();
+    if let Some(t) = temperature {
+        map.insert("temperature".to_string(), json!(t));
+    }
+    if !selected_tools.is_empty() && mcp_tool_lookup.len() == 1 {
+        if let Some(tool_name) = mcp_tool_lookup.keys().next() {
+            map.insert(
+                "tool_choice".to_string(),
+                json!({"type":"function","function":{"name": tool_name}}),
+            );
+        }
+    }
+    if map.is_empty() { None } else { Some(Value::Object(map)) }
+}
+
+pub async fn start_mistral_conversation_stream(
+    client: &ReqwestClient,
+    settings: &MistralSettings,
+    model_name: String,
+    inputs: Value,
+    tools: Option<Vec<MistralTool>>,
+    completion_args: Option<Value>,
+    instructions: Option<String>,
+) -> Result<EventSource, Error> {
+    client
+        .mistral_conversation_start_stream(settings, inputs, tools, completion_args, Some(model_name), None, instructions)
+        .await
+}
+
+pub async fn continue_mistral_conversation_stream(
+    client: &ReqwestClient,
+    settings: &MistralSettings,
+    conversation_id: String,
+    inputs: Value,
+    tools: Option<Vec<MistralTool>>,
+) -> Result<EventSource, Error> {
+    client
+        .mistral_conversation_append_stream(settings, conversation_id, inputs, tools, None)
+        .await
 }

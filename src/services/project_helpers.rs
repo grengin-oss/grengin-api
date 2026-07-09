@@ -1,10 +1,8 @@
 use std::collections::HashMap;
-
 use sea_orm::{
     ColumnTrait, Condition, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
 };
 use uuid::Uuid;
-
 use crate::{
     auth::error::AuthError,
     dto::projects::{ProjectChatResponse, ProjectMcpServerResponse, ProjectResponse, ProjectSourceResponse},

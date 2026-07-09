@@ -2,7 +2,12 @@ use axum::http::HeaderMap;
 use std::{fs, path::Path, process::Command as StdCommand, time::Duration};
 use tokio::process::Command;
 
-use crate::auth::error::AuthError;
+use crate::{
+    auth::{claims::Claims, error::AuthError, permissions::PERMISSION_SYSTEM_MAINTAIN},
+    dto::admin_reconfigure_dto::ReconfigureScriptAvailability,
+    services::authorization::{AuthorizationService, PermissionScopeMode},
+    state::SharedState,
+};
 
 pub const RECONFIGURE_TOKEN_HEADER: &str = "x-grengin-reconfigure-token";
 pub const DEFAULT_DOMAIN_RECONFIGURE_SCRIPT: &str = "/opt/grengin/scripts/reconfigure-domain.sh";
@@ -312,4 +317,70 @@ pub fn summarize_output(stdout: &[u8], stderr: &[u8]) -> Vec<String> {
     }
 
     lines
+}
+
+pub fn build_script_availability(
+    script_path: String,
+    requested_use_sudo: bool,
+    env_prefix: &str,
+) -> ReconfigureScriptAvailability {
+    let exists = script_exists(&script_path);
+    let executable = script_executable(&script_path);
+
+    let (available, effective_use_sudo, reason) = if !exists {
+        (
+            false,
+            false,
+            Some(format!("Script not found at path: {script_path}")),
+        )
+    } else if !executable {
+        (
+            false,
+            false,
+            Some(format!("Script is not executable: {script_path}")),
+        )
+    } else {
+        match resolve_script_sudo_usage(requested_use_sudo, env_prefix) {
+            Ok(value) => (true, value, None),
+            Err(message) => (false, false, Some(message)),
+        }
+    };
+
+    ReconfigureScriptAvailability {
+        script_path,
+        exists,
+        executable,
+        requested_use_sudo,
+        effective_use_sudo,
+        available,
+        reason,
+    }
+}
+
+pub async fn ensure_system_maintainer(
+    claims: &Claims,
+    app_state: &SharedState,
+    headers: &HeaderMap,
+) -> Result<(), AuthError> {
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_SYSTEM_MAINTAIN,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
+
+    if let Some(expected_token) = expected_reconfigure_token() {
+        let Some(provided_token) = provided_reconfigure_token(headers) else {
+            return Err(AuthError::PermissionDenied);
+        };
+        if provided_token != expected_token {
+            return Err(AuthError::PermissionDenied);
+        }
+    }
+
+    Ok(())
 }
