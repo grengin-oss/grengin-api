@@ -37,7 +37,7 @@ use crate::{
         mcp_executions,
         mcp_servers::McpTransportType,
         messages::{self, ChatRole},
-        project_mcp_servers, projects, users,
+        projects, users,
     },
     services::{
         artifacts::{
@@ -318,7 +318,7 @@ pub async fn handle_chat_stream(
     let provider = req.provider.clone().unwrap_or_else(|| "openai".to_string());
     let selected_tools = req.selected_tools.clone().unwrap_or_default();
     let request_selected_mcp_servers = req.selected_mcp_servers.clone().unwrap_or_default();
-    let mut selected_mcp_servers = request_selected_mcp_servers.clone();
+    let selected_mcp_servers = request_selected_mcp_servers.clone();
     let web_search = req.web_search;
     let openai_settings = app_state.settings.openai.read().await.clone();
     let anthropic_settings = app_state.settings.anthropic.read().await.clone();
@@ -797,20 +797,6 @@ pub async fn handle_chat_stream(
             text: ARTIFACT_SYSTEM_HINT.to_string(),
             files: Vec::new(),
         });
-    }
-    // Auto-load MCP servers from linked projects when none are explicitly selected.
-    if selected_mcp_servers.is_empty() && !project_ids.is_empty() {
-        let project_server_ids: Vec<Uuid> = project_mcp_servers::Entity::find()
-            .select_only()
-            .column(project_mcp_servers::Column::ServerId)
-            .filter(project_mcp_servers::Column::ProjectId.is_in(project_ids.clone()))
-            .into_tuple::<Uuid>()
-            .all(&app_state.database)
-            .await
-            .unwrap_or_default();
-        if !project_server_ids.is_empty() {
-            selected_mcp_servers = project_server_ids;
-        }
     }
     let provider_is_openai = provider.to_lowercase() == "openai";
     let provider_is_anthropic = provider.to_lowercase() == "anthropic";
