@@ -7,16 +7,18 @@ use reqwest_eventsource::EventSource;
 use serde_json::Value;
 
 use super::{
-    StreamParseResult, StreamParser, StreamWebSearchAction, StreamWebSearchResult, ToolInput,
-    build_tool_call, build_tool_input_delta, parse_web_search_action, tool_name_is_web_search,
+    StreamErrorKind, StreamParseResult, StreamParser, StreamWebSearchAction, StreamWebSearchResult,
+    ToolInput, build_tool_call, build_tool_input_delta, parse_web_search_action,
+    tool_name_is_web_search,
 };
 use crate::{
     config::setting::AnthropicSettings,
     dto::llm::anthropic::{
-        AnthropicContentBlockResponse, AnthropicDelta, AnthropicMessage, AnthropicStreamEvent,
-        AnthropicTool, AnthropicToolUnion, AnthropicWebSearchTool,
+        AnthropicContentBlock, AnthropicContentBlockResponse, AnthropicDelta, AnthropicMessage,
+        AnthropicRole, AnthropicStreamEvent, AnthropicTool, AnthropicToolUnion,
+        AnthropicWebSearchTool,
     },
-    llm::provider::AnthropicApis,
+    llm::{prompt::Prompt, provider::AnthropicApis},
     services::{
         artifacts::{ARTIFACT_TOOL_DESC, ARTIFACT_TOOL_NAME},
         mcp_tools::McpToolDescriptor,
@@ -221,7 +223,7 @@ impl StreamParser for AnthropicStreamParser {
                 }
 
                 AnthropicStreamEvent::Error { error } => StreamParseResult::Error {
-                    error_type: error.error_type,
+                    kind: StreamErrorKind::from_provider_str(&error.error_type),
                     message: error.message,
                 },
 
@@ -283,4 +285,43 @@ pub async fn continue_anthropic_stream(
             tools,
         )
         .await
+}
+
+pub fn make_anthropic_tool_blocks(
+    call_id: String,
+    tool_name: String,
+    args: Value,
+    output: &Value,
+    is_error: bool,
+) -> (AnthropicContentBlock, AnthropicContentBlock) {
+    (
+        AnthropicContentBlock::ToolUse {
+            id: call_id.clone(),
+            name: tool_name,
+            input: args,
+        },
+        AnthropicContentBlock::ToolResult {
+            tool_use_id: call_id,
+            content: serde_json::to_string(output).unwrap_or_else(|_| "{}".to_string()),
+            is_error: Some(is_error),
+        },
+    )
+}
+
+pub fn build_anthropic_continuation(
+    existing: Option<Vec<AnthropicMessage>>,
+    base_prompts: Vec<Prompt>,
+    tool_use_blocks: Vec<AnthropicContentBlock>,
+    tool_result_blocks: Vec<AnthropicContentBlock>,
+) -> (Vec<AnthropicMessage>, Option<String>) {
+    let (mut messages, system_prompt) = if let Some(m) = existing {
+        (m, None)
+    } else {
+        AnthropicMessage::from_prompts(base_prompts)
+    };
+    if !tool_use_blocks.is_empty() {
+        messages.push(AnthropicMessage::with_blocks(AnthropicRole::Assistant, tool_use_blocks));
+    }
+    messages.push(AnthropicMessage::with_blocks(AnthropicRole::User, tool_result_blocks));
+    (messages, system_prompt)
 }

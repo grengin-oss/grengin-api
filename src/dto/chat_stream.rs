@@ -26,8 +26,8 @@ pub enum ChatStreamEvents {
     Artifact,
     #[serde(rename = "budget_warning")]
     DepartmentBudgetWarning,
-    #[serde(rename = "llm_token_exhausted")]
-    LlmTokenExhausted,
+    #[serde(rename = "llm_error")]
+    LlmError,
 }
 
 #[derive(Serialize, ToSchema)]

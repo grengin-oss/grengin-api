@@ -8,7 +8,10 @@ use serde_json::{Value, json};
 
 use crate::{
     config::setting::GeminiSettings,
-    dto::llm::gemini::normalize_gemini_parameters,
+    dto::llm::gemini::{
+        GeminiContent, GeminiFunctionCall, GeminiFunctionResponse, GeminiPart,
+        normalize_gemini_parameters,
+    },
     llm::provider::GeminiApis,
     services::{
         artifacts::{ARTIFACT_TOOL_DESC, ARTIFACT_TOOL_NAME},
@@ -17,7 +20,8 @@ use crate::{
 };
 
 use crate::handlers::llm::{
-    StreamParseResult, StreamParser, StreamWebSearchResult, ToolInput, build_tool_call,
+    StreamErrorKind, StreamParseResult, StreamParser, StreamWebSearchResult, ToolInput,
+    build_tool_call,
 };
 
 #[derive(Default)]
@@ -50,7 +54,7 @@ impl StreamParser for GeminiStreamParser {
             Ok(v) => v,
             Err(err) => {
                 return StreamParseResult::Error {
-                    error_type: "gemini_parse_error".to_string(),
+                    kind: StreamErrorKind::ProviderError,
                     message: err.to_string(),
                 };
             }
@@ -59,16 +63,15 @@ impl StreamParser for GeminiStreamParser {
             let message = error
                 .get("message")
                 .and_then(|v| v.as_str())
-                .unwrap_or("gemini stream error")
+                .unwrap_or("Gemini stream error")
                 .to_string();
-            let error_type = error
+            let raw_type = error
                 .get("status")
                 .or_else(|| error.get("type"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("gemini_error")
-                .to_string();
+                .unwrap_or("gemini_error");
             return StreamParseResult::Error {
-                error_type,
+                kind: StreamErrorKind::from_provider_str(raw_type),
                 message,
             };
         }
@@ -286,6 +289,39 @@ pub fn build_gemini_tool_config(
     } else {
         Some(Value::Object(config))
     }
+}
+
+pub fn build_gemini_tool_messages(
+    call_id: String,
+    tool_name: String,
+    args: Value,
+    output: &Value,
+    thought_signature: Option<Value>,
+) -> (GeminiContent, GeminiContent) {
+    let model_turn = GeminiContent {
+        role: "model".to_string(),
+        parts: vec![GeminiPart {
+            function_call: Some(GeminiFunctionCall {
+                id: call_id.clone(),
+                name: tool_name.clone(),
+                args,
+            }),
+            thought_signature,
+            ..GeminiPart::default()
+        }],
+    };
+    let user_turn = GeminiContent {
+        role: "user".to_string(),
+        parts: vec![GeminiPart {
+            function_response: Some(GeminiFunctionResponse {
+                id: call_id,
+                name: tool_name,
+                response: json!({ "output": output }),
+            }),
+            ..GeminiPart::default()
+        }],
+    };
+    (model_turn, user_turn)
 }
 
 pub async fn continue_gemini_stream(

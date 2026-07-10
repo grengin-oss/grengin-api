@@ -9,7 +9,7 @@ pub struct GeminiContent {
     pub parts: Vec<GeminiPart>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GeminiPart {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,

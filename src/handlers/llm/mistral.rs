@@ -9,10 +9,11 @@ use serde_json::{Value, json};
 use crate::{
     config::setting::MistralSettings,
     dto::llm::mistral::{
-        MistralChatCompletionChunk, MistralMessage, MistralTool, MistralToolCallDelta,
-        MistralToolDefinition,
+        MistralChatCompletionChunk, MistralConversationFunctionResult, MistralMessage, MistralTool,
+        MistralToolCall, MistralToolCallDelta, MistralToolDefinition, MistralToolFunction,
     },
-    llm::provider::MistralApis,
+    llm::{prompt::Prompt, provider::MistralApis},
+    models::messages::ChatRole,
     services::{
         artifacts::{ARTIFACT_TOOL_DESC, ARTIFACT_TOOL_NAME},
         mcp_tools::McpToolDescriptor,
@@ -20,8 +21,8 @@ use crate::{
 };
 
 use super::{
-    StreamParseResult, StreamParser, ToolInput, build_tool_call, build_tool_input_delta,
-    parse_web_search_action,
+    StreamErrorKind, StreamParseResult, StreamParser, ToolInput, build_tool_call,
+    build_tool_input_delta, parse_web_search_action,
 };
 
 #[derive(Debug, Clone)]
@@ -185,6 +186,38 @@ impl StreamParser for MistralStreamParser {
             Err(_) => return StreamParseResult::None,
         };
 
+        if value.get("object").and_then(|v| v.as_str()) == Some("error") {
+            let message = value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Mistral stream error")
+                .to_string();
+            let raw_type = value
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("mistral_error");
+            return StreamParseResult::Error {
+                kind: StreamErrorKind::from_provider_str(raw_type),
+                message,
+            };
+        }
+        if let Some(error) = value.get("error") {
+            let message = error
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Mistral stream error")
+                .to_string();
+            let raw_type = error
+                .get("type")
+                .or_else(|| error.get("code"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("mistral_error");
+            return StreamParseResult::Error {
+                kind: StreamErrorKind::from_provider_str(raw_type),
+                message,
+            };
+        }
+
         if let Ok(chunk) = serde_json::from_value::<MistralChatCompletionChunk>(value.clone()) {
             // Process choices (text / tool calls) BEFORE checking usage so that a chunk
             // carrying both finish_reason:"tool_calls" and usage doesn't lose the tool call.
@@ -310,4 +343,124 @@ pub async fn continue_mistral_stream(
     client
         .mistral_chat_stream_with_messages(settings, model_name, temperature, messages, tools, tool_choice)
         .await
+}
+
+pub fn build_mistral_conversation_tools(
+    web_search: bool,
+    supports_mcp_tools: bool,
+    mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
+    artifact_schema: Value,
+) -> Option<Vec<MistralTool>> {
+    let mut tools = Vec::new();
+    if web_search {
+        tools.push(MistralTool::WebSearch);
+    }
+    if supports_mcp_tools {
+        for descriptor in mcp_tool_lookup.values() {
+            let description = descriptor
+                .description
+                .clone()
+                .unwrap_or_else(|| descriptor.original_name.clone());
+            tools.push(MistralTool::Function {
+                function: MistralToolDefinition {
+                    name: descriptor.openai_name.clone(),
+                    description: Some(description),
+                    parameters: descriptor.input_schema.clone(),
+                },
+            });
+        }
+    }
+    tools.push(build_mistral_artifact_fn(artifact_schema));
+    if tools.is_empty() { None } else { Some(tools) }
+}
+
+pub fn build_mistral_agent_inputs(previous_prompts: &[Prompt]) -> (String, Value) {
+    let mut instructions = Vec::new();
+    let entries = previous_prompts
+        .iter()
+        .filter_map(|prompt| match prompt.role {
+            ChatRole::System => {
+                if !prompt.text.trim().is_empty() {
+                    instructions.push(prompt.text.clone());
+                }
+                None
+            }
+            ChatRole::User | ChatRole::Assistant => Some(json!({
+                "object": "entry",
+                "type": "message.input",
+                "role": prompt.role,
+                "content": prompt.text,
+            })),
+            _ => None,
+        })
+        .collect::<Vec<Value>>();
+    (instructions.join("\n\n"), Value::Array(entries))
+}
+
+pub fn build_mistral_completion_args(
+    temperature: Option<f32>,
+    selected_tools: &[String],
+    mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
+    use_conversations: bool,
+) -> Option<Value> {
+    let mut map = serde_json::Map::new();
+    if let Some(t) = temperature {
+        map.insert("temperature".to_string(), json!(t));
+    }
+    if !use_conversations && !selected_tools.is_empty() && mcp_tool_lookup.len() == 1 {
+        if let Some(tool_name) = mcp_tool_lookup.keys().next() {
+            map.insert(
+                "tool_choice".to_string(),
+                json!({"type": "function", "function": {"name": tool_name}}),
+            );
+        }
+    }
+    if map.is_empty() { None } else { Some(Value::Object(map)) }
+}
+
+pub fn make_mistral_conversation_result(call_id: String, output: &Value) -> MistralConversationFunctionResult {
+    MistralConversationFunctionResult {
+        object: "entry".to_string(),
+        result_type: "function.result".to_string(),
+        tool_call_id: call_id,
+        result: serde_json::to_string(output).unwrap_or_else(|_| "{}".to_string()),
+    }
+}
+
+pub fn make_mistral_tool_result(
+    call_id: String,
+    tool_name: String,
+    args: Value,
+    output: &Value,
+) -> (MistralToolCall, MistralMessage) {
+    let tool_call = MistralToolCall {
+        id: call_id.clone(),
+        call_type: "function".to_string(),
+        function: MistralToolFunction {
+            name: tool_name.clone(),
+            arguments: serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string()),
+        },
+    };
+    let message = MistralMessage::tool_response(
+        tool_name,
+        call_id,
+        serde_json::to_string(output).unwrap_or_else(|_| "{}".to_string()),
+    );
+    (tool_call, message)
+}
+
+pub fn build_mistral_continuation(
+    existing: Option<Vec<MistralMessage>>,
+    base_prompts: Vec<Prompt>,
+    stream_content: String,
+    tool_calls: Vec<MistralToolCall>,
+    tool_messages: Vec<MistralMessage>,
+) -> Vec<MistralMessage> {
+    let mut messages = existing.unwrap_or_else(|| MistralMessage::from_prompts(base_prompts));
+    if !tool_calls.is_empty() {
+        let content = if stream_content.trim().is_empty() { None } else { Some(stream_content) };
+        messages.push(MistralMessage::assistant_with_tool_calls(content, tool_calls));
+    }
+    messages.extend(tool_messages);
+    messages
 }

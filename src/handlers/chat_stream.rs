@@ -8,19 +8,32 @@ use crate::{
         },
         files::File,
         llm::anthropic::{
-            ANTHROPIC_DEFAULT_MAX_TOKENS, AnthropicContentBlock, AnthropicMessage, AnthropicRole,
-            AnthropicTool, AnthropicToolUnion, AnthropicWebSearchTool,
+            ANTHROPIC_DEFAULT_MAX_TOKENS, AnthropicContentBlock, AnthropicMessage,
         },
-        llm::gemini::{normalize_gemini_parameters, prompts_to_gemini_payload},
-        llm::mistral::{MistralMessage, MistralTool, MistralToolCall, MistralToolDefinition},
-        llm::openai::{OpenaiFunctionCallOutput, OpenaiInputItem, OpenaiTool},
+        llm::gemini::{prompts_to_gemini_payload, GeminiContent},
+        llm::mistral::{MistralConversationFunctionResult, MistralMessage, MistralToolCall},
+        llm::openai::OpenaiInputItem,
     },
-    error::{AppError, ErrorDetailVariant, ErrorResponse},
+    error::{AppError, ChatStreamError, ErrorResponse},
     handlers::llm::{
         StreamParseResult, StreamParser, StreamWebSearchAction as ParsedWebSearchAction,
-        StreamWebSearchState, ToolCall, ToolInput, anthropic::AnthropicStreamParser,
-        gemini::GeminiStreamParser, mistral::MistralStreamParser,
-        mistral_conversations::MistralConversationStreamParser, openai::OpenaiStreamParser,
+        StreamWebSearchState, ToolCall, ToolInput,
+        anthropic::{
+            AnthropicStreamParser, build_anthropic_continuation, build_anthropic_tools,
+            make_anthropic_tool_blocks,
+        },
+        gemini::{
+            GeminiStreamParser, build_gemini_tool_config, build_gemini_tool_messages,
+            build_gemini_tools,
+        },
+        mistral::{
+            MistralStreamParser, build_mistral_agent_inputs, build_mistral_completion_args,
+            build_mistral_continuation, build_mistral_conversation_tools,
+            build_mistral_tool_choice, build_mistral_tools, make_mistral_conversation_result,
+            make_mistral_tool_result,
+        },
+        mistral_conversations::MistralConversationStreamParser,
+        openai::{OpenaiStreamParser, build_openai_tools, make_openai_function_output},
         update_web_search_action_state, update_web_search_results_state,
     },
     services::models_cache::get_model_info_cached,
@@ -41,11 +54,10 @@ use crate::{
     },
     services::{
         artifacts::{
-            ARTIFACT_TOOL_NAME, ARTIFACT_TOOL_DESC, ARTIFACT_SYSTEM_HINT,
+            ARTIFACT_TOOL_NAME, ARTIFACT_SYSTEM_HINT,
             artifact_tool_schema, build_artifact_emit,
         },
         budget_allocation::{get_department_budget_status, refresh_department_budget_available},
-        chat_stream_builder::LlmProviderConfig,
         department_policies::check_model_allowed,
         mcp_helpers::{
             build_mcp_oauth_prompt, build_mcp_server_context,
@@ -62,7 +74,7 @@ use crate::{
     },
     state::SharedState,
     utils::chat_stream::{
-        calculate_cost_decimal, is_rate_limit_error,
+        calculate_cost_decimal, extract_llm_error_message, is_rate_limit_error,
         to_chat_tool_input, to_chat_web_search_result, tool_input_to_value,
         tool_result_status_from_output,
     },
@@ -89,6 +101,12 @@ use std::{collections::HashMap, convert::Infallible};
 use tokio::time::Instant;
 use uuid::Uuid;
 
+enum LlmProviderConfig {
+    OpenAI(crate::config::setting::OpenaiSettings),
+    Anthropic(crate::config::setting::AnthropicSettings),
+    Mistral(crate::config::setting::MistralSettings),
+    Gemini(crate::config::setting::GeminiSettings),
+}
 
 
 #[utoipa::path(
@@ -103,75 +121,110 @@ use uuid::Uuid;
     (status = 200, content_type = "text/event-stream", body = ChatStream,
       examples(
     ("conversation" = (
-      description = "event:conversation",
+      description = "event:conversation — emitted once at the start. is_new=true when a new conversation was created.",
       value = json!({
         "event": "conversation",
-        "data": { "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "title": "...", "is_new": true }
+        "data": { "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "title": "My first chat", "is_new": true }
+      })
+    )),
+    ("budget_warning" = (
+      description = "event:budget_warning — emitted after conversation when the department budget is low. Stream continues.",
+      value = json!({
+        "event": "budget_warning",
+        "data": { "department_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "budget_available": "1.25", "action": "warn", "message": "Department budget is running low." }
       })
     )),
     ("message_start" = (
-      description = "event:message_start",
+      description = "event:message_start — emitted when the assistant message record is created.",
       value = json!({
         "event": "message_start",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
       })
     )),
-    ("delta_1" = (
-      description = "event:delta",
+    ("delta" = (
+      description = "event:delta — one or more text chunks streamed from the model.",
       value = json!({
         "event": "delta",
-        "data": { "text": "Hello" }
-      })
-    )),
-    ("delta_2" = (
-      description = "event:delta",
-      value = json!({
-        "event": "delta",
-        "data": { "text": " world" }
-      })
-    )),
-    ("message_end" = (
-      description = "event:message_end",
-      value = json!({
-        "event": "message_end",
-        "data": { "input_tokens": 100, "output_tokens": 25, "latency_ms": 450 }
+        "data": { "text": "Hello world" }
       })
     )),
     ("event" = (
-      description = "event:event",
+      description = "event:event — internal model event such as a thinking_delta from extended reasoning.",
       value = json!({
         "event": "event",
         "data": { "event": { "event_type": "thinking_delta", "text": "Considering options..." } }
       })
     )),
     ("tool_call" = (
-      description = "event:tool_call",
+      description = "event:tool_call — emitted when the model invokes a tool (web search, MCP tool, artifact, etc.).",
       value = json!({
         "event": "tool_call",
         "data": { "tool_call": { "tool_name": "web_search_call", "tool_id": "ws_123", "kind": "web_search", "web_search": { "query": "latest rust release" } } }
       })
     )),
     ("tool_result" = (
-      description = "event:tool_result",
+      description = "event:tool_result — emitted after a tool call completes with its output.",
       value = json!({
         "event": "tool_result",
-        "data": { "tool_result": { "tool_name": "web_search_call", "tool_id": "ws_123", "kind": "web_search", "web_search": { "query": "latest rust release", "results": [{ "title": "...", "url": "https://example.com" }] } } }
+        "data": { "tool_result": { "tool_name": "web_search_call", "tool_id": "ws_123", "kind": "web_search", "status": "success", "web_search": { "query": "latest rust release", "results": [{ "title": "Rust 1.80 released", "url": "https://blog.rust-lang.org" }] } } }
+      })
+    )),
+    ("artifact" = (
+      description = "event:artifact — emitted when the model produces an artifact (code block, document, etc.).",
+      value = json!({
+        "event": "artifact",
+        "data": { "id": "art_abc123", "title": "Hello World in Rust", "contentType": "application/vnd.grengin.code+rust", "content": "fn main() { println!(\"Hello, world!\"); }" }
+      })
+    )),
+    ("message_end" = (
+      description = "event:message_end — emitted when the model finishes. Contains token usage and cost.",
+      value = json!({
+        "event": "message_end",
+        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "input_tokens": 320, "output_tokens": 85, "latency_ms": 1240, "cost": 0.00042 }
+      })
+    )),
+    ("cancelled" = (
+      description = "event:cancelled — emitted when the stream was cancelled by the client before completion.",
+      value = json!({
+        "event": "cancelled",
+        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
       })
     )),
     ("done" = (
-      description = "event:done",
+      description = "event:done — final event. Always emitted last (even after llm_error or cancelled).",
       value = json!({
         "event": "done",
         "data": {}
+      })
+    )),
+    ("llm_error_quota" = (
+      description = "event:llm_error (code 4005) — provider rate limit or API quota exhausted. Read detail.code to distinguish error types. Stream ends after this event.",
+      value = json!({
+        "event": "llm_error",
+        "data": { "detail": { "type": "rich", "code": 4005, "description": "The openai API quota or rate limit has been exhausted.", "solution": "Check your API key quota and billing, or wait for the rate limit window to reset.", "description_key": "error.llm.api_quota_exhausted.description", "solution_key": "error.llm.api_quota_exhausted.solution", "params": { "app": "grengin", "provider": "openai" }, "external_code": null } }
+      })
+    )),
+    ("llm_error_provider" = (
+      description = "event:llm_error (code 4006) — provider returned an error inside the stream (discontinued model, bad request, server error). Stream ends after this event.",
+      value = json!({
+        "event": "llm_error",
+        "data": { "detail": { "type": "rich", "code": 4006, "description": "Error from mistral: The model `mistral-small-latest` has been deprecated.", "solution": "Verify the selected model is available and your API key is valid.", "description_key": "error.llm.stream_provider_error.description", "solution_key": "error.llm.stream_provider_error.solution", "params": { "app": "grengin", "provider": "mistral", "message": "The model `mistral-small-latest` has been deprecated." }, "external_code": null } }
+      })
+    )),
+    ("llm_error_connection" = (
+      description = "event:llm_error (code 4007) — failed to initiate or reconnect a stream request. Stream ends after this event.",
+      value = json!({
+        "event": "llm_error",
+        "data": { "detail": { "type": "rich", "code": 4007, "description": "Failed to establish or maintain a stream connection to gemini.", "solution": "Try again. If the problem persists, check the provider's status page.", "description_key": "error.llm.stream_connection_failed.description", "solution_key": "error.llm.stream_connection_failed.solution", "params": { "app": "grengin", "provider": "gemini" }, "external_code": null } }
       })
     ))
    )
    ),
     (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
-    (status = 400, content_type = "application/json", body = ErrorResponse, description = "Validation error (code=2002 empty messages)"),
-    (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003) or budget exceeded (code=6001)"),
-    (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found / DB not found (code=5003)"),
-    (status = 503, content_type = "application/json", body = ErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+    (status = 400, content_type = "application/json", body = ErrorResponse, description = "Validation error — empty messages (code=2002)"),
+    (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003), model not allowed for department (code=6002), or budget exceeded (code=6001)"),
+    (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found (code=5003)"),
+    (status = 503, content_type = "application/json", body = ErrorResponse, description = "DB unavailable (code=5000) or timeout (code=5001)"),
 
     ),
 )]
@@ -186,75 +239,110 @@ pub async fn handle_chat_stream_path_doc() {}
     (status = 200, content_type = "text/event-stream", body = ChatStream,
       examples(
     ("conversation" = (
-      description = "event:conversation",
+      description = "event:conversation — emitted once at the start. is_new=true when a new conversation was created.",
       value = json!({
         "event": "conversation",
-        "data": { "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "title": "...", "is_new": true }
+        "data": { "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "title": "My first chat", "is_new": true }
+      })
+    )),
+    ("budget_warning" = (
+      description = "event:budget_warning — emitted after conversation when the department budget is low. Stream continues.",
+      value = json!({
+        "event": "budget_warning",
+        "data": { "department_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "budget_available": "1.25", "action": "warn", "message": "Department budget is running low." }
       })
     )),
     ("message_start" = (
-      description = "event:message_start",
+      description = "event:message_start — emitted when the assistant message record is created.",
       value = json!({
         "event": "message_start",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
       })
     )),
-    ("delta_1" = (
-      description = "event:delta",
+    ("delta" = (
+      description = "event:delta — one or more text chunks streamed from the model.",
       value = json!({
         "event": "delta",
-        "data": { "text": "Hello" }
-      })
-    )),
-    ("delta_2" = (
-      description = "event:delta",
-      value = json!({
-        "event": "delta",
-        "data": { "text": " world" }
-      })
-    )),
-    ("message_end" = (
-      description = "event:message_end",
-      value = json!({
-        "event": "message_end",
-        "data": { "input_tokens": 100, "output_tokens": 25, "latency_ms": 450 }
+        "data": { "text": "Hello world" }
       })
     )),
     ("event" = (
-      description = "event:event",
+      description = "event:event — internal model event such as a thinking_delta from extended reasoning.",
       value = json!({
         "event": "event",
         "data": { "event": { "event_type": "thinking_delta", "text": "Considering options..." } }
       })
     )),
     ("tool_call" = (
-      description = "event:tool_call",
+      description = "event:tool_call — emitted when the model invokes a tool (web search, MCP tool, artifact, etc.).",
       value = json!({
         "event": "tool_call",
         "data": { "tool_call": { "tool_name": "web_search_call", "tool_id": "ws_123", "kind": "web_search", "web_search": { "query": "latest rust release" } } }
       })
     )),
     ("tool_result" = (
-      description = "event:tool_result",
+      description = "event:tool_result — emitted after a tool call completes with its output.",
       value = json!({
         "event": "tool_result",
-        "data": { "tool_result": { "tool_name": "web_search_call", "tool_id": "ws_123", "kind": "web_search", "web_search": { "query": "latest rust release", "results": [{ "title": "...", "url": "https://example.com" }] } } }
+        "data": { "tool_result": { "tool_name": "web_search_call", "tool_id": "ws_123", "kind": "web_search", "status": "success", "web_search": { "query": "latest rust release", "results": [{ "title": "Rust 1.80 released", "url": "https://blog.rust-lang.org" }] } } }
+      })
+    )),
+    ("artifact" = (
+      description = "event:artifact — emitted when the model produces an artifact (code block, document, etc.).",
+      value = json!({
+        "event": "artifact",
+        "data": { "id": "art_abc123", "title": "Hello World in Rust", "contentType": "application/vnd.grengin.code+rust", "content": "fn main() { println!(\"Hello, world!\"); }" }
+      })
+    )),
+    ("message_end" = (
+      description = "event:message_end — emitted when the model finishes. Contains token usage and cost.",
+      value = json!({
+        "event": "message_end",
+        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "input_tokens": 320, "output_tokens": 85, "latency_ms": 1240, "cost": 0.00042 }
+      })
+    )),
+    ("cancelled" = (
+      description = "event:cancelled — emitted when the stream was cancelled by the client before completion.",
+      value = json!({
+        "event": "cancelled",
+        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
       })
     )),
     ("done" = (
-      description = "event:done",
+      description = "event:done — final event. Always emitted last (even after llm_error or cancelled).",
       value = json!({
         "event": "done",
         "data": {}
+      })
+    )),
+    ("llm_error_quota" = (
+      description = "event:llm_error (code 4005) — provider rate limit or API quota exhausted. Read detail.code to distinguish error types. Stream ends after this event.",
+      value = json!({
+        "event": "llm_error",
+        "data": { "detail": { "type": "rich", "code": 4005, "description": "The openai API quota or rate limit has been exhausted.", "solution": "Check your API key quota and billing, or wait for the rate limit window to reset.", "description_key": "error.llm.api_quota_exhausted.description", "solution_key": "error.llm.api_quota_exhausted.solution", "params": { "app": "grengin", "provider": "openai" }, "external_code": null } }
+      })
+    )),
+    ("llm_error_provider" = (
+      description = "event:llm_error (code 4006) — provider returned an error inside the stream (discontinued model, bad request, server error). Stream ends after this event.",
+      value = json!({
+        "event": "llm_error",
+        "data": { "detail": { "type": "rich", "code": 4006, "description": "Error from mistral: The model `mistral-small-latest` has been deprecated.", "solution": "Verify the selected model is available and your API key is valid.", "description_key": "error.llm.stream_provider_error.description", "solution_key": "error.llm.stream_provider_error.solution", "params": { "app": "grengin", "provider": "mistral", "message": "The model `mistral-small-latest` has been deprecated." }, "external_code": null } }
+      })
+    )),
+    ("llm_error_connection" = (
+      description = "event:llm_error (code 4007) — failed to initiate or reconnect a stream request. Stream ends after this event.",
+      value = json!({
+        "event": "llm_error",
+        "data": { "detail": { "type": "rich", "code": 4007, "description": "Failed to establish or maintain a stream connection to gemini.", "solution": "Try again. If the problem persists, check the provider's status page.", "description_key": "error.llm.stream_connection_failed.description", "solution_key": "error.llm.stream_connection_failed.solution", "params": { "app": "grengin", "provider": "gemini" }, "external_code": null } }
       })
     ))
    )
    ),
     (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
-    (status = 400, content_type = "application/json", body = ErrorResponse, description = "Validation error (code=2002 empty messages)"),
-    (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003) or budget exceeded (code=6001)"),
-    (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found / DB not found (code=5003)"),
-    (status = 503, content_type = "application/json", body = ErrorResponse, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
+    (status = 400, content_type = "application/json", body = ErrorResponse, description = "Validation error — empty messages (code=2002)"),
+    (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003), model not allowed for department (code=6002), or budget exceeded (code=6001)"),
+    (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found (code=5003)"),
+    (status = 503, content_type = "application/json", body = ErrorResponse, description = "DB unavailable (code=5000) or timeout (code=5001)"),
     ),
 )]
 pub async fn handle_chat_stream_doc() {}
@@ -375,7 +463,7 @@ pub async fn handle_chat_stream(
             let model = req
                 .model_name
                 .clone()
-                .unwrap_or_else(|| "mistral-small-latest".to_string());
+                .unwrap_or_else(|| "mistral-small-2603".to_string());
             (LlmProviderConfig::Mistral(settings), model)
         }
         "gemini" => {
@@ -491,15 +579,6 @@ pub async fn handle_chat_stream(
             })?
             .ok_or(AppError::DbNotFound)?;
         let mut conversation_active = conversation.clone().into_active_model();
-        // if !selected_tools.is_empty(){
-        // if let Some(json) =  conversation.metadata.as_mut() {
-        //     // Update metadata TODO
-        //  }
-        // conversation_active
-        //   .metadata
-        //   .as_mut()
-        //   .or(Some(&mut metadata));
-        // }
         conversation_active.updated_at = Set(Utc::now());
         conversation_active.message_count =
             Set(conversation.message_count + req.messages.len() as i32);
@@ -590,7 +669,7 @@ pub async fn handle_chat_stream(
             }
             LlmProviderConfig::Mistral(settings) => {
                 let model = get_title_generation_model(&provider)
-                    .unwrap_or("mistral-small-latest")
+                    .unwrap_or("mistral-small-2603")
                     .to_string();
                 app_state
                     .req_client
@@ -741,8 +820,6 @@ pub async fn handle_chat_stream(
             );
         }
     }
-    // Inject project instructions as the top-priority system prompt block.
-    // Two-step query to avoid camelCase column aliasing issues in Sea-ORM JOINs.
     let project_ids: Vec<Uuid> = conversation_projects::Entity::find()
         .select_only()
         .column(conversation_projects::Column::ProjectId)
@@ -774,8 +851,6 @@ pub async fn handle_chat_stream(
                 "You are working within the context of the following project(s). Follow their instructions carefully.\n\n{}",
                 project_blocks.join("\n\n---\n\n")
             );
-            // Prepend to the existing system prompt so providers that accept only one
-            // system block (e.g. Anthropic) don't silently discard it.
             if let Some(existing) = previous_prompts.iter_mut().find(|p| p.role == ChatRole::System) {
                 existing.text = format!("{}\n\n---\n\n{}", project_text, existing.text);
             } else {
@@ -787,8 +862,6 @@ pub async fn handle_chat_stream(
             }
         }
     }
-    // Append artifact hint to the system prompt so all providers instruct the model
-    // to use create_artifact instead of writing standalone documents inline.
     if let Some(sys) = previous_prompts.iter_mut().find(|p| p.role == ChatRole::System) {
         sys.text = format!("{}\n\n{}", sys.text, ARTIFACT_SYSTEM_HINT);
     } else {
@@ -823,14 +896,6 @@ pub async fn handle_chat_stream(
     let mistral_has_function_tools = provider_is_mistral && !mcp_tool_lookup.is_empty();
     let mistral_use_conversations =
         provider_is_mistral && (web_search || mistral_has_function_tools);
-    if std::env::var("MISTRAL_TOOL_DEBUG").as_deref() == Ok("1") && provider_is_mistral {
-        println!(
-            "mistral mcp debug: selected_tools={:?} selected_mcp_servers={:?} mcp_tools_loaded={:?}",
-            selected_tools,
-            selected_mcp_servers,
-            mcp_tool_lookup.keys().cloned().collect::<Vec<_>>()
-        );
-    }
     if supports_mcp_tools {
         if let Some(context) = build_mcp_server_context(&mcp_server_summaries, &mcp_tool_lookup) {
             let insert_at = previous_prompts
@@ -849,166 +914,27 @@ pub async fn handle_chat_stream(
     }
     let artifact_tool_schema = artifact_tool_schema();
 
-    let mut openai_tools = Vec::new();
-    if web_search {
-        openai_tools.push(OpenaiTool::web_search());
-    }
-    openai_tools.extend(mcp_openai_tools);
-    openai_tools.push(OpenaiTool::Function {
-        name: ARTIFACT_TOOL_NAME.to_string(),
-        description: Some(ARTIFACT_TOOL_DESC.to_string()),
-        parameters: artifact_tool_schema.clone(),
-        strict: None,
-    });
-    let openai_tools = if openai_tools.is_empty() { None } else { Some(openai_tools) };
-    let mut anthropic_tools = Vec::new();
-    if web_search {
-        anthropic_tools.push(AnthropicToolUnion::WebSearchTool(
-            AnthropicWebSearchTool::new(Some(5)),
-        ));
-    }
-    if supports_mcp_tools {
-        for descriptor in mcp_tool_lookup.values() {
-            let description = descriptor
-                .description
-                .clone()
-                .unwrap_or_else(|| descriptor.original_name.clone());
-            anthropic_tools.push(AnthropicToolUnion::ClientTool(AnthropicTool {
-                name: descriptor.openai_name.clone(),
-                description,
-                input_schema: descriptor.input_schema.clone(),
-            }));
-        }
-    }
-    anthropic_tools.push(AnthropicToolUnion::ClientTool(AnthropicTool {
-        name: ARTIFACT_TOOL_NAME.to_string(),
-        description: ARTIFACT_TOOL_DESC.to_string(),
-        input_schema: artifact_tool_schema.clone(),
-    }));
-    let anthropic_tools = if anthropic_tools.is_empty() { None } else { Some(anthropic_tools) };
-    let mut mistral_tools = Vec::new();
-    if !mistral_use_conversations && supports_mcp_tools {
-        for descriptor in mcp_tool_lookup.values() {
-            let description = descriptor
-                .description
-                .clone()
-                .unwrap_or_else(|| descriptor.original_name.clone());
-            mistral_tools.push(MistralTool::Function {
-                function: MistralToolDefinition {
-                    name: descriptor.openai_name.clone(),
-                    description: Some(description),
-                    parameters: descriptor.input_schema.clone(),
-                },
-            });
-        }
-    }
-    let mistral_artifact_fn = MistralTool::Function {
-        function: MistralToolDefinition {
-            name: ARTIFACT_TOOL_NAME.to_string(),
-            description: Some(ARTIFACT_TOOL_DESC.to_string()),
-            parameters: artifact_tool_schema.clone(),
-        },
-    };
-    mistral_tools.push(mistral_artifact_fn.clone());
-    let mistral_tools = if mistral_tools.is_empty() { None } else { Some(mistral_tools) };
+    let openai_tools = build_openai_tools(web_search, mcp_openai_tools, artifact_tool_schema.clone());
+    let anthropic_tools = build_anthropic_tools(web_search, &mcp_tool_lookup, artifact_tool_schema.clone());
+    let mistral_tools = build_mistral_tools(mistral_use_conversations, &mcp_tool_lookup, artifact_tool_schema.clone());
     let mistral_conversation_tools = if mistral_use_conversations {
-        let mut tools = Vec::new();
-        if web_search {
-            tools.push(MistralTool::WebSearch);
-        }
-        if supports_mcp_tools {
-            for descriptor in mcp_tool_lookup.values() {
-                let description = descriptor
-                    .description
-                    .clone()
-                    .unwrap_or_else(|| descriptor.original_name.clone());
-                tools.push(MistralTool::Function {
-                    function: MistralToolDefinition {
-                        name: descriptor.openai_name.clone(),
-                        description: Some(description),
-                        parameters: descriptor.input_schema.clone(),
-                    },
-                });
-            }
-        }
-        tools.push(mistral_artifact_fn);
-        Some(tools)
+        build_mistral_conversation_tools(web_search, supports_mcp_tools, &mcp_tool_lookup, artifact_tool_schema.clone())
     } else {
         None
     };
-    let mistral_tool_choice = if mistral_tools.is_some() {
-        if !selected_tools.is_empty() && mcp_tool_lookup.len() == 1 {
-            let tool_name = mcp_tool_lookup.keys().next().cloned().unwrap_or_default();
-            Some(json!({"type":"function","function":{"name": tool_name}}))
-        } else {
-            Some(json!("auto"))
-        }
-    } else {
-        None
-    };
+    let mistral_tool_choice = build_mistral_tool_choice(&selected_tools, &mcp_tool_lookup, mistral_tools.is_some());
     let gemini_tools = if provider_is_gemini {
-        let mut tools: Vec<Value> = Vec::new();
-        if web_search {
-            tools.push(json!({ "google_search": {} }));
-        }
-        let mut function_declarations: Vec<Value> = Vec::new();
-        if supports_mcp_tools && !mcp_tool_lookup.is_empty() {
-            for descriptor in mcp_tool_lookup.values() {
-                let description = descriptor
-                    .description
-                    .clone()
-                    .unwrap_or_else(|| descriptor.original_name.clone());
-                function_declarations.push(json!({
-                    "name": descriptor.openai_name.clone(),
-                    "description": description,
-                    "parameters": normalize_gemini_parameters(&descriptor.input_schema),
-                }));
-            }
-        }
-        function_declarations.push(json!({
-            "name": ARTIFACT_TOOL_NAME,
-            "description": ARTIFACT_TOOL_DESC,
-            "parameters": normalize_gemini_parameters(&artifact_tool_schema),
-        }));
-        tools.push(json!({ "function_declarations": function_declarations }));
-        Some(Value::Array(tools))
+        build_gemini_tools(web_search, &mcp_tool_lookup, &artifact_tool_schema)
     } else {
         None
     };
     let gemini_tool_config = if provider_is_gemini {
-        let mut config = serde_json::Map::new();
-        if web_search && !mcp_tool_lookup.is_empty() {
-            config.insert(
-                "include_server_side_tool_invocations".to_string(),
-                json!(true),
-            );
-        }
-        if !selected_tools.is_empty() && mcp_tool_lookup.len() == 1 {
-            let tool_name = mcp_tool_lookup.keys().next().cloned().unwrap_or_default();
-            config.insert(
-                "function_calling_config".to_string(),
-                json!({
-                    "mode": "ANY",
-                    "allowed_function_names": [tool_name],
-                }),
-            );
-        } else {
-            config.insert(
-                "function_calling_config".to_string(),
-                json!({ "mode": "AUTO" }),
-            );
-        }
-        if config.is_empty() {
-            None
-        } else {
-            Some(Value::Object(config))
-        }
+        build_gemini_tool_config(web_search, &selected_tools, &mcp_tool_lookup)
     } else {
         None
     };
     let (gemini_system_instruction, gemini_contents_seed) = if provider_is_gemini {
-        let (sys, contents) = prompts_to_gemini_payload(&previous_prompts);
-        (sys, contents)
+        prompts_to_gemini_payload(&previous_prompts)
     } else {
         (None, Vec::new())
     };
@@ -1018,49 +944,16 @@ pub async fn handle_chat_stream(
         None
     };
     let (mistral_agent_instructions, mistral_inputs) = if mistral_use_conversations {
-        let mut instructions = Vec::new();
-        let entries = previous_prompts
-            .iter()
-            .filter_map(|prompt| match prompt.role {
-                ChatRole::System => {
-                    if !prompt.text.trim().is_empty() {
-                        instructions.push(prompt.text.clone());
-                    }
-                    None
-                }
-                ChatRole::User | ChatRole::Assistant => Some(json!({
-                    "object": "entry",
-                    "type": "message.input",
-                    "role": prompt.role,
-                    "content": prompt.text,
-                })),
-                _ => None,
-            })
-            .collect::<Vec<Value>>();
-        let instructions = instructions.join("\n\n");
-        (instructions, Value::Array(entries))
+        build_mistral_agent_inputs(&previous_prompts)
     } else {
         (String::new(), Value::Null)
     };
-    let mut mistral_completion_args_map = serde_json::Map::new();
-    if let Some(temperature) = req.temperature {
-        mistral_completion_args_map.insert("temperature".to_string(), json!(temperature));
-    }
-    if supports_mcp_tools && !selected_tools.is_empty() && mcp_tool_lookup.len() == 1 {
-        if !mistral_use_conversations {
-            if let Some(tool_name) = mcp_tool_lookup.keys().next() {
-                mistral_completion_args_map.insert(
-                    "tool_choice".to_string(),
-                    json!({"type":"function","function":{"name": tool_name}}),
-                );
-            }
-        }
-    }
-    let mistral_completion_args = if mistral_completion_args_map.is_empty() {
-        None
-    } else {
-        Some(Value::Object(mistral_completion_args_map))
-    };
+    let mistral_completion_args = build_mistral_completion_args(
+        req.temperature,
+        &selected_tools,
+        &mcp_tool_lookup,
+        mistral_use_conversations,
+    );
     // Create event source based on provider
     let event_source = match &provider_config {
         LlmProviderConfig::OpenAI(settings) => {
@@ -1307,12 +1200,6 @@ pub async fn handle_chat_stream(
            match event {
                Ok(ReqwestEvent::Open) => {}
                Ok(ReqwestEvent::Message(msg)) => {
-                   if provider.to_lowercase() == "openai" && std::env::var("OPENAI_STREAM_DEBUG").as_deref() == Ok("1") {
-                       println!("openai raw event: {}", msg.data);
-                   }
-                   if mistral_use_conversations && std::env::var("MISTRAL_STREAM_DEBUG").as_deref() == Ok("1") {
-                       println!("mistral conversations raw event: event='{}' data={}", msg.event, msg.data);
-                   }
                    let mut data_for_parse = msg.data.clone();
                    if mistral_use_conversations {
                        let parsed = serde_json::from_str::<Value>(&msg.data).unwrap_or(Value::String(msg.data.clone()));
@@ -1909,16 +1796,14 @@ pub async fn handle_chat_stream(
                            };
                            yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(chat_stream.to_string());
                        }
-                       StreamParseResult::Error { error_type, message } => {
-                         new_llm_message.message_content = Set(message.clone());
-                         new_llm_message.role = Set(ChatRole::System);
-                         new_llm_message.updated_at = Set(Utc::now());
-                         new_llm_message
-                           .clone()
-                           .update(&app_state.database)
-                           .await
-                           .expect("failed to update in new llm response in table messages");
-                           eprintln!("Stream error: {} - {}", error_type, message);
+                       StreamParseResult::Error { kind, message } => {
+                         eprintln!("Stream error ({:?}): {}", kind, message);
+                         let data = serde_json::to_string(
+                             &ChatStreamError::from_stream_error(*kind, provider.clone(), message.clone()).to_response()
+                         ).unwrap_or_else(|_| "{}".to_string());
+                         yield Event::default().event(ChatStreamEvents::LlmError.to_string()).data(data);
+                         stream_finished = true;
+                         break;
                        }
                        StreamParseResult::None => {}
                    }
@@ -1937,7 +1822,6 @@ pub async fn handle_chat_stream(
                            output_rate,
                          );
                          final_message_cost = message_cost;
-                         println!("Stream ended for provider: {} input tokens: {} output_tokens: {} total_tokens: {} latency in ms: {} cost: {}", &provider,request_tokens,response_tokens,total_tokens,latency,&message_cost);
                        new_llm_message.latency = Set(latency);
                        new_llm_message.request_tokens = Set(request_tokens);
                        new_llm_message.response_tokens = Set(response_tokens);
@@ -1962,9 +1846,9 @@ pub async fn handle_chat_stream(
                            let mut anthropic_tool_result_blocks: Vec<AnthropicContentBlock> = Vec::new();
                            let mut mistral_tool_calls: Vec<MistralToolCall> = Vec::new();
                            let mut mistral_tool_messages: Vec<MistralMessage> = Vec::new();
-                           let mut mistral_function_results_entries: Vec<Value> = Vec::new();
-                           let mut gemini_model_tool_messages: Vec<Value> = Vec::new();
-                           let mut gemini_function_response_messages: Vec<Value> = Vec::new();
+                           let mut mistral_function_results_entries: Vec<MistralConversationFunctionResult> = Vec::new();
+                           let mut gemini_model_tool_messages: Vec<GeminiContent> = Vec::new();
+                           let mut gemini_function_response_messages: Vec<GeminiContent> = Vec::new();
 
                            if anthropic_tooling_enabled && !stream_message_content.trim().is_empty() {
                                anthropic_tool_use_blocks.push(AnthropicContentBlock::Text {
@@ -2195,99 +2079,53 @@ pub async fn handle_chat_stream(
                                        .tool_id
                                        .clone()
                                        .unwrap_or_else(|| format!("gemini_call_{}", Uuid::new_v4()));
-                                   let thought_signature = call
-                                       .raw
-                                       .as_ref()
-                                       .and_then(|raw| {
-                                           raw.get("thoughtSignature")
-                                               .cloned()
-                                               .or_else(|| raw.get("thought_signature").cloned())
-                                       });
-                                   let mut part = serde_json::Map::new();
-                                   part.insert(
-                                       "functionCall".to_string(),
-                                       json!({
-                                           "id": gemini_call_id.clone(),
-                                           "name": call.tool_name.clone(),
-                                           "args": args_for_call.clone(),
-                                       }),
+                                   let thought_signature = call.raw.as_ref().and_then(|raw| {
+                                       raw.get("thoughtSignature")
+                                           .cloned()
+                                           .or_else(|| raw.get("thought_signature").cloned())
+                                   });
+                                   let (model_turn, user_turn) = build_gemini_tool_messages(
+                                       gemini_call_id,
+                                       call.tool_name.clone(),
+                                       args_for_call.clone(),
+                                       &output_payload,
+                                       thought_signature,
                                    );
-                                   if let Some(signature) = thought_signature {
-                                       part.insert("thoughtSignature".to_string(), signature);
-                                   }
-                                   gemini_model_tool_messages.push(json!({
-                                       "role": "model",
-                                       "parts": [Value::Object(part)]
-                                   }));
-                                   gemini_function_response_messages.push(json!({
-                                       "role": "user",
-                                       "parts": [{
-                                           "functionResponse": {
-                                               "id": gemini_call_id,
-                                               "name": call.tool_name.clone(),
-                                               "response": {
-                                                   "output": output_payload.clone(),
-                                               }
-                                           }
-                                       }]
-                                   }));
+                                   gemini_model_tool_messages.push(model_turn);
+                                   gemini_function_response_messages.push(user_turn);
                                }
 
                                if let Some(call_id) = call.tool_id.clone() {
                                    if openai_tooling_enabled {
-                                       let output_text = serde_json::to_string(&output_payload)
-                                           .unwrap_or_else(|_| "{}".to_string());
-                                       tool_outputs.push(OpenaiInputItem::FunctionCallOutput(
-                                           OpenaiFunctionCallOutput {
-                                               item_type: "function_call_output".to_string(),
-                                               call_id: call_id.clone(),
-                                               output: output_text,
-                                           },
+                                       tool_outputs.push(make_openai_function_output(
+                                           call_id.clone(),
+                                           &output_payload,
                                        ));
                                    }
                                    if anthropic_tooling_enabled {
-                                       anthropic_tool_use_blocks.push(AnthropicContentBlock::ToolUse {
-                                           id: call_id.clone(),
-                                           name: call.tool_name.clone(),
-                                           input: args_for_call.clone(),
-                                       });
-                                       let output_text = serde_json::to_string(&output_payload)
-                                           .unwrap_or_else(|_| "{}".to_string());
-                                       anthropic_tool_result_blocks.push(
-                                           AnthropicContentBlock::ToolResult {
-                                               tool_use_id: call_id.clone(),
-                                               content: output_text,
-                                               is_error: Some(is_error),
-                                           },
+                                       let (use_block, result_block) = make_anthropic_tool_blocks(
+                                           call_id.clone(),
+                                           call.tool_name.clone(),
+                                           args_for_call.clone(),
+                                           &output_payload,
+                                           is_error,
                                        );
+                                       anthropic_tool_use_blocks.push(use_block);
+                                       anthropic_tool_result_blocks.push(result_block);
                                    }
                                    if mistral_use_conversations {
-                                       let output_text = serde_json::to_string(&output_payload)
-                                           .unwrap_or_else(|_| "{}".to_string());
-                                       mistral_function_results_entries.push(json!({
-                                           "object": "entry",
-                                           "type": "function.result",
-                                           "tool_call_id": call_id.clone(),
-                                           "result": output_text,
-                                       }));
+                                       mistral_function_results_entries.push(
+                                           make_mistral_conversation_result(call_id, &output_payload),
+                                       );
                                    } else if mistral_tooling_enabled {
-                                       let arguments_text = serde_json::to_string(&args_for_call)
-                                           .unwrap_or_else(|_| "{}".to_string());
-                                       mistral_tool_calls.push(MistralToolCall {
-                                           id: call_id.clone(),
-                                           call_type: "function".to_string(),
-                                           function: crate::dto::llm::mistral::MistralToolFunction {
-                                               name: call.tool_name.clone(),
-                                               arguments: arguments_text,
-                                           },
-                                       });
-                                       let output_text = serde_json::to_string(&output_payload)
-                                           .unwrap_or_else(|_| "{}".to_string());
-                                       mistral_tool_messages.push(MistralMessage::tool_response(
-                                           call.tool_name.clone(),
+                                       let (tool_call, tool_message) = make_mistral_tool_result(
                                            call_id,
-                                           output_text,
-                                       ));
+                                           call.tool_name.clone(),
+                                           args_for_call.clone(),
+                                           &output_payload,
+                                       );
+                                       mistral_tool_calls.push(tool_call);
+                                       mistral_tool_messages.push(tool_message);
                                    }
                                }
                            }
@@ -2310,7 +2148,7 @@ pub async fn handle_chat_stream(
                                    stream_finished = true;
                                } else {
                                    mistral_conversation_next_inputs =
-                                       Some(Value::Array(mistral_function_results_entries));
+                                       serde_json::to_value(&mistral_function_results_entries).ok();
                                    tool_round += 1;
                                    stream_should_continue = true;
                                }
@@ -2318,25 +2156,13 @@ pub async fn handle_chat_stream(
                                if mistral_tool_messages.is_empty() {
                                    stream_finished = true;
                                } else {
-                                   let mut messages = if let Some(existing) = mistral_messages.take() {
-                                       existing
-                                   } else {
-                                       let base = base_prompts.clone().unwrap_or_default();
-                                       MistralMessage::from_prompts(base)
-                                   };
-                                   if !mistral_tool_calls.is_empty() {
-                                       let content = if stream_message_content.trim().is_empty() {
-                                           None
-                                       } else {
-                                           Some(stream_message_content.clone())
-                                       };
-                                       messages.push(MistralMessage::assistant_with_tool_calls(
-                                           content,
-                                           mistral_tool_calls,
-                                       ));
-                                   }
-                                   messages.extend(mistral_tool_messages);
-                                   mistral_messages = Some(messages);
+                                   mistral_messages = Some(build_mistral_continuation(
+                                       mistral_messages.take(),
+                                       base_prompts.clone().unwrap_or_default(),
+                                       stream_message_content.clone(),
+                                       mistral_tool_calls,
+                                       mistral_tool_messages,
+                                   ));
                                    tool_round += 1;
                                    stream_should_continue = true;
                                }
@@ -2344,25 +2170,15 @@ pub async fn handle_chat_stream(
                                if anthropic_tool_result_blocks.is_empty() {
                                    stream_finished = true;
                                } else {
-                                   let mut messages = if let Some(existing) = anthropic_messages.take() {
-                                       existing
-                                   } else {
-                                       let base = base_prompts.clone().unwrap_or_default();
-                                       let (messages, system_prompt) =
-                                           AnthropicMessage::from_prompts(base);
-                                       anthropic_system_prompt = system_prompt;
-                                       messages
-                                   };
-                                   if !anthropic_tool_use_blocks.is_empty() {
-                                       messages.push(AnthropicMessage::with_blocks(
-                                           AnthropicRole::Assistant,
-                                           anthropic_tool_use_blocks,
-                                       ));
-                                   }
-                                   messages.push(AnthropicMessage::with_blocks(
-                                       AnthropicRole::User,
+                                   let (messages, derived_system) = build_anthropic_continuation(
+                                       anthropic_messages.take(),
+                                       base_prompts.clone().unwrap_or_default(),
+                                       anthropic_tool_use_blocks,
                                        anthropic_tool_result_blocks,
-                                   ));
+                                   );
+                                   if let Some(s) = derived_system {
+                                       anthropic_system_prompt = Some(s);
+                                   }
                                    anthropic_messages = Some(messages);
                                    tool_round += 1;
                                    stream_should_continue = true;
@@ -2372,8 +2188,8 @@ pub async fn handle_chat_stream(
                                    stream_finished = true;
                                } else {
                                    let mut contents = gemini_contents.take().unwrap_or_default();
-                                   contents.extend(gemini_model_tool_messages);
-                                   contents.extend(gemini_function_response_messages);
+                                   contents.extend(gemini_model_tool_messages.into_iter().filter_map(|c| serde_json::to_value(c).ok()));
+                                   contents.extend(gemini_function_response_messages.into_iter().filter_map(|c| serde_json::to_value(c).ok()));
                                    gemini_contents = Some(contents);
                                    tool_round += 1;
                                    stream_should_continue = true;
@@ -2391,31 +2207,28 @@ pub async fn handle_chat_stream(
                                .text()
                                .await
                                .unwrap_or_else(|_| "<failed to read response body>".to_string());
-                           if status == StatusCode::TOO_MANY_REQUESTS
-                               && is_rate_limit_error(&body)
+                           let stream_err = if status == StatusCode::TOO_MANY_REQUESTS
+                               || is_rate_limit_error(&body)
                            {
-                               let (_, detail) = AppError::LlmTokenExhausted {
-                                   provider: provider.clone(),
-                               }
-                               .to_detail();
-                               let payload = ErrorResponse {
-                                   detail: ErrorDetailVariant::Rich(detail),
-                               };
-                               let data = serde_json::to_string(&payload)
-                                   .unwrap_or_else(|_| "{}".to_string());
-                               yield Event::default()
-                                   .event(ChatStreamEvents::LlmTokenExhausted.to_string())
-                                   .data(data);
-                           }
+                               ChatStreamError::ApiQuotaExhausted { provider: provider.clone() }
+                           } else {
+                               let message = extract_llm_error_message(&body)
+                                   .unwrap_or_else(|| format!("{} error from {} provider", status.as_u16(), provider));
+                               ChatStreamError::ProviderError { provider: provider.clone(), message }
+                           };
                            eprintln!(
                                "Streaming error for provider:{} status:{} body:{}",
                                provider, status, body
                            );
+                           let data = serde_json::to_string(&stream_err.to_response()).unwrap_or_else(|_| "{}".to_string());
+                           yield Event::default().event(ChatStreamEvents::LlmError.to_string()).data(data);
                            stream_finished = true;
                            break;
                        }
                        _ => {
-                           println!("Streaming error for provider:{} error:{}",provider,e.to_string());
+                           let stream_err = ChatStreamError::ConnectionFailed { provider: provider.clone() };
+                           let data = serde_json::to_string(&stream_err.to_response()).unwrap_or_else(|_| "{}".to_string());
+                           yield Event::default().event(ChatStreamEvents::LlmError.to_string()).data(data);
                            stream_finished = true;
                            break;
                        }
@@ -2450,6 +2263,9 @@ pub async fn handle_chat_stream(
                            }
                            Err(e) => {
                                eprintln!("openai continuation error: {e}");
+                               let stream_err = ChatStreamError::ConnectionFailed { provider: provider.clone() };
+                               let data = serde_json::to_string(&stream_err.to_response()).unwrap_or_else(|_| "{}".to_string());
+                               yield Event::default().event(ChatStreamEvents::LlmError.to_string()).data(data);
                                stream_finished = true;
                            }
                        }
@@ -2479,6 +2295,9 @@ pub async fn handle_chat_stream(
                            }
                            Err(e) => {
                                eprintln!("anthropic continuation error: {e}");
+                               let stream_err = ChatStreamError::ConnectionFailed { provider: provider.clone() };
+                               let data = serde_json::to_string(&stream_err.to_response()).unwrap_or_else(|_| "{}".to_string());
+                               yield Event::default().event(ChatStreamEvents::LlmError.to_string()).data(data);
                                stream_finished = true;
                            }
                        }
@@ -2507,6 +2326,9 @@ pub async fn handle_chat_stream(
                                }
                                Err(e) => {
                                    eprintln!("mistral conversation continuation error: {e}");
+                                   let stream_err = ChatStreamError::ConnectionFailed { provider: provider.clone() };
+                                   let data = serde_json::to_string(&stream_err.to_response()).unwrap_or_else(|_| "{}".to_string());
+                                   yield Event::default().event(ChatStreamEvents::LlmError.to_string()).data(data);
                                    stream_finished = true;
                                }
                            }
@@ -2534,6 +2356,9 @@ pub async fn handle_chat_stream(
                                }
                                Err(e) => {
                                    eprintln!("mistral continuation error: {e}");
+                                   let stream_err = ChatStreamError::ConnectionFailed { provider: provider.clone() };
+                                   let data = serde_json::to_string(&stream_err.to_response()).unwrap_or_else(|_| "{}".to_string());
+                                   yield Event::default().event(ChatStreamEvents::LlmError.to_string()).data(data);
                                    stream_finished = true;
                                }
                            }
@@ -2564,6 +2389,9 @@ pub async fn handle_chat_stream(
                            }
                            Err(e) => {
                                eprintln!("gemini continuation error: {e}");
+                               let stream_err = ChatStreamError::ConnectionFailed { provider: provider.clone() };
+                               let data = serde_json::to_string(&stream_err.to_response()).unwrap_or_else(|_| "{}".to_string());
+                               yield Event::default().event(ChatStreamEvents::LlmError.to_string()).data(data);
                                stream_finished = true;
                            }
                        }

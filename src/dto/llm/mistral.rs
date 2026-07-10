@@ -155,6 +155,15 @@ pub struct MistralToolCallDelta {
     pub function: Option<MistralToolFunctionDelta>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct MistralConversationFunctionResult {
+    pub object: String,
+    #[serde(rename = "type")]
+    pub result_type: String,
+    pub tool_call_id: String,
+    pub result: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MistralToolCall {
     pub id: String,

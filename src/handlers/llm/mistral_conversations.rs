@@ -17,8 +17,8 @@ use crate::{
 };
 
 use super::{
-    StreamParseResult, StreamParser, StreamWebSearchResult, ToolInput, build_tool_call,
-    build_tool_input_delta, parse_web_search_action,
+    StreamErrorKind, StreamParseResult, StreamParser, StreamWebSearchResult, ToolInput,
+    build_tool_call, build_tool_input_delta, parse_web_search_action,
 };
 
 #[derive(Debug, Clone)]
@@ -351,17 +351,14 @@ impl StreamParser for MistralConversationStreamParser {
                 let message = payload
                     .get("message")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("mistral error")
+                    .unwrap_or("Mistral conversation error")
                     .to_string();
-                let code = payload
+                let kind = payload
                     .get("code")
                     .and_then(|v| v.as_i64())
-                    .map(|v| v.to_string())
-                    .unwrap_or("mistral_error".to_string());
-                return StreamParseResult::Error {
-                    error_type: code,
-                    message,
-                };
+                    .map(|code| if code == 429 { StreamErrorKind::QuotaExhausted } else { StreamErrorKind::ProviderError })
+                    .unwrap_or(StreamErrorKind::ProviderError);
+                return StreamParseResult::Error { kind, message };
             }
             _ => {}
         }
