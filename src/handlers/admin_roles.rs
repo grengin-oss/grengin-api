@@ -22,8 +22,9 @@ use crate::{
     },
     dto::admin_roles::{
         PermissionDto, PermissionsResponse, RoleAssignmentPayload, RoleCreatedPayload,
-        RoleDeletedPayload, RoleDto, RoleRequest, RoleUpdateRequest, RoleUpdatedPayload,
-        RolesResponse, UserRoleAssignmentDto, UserRoleAssignmentInput, UserRoleAssignmentsResponse,
+        RoleDeletedPayload, RoleDto, RolePermissionRow, RoleRequest, RoleUpdateRequest,
+        RoleUpdatedPayload, RolesResponse, RoleUserCountRow, UserRoleAssignmentDto,
+        UserRoleAssignmentInput, UserRoleAssignmentsResponse,
     },
     models::{permissions, role_permissions, roles, user_role_assignments, users},
     services::{
@@ -32,22 +33,6 @@ use crate::{
     },
     state::SharedState,
 };
-
-#[derive(Debug, sea_orm::FromQueryResult)]
-struct RolePermissionRow {
-    #[sea_orm(from_alias = "roleId")]
-    role_id: Uuid,
-    domain: String,
-    action: String,
-}
-
-#[derive(Debug, sea_orm::FromQueryResult)]
-struct RoleUserCountRow {
-    #[sea_orm(from_alias = "role_id")]
-    role_id: Uuid,
-    #[sea_orm(from_alias = "user_count")]
-    user_count: i64,
-}
 
 #[utoipa::path(
     get,

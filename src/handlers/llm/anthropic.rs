@@ -1,12 +1,28 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use anyhow::Error;
+use reqwest::Client as ReqwestClient;
+use reqwest_eventsource::EventSource;
+use serde_json::Value;
+
 use super::{
-    StreamParseResult, StreamParser, StreamWebSearchAction, StreamWebSearchResult, ToolInput,
-    build_tool_call, build_tool_input_delta, parse_web_search_action, tool_name_is_web_search,
+    StreamErrorKind, StreamParseResult, StreamParser, StreamWebSearchAction, StreamWebSearchResult,
+    ToolInput, build_tool_call, build_tool_input_delta, parse_web_search_action,
+    tool_name_is_web_search,
 };
-use crate::dto::llm::anthropic::{
-    AnthropicContentBlockResponse, AnthropicDelta, AnthropicStreamEvent,
+use crate::{
+    config::setting::AnthropicSettings,
+    dto::llm::anthropic::{
+        AnthropicContentBlock, AnthropicContentBlockResponse, AnthropicDelta, AnthropicMessage,
+        AnthropicRole, AnthropicStreamEvent, AnthropicTool, AnthropicToolUnion,
+        AnthropicWebSearchTool,
+    },
+    llm::{prompt::Prompt, provider::AnthropicApis},
+    services::{
+        artifacts::{ARTIFACT_TOOL_DESC, ARTIFACT_TOOL_NAME},
+        mcp_tools::McpToolDescriptor,
+    },
 };
 
 /// Anthropic stream parser
@@ -207,7 +223,7 @@ impl StreamParser for AnthropicStreamParser {
                 }
 
                 AnthropicStreamEvent::Error { error } => StreamParseResult::Error {
-                    error_type: error.error_type,
+                    kind: StreamErrorKind::from_provider_str(&error.error_type),
                     message: error.message,
                 },
 
@@ -218,4 +234,94 @@ impl StreamParser for AnthropicStreamParser {
             Err(_) => StreamParseResult::None,
         }
     }
+}
+
+pub fn build_anthropic_tools(
+    web_search: bool,
+    mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
+    artifact_schema: Value,
+) -> Option<Vec<AnthropicToolUnion>> {
+    let mut tools = Vec::new();
+    if web_search {
+        tools.push(AnthropicToolUnion::WebSearchTool(AnthropicWebSearchTool::new(Some(5))));
+    }
+    for descriptor in mcp_tool_lookup.values() {
+        let description = descriptor
+            .description
+            .clone()
+            .unwrap_or_else(|| descriptor.original_name.clone());
+        tools.push(AnthropicToolUnion::ClientTool(AnthropicTool {
+            name: descriptor.openai_name.clone(),
+            description,
+            input_schema: descriptor.input_schema.clone(),
+        }));
+    }
+    tools.push(AnthropicToolUnion::ClientTool(AnthropicTool {
+        name: ARTIFACT_TOOL_NAME.to_string(),
+        description: ARTIFACT_TOOL_DESC.to_string(),
+        input_schema: artifact_schema,
+    }));
+    if tools.is_empty() { None } else { Some(tools) }
+}
+
+pub async fn continue_anthropic_stream(
+    client: &ReqwestClient,
+    settings: &AnthropicSettings,
+    model_name: String,
+    max_tokens: i32,
+    temperature: Option<f32>,
+    messages: Vec<AnthropicMessage>,
+    system_prompt: Option<String>,
+    tools: Option<Vec<AnthropicToolUnion>>,
+) -> Result<EventSource, Error> {
+    client
+        .anthropic_chat_stream_with_messages(
+            settings,
+            model_name,
+            max_tokens,
+            temperature,
+            messages,
+            system_prompt,
+            tools,
+        )
+        .await
+}
+
+pub fn make_anthropic_tool_blocks(
+    call_id: String,
+    tool_name: String,
+    args: Value,
+    output: &Value,
+    is_error: bool,
+) -> (AnthropicContentBlock, AnthropicContentBlock) {
+    (
+        AnthropicContentBlock::ToolUse {
+            id: call_id.clone(),
+            name: tool_name,
+            input: args,
+        },
+        AnthropicContentBlock::ToolResult {
+            tool_use_id: call_id,
+            content: serde_json::to_string(output).unwrap_or_else(|_| "{}".to_string()),
+            is_error: Some(is_error),
+        },
+    )
+}
+
+pub fn build_anthropic_continuation(
+    existing: Option<Vec<AnthropicMessage>>,
+    base_prompts: Vec<Prompt>,
+    tool_use_blocks: Vec<AnthropicContentBlock>,
+    tool_result_blocks: Vec<AnthropicContentBlock>,
+) -> (Vec<AnthropicMessage>, Option<String>) {
+    let (mut messages, system_prompt) = if let Some(m) = existing {
+        (m, None)
+    } else {
+        AnthropicMessage::from_prompts(base_prompts)
+    };
+    if !tool_use_blocks.is_empty() {
+        messages.push(AnthropicMessage::with_blocks(AnthropicRole::Assistant, tool_use_blocks));
+    }
+    messages.push(AnthropicMessage::with_blocks(AnthropicRole::User, tool_result_blocks));
+    (messages, system_prompt)
 }

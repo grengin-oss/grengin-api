@@ -6,7 +6,7 @@ use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
 use sea_orm::sea_query::{Alias, BinOper, Expr, Func};
 use sea_orm::{
-    ColumnTrait, Condition, DatabaseConnection, EntityTrait, JoinType, Order, PaginatorTrait,
+    ColumnTrait, Condition, EntityTrait, JoinType, Order, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect, RelationTrait,
 };
 use serde_json::{Map, Value};
@@ -20,8 +20,9 @@ use crate::{
     },
     dto::{
         admin_department::{
-            Department, DepartmentListQuery, DepartmentSortRule, DepartmentTree,
-            DepartmentTreeNode, DepartmentTreeQuery, DepartmentsListResponse,
+            ChildCountRow, Department, DepartmentListQuery, DepartmentRow, DepartmentSortRule,
+            DepartmentTree, DepartmentTreeNode, DepartmentTreeQuery, DepartmentTreeRow,
+            DepartmentsListResponse, DeptCountRow,
         },
         admin_user::User,
         analytics::{
@@ -33,241 +34,26 @@ use crate::{
             MeDepartmentUsersResponse,
         },
     },
-    handlers::admin_department::{
-        ChildCountRow, DepartmentRow, DepartmentTreeRow, DeptCountRow, department_budget_snapshot,
-        departments_base_select, departments_tree_select, load_department_admin_ids_map,
+    services::department_helpers::{
+        department_budget_snapshot, departments_base_select, departments_tree_select,
+        load_department_admin_ids_map,
     },
     models::{
-        departments, permissions, role_permissions, roles, user_role_assignments, users,
+        departments, user_role_assignments, users,
         users::UserStatus,
     },
     services::{
         analytics,
         authorization::{AuthorizationService, is_path_within_scope},
+        me_helpers::{
+            load_administered_department_ids, load_administered_department_paths,
+            needs_effective_permissions_refresh, scope_condition,
+            should_refresh_administered_departments,
+        },
     },
     state::SharedState,
 };
 
-async fn load_administered_department_ids(
-    claims: Claims,
-    app_state: &SharedState,
-) -> Result<Vec<Uuid>, AuthError> {
-    let authz = AuthorizationService::new(&app_state.database);
-
-    let mut user = users::Entity::find_by_id(claims.user_id)
-        .one(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("user lookup error: {e}");
-            AuthError::DbTimeout
-        })?
-        .ok_or(AuthError::ResourceNotFound)?;
-
-    let mut needs_refresh = needs_effective_permissions_refresh(&user.effective_permissions);
-    if !needs_refresh
-        && should_refresh_administered_departments(
-            &app_state.database,
-            user.id,
-            &user.effective_permissions,
-        )
-        .await?
-    {
-        needs_refresh = true;
-    }
-
-    if needs_refresh {
-        authz.recompute_effective_permissions(user.id).await?;
-        user = users::Entity::find_by_id(claims.user_id)
-            .one(&app_state.database)
-            .await
-            .map_err(|e| {
-                eprintln!("user lookup error: {e}");
-                AuthError::DbTimeout
-            })?
-            .ok_or(AuthError::ResourceNotFound)?;
-    }
-
-    let mut departments = Vec::new();
-    if let Some(value) = user.effective_permissions {
-        let permissions = value.get("permissions").unwrap_or(&Value::Null);
-        let manage_scope = parse_permission_scope(permissions, "departments:manage");
-        let view_scope = parse_permission_scope(permissions, "departments:view");
-
-        if matches!(manage_scope, PermissionScope::Missing)
-            && matches!(view_scope, PermissionScope::Missing)
-        {
-            return Ok(Vec::new());
-        }
-
-        if let Some(list) = value
-            .get("administered_departments")
-            .and_then(|v| v.as_array())
-        {
-            for item in list {
-                if let Some(id_str) = item.as_str() {
-                    if let Ok(id) = Uuid::parse_str(id_str) {
-                        departments.push(id);
-                    }
-                }
-            }
-        }
-
-        if departments.is_empty() {
-            departments = match manage_scope {
-                PermissionScope::OrgWide => load_all_department_ids(&app_state.database).await?,
-                PermissionScope::Scoped(ids) if !ids.is_empty() => ids,
-                _ => match view_scope {
-                    PermissionScope::OrgWide => {
-                        load_all_department_ids(&app_state.database).await?
-                    }
-                    PermissionScope::Scoped(ids) => ids,
-                    PermissionScope::Missing => Vec::new(),
-                },
-            };
-        }
-    }
-
-    Ok(departments)
-}
-
-fn needs_effective_permissions_refresh(value: &Option<Value>) -> bool {
-    match value {
-        Some(Value::Object(map)) => {
-            !map.contains_key("permissions")
-                || !map.contains_key("mcp_access")
-                || !map.contains_key("administered_departments")
-        }
-        Some(_) => true,
-        None => true,
-    }
-}
-
-enum PermissionScope {
-    Missing,
-    OrgWide,
-    Scoped(Vec<Uuid>),
-}
-
-fn parse_permission_scope(permissions: &Value, key: &str) -> PermissionScope {
-    let value = match permissions.get(key) {
-        Some(value) => value,
-        None => return PermissionScope::Missing,
-    };
-
-    match value {
-        Value::String(text) => {
-            if text.is_empty() {
-                PermissionScope::Missing
-            } else {
-                PermissionScope::OrgWide
-            }
-        }
-        Value::Array(items) => {
-            let ids = items
-                .iter()
-                .filter_map(|item| item.as_str())
-                .filter_map(|item| Uuid::parse_str(item).ok())
-                .collect::<Vec<_>>();
-            if ids.is_empty() {
-                PermissionScope::Missing
-            } else {
-                PermissionScope::Scoped(ids)
-            }
-        }
-        _ => PermissionScope::Missing,
-    }
-}
-
-async fn load_all_department_ids(db: &DatabaseConnection) -> Result<Vec<Uuid>, AuthError> {
-    departments::Entity::find()
-        .select_only()
-        .column(departments::Column::Id)
-        .into_tuple::<Uuid>()
-        .all(db)
-        .await
-        .map_err(|e| {
-            eprintln!("department list error: {e}");
-            AuthError::DbTimeout
-        })
-}
-
-async fn should_refresh_administered_departments(
-    db: &DatabaseConnection,
-    user_id: Uuid,
-    effective_permissions: &Option<Value>,
-) -> Result<bool, AuthError> {
-    let empty = match effective_permissions {
-        Some(Value::Object(map)) => map
-            .get("administered_departments")
-            .and_then(Value::as_array)
-            .map(|items| items.is_empty())
-            .unwrap_or(true),
-        _ => true,
-    };
-
-    if !empty {
-        return Ok(false);
-    }
-
-    let count = user_role_assignments::Entity::find()
-        .select_only()
-        .column(user_role_assignments::Column::Id)
-        .join(
-            JoinType::InnerJoin,
-            user_role_assignments::Relation::Roles.def(),
-        )
-        .join(JoinType::InnerJoin, roles::Relation::RolePermissions.def())
-        .join(
-            JoinType::InnerJoin,
-            role_permissions::Relation::Permissions.def(),
-        )
-        .filter(user_role_assignments::Column::UserId.eq(user_id))
-        .filter(permissions::Column::Domain.eq("departments"))
-        .filter(permissions::Column::Action.eq("manage"))
-        .count(db)
-        .await
-        .map_err(|e| {
-            eprintln!("administered departments check error: {e}");
-            AuthError::DbTimeout
-        })?;
-
-    Ok(count > 0)
-}
-
-async fn load_administered_department_paths(
-    app_state: &SharedState,
-    department_ids: &[Uuid],
-) -> Result<Vec<String>, AuthError> {
-    if department_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let rows = departments::Entity::find()
-        .select_only()
-        .column(departments::Column::Id)
-        .expr_as(Expr::cust("path::text"), "path")
-        .filter(departments::Column::Id.is_in(department_ids.iter().copied()))
-        .into_tuple::<(Uuid, String)>()
-        .all(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("department paths lookup error: {e}");
-            AuthError::DbTimeout
-        })?;
-
-    Ok(rows.into_iter().map(|(_, path)| path).collect())
-}
-
-fn scope_condition(scope_paths: &[String]) -> Condition {
-    let mut cond = Condition::any();
-    for path in scope_paths {
-        cond = cond.add(Expr::col(departments::Column::Path).binary(
-            BinOper::Custom("<@".into()),
-            Expr::val(path.clone()).cast_as(Alias::new("ltree")),
-        ));
-    }
-    cond
-}
 
 #[utoipa::path(
     get,

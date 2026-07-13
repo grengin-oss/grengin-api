@@ -36,6 +36,9 @@ pub enum ErrorCode {
     LlmProviderNotConfigured = 4002,
     LlmProviderDisabledByAdmin = 4003,
     LlmTokenExhausted = 4004,
+    LlmApiQuotaExhausted = 4005,
+    LlmStreamProviderError = 4006,
+    LlmStreamConnectionFailed = 4007,
 
     // 6000-6999: budgets
     DepartmentBudgetExceeded = 6001,
@@ -131,6 +134,91 @@ pub enum AppError {
     },
     McpServerNotFound,
     McpAccessUpdateFailed,
+    ChatStream(ChatStreamError),
+}
+
+/// Errors that occur inside an active SSE chat stream.
+/// Use `to_response()` to produce the SSE event payload.
+#[derive(Debug, Clone, ToSchema)]
+pub enum ChatStreamError {
+    ApiQuotaExhausted { provider: String },
+    ProviderError { provider: String, message: String },
+    ConnectionFailed { provider: String },
+}
+
+impl ChatStreamError {
+    pub fn from_stream_error(
+        kind: crate::handlers::llm::StreamErrorKind,
+        provider: String,
+        message: String,
+    ) -> Self {
+        match kind {
+            crate::handlers::llm::StreamErrorKind::QuotaExhausted => {
+                Self::ApiQuotaExhausted { provider }
+            }
+            crate::handlers::llm::StreamErrorKind::ProviderError => {
+                Self::ProviderError { provider, message }
+            }
+        }
+    }
+
+    pub fn is_quota_exhaustion(&self) -> bool {
+        matches!(self, Self::ApiQuotaExhausted { .. })
+    }
+
+    pub fn to_detail(&self) -> ErrorDetail {
+        match self {
+            ChatStreamError::ApiQuotaExhausted { provider } => {
+                let mut params = BTreeMap::new();
+                params.insert("app".to_string(), APP_NAME.to_string());
+                params.insert("provider".to_string(), provider.clone());
+                ErrorDetail {
+                    code: ErrorCode::LlmApiQuotaExhausted,
+                    description: format!("The {provider} API quota or rate limit has been exhausted."),
+                    solution: "Check your API key quota and billing, or wait for the rate limit window to reset.".to_string(),
+                    description_key: "error.llm.api_quota_exhausted.description".to_string(),
+                    solution_key: "error.llm.api_quota_exhausted.solution".to_string(),
+                    params,
+                    external_code: None,
+                }
+            }
+            ChatStreamError::ProviderError { provider, message } => {
+                let mut params = BTreeMap::new();
+                params.insert("app".to_string(), APP_NAME.to_string());
+                params.insert("provider".to_string(), provider.clone());
+                params.insert("message".to_string(), message.clone());
+                ErrorDetail {
+                    code: ErrorCode::LlmStreamProviderError,
+                    description: format!("Error from {provider}: {message}"),
+                    solution: "Verify the selected model is available and your API key is valid.".to_string(),
+                    description_key: "error.llm.stream_provider_error.description".to_string(),
+                    solution_key: "error.llm.stream_provider_error.solution".to_string(),
+                    params,
+                    external_code: None,
+                }
+            }
+            ChatStreamError::ConnectionFailed { provider } => {
+                let mut params = BTreeMap::new();
+                params.insert("app".to_string(), APP_NAME.to_string());
+                params.insert("provider".to_string(), provider.clone());
+                ErrorDetail {
+                    code: ErrorCode::LlmStreamConnectionFailed,
+                    description: format!("Failed to establish or maintain a stream connection to {provider}."),
+                    solution: "Try again. If the problem persists, check the provider's status page.".to_string(),
+                    description_key: "error.llm.stream_connection_failed.description".to_string(),
+                    solution_key: "error.llm.stream_connection_failed.solution".to_string(),
+                    params,
+                    external_code: None,
+                }
+            }
+        }
+    }
+
+    pub fn to_response(&self) -> ErrorResponse {
+        ErrorResponse {
+            detail: ErrorDetailVariant::Rich(self.to_detail()),
+        }
+    }
 }
 
 impl AppError {
@@ -545,6 +633,15 @@ impl AppError {
                         external_code: None,
                     },
                 )
+            }
+
+            AppError::ChatStream(e) => {
+                let status = if e.is_quota_exhaustion() {
+                    StatusCode::TOO_MANY_REQUESTS
+                } else {
+                    StatusCode::BAD_GATEWAY
+                };
+                (status, e.to_detail())
             }
 
             AppError::McpAccessUpdateFailed => {

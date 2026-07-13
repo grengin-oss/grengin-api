@@ -1,15 +1,26 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use super::{
-    StreamParseResult, StreamParser, StreamWebSearchResult, ToolInput, ToolResult, build_tool_call,
-    build_tool_input_delta, parse_web_search_action, tool_name_is_web_search,
-};
-use crate::dto::llm::openai::{
-    OpenaiChatCompletionChunk, OpenaiFunctionCallItem, OpenaiResponseOutputItem,
-    OpenaiResponseStreamEvent, OpenaiWebSearchAction,
-};
+use anyhow::Error;
+use reqwest::Client as ReqwestClient;
+use reqwest_eventsource::EventSource;
 use serde_json::Value;
+use uuid::Uuid;
+
+use super::{
+    StreamErrorKind, StreamParseResult, StreamParser, StreamWebSearchResult, ToolInput, ToolResult,
+    build_tool_call, build_tool_input_delta, parse_web_search_action, tool_name_is_web_search,
+};
+use crate::{
+    config::setting::OpenaiSettings,
+    dto::llm::openai::{
+        OpenaiChatCompletionChunk, OpenaiFunctionCallItem, OpenaiFunctionCallOutput,
+        OpenaiInputItem, OpenaiResponseOutputItem, OpenaiResponseStreamEvent, OpenaiTool,
+        OpenaiWebSearchAction,
+    },
+    llm::provider::OpenaiApis,
+    services::artifacts::{ARTIFACT_TOOL_DESC, ARTIFACT_TOOL_NAME},
+};
 
 #[derive(Debug, Clone)]
 struct OpenaiToolCallMeta {
@@ -121,10 +132,13 @@ impl OpenaiStreamParser {
                     output_tokens: ev.response.usage.as_ref().map(|usage| usage.output_tokens),
                 })
             }
-            OpenaiResponseStreamEvent::Error(ev) => Some(StreamParseResult::Error {
-                error_type: ev.error.error_type.unwrap_or("openai_error".into()),
-                message: ev.error.message.unwrap_or("openai.error.message".into()),
-            }),
+            OpenaiResponseStreamEvent::Error(ev) => {
+                let raw_type = ev.error.error_type.as_deref().unwrap_or("openai_error");
+                Some(StreamParseResult::Error {
+                    kind: StreamErrorKind::from_provider_str(raw_type),
+                    message: ev.error.message.unwrap_or_else(|| "OpenAI stream error".into()),
+                })
+            }
             _ => None,
         }
     }
@@ -177,6 +191,23 @@ impl StreamParser for OpenaiStreamParser {
         }
         if let Some(event) = extract_openai_tool_event(&value) {
             return event;
+        }
+
+        if let Some(error) = value.get("error") {
+            let message = error
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("OpenAI stream error")
+                .to_string();
+            let raw_type = error
+                .get("type")
+                .or_else(|| error.get("code"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("openai_error");
+            return StreamParseResult::Error {
+                kind: StreamErrorKind::from_provider_str(raw_type),
+                message,
+            };
         }
 
         StreamParseResult::None
@@ -488,4 +519,56 @@ fn parse_tool_input(value: Value) -> Option<ToolInput> {
         }
         other => Some(ToolInput::Json(other)),
     }
+}
+
+pub fn build_openai_tools(
+    web_search: bool,
+    mcp_openai_tools: Vec<OpenaiTool>,
+    artifact_schema: Value,
+) -> Option<Vec<OpenaiTool>> {
+    let mut tools = Vec::new();
+    if web_search {
+        tools.push(OpenaiTool::web_search());
+    }
+    tools.extend(mcp_openai_tools);
+    tools.push(OpenaiTool::Function {
+        name: ARTIFACT_TOOL_NAME.to_string(),
+        description: Some(ARTIFACT_TOOL_DESC.to_string()),
+        parameters: artifact_schema,
+        strict: None,
+    });
+    if tools.is_empty() { None } else { Some(tools) }
+}
+
+pub async fn continue_openai_stream(
+    client: &ReqwestClient,
+    settings: &OpenaiSettings,
+    model_name: String,
+    temperature: Option<f32>,
+    user_id: &Uuid,
+    tools: Option<Vec<OpenaiTool>>,
+    prev_response_id: Option<String>,
+    next_input: Vec<OpenaiInputItem>,
+) -> Result<EventSource, Error> {
+    client
+        .openai_chat_stream(
+            settings,
+            model_name,
+            temperature,
+            Vec::new(),
+            user_id,
+            tools,
+            None,
+            prev_response_id,
+            Some(next_input),
+        )
+        .await
+}
+
+pub fn make_openai_function_output(call_id: String, output: &Value) -> OpenaiInputItem {
+    OpenaiInputItem::FunctionCallOutput(OpenaiFunctionCallOutput {
+        item_type: "function_call_output".to_string(),
+        call_id,
+        output: serde_json::to_string(output).unwrap_or_else(|_| "{}".to_string()),
+    })
 }

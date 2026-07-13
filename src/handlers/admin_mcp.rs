@@ -30,6 +30,7 @@ use crate::{
     services::{
         auth_audit::{build_audit_payload, record_auth_event},
         authorization::{AuthorizationService, PermissionScopeMode},
+        mcp_access::resolve_role_reference,
         mcp_helpers::build_access_rule_dtos,
     },
     state::SharedState,
@@ -728,40 +729,3 @@ pub async fn delete_mcp_access_rule(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn resolve_role_reference(
-    db: &sea_orm::DatabaseConnection,
-    access_type: McpAccessType,
-    role_id: Option<Uuid>,
-    role_name: Option<String>,
-) -> Result<(Option<Uuid>, Option<String>), AuthError> {
-    if access_type != McpAccessType::Role {
-        return Ok((None, None));
-    }
-
-    if let Some(role_id) = role_id {
-        let role = roles::Entity::find_by_id(role_id)
-            .one(db)
-            .await
-            .map_err(|e| {
-                eprintln!("role lookup error: {e}");
-                AuthError::DbTimeout
-            })?
-            .ok_or(AuthError::ResourceNotFound)?;
-        return Ok((Some(role.id), Some(role.name)));
-    }
-
-    if let Some(role_name) = role_name {
-        let role = roles::Entity::find()
-            .filter(roles::Column::Name.eq(role_name))
-            .one(db)
-            .await
-            .map_err(|e| {
-                eprintln!("role lookup error: {e}");
-                AuthError::DbTimeout
-            })?
-            .ok_or(AuthError::ResourceNotFound)?;
-        return Ok((Some(role.id), Some(role.name)));
-    }
-
-    Err(AuthError::ResourceNotFound)
-}

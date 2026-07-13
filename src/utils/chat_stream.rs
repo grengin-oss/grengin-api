@@ -12,8 +12,9 @@ use serde_json::Value;
 pub struct LlmErrorObject {
     #[serde(rename = "type")]
     pub kind: Option<String>,
-    pub code: Option<String>,
+    pub code: Option<Value>,
     pub message: Option<String>,
+    pub status: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -50,7 +51,10 @@ pub fn is_rate_limit_error(body: &str) -> bool {
         if error.kind.as_deref() == Some("rate_limit_error") {
             return true;
         }
-        if error.code.as_deref() == Some("rate_limit_error") {
+        if error.code.as_ref().and_then(|c| c.as_str()) == Some("rate_limit_error") {
+            return true;
+        }
+        if error.status.as_deref() == Some("RESOURCE_EXHAUSTED") {
             return true;
         }
     }

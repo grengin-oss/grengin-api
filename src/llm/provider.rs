@@ -31,7 +31,7 @@ pub fn get_title_generation_model(provider: &str) -> Option<&str> {
     match provider {
         "openai" => "o3-mini".into(),
         "anthropic" => "claude-haiku-4-5".into(),
-        "mistral" => "mistral-small-latest".into(),
+        "mistral" => "mistral-small-2603".into(),
         "gemini" => "gemini-2.5-flash".into(),
         _ => None,
     }

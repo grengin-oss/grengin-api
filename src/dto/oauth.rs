@@ -18,3 +18,9 @@ pub struct AuthCallback {
     pub error: Option<String>,
     pub error_description: Option<String>,
 }
+
+#[derive(Clone, Copy)]
+pub enum CallbackExchangeMode {
+    Auto,
+    AzureMobilePublic,
+}

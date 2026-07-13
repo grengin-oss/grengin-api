@@ -9,6 +9,28 @@ pub use tool::{
     ToolCall, ToolInput, ToolInputDelta, ToolKind, ToolResult, tool_name_is_web_search,
 };
 
+/// Typed classification of a stream-level error from any LLM provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamErrorKind {
+    /// Provider rate limit or API quota exhausted (429 / RESOURCE_EXHAUSTED / insufficient_quota)
+    QuotaExhausted,
+    /// Any other provider-side error (discontinued model, bad request, server error, parse failure)
+    ProviderError,
+}
+
+impl StreamErrorKind {
+    /// Map a raw provider error-type string to the typed kind.
+    pub fn from_provider_str(s: &str) -> Self {
+        match s {
+            "RESOURCE_EXHAUSTED"
+            | "rate_limit_error"
+            | "insufficient_quota"
+            | "rate_limit_exceeded" => Self::QuotaExhausted,
+            _ => Self::ProviderError,
+        }
+    }
+}
+
 /// Result of parsing a streaming event
 #[derive(Debug, Clone)]
 pub enum StreamParseResult {
@@ -60,7 +82,7 @@ pub enum StreamParseResult {
     },
 
     Error {
-        error_type: String,
+        kind: StreamErrorKind,
         message: String,
     },
 }

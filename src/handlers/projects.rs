@@ -964,50 +964,6 @@ pub async fn add_project_artifact(
 
 // --- project MCP server helpers ---
 
-async fn fetch_project_mcp_servers(
-    project_id: Uuid,
-    db: &sea_orm::DatabaseConnection,
-) -> Result<Vec<ProjectMcpServerResponse>, AuthError> {
-    let rows = project_mcp_servers::Entity::find()
-        .filter(project_mcp_servers::Column::ProjectId.eq(project_id))
-        .all(db)
-        .await
-        .map_err(|e| {
-            eprintln!("db project mcp servers fetch error: {e}");
-            AuthError::DbTimeout
-        })?;
-
-    if rows.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let server_ids: Vec<Uuid> = rows.iter().map(|r| r.server_id).collect();
-    let servers = mcp_servers::Entity::find()
-        .filter(mcp_servers::Column::Id.is_in(server_ids))
-        .all(db)
-        .await
-        .map_err(|e| {
-            eprintln!("db mcp servers fetch error: {e}");
-            AuthError::DbTimeout
-        })?;
-
-    let server_map: HashMap<Uuid, mcp_servers::Model> =
-        servers.into_iter().map(|s| (s.id, s)).collect();
-
-    Ok(rows
-        .into_iter()
-        .filter_map(|row| {
-            let server = server_map.get(&row.server_id)?;
-            Some(ProjectMcpServerResponse {
-                id: row.id,
-                server_id: row.server_id,
-                name: server.name.clone(),
-                description: server.description.clone(),
-                added_at: row.created_at,
-            })
-        })
-        .collect())
-}
 
 // --- project MCP server CRUD ---
 

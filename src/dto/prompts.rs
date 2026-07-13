@@ -1,4 +1,6 @@
+use crate::models::{department_prompt_assignments, role_prompts};
 use chrono::{DateTime, Utc};
+use sea_orm::FromQueryResult;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
@@ -115,4 +117,58 @@ pub struct PromptFeedbackRequest {
     pub prompt_id: Option<Uuid>,
     pub rating: i32,
     pub comment: Option<String>,
+}
+
+#[derive(serde::Deserialize, FromQueryResult)]
+pub struct PromptMetricRow {
+    #[sea_orm(from_alias = "promptId")]
+    pub prompt_id: Uuid,
+    #[sea_orm(from_alias = "name")]
+    pub name: String,
+    #[sea_orm(from_alias = "roleId")]
+    pub role_id: Uuid,
+    #[sea_orm(from_alias = "usageCount")]
+    pub usage_count: i32,
+    #[sea_orm(from_alias = "feedbackCount")]
+    pub feedback_count: i64,
+    #[sea_orm(from_alias = "averageRating")]
+    pub average_rating: Option<f64>,
+}
+
+pub fn to_role_prompt_response(model: role_prompts::Model) -> RolePromptResponse {
+    RolePromptResponse {
+        id: model.id,
+        name: model.name,
+        role_id: model.role_id,
+        prompt_text: model.prompt_text,
+        variables: model
+            .variables
+            .as_ref()
+            .and_then(|value| value.as_array())
+            .map(|array| {
+                array
+                    .iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect()
+            }),
+        is_system: model.is_system,
+        created_by: model.created_by,
+        created_at: model.created_at,
+        updated_at: model.updated_at,
+        usage_count: model.usage_count,
+    }
+}
+
+pub fn to_assignment_response(
+    model: department_prompt_assignments::Model,
+) -> DepartmentPromptAssignmentResponse {
+    DepartmentPromptAssignmentResponse {
+        id: model.id,
+        department_id: model.department_id,
+        prompt_id: model.prompt_id,
+        priority: model.priority,
+        assigned_by: model.assigned_by,
+        created_at: model.created_at,
+        updated_at: model.updated_at,
+    }
 }

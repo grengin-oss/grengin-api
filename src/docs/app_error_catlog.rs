@@ -1,4 +1,4 @@
-use crate::error::{AppError, ErrorCode, ErrorDetail};
+use crate::error::{AppError, ChatStreamError, ErrorCode, ErrorDetail};
 use axum::http::StatusCode;
 use std::collections::BTreeMap;
 use utoipa::ToSchema;
@@ -79,7 +79,7 @@ pub fn build_app_error_catalog() -> Vec<AppErrorCatalogItem> {
         items.push(AppErrorCatalogItem::from_detail(status, detail));
     }
 
-    // llm provider examples: openai + anthropic
+    // llm provider errors
     for e in [
         AppError::InvalidLlmProvider {
             provider: "openai".to_string(),
@@ -90,12 +90,40 @@ pub fn build_app_error_catalog() -> Vec<AppErrorCatalogItem> {
         AppError::LlmProviderDisabledByAdmin {
             provider: "openai".to_string(),
         },
+        AppError::LlmTokenExhausted {
+            provider: "openai".to_string(),
+        },
     ] {
         let (status, detail) = e.to_detail();
         items.push(AppErrorCatalogItem::from_detail(status, detail));
     }
 
-    // Optional: stable ordering
+    // chat stream errors (one example per variant)
+    for e in [
+        ChatStreamError::ApiQuotaExhausted { provider: "openai".to_string() },
+        ChatStreamError::ProviderError {
+            provider: "mistral".to_string(),
+            message: "The model `mistral-small-latest` has been deprecated.".to_string(),
+        },
+        ChatStreamError::ConnectionFailed { provider: "gemini".to_string() },
+    ] {
+        let (status, detail) = AppError::ChatStream(e).to_detail();
+        items.push(AppErrorCatalogItem::from_detail(status, detail));
+    }
+
+    // budget errors
+    for e in [
+        AppError::DepartmentBudgetExceeded,
+        AppError::DepartmentModelNotAllowed {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+        },
+    ] {
+        let (status, detail) = e.to_detail();
+        items.push(AppErrorCatalogItem::from_detail(status, detail));
+    }
+
+    // stable ordering, deduplicated by code
     items.sort_by_key(|x| x.code as u32);
     items.dedup_by_key(|x| x.code as u32);
 
