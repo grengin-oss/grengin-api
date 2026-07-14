@@ -4,7 +4,6 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 #[derive(Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ActiveSkillInfo {
     pub id: Uuid,
     pub identifier: String,
@@ -13,7 +12,6 @@ pub struct ActiveSkillInfo {
 }
 
 #[derive(Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct SkillsActivePayload {
     pub skills: Vec<ActiveSkillInfo>,
 }
@@ -27,7 +25,6 @@ pub struct BudgetWarningPayload {
 }
 
 #[derive(Serialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
 pub enum ChatStreamEvents {
     Conversation,
     Skills,
@@ -141,7 +138,6 @@ pub struct ChatStreamPayload {
 }
 
 #[derive(Serialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
 pub enum ChatToolKind {
     WebSearch,
     Other,

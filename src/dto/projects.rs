@@ -4,7 +4,6 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ProjectCreateRequest {
     pub name: String,
     pub description: Option<String>,
@@ -13,7 +12,6 @@ pub struct ProjectCreateRequest {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ProjectUpdateRequest {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -22,7 +20,6 @@ pub struct ProjectUpdateRequest {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ProjectListQuery {
     pub limit: Option<u64>,
     pub offset: Option<u64>,
@@ -32,7 +29,6 @@ pub struct ProjectListQuery {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ProjectResponse {
     pub id: Uuid,
     pub name: String,
@@ -49,7 +45,6 @@ pub struct ProjectResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ProjectListResponse {
     pub projects: Vec<ProjectResponse>,
     pub total: u64,
@@ -58,7 +53,6 @@ pub struct ProjectListResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ProjectSourceResponse {
     pub id: Uuid,
     pub project_id: Uuid,
@@ -70,7 +64,6 @@ pub struct ProjectSourceResponse {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ArtifactCreateRequest {
     pub title: String,
     pub content: String,
@@ -78,7 +71,6 @@ pub struct ArtifactCreateRequest {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ProjectChatResponse {
     pub id: Uuid,
     pub title: Option<String>,
@@ -88,7 +80,6 @@ pub struct ProjectChatResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ProjectDetailResponse {
     pub id: Uuid,
     pub name: String,
@@ -109,7 +100,6 @@ pub struct ProjectDetailResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ProjectMcpServerResponse {
     pub id: Uuid,
     pub server_id: Uuid,
@@ -119,26 +109,22 @@ pub struct ProjectMcpServerResponse {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct AddMcpServerRequest {
     pub server_id: Uuid,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct AddMemberRequest {
     pub user_id: Uuid,
     pub role: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct InstructionsUpdateRequest {
     pub instructions: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct AddSourceRequest {
     pub file_name: String,
     pub file_type: String,
@@ -147,19 +133,16 @@ pub struct AddSourceRequest {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ShareProjectResponse {
     pub share_url: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct LinkProjectRequest {
     pub project_id: Uuid,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ProjectMemberResponse {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -171,7 +154,6 @@ pub struct ProjectMemberResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct UserSearchItem {
     pub id: Uuid,
     pub name: Option<String>,
@@ -180,13 +162,11 @@ pub struct UserSearchItem {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct UserSearchResponse {
     pub users: Vec<UserSearchItem>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct MemberSearchQuery {
     pub q: Option<String>,
     pub limit: Option<u64>,
