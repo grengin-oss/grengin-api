@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 /// Typed tools configuration stored in a skill's toolsConfig JSON column.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillToolsConfig {
     pub web_search: bool,
     #[serde(default)]
@@ -26,6 +27,7 @@ impl SkillToolsConfig {
 // ── Request types ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillCreateRequest {
     pub identifier: String,
     pub name: String,
@@ -37,6 +39,7 @@ pub struct SkillCreateRequest {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillUpdateRequest {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -48,6 +51,7 @@ pub struct SkillUpdateRequest {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillListQuery {
     pub limit: Option<u64>,
     pub offset: Option<u64>,
@@ -56,6 +60,7 @@ pub struct SkillListQuery {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct LinkSkillRequest {
     pub skill_id: Uuid,
 }
@@ -63,6 +68,7 @@ pub struct LinkSkillRequest {
 // ── Response types ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillResponse {
     pub id: Uuid,
     pub identifier: String,
@@ -83,6 +89,7 @@ pub struct SkillResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillListResponse {
     pub skills: Vec<SkillResponse>,
     pub total: u64,
@@ -91,6 +98,7 @@ pub struct SkillListResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ConversationSkillResponse {
     pub id: Uuid,
     pub conversation_id: Uuid,
