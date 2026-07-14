@@ -2,9 +2,9 @@ use crate::{
     auth::{claims::Claims, error::Error},
     dto::{
         chat_stream::{
-            ActiveSkillInfo, BudgetWarningPayload, ChatInput, ChatStream, ChatStreamEvent,
-            ChatStreamEvents, ChatStreamPayload, ChatStreamToolCall, ChatStreamToolResult,
-            ChatStreamWebSearchAction, ChatToolKind, SkillsActivePayload,
+            ActiveSkillInfo, ArtifactSavedPayload, BudgetWarningPayload, ChatInput, ChatStream,
+            ChatStreamEvent, ChatStreamEvents, ChatStreamPayload, ChatStreamToolCall,
+            ChatStreamToolResult, ChatStreamWebSearchAction, ChatToolKind, SkillsActivePayload,
         },
         files::File,
         llm::anthropic::{
@@ -2684,18 +2684,20 @@ pub async fn handle_chat_stream(
                        }
                        saved_artifacts.push(json!({
                            "id": artifact_id,
-                           "fileId": file_id,
+                           "file_id": file_id,
                            "title": acc.title,
-                           "contentType": acc.content_type,
+                           "content_type": acc.content_type,
                        }));
-                       if let Ok(data) = serde_json::to_string(&json!({
-                           "streamId": stream_id,
-                           "id": artifact_id,
-                           "fileId": file_id,
-                           "title": acc.title,
-                           "contentType": acc.content_type,
-                       })) {
-                           yield Event::default().event(ChatStreamEvents::ArtifactSaved.to_string()).data(data);
+                       if let Ok(stream_uuid) = stream_id.parse::<Uuid>() {
+                           if let Ok(data) = serde_json::to_string(&ArtifactSavedPayload {
+                               stream_id: stream_uuid,
+                               id: artifact_id,
+                               file_id,
+                               title: acc.title.clone(),
+                               content_type: acc.content_type.clone(),
+                           }) {
+                               yield Event::default().event(ChatStreamEvents::ArtifactSaved.to_string()).data(data);
+                           }
                        }
                    }
                    if !saved_artifacts.is_empty() {

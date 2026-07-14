@@ -66,7 +66,6 @@ pub struct MessageResponse {
 }
 
 #[derive(Serialize, Deserialize, ToSchema, IntoParams)]
-#[serde(rename_all = "camelCase")]
 pub struct ArtifactMeta {
     pub id: Uuid,
     pub file_id: Uuid,
