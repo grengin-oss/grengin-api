@@ -4,7 +4,6 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 #[derive(Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ActiveSkillInfo {
     pub id: Uuid,
     pub identifier: String,
@@ -13,7 +12,6 @@ pub struct ActiveSkillInfo {
 }
 
 #[derive(Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct SkillsActivePayload {
     pub skills: Vec<ActiveSkillInfo>,
 }
