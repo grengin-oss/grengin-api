@@ -27,6 +27,7 @@ pub mod notifications;
 pub mod rag;
 pub mod reconfigure;
 pub mod search;
+pub mod skills_helpers;
 pub mod system_metrics;
 pub mod sso_validation;
 pub mod system_prompts;

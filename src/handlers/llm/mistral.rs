@@ -14,10 +14,7 @@ use crate::{
     },
     llm::{prompt::Prompt, provider::MistralApis},
     models::messages::ChatRole,
-    services::{
-        artifacts::{ARTIFACT_TOOL_DESC, ARTIFACT_TOOL_NAME},
-        mcp_tools::McpToolDescriptor,
-    },
+    services::mcp_tools::McpToolDescriptor,
 };
 
 use super::{
@@ -280,20 +277,9 @@ impl StreamParser for MistralStreamParser {
     }
 }
 
-pub fn build_mistral_artifact_fn(artifact_schema: Value) -> MistralTool {
-    MistralTool::Function {
-        function: MistralToolDefinition {
-            name: ARTIFACT_TOOL_NAME.to_string(),
-            description: Some(ARTIFACT_TOOL_DESC.to_string()),
-            parameters: artifact_schema,
-        },
-    }
-}
-
 pub fn build_mistral_tools(
     use_conversations: bool,
     mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
-    artifact_schema: Value,
 ) -> Option<Vec<MistralTool>> {
     let mut tools = Vec::new();
     if !use_conversations {
@@ -311,7 +297,6 @@ pub fn build_mistral_tools(
             });
         }
     }
-    tools.push(build_mistral_artifact_fn(artifact_schema));
     if tools.is_empty() { None } else { Some(tools) }
 }
 
@@ -349,7 +334,6 @@ pub fn build_mistral_conversation_tools(
     web_search: bool,
     supports_mcp_tools: bool,
     mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
-    artifact_schema: Value,
 ) -> Option<Vec<MistralTool>> {
     let mut tools = Vec::new();
     if web_search {
@@ -370,7 +354,6 @@ pub fn build_mistral_conversation_tools(
             });
         }
     }
-    tools.push(build_mistral_artifact_fn(artifact_schema));
     if tools.is_empty() { None } else { Some(tools) }
 }
 

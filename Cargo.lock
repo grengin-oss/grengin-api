@@ -1249,7 +1249,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "grengin-api"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1909,6 +1909,7 @@ checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
 name = "migration"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "sea-orm-migration",
  "serde_json",
  "tokio",

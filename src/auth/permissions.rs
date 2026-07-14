@@ -130,6 +130,8 @@ pub const PERMISSION_ROLES_VIEW: &str = "roles:view";
 pub const PERMISSION_ROLES_MANAGE: &str = "roles:manage";
 pub const PERMISSION_ROLES_ASSIGN: &str = "roles:assign";
 pub const PERMISSION_SYSTEM_MAINTAIN: &str = "system:maintain";
+pub const PERMISSION_SKILLS_VIEW: &str = "skills:view";
+pub const PERMISSION_SKILLS_MANAGE: &str = "skills:manage";
 
 pub fn permission_key(domain: &str, action: &str) -> String {
     format!("{domain}:{action}")

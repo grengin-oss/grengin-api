@@ -65,10 +65,21 @@ pub struct MessageResponse {
     pub usage: TokenUsage,
 }
 
+#[derive(Serialize, Deserialize, ToSchema, IntoParams)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactMeta {
+    pub id: Uuid,
+    pub file_id: Uuid,
+    pub title: String,
+    pub content_type: String,
+}
+
 #[derive(Serialize, ToSchema, IntoParams)]
 pub struct MessageParts {
     pub text: String,
     pub files: Option<Vec<File>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<Vec<ArtifactMeta>>,
 }
 
 #[derive(Serialize, ToSchema, IntoParams)]

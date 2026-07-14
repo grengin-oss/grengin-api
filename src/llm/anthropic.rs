@@ -24,6 +24,7 @@ impl AnthropicHeaders for RequestBuilder {
         self.header("x-api-key", &anthropic_settings.api_key)
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("content-type", "application/json")
+            .header("anthropic-beta", "output-128k-2025-02-19")
     }
 }
 

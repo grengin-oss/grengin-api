@@ -10,4 +10,5 @@ pub mod models;
 pub mod oidc;
 pub mod open_error;
 pub mod projects;
+pub mod skills;
 pub mod swagger_ui;

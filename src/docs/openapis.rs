@@ -74,11 +74,15 @@ use crate::dto::projects::{
     ProjectResponse, ProjectSourceResponse, ProjectUpdateRequest, ShareProjectResponse,
     UserSearchItem, UserSearchResponse,
 };
+use crate::dto::skills::{
+    ConversationSkillResponse, LinkSkillRequest, SkillCreateRequest, SkillListQuery,
+    SkillListResponse, SkillResponse, SkillToolsConfig, SkillUpdateRequest,
+};
 use crate::handlers::{
     admin_ai, admin_analytics, admin_audit, admin_department, admin_department_budgets,
     admin_embedding, admin_mcp, admin_prompts, admin_reconfigure, admin_roles, admin_sso_provider,
     admin_system, admin_users, auth, branding, chat, chat_stream, file, mcp, me, me_prompts,
-    message, models, notifications, oidc, open_error, projects,
+    message, models, notifications, oidc, open_error, projects, skills,
 };
 use crate::models::departments::{ActionOnExceed, BudgetPeriod};
 use crate::models::mcp_access_policies::{McpAccessType, McpPermission};
@@ -235,6 +239,14 @@ use utoipa::OpenApi;
         projects::list_project_mcp_servers,
         projects::add_project_mcp_server,
         projects::remove_project_mcp_server,
+        skills::list_skills,
+        skills::get_skill,
+        skills::create_skill,
+        skills::update_skill,
+        skills::delete_skill,
+        skills::list_conversation_skill_links,
+        skills::link_skill,
+        skills::unlink_skill,
     ),
     components(
         schemas(
@@ -409,6 +421,14 @@ use utoipa::OpenApi;
             LinkProjectRequest,
             ProjectMcpServerResponse,
             AddMcpServerRequest,
+            SkillToolsConfig,
+            SkillCreateRequest,
+            SkillUpdateRequest,
+            SkillListQuery,
+            SkillResponse,
+            SkillListResponse,
+            LinkSkillRequest,
+            ConversationSkillResponse,
         )
     ),
     tags(
@@ -418,6 +438,7 @@ use utoipa::OpenApi;
         (name = "me", description = "Current user permissions"),
         (name = "mcp", description = "MCP tools & connections"),
         (name = "root", description = "Root / health"),
+        (name = "skills", description = "Skills management & conversation skill links"),
     ),
     modifiers(
         &ApiSecurityAddon

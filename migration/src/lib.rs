@@ -52,6 +52,9 @@ mod m20260608_000001_add_use_grengin_proxy_to_sso_providers;
 mod m20260615_000001_add_allow_self_registration_to_sso_providers;
 mod m20260630_000001_create_projects;
 mod m20260706_000001_create_project_mcp_servers;
+mod m20260713_000001_create_skills;
+mod m20260713_000002_add_skills_permissions;
+mod m20260714_000001_create_artifacts;
 
 pub struct Migrator;
 
@@ -111,6 +114,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260615_000001_add_allow_self_registration_to_sso_providers::Migration),
             Box::new(m20260630_000001_create_projects::Migration),
             Box::new(m20260706_000001_create_project_mcp_servers::Migration),
+            Box::new(m20260713_000001_create_skills::Migration),
+            Box::new(m20260713_000002_add_skills_permissions::Migration),
+            Box::new(m20260714_000001_create_artifacts::Migration),
         ]
     }
 }

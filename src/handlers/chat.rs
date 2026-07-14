@@ -2,7 +2,7 @@ use crate::{
     auth::{claims::Claims, error::Error},
     dto::{
         chat::{
-            ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse,
+            ArchiveChatRequest, ArtifactMeta, ConversationResponse, MessageParts, MessageResponse,
             PaginatedConversations, SemanticResult, TokenUsage,
         },
         common::PaginationQuery,
@@ -344,6 +344,11 @@ pub async fn get_chat_by_id(
         } else {
             None
         };
+        let artifacts: Option<Vec<ArtifactMeta>> = metadata.and_then(|m| {
+            m.get("artifacts")
+                .cloned()
+                .and_then(|v| serde_json::from_value(v).ok())
+        });
         let message = MessageResponse {
             id: message_model.id,
             role: message_model.role,
@@ -358,6 +363,7 @@ pub async fn get_chat_by_id(
             parts: MessageParts {
                 text: message_model.message_content,
                 files,
+                artifacts,
             },
             usage: TokenUsage {
                 input_tokens: message_model.request_tokens,

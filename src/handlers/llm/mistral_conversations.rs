@@ -10,10 +10,7 @@ use crate::{
     config::setting::MistralSettings,
     dto::llm::mistral::{MistralTool, MistralToolDefinition},
     llm::provider::MistralApis,
-    services::{
-        artifacts::{ARTIFACT_TOOL_DESC, ARTIFACT_TOOL_NAME},
-        mcp_tools::McpToolDescriptor,
-    },
+    services::mcp_tools::McpToolDescriptor,
 };
 
 use super::{
@@ -370,7 +367,6 @@ impl StreamParser for MistralConversationStreamParser {
 pub fn build_mistral_conversation_tools(
     web_search: bool,
     mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
-    artifact_schema: Value,
 ) -> Option<Vec<MistralTool>> {
     let mut tools = Vec::new();
     if web_search {
@@ -389,13 +385,6 @@ pub fn build_mistral_conversation_tools(
             },
         });
     }
-    tools.push(MistralTool::Function {
-        function: MistralToolDefinition {
-            name: ARTIFACT_TOOL_NAME.to_string(),
-            description: Some(ARTIFACT_TOOL_DESC.to_string()),
-            parameters: artifact_schema,
-        },
-    });
     if tools.is_empty() { None } else { Some(tools) }
 }
 

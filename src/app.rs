@@ -5,7 +5,7 @@ use crate::{
         admin::admin_routes, auth::auth_routes, branding::branding_routes, chat::chat_routes,
         file::files_routes, mcp::mcp_routes, me::me_routes, message::message_routes,
         models::models_routes, oidc::oidc_routes, open_error::errors_routes,
-        projects::projects_routes, swagger_ui::swagger_ui_routes,
+        projects::projects_routes, skills::skills_routes, swagger_ui::swagger_ui_routes,
     },
     services::{
         analytics_cache::spawn_analytics_cache_refresh,
@@ -76,6 +76,7 @@ pub async fn init_app() -> Result<(), Error> {
         .merge(branding_routes())
         .merge(models_routes())
         .merge(projects_routes())
+        .merge(skills_routes())
         .merge(auth_routes())
         .merge(errors_routes())
         .layer(from_fn_with_state(app_state.clone(), audit_log_middleware))
