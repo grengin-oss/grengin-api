@@ -55,8 +55,10 @@ use crate::{
     },
     services::{
         artifacts::{
-            ARTIFACT_SYSTEM_HINT, ArtifactParser, ArtifactParseEvent,
+            ARTIFACT_SYSTEM_HINT, ArtifactAccum, ArtifactParser, ArtifactParseEvent,
+            content_type_to_ext,
         },
+        chat_helpers::LlmProviderConfig,
         budget_allocation::{get_department_budget_status, refresh_department_budget_available},
         department_policies::check_model_allowed,
         mcp_helpers::{
@@ -102,30 +104,6 @@ use std::{collections::HashMap, convert::Infallible};
 use tokio::time::Instant;
 use uuid::Uuid;
 
-enum LlmProviderConfig {
-    OpenAI(crate::config::setting::OpenaiSettings),
-    Anthropic(crate::config::setting::AnthropicSettings),
-    Mistral(crate::config::setting::MistralSettings),
-    Gemini(crate::config::setting::GeminiSettings),
-}
-
-struct ArtifactAccum {
-    title: String,
-    content_type: String,
-    content: String,
-}
-
-fn content_type_to_ext(content_type: &str) -> &'static str {
-    match content_type {
-        "text/html" => "html",
-        "text/markdown" => "md",
-        "application/javascript" | "text/javascript" => "js",
-        "text/css" => "css",
-        "application/json" => "json",
-        "image/svg+xml" => "svg",
-        _ => "txt",
-    }
-}
 
 
 #[utoipa::path(

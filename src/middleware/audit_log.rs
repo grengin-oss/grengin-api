@@ -529,6 +529,12 @@ fn resolve_audit_action(method: &Method, route: &str) -> Option<AuditRouteAction
             snapshot_target: SnapshotTarget::Message,
         }),
 
+        ("DELETE", "/artifacts/{id}") => Some(AuditRouteAction {
+            action: "artifact_deleted",
+            resource_type: Some("artifact"),
+            resource_param: Some("id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
         ("POST", "/files") => Some(AuditRouteAction {
             action: "file_uploaded",
             resource_type: Some("file"),

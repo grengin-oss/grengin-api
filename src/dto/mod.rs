@@ -1,3 +1,4 @@
+pub mod artifacts;
 pub mod admin_ai;
 pub mod admin_department;
 pub mod admin_department_budget;

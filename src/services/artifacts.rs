@@ -1,5 +1,23 @@
 use uuid::Uuid;
 
+pub struct ArtifactAccum {
+    pub title: String,
+    pub content_type: String,
+    pub content: String,
+}
+
+pub fn content_type_to_ext(content_type: &str) -> &'static str {
+    match content_type {
+        "text/html" => "html",
+        "text/markdown" => "md",
+        "application/javascript" | "text/javascript" => "js",
+        "text/css" => "css",
+        "application/json" => "json",
+        "image/svg+xml" => "svg",
+        _ => "txt",
+    }
+}
+
 pub const ARTIFACT_SYSTEM_HINT: &str = "When producing a standalone artifact — a complete HTML page, \
 full Markdown document, or self-contained code file — wrap it in XML tags:\n\n\
 <artifact type=\"text/html\" title=\"Descriptive title\">\n\

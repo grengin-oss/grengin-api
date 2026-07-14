@@ -1,4 +1,6 @@
 use crate::auth::claims::Claims;
+use crate::dto::artifacts::{ArtifactListResponse, ArtifactResponse};
+use crate::handlers::artifacts;
 use crate::auth::error::{AuthError, AuthErrorCode, AuthErrorDetailVariant, Error};
 use crate::docs::{app_error_catlog::AppErrorCatalogItem, security::ApiSecurityAddon};
 use crate::dto::admin_ai::{
@@ -94,6 +96,9 @@ use utoipa::OpenApi;
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        artifacts::get_artifact,
+        artifacts::list_conversation_artifacts,
+        artifacts::delete_artifact,
         auth::handle_refresh_token,
         oidc::oidc_login_start,
         oidc::oidc_oauth_callback_get,
@@ -250,6 +255,8 @@ use utoipa::OpenApi;
     ),
     components(
         schemas(
+            ArtifactResponse,
+            ArtifactListResponse,
             AuthInit,
             AuthToken,
             TokenType,
@@ -439,6 +446,7 @@ use utoipa::OpenApi;
         (name = "mcp", description = "MCP tools & connections"),
         (name = "root", description = "Root / health"),
         (name = "skills", description = "Skills management & conversation skill links"),
+        (name = "artifacts", description = "Chat artifact retrieval & deletion"),
     ),
     modifiers(
         &ApiSecurityAddon

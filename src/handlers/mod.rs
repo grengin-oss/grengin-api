@@ -1,3 +1,4 @@
+pub mod artifacts;
 pub mod admin_ai;
 pub mod admin_analytics;
 pub mod admin_audit;

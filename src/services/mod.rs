@@ -1,4 +1,5 @@
 pub mod ai_engine_helpers;
+pub mod artifacts_helpers;
 pub mod artifacts;
 pub mod branding_helpers;
 pub mod chat_helpers;
