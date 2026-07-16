@@ -3,14 +3,18 @@ use sea_orm::{
     ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder, QuerySelect,
     RelationTrait,
 };
+use serde_json::json;
 use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
     config::setting::EmbeddingSettings,
+    dto::embeddings::{GeminiEmbeddingResponse, MistralEmbeddingResponse},
     error::AppError,
     llm::provider::OpenaiApis,
+    llm::{gemini::GEMINI_API_URL, mistral::MISTRAL_API_URL},
     models::{conversations, message_embeddings, messages, messages::ChatRole},
+    services::embedders_cache::get_model_dimensions,
     state::SharedState,
 };
 
@@ -211,15 +215,21 @@ async fn load_semantic_snippets(
         return Ok(HashMap::new());
     }
 
+    // DISTINCT ON is not expressible in Sea-ORM. Since conversation_ids is bounded by the
+    // page limit (typically ≤20), N+1 queries with LIMIT 1 ordered by distance are fine.
     let vector = format_pgvector(embedding);
-    let distance_expr = Expr::col(message_embeddings::Column::Embedding).binary(
-        BinOper::Custom("<=>".into()),
-        Expr::val(vector).cast_as(Alias::new("vector")),
-    );
-
     let mut results = HashMap::new();
-    for conversation_id in conversation_ids {
+
+    for &conv_id in conversation_ids {
+        let distance = || {
+            Expr::col(message_embeddings::Column::Embedding).binary(
+                BinOper::Custom("<=>".into()),
+                Expr::val(vector.clone()).cast_as(Alias::new("vector")),
+            )
+        };
+
         let row = build_semantic_base_query(user_id, archived, config)
+            .filter(message_embeddings::Column::ConversationId.eq(conv_id))
             .select_only()
             .column_as(
                 Expr::col((
@@ -239,15 +249,14 @@ async fn load_semantic_snippets(
                 Expr::col((messages::Entity, messages::Column::MessageContent)),
                 "snippet",
             )
-            .column_as(distance_expr.clone(), "distance")
-            .filter(message_embeddings::Column::ConversationId.eq(*conversation_id))
-            .order_by(distance_expr.clone(), Order::Asc)
+            .column_as(distance(), "distance")
+            .order_by(distance(), Order::Asc)
             .limit(1)
             .into_model::<SemanticSnippetRow>()
             .one(db)
             .await
             .map_err(|e| {
-                eprintln!("conversation semantic snippet query error -> {e}");
+                eprintln!("semantic snippet query error -> {e}");
                 AppError::DbTimeout
             })?;
 
@@ -271,7 +280,14 @@ async fn generate_search_embedding(
     config: &EmbeddingSettings,
     text: &str,
 ) -> Result<Option<Vec<f32>>, AppError> {
-    match config.provider.to_lowercase().as_str() {
+    let provider = config.provider.to_lowercase();
+    // Prefer the admin-configured dimensions; fall back to the model's native dimensions from cache.
+    let target_dim = match config.dimensions {
+        Some(d) => Some(d as usize),
+        None => get_model_dimensions(&app_state.req_client, &provider, &config.model).await,
+    };
+
+    match provider.as_str() {
         "openai" => {
             let openai_settings = match app_state.settings.openai.read().await.clone() {
                 Some(settings) if settings.is_enabled => settings,
@@ -283,6 +299,7 @@ async fn generate_search_embedding(
                     &openai_settings,
                     config.model.clone(),
                     vec![text.to_string()],
+                    config.dimensions,
                 )
                 .await
                 .map_err(|e| {
@@ -293,9 +310,144 @@ async fn generate_search_embedding(
                 })?;
             let mut data = response.data;
             data.sort_by_key(|item| item.index);
-            Ok(data.into_iter().next().map(|item| item.embedding))
+            Ok(data
+                .into_iter()
+                .next()
+                .map(|item| normalize_to_target(item.embedding, target_dim)))
         }
+        "mistral" => generate_mistral_search_embedding(app_state, config, text, target_dim).await,
+        "gemini" => generate_gemini_search_embedding(app_state, config, text, target_dim).await,
         _ => Ok(None),
+    }
+}
+
+async fn generate_mistral_search_embedding(
+    app_state: &SharedState,
+    config: &EmbeddingSettings,
+    text: &str,
+    target_dim: Option<usize>,
+) -> Result<Option<Vec<f32>>, AppError> {
+    let mistral_settings = match app_state.settings.mistral.read().await.clone() {
+        Some(settings) if settings.is_enabled => settings,
+        _ => return Ok(None),
+    };
+    let response: MistralEmbeddingResponse = app_state
+        .req_client
+        .post(format!("{MISTRAL_API_URL}/v1/embeddings"))
+        .bearer_auth(mistral_settings.api_key)
+        .header("content-type", "application/json")
+        .json(&json!({
+            "model": config.model,
+            "input": [text],
+        }))
+        .send()
+        .await
+        .map_err(|e| {
+            eprintln!("mistral search embedding request error: {e}");
+            AppError::LlmProviderNotConfigured {
+                provider: "mistral".to_string(),
+            }
+        })?
+        .error_for_status()
+        .map_err(|e| {
+            eprintln!("mistral search embedding status error: {e}");
+            AppError::LlmProviderNotConfigured {
+                provider: "mistral".to_string(),
+            }
+        })?
+        .json()
+        .await
+        .map_err(|e| {
+            eprintln!("mistral search embedding decode error: {e}");
+            AppError::LlmProviderNotConfigured {
+                provider: "mistral".to_string(),
+            }
+        })?;
+    let mut data = response.data;
+    data.sort_by_key(|item| item.index);
+    Ok(data
+        .into_iter()
+        .next()
+        .map(|item| normalize_to_target(item.embedding, target_dim)))
+}
+
+async fn generate_gemini_search_embedding(
+    app_state: &SharedState,
+    config: &EmbeddingSettings,
+    text: &str,
+    target_dim: Option<usize>,
+) -> Result<Option<Vec<f32>>, AppError> {
+    let gemini_settings = match app_state.settings.gemini.read().await.clone() {
+        Some(settings) if settings.is_enabled => settings,
+        _ => return Ok(None),
+    };
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "content".to_string(),
+        json!({
+            "parts": [{"text": text}]
+        }),
+    );
+    if let Some(dimensions) = config.dimensions {
+        body.insert("outputDimensionality".to_string(), json!(dimensions));
+    }
+
+    let response = app_state
+        .req_client
+        .post(format!(
+            "{GEMINI_API_URL}/v1beta/models/{}:embedContent",
+            config.model
+        ))
+        .header("x-goog-api-key", gemini_settings.api_key.clone())
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            eprintln!("gemini search embedding request error: {e}");
+            AppError::LlmProviderNotConfigured {
+                provider: "gemini".to_string(),
+            }
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        eprintln!("gemini search embedding status error: {status} body: {body}");
+        return Err(AppError::LlmProviderNotConfigured {
+            provider: "gemini".to_string(),
+        });
+    }
+
+    let parsed: GeminiEmbeddingResponse = response.json().await.map_err(|e| {
+        eprintln!("gemini search embedding decode error: {e}");
+        AppError::LlmProviderNotConfigured {
+            provider: "gemini".to_string(),
+        }
+    })?;
+
+    Ok(parsed
+        .embedding
+        .map(|e| normalize_to_target(e.values, target_dim)))
+}
+
+// Normalize only when the API returns a different length than expected (e.g. Mistral's
+// fixed 1024-dim output used against a 1536-dim stored index). When target_dim is None
+// the embedding is returned as-is.
+fn normalize_to_target(mut embedding: Vec<f32>, target_dim: Option<usize>) -> Vec<f32> {
+    let Some(target) = target_dim else {
+        return embedding;
+    };
+    match embedding.len().cmp(&target) {
+        std::cmp::Ordering::Equal => embedding,
+        std::cmp::Ordering::Greater => {
+            embedding.truncate(target);
+            embedding
+        }
+        std::cmp::Ordering::Less => {
+            embedding.resize(target, 0.0);
+            embedding
+        }
     }
 }
 

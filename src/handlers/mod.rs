@@ -21,6 +21,7 @@ pub mod llm;
 pub mod mcp;
 pub mod me;
 pub mod me_prompts;
+pub mod me_skills;
 pub mod message;
 pub mod models;
 pub mod notifications;

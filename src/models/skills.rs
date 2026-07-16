@@ -19,6 +19,7 @@ pub struct Model {
     pub is_builtin: bool,
     pub is_active: bool,
     pub department_id: Option<Uuid>,
+    pub user_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -31,11 +32,23 @@ pub enum Relation {
         to = "super::departments::Column::Id"
     )]
     Department,
+    #[sea_orm(
+        belongs_to = "super::users::Entity",
+        from = "Column::UserId",
+        to = "super::users::Column::Id"
+    )]
+    User,
 }
 
 impl Related<super::departments::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Department.def()
+    }
+}
+
+impl Related<super::users::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::User.def()
     }
 }
 

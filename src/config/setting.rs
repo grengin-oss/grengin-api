@@ -614,8 +614,10 @@ impl AzureSettings {
 
 impl OpenaiSettings {
     pub fn from_env() -> Result<Self, ConfigError> {
-        let api_key =
-            std::env::var("OPENAI_API_KEY").map_err(|_| ConfigError::Missing("OPENAI_API_KEY"))?;
+        let api_key = std::env::var("OPENAI_API_KEY")
+            .map_err(|_| ConfigError::Missing("OPENAI_API_KEY"))?
+            .split_whitespace()
+            .collect::<String>();
         let org_id = std::env::var("OPENAI_ORG_ID").ok();
         let project_id = std::env::var("OPENAI_PROJECT_ID").ok();
         let timeout_ms = std::env::var("OPENAI_TIMEOUT_MS")
@@ -640,7 +642,9 @@ impl OpenaiSettings {
 impl AnthropicSettings {
     pub fn from_env() -> Result<Self, ConfigError> {
         let api_key = std::env::var("ANTHROPIC_API_KEY")
-            .map_err(|_| ConfigError::Missing("ANTHROPIC_API_KEY"))?;
+            .map_err(|_| ConfigError::Missing("ANTHROPIC_API_KEY"))?
+            .split_whitespace()
+            .collect::<String>();
         Ok(Self {
             api_key,
             is_enabled: true,
@@ -651,7 +655,9 @@ impl AnthropicSettings {
 impl MistralSettings {
     pub fn from_env() -> Result<Self, ConfigError> {
         let api_key = std::env::var("MISTRAL_API_KEY")
-            .map_err(|_| ConfigError::Missing("MISTRAL_API_KEY"))?;
+            .map_err(|_| ConfigError::Missing("MISTRAL_API_KEY"))?
+            .split_whitespace()
+            .collect::<String>();
         Ok(Self {
             api_key,
             is_enabled: true,
@@ -661,8 +667,10 @@ impl MistralSettings {
 
 impl GeminiSettings {
     pub fn from_env() -> Result<Self, ConfigError> {
-        let api_key =
-            std::env::var("GEMINI_API_KEY").map_err(|_| ConfigError::Missing("GEMINI_API_KEY"))?;
+        let api_key = std::env::var("GEMINI_API_KEY")
+            .map_err(|_| ConfigError::Missing("GEMINI_API_KEY"))?
+            .split_whitespace()
+            .collect::<String>();
         Ok(Self {
             api_key,
             is_enabled: true,

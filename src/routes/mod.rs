@@ -6,6 +6,7 @@ pub mod chat;
 pub mod file;
 pub mod mcp;
 pub mod me;
+pub mod me_skills;
 pub mod message;
 pub mod models;
 pub mod oidc;

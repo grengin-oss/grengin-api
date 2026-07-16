@@ -2,11 +2,18 @@ use crate::{llm::prompt::Prompt, models::messages::ChatRole};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
+pub struct MistralStreamOptions {
+    pub include_usage: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct MistralChatCompletionRequest {
     pub model: String,
     pub messages: Vec<MistralMessage>,
     #[serde(default)]
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<MistralStreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]

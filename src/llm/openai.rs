@@ -219,10 +219,12 @@ impl OpenaiApis for ReqwestClient {
         openai_settings: &OpenaiSettings,
         model_name: String,
         input: Vec<String>,
+        dimensions: Option<i32>,
     ) -> Result<OpenaiEmbeddingResponse, Error> {
         let body = OpenaiEmbeddingRequest {
             model: model_name,
             input,
+            dimensions,
         };
         let response: OpenaiEmbeddingResponse = self
             .post(format!("{OPENAI_API_URL}/v1/embeddings"))

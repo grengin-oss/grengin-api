@@ -26,6 +26,32 @@ impl SkillToolsConfig {
 // ── Request types ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, ToSchema)]
+pub struct UserSkillCreateRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub avatar: Option<String>,
+    pub system_role: Option<String>,
+    pub tools_config: Option<SkillToolsConfig>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UserSkillUpdateRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub avatar: Option<String>,
+    pub system_role: Option<String>,
+    pub tools_config: Option<SkillToolsConfig>,
+    pub is_active: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UserSkillListQuery {
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+    pub is_active: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct SkillCreateRequest {
     pub identifier: String,
     pub name: String,
@@ -78,6 +104,8 @@ pub struct SkillResponse {
     pub is_active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub department_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

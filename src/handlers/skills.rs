@@ -41,7 +41,7 @@ use crate::{
     )
 )]
 pub async fn list_skills(
-    _claims: Claims,
+    claims: Claims,
     Query(query): Query<SkillListQuery>,
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode, Json<SkillListResponse>), AuthError> {
@@ -54,6 +54,7 @@ pub async fn list_skills(
         query.is_active,
         limit,
         offset,
+        Some(claims.user_id),
     )
     .await?;
 
@@ -146,6 +147,7 @@ pub async fn create_skill(
         is_builtin: Set(false),
         is_active: Set(true),
         department_id: Set(req.department_id),
+        user_id: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
     };

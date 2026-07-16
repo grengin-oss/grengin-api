@@ -27,6 +27,7 @@ pub fn skill_to_response(skill: skills::Model) -> SkillResponse {
         is_builtin: skill.is_builtin,
         is_active: skill.is_active,
         department_id: skill.department_id,
+        user_id: skill.user_id,
         created_at: skill.created_at,
         updated_at: skill.updated_at,
     }
@@ -49,8 +50,14 @@ pub async fn list_skills_query(
     is_active: Option<bool>,
     limit: u64,
     offset: u64,
+    own_user_id: Option<Uuid>,
 ) -> Result<(Vec<skills::Model>, u64), AuthError> {
-    let mut select = skills::Entity::find();
+    // Include org/global skills (user_id IS NULL) plus the caller's own personal skills.
+    let mut user_filter = sea_orm::Condition::any().add(skills::Column::UserId.is_null());
+    if let Some(uid) = own_user_id {
+        user_filter = user_filter.add(skills::Column::UserId.eq(uid));
+    }
+    let mut select = skills::Entity::find().filter(user_filter);
 
     if let Some(dept_id) = department_id {
         select = select.filter(

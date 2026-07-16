@@ -4,7 +4,8 @@ use crate::{
     routes::{
         admin::admin_routes, artifacts::artifacts_routes, auth::auth_routes,
         branding::branding_routes, chat::chat_routes, file::files_routes, mcp::mcp_routes,
-        me::me_routes, message::message_routes, models::models_routes, oidc::oidc_routes,
+        me::me_routes, me_skills::me_skills_routes, message::message_routes,
+        models::models_routes, oidc::oidc_routes,
         open_error::errors_routes, projects::projects_routes, skills::skills_routes,
         swagger_ui::swagger_ui_routes,
     },
@@ -74,6 +75,7 @@ pub async fn init_app() -> Result<(), Error> {
         .merge(admin_routes())
         .merge(mcp_routes())
         .merge(me_routes())
+        .merge(me_skills_routes())
         .merge(branding_routes())
         .merge(models_routes())
         .merge(projects_routes())

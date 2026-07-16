@@ -917,6 +917,24 @@ fn resolve_audit_action(method: &Method, route: &str) -> Option<AuditRouteAction
                 snapshot_target: SnapshotTarget::None,
             })
         }
+        ("POST", "/me/skills") => Some(AuditRouteAction {
+            action: "user_skill_created",
+            resource_type: Some("skill"),
+            resource_param: None,
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("PUT", "/me/skills/{id}") => Some(AuditRouteAction {
+            action: "user_skill_updated",
+            resource_type: Some("skill"),
+            resource_param: Some("id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("DELETE", "/me/skills/{id}") => Some(AuditRouteAction {
+            action: "user_skill_deleted",
+            resource_type: Some("skill"),
+            resource_param: Some("id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
         ("POST", "/admin/skills") => Some(AuditRouteAction {
             action: "skill_created",
             resource_type: Some("skill"),

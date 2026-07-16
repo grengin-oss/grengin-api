@@ -116,14 +116,6 @@ pub async fn get_chats(
                         let Some(conversation_with_count) = row_map.remove(&conversation_id) else {
                             continue;
                         };
-                        let message_count = messages::Entity::find()
-                            .filter(messages::Column::ConversationId.eq(conversation_with_count.id))
-                            .count(&app_state.database)
-                            .await
-                            .map_err(|e| {
-                                eprintln!("conversation in count error {}", e);
-                                AppError::DbTimeout
-                            })?;
                         let web_search_enabled =
                             resolve_web_search_enabled(conversation_with_count.metadata.as_ref());
                         let conversation_response = ConversationResponse {
@@ -141,7 +133,7 @@ pub async fn get_chats(
                             created_at: conversation_with_count.created_at,
                             updated_at: conversation_with_count.updated_at,
                             last_message_at: conversation_with_count.last_message_at,
-                            message_count,
+                            message_count: conversation_with_count.message_count.max(0) as u64,
                             messages: None,
                         };
                         response.push(conversation_response);
