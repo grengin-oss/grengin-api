@@ -79,7 +79,8 @@ pub async fn get_skill(
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode, Json<SkillResponse>), AuthError> {
     let skill = get_skill_or_404(id, &app_state.database).await?;
-    Ok((StatusCode::OK, Json(skill_to_response(skill))))
+    let knowledge_files = get_skill_knowledge_info(&app_state.database, skill.id).await;
+    Ok((StatusCode::OK, Json(skill_to_response_with_knowledge(skill, knowledge_files))))
 }
 
 #[utoipa::path(
@@ -97,7 +98,7 @@ pub async fn get_skill(
 pub async fn create_skill(
     claims: Claims,
     State(app_state): State<SharedState>,
-    Json(req): Json<SkillCreateRequest>,
+    Json(mut req): Json<SkillCreateRequest>,
 ) -> Result<(StatusCode, Json<SkillResponse>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
@@ -109,6 +110,8 @@ pub async fn create_skill(
             None,
         )
         .await?;
+
+    let knowledge_attachment = req.knowledge_attachment.take();
 
     let identifier = req.identifier.trim().to_ascii_lowercase();
     if identifier.is_empty() || identifier.len() > 100 {
@@ -157,7 +160,15 @@ pub async fn create_skill(
         AuthError::DbTimeout
     })?;
 
-    Ok((StatusCode::CREATED, Json(skill_to_response(skill))))
+    let knowledge_files = if let Some(attachment) = knowledge_attachment {
+        process_skill_knowledge(&app_state.database, skill.id, claims.user_id, attachment)
+            .await
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+
+    Ok((StatusCode::CREATED, Json(skill_to_response_with_knowledge(skill, knowledge_files))))
 }
 
 #[utoipa::path(
@@ -177,7 +188,7 @@ pub async fn update_skill(
     claims: Claims,
     Path(id): Path<Uuid>,
     State(app_state): State<SharedState>,
-    Json(req): Json<SkillUpdateRequest>,
+    Json(mut req): Json<SkillUpdateRequest>,
 ) -> Result<(StatusCode, Json<SkillResponse>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
@@ -189,6 +200,8 @@ pub async fn update_skill(
             None,
         )
         .await?;
+
+    let knowledge_attachment = req.knowledge_attachment.take();
 
     let skill = get_skill_or_404(id, &app_state.database).await?;
     let mut active: skills::ActiveModel = skill.into_active_model();
@@ -225,7 +238,15 @@ pub async fn update_skill(
         AuthError::DbTimeout
     })?;
 
-    Ok((StatusCode::OK, Json(skill_to_response(skill))))
+    let knowledge_files = if let Some(attachment) = knowledge_attachment {
+        process_skill_knowledge(&app_state.database, skill.id, claims.user_id, attachment)
+            .await
+            .unwrap_or_default()
+    } else {
+        get_skill_knowledge_info(&app_state.database, skill.id).await
+    };
+
+    Ok((StatusCode::OK, Json(skill_to_response_with_knowledge(skill, knowledge_files))))
 }
 
 #[utoipa::path(

@@ -8,7 +8,10 @@ use uuid::Uuid;
 use crate::{
     auth::{claims::Claims, error::AuthError},
     dto::skills::{SkillListResponse, SkillResponse, UserSkillCreateRequest, UserSkillListQuery, UserSkillUpdateRequest},
-    services::me_skills_helpers::*,
+    services::{
+        me_skills_helpers::*,
+        skills_helpers::{get_skill_knowledge_info, process_skill_knowledge, skill_to_response_with_knowledge},
+    },
     state::SharedState,
 };
 
@@ -64,7 +67,8 @@ pub async fn get_my_skill(
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode, Json<SkillResponse>), AuthError> {
     let skill = get_user_skill_or_404(id, claims.user_id, &app_state.database).await?;
-    Ok((StatusCode::OK, Json(user_skill_to_response(skill))))
+    let knowledge_files = get_skill_knowledge_info(&app_state.database, skill.id).await;
+    Ok((StatusCode::OK, Json(skill_to_response_with_knowledge(skill, knowledge_files))))
 }
 
 #[utoipa::path(
@@ -81,10 +85,18 @@ pub async fn get_my_skill(
 pub async fn create_my_skill(
     claims: Claims,
     State(app_state): State<SharedState>,
-    Json(req): Json<UserSkillCreateRequest>,
+    Json(mut req): Json<UserSkillCreateRequest>,
 ) -> Result<(StatusCode, Json<SkillResponse>), AuthError> {
+    let knowledge_attachment = req.knowledge_attachment.take();
     let skill = create_user_skill(&app_state.database, claims.user_id, req).await?;
-    Ok((StatusCode::CREATED, Json(user_skill_to_response(skill))))
+    let knowledge_files = if let Some(attachment) = knowledge_attachment {
+        process_skill_knowledge(&app_state.database, skill.id, claims.user_id, attachment)
+            .await
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+    Ok((StatusCode::CREATED, Json(skill_to_response_with_knowledge(skill, knowledge_files))))
 }
 
 #[utoipa::path(
@@ -103,10 +115,18 @@ pub async fn update_my_skill(
     claims: Claims,
     Path(id): Path<Uuid>,
     State(app_state): State<SharedState>,
-    Json(req): Json<UserSkillUpdateRequest>,
+    Json(mut req): Json<UserSkillUpdateRequest>,
 ) -> Result<(StatusCode, Json<SkillResponse>), AuthError> {
+    let knowledge_attachment = req.knowledge_attachment.take();
     let skill = update_user_skill(&app_state.database, id, claims.user_id, req).await?;
-    Ok((StatusCode::OK, Json(user_skill_to_response(skill))))
+    let knowledge_files = if let Some(attachment) = knowledge_attachment {
+        process_skill_knowledge(&app_state.database, skill.id, claims.user_id, attachment)
+            .await
+            .unwrap_or_default()
+    } else {
+        get_skill_knowledge_info(&app_state.database, skill.id).await
+    };
+    Ok((StatusCode::OK, Json(skill_to_response_with_knowledge(skill, knowledge_files))))
 }
 
 #[utoipa::path(

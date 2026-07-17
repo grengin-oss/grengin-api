@@ -2,6 +2,7 @@ pub mod ai_engines;
 pub mod artifacts;
 pub mod conversation_projects;
 pub mod conversation_skills;
+pub mod skill_knowledge;
 pub mod skills;
 pub mod project_mcp_servers;
 pub mod project_members;

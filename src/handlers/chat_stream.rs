@@ -73,7 +73,7 @@ use crate::{
             load_recent_prompts, load_summary, update_conversation_summary,
         },
         system_prompts,
-        skills_helpers::load_skills_for_stream,
+        skills_helpers::{load_skill_knowledge_for_stream, load_skills_for_stream},
     },
     state::SharedState,
     utils::chat_stream::{
@@ -921,12 +921,26 @@ pub async fn handle_chat_stream(
     let mut skill_web_search = false;
     let mut skill_mcp_server_ids: Vec<Uuid> = Vec::new();
     if !active_skills.is_empty() {
+        let skill_ids: Vec<uuid::Uuid> = active_skills.iter().map(|s| s.id).collect();
+        let knowledge_map = load_skill_knowledge_for_stream(&app_state.database, &skill_ids).await;
         let skill_role_blocks: Vec<String> = active_skills
             .iter()
             .filter_map(|s| {
-                let role = s.system_role.as_deref()?.trim().to_string();
-                if role.is_empty() { return None; }
-                Some(format!("## Skill: {}\n{}", s.name, role))
+                let role = s.system_role.as_deref().unwrap_or("").trim().to_string();
+                let knowledge = knowledge_map.get(&s.id).cloned().unwrap_or_default();
+                if role.is_empty() && knowledge.is_empty() {
+                    return None;
+                }
+                let mut block = format!("## Skill: {}", s.name);
+                if !role.is_empty() {
+                    block.push('\n');
+                    block.push_str(&role);
+                }
+                if !knowledge.is_empty() {
+                    block.push_str("\n\n### Knowledge\n");
+                    block.push_str(&knowledge);
+                }
+                Some(block)
             })
             .collect();
         if !skill_role_blocks.is_empty() {

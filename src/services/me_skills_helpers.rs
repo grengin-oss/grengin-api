@@ -7,8 +7,9 @@ use uuid::Uuid;
 
 use crate::{
     auth::error::AuthError,
-    dto::skills::{SkillResponse, SkillToolsConfig, UserSkillCreateRequest, UserSkillUpdateRequest},
+    dto::skills::{SkillResponse, UserSkillCreateRequest, UserSkillUpdateRequest},
     models::skills,
+    services::skills_helpers::skill_to_response,
 };
 
 pub async fn list_user_skills(
@@ -52,6 +53,8 @@ pub async fn get_user_skill_or_404(
         .ok_or(AuthError::ResourceNotFound)
 }
 
+/// Creates a personal skill. The caller is responsible for processing any
+/// `knowledge_attachment` from the request after this returns.
 pub async fn create_user_skill(
     db: &DatabaseConnection,
     user_id: Uuid,
@@ -88,6 +91,8 @@ pub async fn create_user_skill(
     })
 }
 
+/// Updates a personal skill. The caller is responsible for processing any
+/// `knowledge_attachment` from the request after this returns.
 pub async fn update_user_skill(
     db: &DatabaseConnection,
     id: Uuid,
@@ -142,24 +147,5 @@ pub async fn delete_user_skill(
 }
 
 pub fn user_skill_to_response(skill: skills::Model) -> SkillResponse {
-    let tools_config = skill
-        .tools_config
-        .as_ref()
-        .map(SkillToolsConfig::from_json)
-        .unwrap_or_default();
-    SkillResponse {
-        id: skill.id,
-        identifier: skill.identifier,
-        name: skill.name,
-        description: skill.description,
-        avatar: skill.avatar,
-        system_role: skill.system_role,
-        tools_config,
-        is_builtin: skill.is_builtin,
-        is_active: skill.is_active,
-        department_id: skill.department_id,
-        user_id: skill.user_id,
-        created_at: skill.created_at,
-        updated_at: skill.updated_at,
-    }
+    skill_to_response(skill)
 }

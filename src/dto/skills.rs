@@ -23,6 +23,25 @@ impl SkillToolsConfig {
     }
 }
 
+/// A file attachment uploaded with a skill create/update request.
+/// `content_type` must be `text/markdown` (single .md) or `application/zip` (multiple .md files).
+/// `data` is the base64-encoded file bytes.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct KnowledgeAttachment {
+    pub file_name: String,
+    pub content_type: String,
+    pub data: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SkillKnowledgeInfo {
+    pub id: Uuid,
+    pub file_name: String,
+    pub char_count: i32,
+    pub storage_mode: String,
+    pub created_at: DateTime<Utc>,
+}
+
 // ── Request types ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -32,6 +51,7 @@ pub struct UserSkillCreateRequest {
     pub avatar: Option<String>,
     pub system_role: Option<String>,
     pub tools_config: Option<SkillToolsConfig>,
+    pub knowledge_attachment: Option<KnowledgeAttachment>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -42,6 +62,7 @@ pub struct UserSkillUpdateRequest {
     pub system_role: Option<String>,
     pub tools_config: Option<SkillToolsConfig>,
     pub is_active: Option<bool>,
+    pub knowledge_attachment: Option<KnowledgeAttachment>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -60,6 +81,7 @@ pub struct SkillCreateRequest {
     pub system_role: Option<String>,
     pub tools_config: Option<SkillToolsConfig>,
     pub department_id: Option<Uuid>,
+    pub knowledge_attachment: Option<KnowledgeAttachment>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -71,6 +93,7 @@ pub struct SkillUpdateRequest {
     pub tools_config: Option<SkillToolsConfig>,
     pub is_active: Option<bool>,
     pub department_id: Option<Uuid>,
+    pub knowledge_attachment: Option<KnowledgeAttachment>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -108,6 +131,8 @@ pub struct SkillResponse {
     pub user_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub knowledge_files: Vec<SkillKnowledgeInfo>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
