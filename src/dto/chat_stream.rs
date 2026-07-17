@@ -18,7 +18,6 @@ pub struct SkillsActivePayload {
 
 #[derive(Serialize, ToSchema)]
 pub struct ArtifactSavedPayload {
-    pub stream_id: Uuid,
     pub id: Uuid,
     pub file_id: Uuid,
     pub title: String,

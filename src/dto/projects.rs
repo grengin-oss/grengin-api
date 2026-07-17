@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::models::project_sources::ProcessingStatus;
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ProjectCreateRequest {
     pub name: String,
@@ -61,6 +63,11 @@ pub struct ProjectSourceResponse {
     pub file_size: i64,
     pub origin: String,
     pub uploaded_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<Uuid>,
+    pub processing_status: ProcessingStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processing_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -68,6 +75,13 @@ pub struct ArtifactCreateRequest {
     pub title: String,
     pub content: String,
     pub content_type: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ArtifactUpdateRequest {
+    pub title: Option<String>,
+    pub content: Option<String>,
+    pub content_type: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -130,6 +144,7 @@ pub struct AddSourceRequest {
     pub file_type: String,
     pub file_size: i64,
     pub origin: Option<String>,
+    pub file_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

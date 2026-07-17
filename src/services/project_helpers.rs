@@ -6,7 +6,10 @@ use uuid::Uuid;
 use crate::{
     auth::error::AuthError,
     dto::projects::{ProjectChatResponse, ProjectMcpServerResponse, ProjectResponse, ProjectSourceResponse},
-    models::{conversation_projects, conversations, mcp_servers, project_mcp_servers, project_members, project_sources, projects},
+    models::{
+        conversation_projects, conversations, mcp_servers, project_mcp_servers, project_members,
+        project_sources, project_sources::ProcessingStatus, projects,
+    },
 };
 
 pub async fn get_project_or_404(
@@ -177,6 +180,22 @@ pub fn to_project_response(
     }
 }
 
+pub fn source_to_response(s: project_sources::Model) -> ProjectSourceResponse {
+    ProjectSourceResponse {
+        id: s.id,
+        project_id: s.project_id,
+        file_name: s.file_name,
+        file_type: s.file_type,
+        file_size: s.file_size,
+        origin: s.origin,
+        uploaded_at: s.uploaded_at,
+        file_id: s.file_id,
+        processing_status: ProcessingStatus::try_from(s.processing_status)
+            .unwrap_or(ProcessingStatus::Error),
+        processing_error: s.processing_error,
+    }
+}
+
 pub async fn fetch_project_sources(
     project_id: Uuid,
     db: &DatabaseConnection,
@@ -189,18 +208,7 @@ pub async fn fetch_project_sources(
             eprintln!("db sources fetch error: {e}");
             AuthError::DbTimeout
         })?;
-    Ok(sources
-        .into_iter()
-        .map(|s| ProjectSourceResponse {
-            id: s.id,
-            project_id: s.project_id,
-            file_name: s.file_name,
-            file_type: s.file_type,
-            file_size: s.file_size,
-            origin: s.origin,
-            uploaded_at: s.uploaded_at,
-        })
-        .collect())
+    Ok(sources.into_iter().map(source_to_response).collect())
 }
 
 pub async fn fetch_project_chats(

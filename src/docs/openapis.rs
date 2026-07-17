@@ -71,10 +71,10 @@ use crate::dto::system_metrics::{
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::dto::projects::{
     AddMcpServerRequest, AddMemberRequest, AddSourceRequest, ArtifactCreateRequest,
-    InstructionsUpdateRequest, LinkProjectRequest, ProjectCreateRequest, ProjectDetailResponse,
-    ProjectListQuery, ProjectListResponse, ProjectMcpServerResponse, ProjectMemberResponse,
-    ProjectResponse, ProjectSourceResponse, ProjectUpdateRequest, ShareProjectResponse,
-    UserSearchItem, UserSearchResponse,
+    ArtifactUpdateRequest, InstructionsUpdateRequest, LinkProjectRequest, ProjectCreateRequest,
+    ProjectDetailResponse, ProjectListQuery, ProjectListResponse, ProjectMcpServerResponse,
+    ProjectMemberResponse, ProjectResponse, ProjectSourceResponse, ProjectUpdateRequest,
+    ShareProjectResponse, UserSearchItem, UserSearchResponse,
 };
 use crate::dto::skills::{
     ConversationSkillResponse, LinkSkillRequest, SkillCreateRequest, SkillListQuery,
@@ -239,6 +239,9 @@ use utoipa::OpenApi;
         projects::delete_project_source,
         projects::list_project_artifacts,
         projects::add_project_artifact,
+        projects::get_project_artifact,
+        projects::update_project_artifact,
+        projects::delete_project_artifact,
         projects::share_project,
         projects::link_project_to_conversation,
         projects::unlink_project_from_conversation,
@@ -430,6 +433,7 @@ use utoipa::OpenApi;
             InstructionsUpdateRequest,
             AddSourceRequest,
             ArtifactCreateRequest,
+            ArtifactUpdateRequest,
             ShareProjectResponse,
             LinkProjectRequest,
             ProjectMcpServerResponse,

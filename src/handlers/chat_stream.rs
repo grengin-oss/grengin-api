@@ -2609,7 +2609,7 @@ pub async fn handle_chat_stream(
                if !artifact_accumulator.is_empty() {
                    let mut saved_artifacts: Vec<serde_json::Value> = Vec::new();
                    for (stream_id, acc) in artifact_accumulator.drain() {
-                       let artifact_id = Uuid::new_v4();
+                       let artifact_id = stream_id.parse::<Uuid>().unwrap_or_else(|_| Uuid::new_v4());
                        let file_id = Uuid::new_v4();
                        let ext = content_type_to_ext(&acc.content_type);
                        let safe_title = acc.title.chars().map(|c| match c {
@@ -2666,16 +2666,13 @@ pub async fn handle_chat_stream(
                            "title": acc.title,
                            "content_type": acc.content_type,
                        }));
-                       if let Ok(stream_uuid) = stream_id.parse::<Uuid>() {
-                           if let Ok(data) = serde_json::to_string(&ArtifactSavedPayload {
-                               stream_id: stream_uuid,
-                               id: artifact_id,
-                               file_id,
-                               title: acc.title.clone(),
-                               content_type: acc.content_type.clone(),
-                           }) {
-                               yield Event::default().event(ChatStreamEvents::ArtifactSaved.to_string()).data(data);
-                           }
+                       if let Ok(data) = serde_json::to_string(&ArtifactSavedPayload {
+                           id: artifact_id,
+                           file_id,
+                           title: acc.title.clone(),
+                           content_type: acc.content_type.clone(),
+                       }) {
+                           yield Event::default().event(ChatStreamEvents::ArtifactSaved.to_string()).data(data);
                        }
                    }
                    if !saved_artifacts.is_empty() {

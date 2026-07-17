@@ -26,6 +26,7 @@ pub mod mcp_client;
 pub mod mcp_helpers;
 pub mod mcp_tools;
 pub mod project_helpers;
+pub mod project_source_processing;
 pub mod notifications;
 pub mod rag;
 pub mod reconfigure;

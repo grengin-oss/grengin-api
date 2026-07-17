@@ -56,6 +56,8 @@ mod m20260713_000001_create_skills;
 mod m20260713_000002_add_skills_permissions;
 mod m20260714_000001_create_artifacts;
 mod m20260716_000001_add_user_id_to_skills;
+mod m20260716_000002_add_processing_fields_to_project_sources;
+mod m20260716_000003_create_project_source_chunks;
 
 pub struct Migrator;
 
@@ -119,6 +121,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260713_000002_add_skills_permissions::Migration),
             Box::new(m20260714_000001_create_artifacts::Migration),
             Box::new(m20260716_000001_add_user_id_to_skills::Migration),
+            Box::new(m20260716_000002_add_processing_fields_to_project_sources::Migration),
+            Box::new(m20260716_000003_create_project_source_chunks::Migration),
         ]
     }
 }

@@ -431,7 +431,7 @@ async fn generate_embedding(
     Ok(embeddings.and_then(|mut vecs| vecs.pop()))
 }
 
-async fn generate_embeddings(
+pub async fn generate_embeddings(
     app_state: &SharedState,
     config: &EmbeddingSettings,
     inputs: Vec<String>,
@@ -698,7 +698,7 @@ async fn insert_message_embedding(
     Ok(())
 }
 
-fn format_pgvector(values: &[f32]) -> String {
+pub fn format_pgvector(values: &[f32]) -> String {
     let mut out = String::from("[");
     for (idx, value) in values.iter().enumerate() {
         if idx > 0 {
@@ -708,6 +708,67 @@ fn format_pgvector(values: &[f32]) -> String {
     }
     out.push(']');
     out
+}
+
+pub async fn build_project_retrieval_prompt(
+    app_state: &SharedState,
+    project_id: uuid::Uuid,
+    query: &str,
+    top_k: usize,
+) -> Result<Option<String>, AppError> {
+    if !app_state.settings.rag.enabled {
+        return Ok(None);
+    }
+    let embedding_config = match app_state.settings.get_embedding_config().await {
+        Some(c) if c.is_enabled => c,
+        _ => return Ok(None),
+    };
+
+    let embeddings = match generate_embeddings(app_state, &embedding_config, vec![query.to_string()]).await? {
+        Some(v) if !v.is_empty() => v,
+        _ => return Ok(None),
+    };
+    let query_vector = format_pgvector(&embeddings[0]);
+
+    let sql = format!(
+        r#"
+        SELECT psc."content",
+               ps."fileName"
+        FROM "project_source_chunks" psc
+        JOIN "project_sources" ps ON ps."id" = psc."projectSourceId"
+        WHERE psc."projectId" = $1
+          AND ps."processingStatus" = 'ready'
+        ORDER BY psc."embedding" <=> '{}'::vector
+        LIMIT $2
+        "#,
+        query_vector
+    );
+
+    let rows = app_state
+        .database
+        .query_all(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &sql,
+            vec![project_id.into(), (top_k as i64).into()],
+        ))
+        .await
+        .map_err(|e| {
+            eprintln!("project chunk retrieval error: {e}");
+            AppError::DbTimeout
+        })?;
+
+    if rows.is_empty() {
+        return Ok(None);
+    }
+
+    let mut context = String::from("Relevant project documents:\n\n");
+    for row in rows {
+        let content: String = row.try_get("", "content").unwrap_or_default();
+        let file_name: String = row.try_get("", "fileName").unwrap_or_default();
+        context.push_str(&format!("— {file_name}\n{content}\n\n"));
+    }
+
+    Ok(Some(context.trim_end().to_string()))
 }
 
 impl ChatRole {
