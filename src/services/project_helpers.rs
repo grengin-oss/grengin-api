@@ -9,6 +9,7 @@ use crate::{
     models::{
         conversation_projects, conversations, mcp_servers, project_mcp_servers, project_members,
         project_sources, project_sources::ProcessingStatus, projects,
+        projects::ProjectVisibility,
     },
 };
 
@@ -31,7 +32,7 @@ pub async fn ensure_project_read_access(
     project: &projects::Model,
     db: &DatabaseConnection,
 ) -> Result<(), AuthError> {
-    if project.owner_id == user_id || project.visibility == "team" {
+    if project.owner_id == user_id || project.visibility == ProjectVisibility::Team {
         return Ok(());
     }
     let is_member = project_members::Entity::find()
@@ -77,7 +78,7 @@ pub async fn ensure_project_write_access(
 pub fn build_visibility_condition(user_id: Uuid, member_project_ids: Vec<Uuid>) -> Condition {
     let mut cond = Condition::any()
         .add(projects::Column::OwnerId.eq(user_id))
-        .add(projects::Column::Visibility.eq("team"));
+        .add(projects::Column::Visibility.eq(ProjectVisibility::Team));
     if !member_project_ids.is_empty() {
         cond = cond.add(projects::Column::Id.is_in(member_project_ids));
     }
@@ -258,9 +259,6 @@ pub fn is_valid_category(s: &str) -> bool {
     crate::models::projects::VALID_CATEGORIES.contains(&s)
 }
 
-pub fn is_valid_visibility(s: &str) -> bool {
-    crate::models::projects::VALID_VISIBILITIES.contains(&s)
-}
 
 pub async fn fetch_project_mcp_servers(
     project_id: Uuid,

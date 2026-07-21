@@ -1,6 +1,37 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+
+#[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize, ToSchema)]
+#[sea_orm(rs_type = "String", db_type = "String(StringLen::None)")]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectVisibility {
+    #[sea_orm(string_value = "private")]
+    Private,
+    #[sea_orm(string_value = "team")]
+    Team,
+}
+
+impl std::fmt::Display for ProjectVisibility {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Private => write!(f, "private"),
+            Self::Team => write!(f, "team"),
+        }
+    }
+}
+
+impl TryFrom<String> for ProjectVisibility {
+    type Error = String;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        match s.as_str() {
+            "private" => Ok(Self::Private),
+            "team" => Ok(Self::Team),
+            _ => Err(format!("unknown visibility: {s}")),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "projects", rename_all = "camelCase")]
@@ -11,7 +42,7 @@ pub struct Model {
     pub name: String,
     pub description: Option<String>,
     pub category: String,
-    pub visibility: String,
+    pub visibility: ProjectVisibility,
     pub owner_id: Uuid,
     pub instructions: Option<String>,
     pub last_activity_at: Option<DateTime<Utc>>,
@@ -48,4 +79,3 @@ pub const VALID_CATEGORIES: &[&str] = &[
     "design",
 ];
 
-pub const VALID_VISIBILITIES: &[&str] = &["private", "team"];

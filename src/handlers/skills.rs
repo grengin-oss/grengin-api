@@ -145,7 +145,7 @@ pub async fn create_skill(
         name: Set(name),
         description: Set(req.description),
         avatar: Set(req.avatar),
-        system_role: Set(req.system_role),
+        instructions: Set(req.instructions),
         tools_config: Set(tools_json),
         is_builtin: Set(false),
         is_active: Set(true),
@@ -219,8 +219,8 @@ pub async fn update_skill(
     if let Some(avatar) = req.avatar {
         active.avatar = Set(Some(avatar));
     }
-    if let Some(system_role) = req.system_role {
-        active.system_role = Set(Some(system_role));
+    if let Some(instructions) = req.instructions {
+        active.instructions = Set(Some(instructions));
     }
     if let Some(config) = req.tools_config {
         active.tools_config = Set(Some(serde_json::to_value(config).unwrap_or_default()));

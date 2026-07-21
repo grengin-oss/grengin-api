@@ -3,14 +3,14 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::models::project_sources::ProcessingStatus;
+use crate::models::{project_sources::ProcessingStatus, projects::ProjectVisibility};
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ProjectCreateRequest {
     pub name: String,
     pub description: Option<String>,
     pub category: Option<String>,
-    pub visibility: Option<String>,
+    pub visibility: Option<ProjectVisibility>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -18,7 +18,7 @@ pub struct ProjectUpdateRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub category: Option<String>,
-    pub visibility: Option<String>,
+    pub visibility: Option<ProjectVisibility>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -27,7 +27,7 @@ pub struct ProjectListQuery {
     pub offset: Option<u64>,
     pub search: Option<String>,
     pub category: Option<String>,
-    pub visibility: Option<String>,
+    pub visibility: Option<ProjectVisibility>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -36,7 +36,7 @@ pub struct ProjectResponse {
     pub name: String,
     pub description: String,
     pub category: String,
-    pub visibility: String,
+    pub visibility: ProjectVisibility,
     pub owner_id: Uuid,
     pub chat_count: i64,
     pub source_count: i64,
@@ -99,7 +99,7 @@ pub struct ProjectDetailResponse {
     pub name: String,
     pub description: String,
     pub category: String,
-    pub visibility: String,
+    pub visibility: ProjectVisibility,
     pub owner_id: Uuid,
     pub instructions: String,
     pub chat_count: i64,

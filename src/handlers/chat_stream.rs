@@ -926,15 +926,15 @@ pub async fn handle_chat_stream(
         let skill_role_blocks: Vec<String> = active_skills
             .iter()
             .filter_map(|s| {
-                let role = s.system_role.as_deref().unwrap_or("").trim().to_string();
+                let instructions = s.instructions.as_deref().unwrap_or("").trim().to_string();
                 let knowledge = knowledge_map.get(&s.id).cloned().unwrap_or_default();
-                if role.is_empty() && knowledge.is_empty() {
+                if instructions.is_empty() && knowledge.is_empty() {
                     return None;
                 }
                 let mut block = format!("## Skill: {}", s.name);
-                if !role.is_empty() {
+                if !instructions.is_empty() {
                     block.push('\n');
-                    block.push_str(&role);
+                    block.push_str(&instructions);
                 }
                 if !knowledge.is_empty() {
                     block.push_str("\n\n### Knowledge\n");

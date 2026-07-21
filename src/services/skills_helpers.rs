@@ -33,7 +33,7 @@ pub fn skill_to_response_with_knowledge(
         name: skill.name,
         description: skill.description,
         avatar: skill.avatar,
-        system_role: skill.system_role,
+        instructions: skill.instructions,
         tools_config,
         is_builtin: skill.is_builtin,
         is_active: skill.is_active,

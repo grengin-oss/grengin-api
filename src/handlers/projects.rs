@@ -24,7 +24,7 @@ use crate::{
     },
     models::{
         conversation_projects, conversations, mcp_servers, project_mcp_servers, project_members,
-        project_sources, projects, users,
+        project_sources, projects, projects::ProjectVisibility, users,
     },
     models::project_sources::ProcessingStatus,
     services::{
@@ -73,7 +73,7 @@ pub async fn list_projects(
     if let Some(category) = query.category.as_deref().filter(|v| !v.is_empty()) {
         select = select.filter(projects::Column::Category.eq(category));
     }
-    if let Some(vis) = query.visibility.as_deref().filter(|v| !v.is_empty()) {
+    if let Some(vis) = query.visibility {
         select = select.filter(projects::Column::Visibility.eq(vis));
     }
 
@@ -126,10 +126,7 @@ pub async fn create_project(
         return Err(AuthError::InvalidRequest { field: "category" });
     }
 
-    let visibility = req.visibility.as_deref().unwrap_or("private").trim().to_ascii_lowercase();
-    if !is_valid_visibility(&visibility) {
-        return Err(AuthError::InvalidRequest { field: "visibility" });
-    }
+    let visibility = req.visibility.unwrap_or(ProjectVisibility::Private);
 
     let now = Utc::now();
     let inserted = projects::ActiveModel {
@@ -278,10 +275,6 @@ pub async fn update_project(
         active.category = Set(cat);
     }
     if let Some(vis) = req.visibility {
-        let vis = vis.trim().to_ascii_lowercase();
-        if !is_valid_visibility(&vis) {
-            return Err(AuthError::InvalidRequest { field: "visibility" });
-        }
         active.visibility = Set(vis);
     }
 

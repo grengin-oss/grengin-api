@@ -13,7 +13,7 @@ pub struct Model {
     pub name: String,
     pub description: Option<String>,
     pub avatar: Option<String>,
-    pub system_role: Option<String>,
+    pub instructions: Option<String>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub tools_config: Option<JsonValue>,
     pub is_builtin: bool,
