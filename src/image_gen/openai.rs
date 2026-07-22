@@ -24,11 +24,25 @@ struct TextToImageRequest<'a> {
 #[derive(Deserialize)]
 struct ImageGenResponse {
     data: Vec<ImageDataItem>,
+    usage: Option<ImageGenUsage>,
 }
 
 #[derive(Deserialize)]
 struct ImageDataItem {
     b64_json: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ImageGenUsage {
+    input_tokens: i32,
+    input_tokens_details: Option<InputTokensDetails>,
+    output_tokens: i32,
+}
+
+#[derive(Deserialize)]
+struct InputTokensDetails {
+    text_tokens: i32,
+    image_tokens: i32,
 }
 
 #[async_trait]
@@ -42,7 +56,7 @@ impl OpenaiImageGenApis for ReqwestClient {
         size: Option<&str>,
         quality: Option<&str>,
     ) -> Result<ImageGenResult, Error> {
-        let b64 = if input_images.is_empty() {
+        let (b64, text_input_tokens, image_input_tokens, output_tokens) = if input_images.is_empty() {
             let body = TextToImageRequest { model, prompt, n: 1, size, quality };
             let resp = self
                 .post(format!("{OPENAI_API_URL}/v1/images/generations"))
@@ -76,22 +90,34 @@ impl OpenaiImageGenApis for ReqwestClient {
         Ok(ImageGenResult {
             bytes: B64.decode(&b64)?,
             content_type: "image/png".to_string(),
+            text_input_tokens,
+            image_input_tokens,
+            output_tokens,
         })
     }
 }
 
-async fn extract_b64(resp: reqwest::Response) -> Result<String, Error> {
+async fn extract_b64(resp: reqwest::Response) -> Result<(String, i32, i32, i32), Error> {
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow!("openai image gen {status}: {body}"));
     }
     let parsed: ImageGenResponse = resp.json().await?;
-    parsed
+    let b64 = parsed
         .data
         .into_iter()
         .next()
         .ok_or_else(|| anyhow!("openai image response has empty data array"))?
         .b64_json
-        .ok_or_else(|| anyhow!("openai image response missing b64_json field"))
+        .ok_or_else(|| anyhow!("openai image response missing b64_json field"))?;
+    let (text_input_tokens, image_input_tokens, output_tokens) = parsed
+        .usage
+        .map(|u| {
+            let text = u.input_tokens_details.as_ref().map(|d| d.text_tokens).unwrap_or(u.input_tokens);
+            let image = u.input_tokens_details.as_ref().map(|d| d.image_tokens).unwrap_or(0);
+            (text, image, u.output_tokens)
+        })
+        .unwrap_or((0, 0, 0));
+    Ok((b64, text_input_tokens, image_input_tokens, output_tokens))
 }

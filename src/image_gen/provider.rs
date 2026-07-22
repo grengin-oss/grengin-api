@@ -6,6 +6,9 @@ use crate::config::setting::{GeminiSettings, OpenaiSettings};
 pub struct ImageGenResult {
     pub bytes: Vec<u8>,
     pub content_type: String,
+    pub text_input_tokens: i32,
+    pub image_input_tokens: i32,
+    pub output_tokens: i32,
 }
 
 pub struct InputImage {

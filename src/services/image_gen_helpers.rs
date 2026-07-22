@@ -19,7 +19,7 @@ pub async fn generate_and_save(
     model: &str,
     prompt: &str,
     input_file_ids: &[Uuid],
-) -> anyhow::Result<(Uuid, String)> {
+) -> anyhow::Result<(Uuid, String, i32, i32, i32)> {
     let input_images = load_input_images(app_state, input_file_ids).await?;
 
     let result = match provider {
@@ -88,7 +88,7 @@ pub async fn generate_and_save(
         .await
         .context("db insert image file")?;
 
-    Ok((file_id, result.content_type))
+    Ok((file_id, result.content_type, result.text_input_tokens, result.image_input_tokens, result.output_tokens))
 }
 
 async fn load_input_images(

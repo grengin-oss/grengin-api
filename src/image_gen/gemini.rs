@@ -45,6 +45,16 @@ struct GenerationConfig {
 #[derive(Deserialize)]
 struct ImageGenResponse {
     candidates: Vec<Candidate>,
+    #[serde(rename = "usageMetadata")]
+    usage_metadata: Option<UsageMetadata>,
+}
+
+#[derive(Deserialize)]
+struct UsageMetadata {
+    #[serde(rename = "promptTokenCount")]
+    prompt_token_count: Option<i32>,
+    #[serde(rename = "candidatesTokenCount")]
+    candidates_token_count: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -111,6 +121,17 @@ impl GeminiImageGenApis for ReqwestClient {
 
         let parsed: ImageGenResponse = resp.json().await?;
 
+        let input_tokens = parsed
+            .usage_metadata
+            .as_ref()
+            .and_then(|u| u.prompt_token_count)
+            .unwrap_or(0);
+        let output_tokens = parsed
+            .usage_metadata
+            .as_ref()
+            .and_then(|u| u.candidates_token_count)
+            .unwrap_or(0);
+
         for part in parsed
             .candidates
             .into_iter()
@@ -123,6 +144,9 @@ impl GeminiImageGenApis for ReqwestClient {
                 return Ok(ImageGenResult {
                     bytes: B64.decode(&inline.data)?,
                     content_type: inline.mime_type,
+                    text_input_tokens: input_tokens,
+                    image_input_tokens: 0,
+                    output_tokens,
                 });
             }
         }

@@ -235,6 +235,8 @@ fn parse_text_model(value: &Value) -> Result<ModelInfo, Error> {
         comment: None,
         input_token_rate,
         output_token_rate,
+        image_input_token_rate: None,
+        image_output_token_rate: None,
         supports_streaming: true,
         supports_tools: true,
         supports_vision: true,
@@ -250,9 +252,11 @@ fn parse_image_model(value: &Value) -> Result<ModelInfo, Error> {
     let key = get_str(value, "key")?;
     let name = get_str(value, "name")?;
     let engine = get_str(value, "engine")?;
-    let price_per_image = value
-        .get("pricePerImage")
-        .and_then(Value::as_f64);
+    let pricing = value.get("pricingPer1M");
+    let input_token_rate = pricing.and_then(|p| p.get("input")).and_then(Value::as_f64);
+    let output_token_rate = pricing.and_then(|p| p.get("output")).and_then(Value::as_f64);
+    let image_input_token_rate = pricing.and_then(|p| p.get("image_input")).and_then(Value::as_f64);
+    let image_output_token_rate = pricing.and_then(|p| p.get("image_output")).and_then(Value::as_f64);
 
     Ok(ModelInfo {
         key,
@@ -260,8 +264,10 @@ fn parse_image_model(value: &Value) -> Result<ModelInfo, Error> {
         engine,
         model_type: ModelType::ImageGenerator,
         comment: None,
-        input_token_rate: None,
-        output_token_rate: None,
+        input_token_rate,
+        output_token_rate,
+        image_input_token_rate,
+        image_output_token_rate,
         supports_streaming: false,
         supports_tools: false,
         supports_vision: false,
@@ -269,7 +275,7 @@ fn parse_image_model(value: &Value) -> Result<ModelInfo, Error> {
         supports_web_search: false,
         max_images: None,
         dimensions: None,
-        price_per_image,
+        price_per_image: None,
     })
 }
 
@@ -295,6 +301,8 @@ fn parse_embed_model(value: &Value, provider_key: &str) -> Result<ModelInfo, Err
         comment: None,
         input_token_rate: per_1m,
         output_token_rate: None,
+        image_input_token_rate: None,
+        image_output_token_rate: None,
         supports_streaming: false,
         supports_tools: false,
         supports_vision: false,

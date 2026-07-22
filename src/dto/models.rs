@@ -55,6 +55,10 @@ pub struct ModelInfo {
     pub input_token_rate: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_token_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_input_token_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_output_token_rate: Option<f64>,
     pub supports_streaming: bool,
     pub supports_tools: bool,
     pub supports_vision: bool,

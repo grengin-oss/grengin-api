@@ -601,18 +601,19 @@ pub async fn handle_chat_stream(
         }
     }
 
-    let (input_rate, output_rate, is_image_gen, price_per_image) =
+    let (input_rate, output_rate, image_input_rate, image_output_rate, is_image_gen) =
         match get_model_info_cached(&app_state.req_client, &model_name).await {
             Ok(Some(model)) => (
                 model.input_token_rate,
                 model.output_token_rate,
+                model.image_input_token_rate,
+                model.image_output_token_rate,
                 model.model_type == ModelType::ImageGenerator,
-                model.price_per_image,
             ),
-            Ok(None) => (None, None, false, None),
+            Ok(None) => (None, None, None, None, false),
             Err(error) => {
                 eprintln!("models cache error: {error}");
-                (None, None, false, None)
+                (None, None, None, None, false)
             }
         };
     if let Some(conversation_id) = req.conversation_id {
@@ -626,9 +627,20 @@ pub async fn handle_chat_stream(
     let retrieval_query = last_message
         .map(|m| m.content.clone())
         .unwrap_or_default();
-    let input_image_file_ids: Vec<Uuid> = last_message
+    let input_image_file_ids: Vec<Uuid> = req
+        .messages
+        .iter()
+        .rev()
+        .find(|m| !m.files.is_empty())
         .map(|m| m.files.iter().map(|f| f.id).collect())
         .unwrap_or_default();
+    let image_prompt: String = req
+        .messages
+        .iter()
+        .filter(|m| !m.content.is_empty())
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     let mut summary_prompt: Option<Prompt> = None;
     let mut retrieval_prompt: Option<Prompt> = None;
     let mut recent_prompts: Vec<Prompt> = Vec::new();
@@ -1265,11 +1277,14 @@ pub async fn handle_chat_stream(
         if is_image_gen {
             let img_message_id = Uuid::new_v4();
             let now = Utc::now();
-            match generate_and_save(&app_state, claims.user_id, &provider, &model_name, &retrieval_query, &input_image_file_ids).await {
-                Ok((file_id, content_type)) => {
-                    image_gen_cost = price_per_image
-                        .and_then(Decimal::from_f64_retain)
-                        .unwrap_or(Decimal::ZERO);
+            match generate_and_save(&app_state, claims.user_id, &provider, &model_name, &image_prompt, &input_image_file_ids).await {
+                Ok((file_id, content_type, text_input_tokens, image_input_tokens, img_output_tokens)) => {
+                    let effective_output_rate = if image_input_tokens > 0 { image_output_rate.or(output_rate) } else { output_rate };
+                    image_gen_cost =
+                        calculate_cost_decimal(text_input_tokens, 0, input_rate, None)
+                        + calculate_cost_decimal(image_input_tokens, 0, image_input_rate, None)
+                        + calculate_cost_decimal(0, img_output_tokens, None, effective_output_rate);
+                    let total_input_tokens = text_input_tokens + image_input_tokens;
                     let ext = if content_type == "image/png" { "png" } else { "webp" };
                     let img_msg = messages::ActiveModel {
                         id: Set(img_message_id),
@@ -1280,9 +1295,9 @@ pub async fn handle_chat_stream(
                         message_content: Set(String::new()),
                         model_provider: Set(provider.clone()),
                         model_name: Set(model_name.clone()),
-                        request_tokens: Set(0),
-                        response_tokens: Set(0),
-                        total_tokens: Set(0),
+                        request_tokens: Set(total_input_tokens),
+                        response_tokens: Set(img_output_tokens),
+                        total_tokens: Set(total_input_tokens + img_output_tokens),
                         latency: Set(latency),
                         cost: Set(image_gen_cost),
                         request_id: Set(None),

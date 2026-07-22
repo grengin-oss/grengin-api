@@ -247,4 +247,5 @@ pub trait GeminiApis {
         model_name: String,
         prompt: String,
     ) -> Result<PromptTitleResponse, Error>;
+
 }
