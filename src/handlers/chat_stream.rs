@@ -627,20 +627,14 @@ pub async fn handle_chat_stream(
     let retrieval_query = last_message
         .map(|m| m.content.clone())
         .unwrap_or_default();
-    let input_image_file_ids: Vec<Uuid> = req
+    let mut input_image_file_ids: Vec<Uuid> = req
         .messages
         .iter()
         .rev()
         .find(|m| !m.files.is_empty())
         .map(|m| m.files.iter().map(|f| f.id).collect())
         .unwrap_or_default();
-    let image_prompt: String = req
-        .messages
-        .iter()
-        .filter(|m| !m.content.is_empty())
-        .map(|m| m.content.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let image_prompt = retrieval_query.clone();
     let mut summary_prompt: Option<Prompt> = None;
     let mut retrieval_prompt: Option<Prompt> = None;
     let mut recent_prompts: Vec<Prompt> = Vec::new();
@@ -808,6 +802,16 @@ pub async fn handle_chat_stream(
             })?;
         (new_conversation_id, generated_title)
     };
+    // For multi-turn image editing: if no image was uploaded in this request,
+    // use the last generated image from previous conversation turns.
+    if input_image_file_ids.is_empty() {
+        input_image_file_ids = recent_prompts
+            .iter()
+            .rev()
+            .find(|p| !p.files.is_empty())
+            .map(|p| p.files.iter().map(|f| f.id).collect())
+            .unwrap_or_default();
+    }
     let mut previous_message_id = None;
     let mut embedding_targets: Vec<EmbeddingTarget> = Vec::new();
     for message in &req.messages {
