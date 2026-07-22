@@ -33,6 +33,7 @@ pub struct Model {
     pub api_key: Option<String>,
     pub whitelist_models: Vec<String>,
     pub default_model: String,
+    pub default_image_gen_model: Option<String>,
     pub api_key_validated_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

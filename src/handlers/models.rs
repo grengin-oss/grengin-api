@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use crate::{
     auth::claims::Claims,
-    dto::models::{ModelInfo, ModelsResponse, ProviderInfo},
+    dto::models::{ModelInfo, ModelType, ModelsResponse, ProviderInfo},
     models::users,
     services::{
         department_policies::effective_allowed_models,
@@ -79,6 +79,7 @@ pub async fn get_list_models(
         let mut models = provider
             .models
             .into_iter()
+            .filter(|model| model.model_type != ModelType::TextEmbedder)
             .filter(|model| whitelist.contains(&model.name) || whitelist.contains(&model.key))
             .collect::<Vec<ModelInfo>>();
         if let Some(allowed) = &allowed_set {

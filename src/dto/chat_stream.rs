@@ -55,8 +55,10 @@ pub enum ChatStreamEvents {
     ArtifactSaved,
     #[serde(rename = "budget_warning")]
     DepartmentBudgetWarning,
-    #[serde(rename = "llm_error")]
-    LlmError,
+    #[serde(rename = "ai_error")]
+    AiError,
+    #[serde(rename = "image_generated")]
+    ImageGenerated,
 }
 
 impl ChatStreamEvents {
@@ -196,8 +198,8 @@ pub struct ChatStreamWebSearchResultItem {
 
 #[derive(Deserialize, ToSchema, IntoParams)]
 pub struct ChatInput {
-    pub provider: Option<String>,
-    pub model_name: Option<String>,
+    pub provider: String,
+    pub model_name: String,
     pub config: Option<serde_json::Value>,
     #[serde(default)]
     pub web_search: bool,

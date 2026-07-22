@@ -9,6 +9,7 @@ pub struct AIEngineUpdate {
     pub api_key: Option<String>,
     pub whitelisted_models: Option<Vec<String>>,
     pub default_model: Option<String>,
+    pub default_image_gen_model: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -24,6 +25,8 @@ pub struct AIEngineDetail {
     pub api_key_last_validated_at: Option<DateTime<Utc>>,
     pub whitelisted_models: Vec<String>,
     pub default_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_image_gen_model: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

@@ -5,9 +5,9 @@ use crate::{
         error::{AuthError, Error},
         permissions::{PERMISSION_AI_PLATFORM_MANAGE, PERMISSION_AI_PLATFORM_VIEW},
     },
-    dto::admin_ai::{
-        AIEngineDetail, AIEngineModels, AIEngineUpdate, AIEngineValidation, AiModel,
-        AiModelCapabilities,
+    dto::{
+        admin_ai::{AIEngineDetail, AIEngineModels, AIEngineUpdate, AIEngineValidation, AiModel, AiModelCapabilities},
+        models::ModelType,
     },
     services::ai_engine_helpers::{
         load_models_response, load_models_response_refreshed, normalize_bearer_token,
@@ -104,6 +104,7 @@ pub async fn get_ai_engines(
                 api_key: Set(api_key_encrypted.clone()),
                 whitelist_models: Set(whitelist_models.clone()),
                 default_model: Set(String::from("<empty>")),
+                default_image_gen_model: Set(None),
                 api_key_validated_at: Set(None),
                 created_at: Set(Utc::now()),
                 updated_at: Set(Utc::now()),
@@ -155,6 +156,7 @@ pub async fn get_ai_engines(
             api_key_last_validated_at: model.api_key_validated_at,
             whitelisted_models: model.whitelist_models,
             default_model: Some(model.default_model),
+            default_image_gen_model: model.default_image_gen_model,
             created_at: model.created_at,
             updated_at: model.updated_at,
         })
@@ -214,6 +216,7 @@ pub async fn get_ai_engines_by_key(
         api_key_last_validated_at: model.api_key_validated_at,
         whitelisted_models: model.whitelist_models,
         default_model: Some(model.default_model),
+        default_image_gen_model: model.default_image_gen_model,
         created_at: model.created_at,
         updated_at: model.updated_at,
     };
@@ -266,7 +269,7 @@ pub async fn get_ai_engine_models_by_key(
         if provider.key != ai_engine_key {
             continue;
         }
-        for model in provider.models {
+        for model in provider.models.into_iter().filter(|m| m.model_type != ModelType::TextEmbedder) {
             response.models.push(AiModel {
                 model_id: model.key.clone(),
                 display_name: model.name.clone(),
@@ -338,6 +341,9 @@ pub async fn update_ai_engines_by_key(
     if let Some(default_model) = req.default_model {
         active_model.default_model = Set(default_model);
     }
+    if let Some(default_image_gen_model) = req.default_image_gen_model {
+        active_model.default_image_gen_model = Set(Some(default_image_gen_model));
+    }
     if let Some(whitelist_models) = req.whitelisted_models {
         active_model.whitelist_models = Set(whitelist_models);
     }
@@ -391,6 +397,7 @@ pub async fn update_ai_engines_by_key(
         api_key_last_validated_at: model.api_key_validated_at,
         whitelisted_models: model.whitelist_models,
         default_model: Some(model.default_model),
+        default_image_gen_model: model.default_image_gen_model,
         created_at: model.created_at,
         updated_at: model.updated_at,
     };
@@ -472,6 +479,7 @@ pub async fn delete_ai_engines_api_key_key(
         api_key_last_validated_at: model.api_key_validated_at,
         whitelisted_models: model.whitelist_models,
         default_model: Some(model.default_model),
+        default_image_gen_model: model.default_image_gen_model,
         created_at: model.created_at,
         updated_at: model.updated_at,
     };
