@@ -59,6 +59,8 @@ pub enum ChatStreamEvents {
     AiError,
     #[serde(rename = "image_generated")]
     ImageGenerated,
+    #[serde(rename = "stream_finished")]
+    StreamFinished,
 }
 
 impl ChatStreamEvents {

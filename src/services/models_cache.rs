@@ -225,7 +225,12 @@ fn parse_text_model(value: &Value) -> Result<ModelInfo, Error> {
     let key = get_str(value, "key")?;
     let name = get_str(value, "name")?;
     let engine = get_str(value, "engine")?;
-    let (input_token_rate, output_token_rate) = pricing_rates(value);
+    let (input_token_rate, output_token_rate, cached_input_token_rate, cache_creation_token_rate) =
+        pricing_rates(value);
+    let max_output_tokens = value
+        .pointer("/contextWindow/output")
+        .and_then(Value::as_i64)
+        .map(|v| v as i32);
 
     Ok(ModelInfo {
         key,
@@ -237,6 +242,9 @@ fn parse_text_model(value: &Value) -> Result<ModelInfo, Error> {
         output_token_rate,
         image_input_token_rate: None,
         image_output_token_rate: None,
+        cached_input_token_rate,
+        cache_creation_token_rate,
+        max_output_tokens,
         supports_streaming: true,
         supports_tools: true,
         supports_vision: true,
@@ -270,6 +278,9 @@ fn parse_image_model(value: &Value) -> Result<ModelInfo, Error> {
         output_token_rate,
         image_input_token_rate,
         image_output_token_rate,
+        cached_input_token_rate: None,
+        cache_creation_token_rate: None,
+        max_output_tokens: None,
         supports_streaming: false,
         supports_tools: false,
         supports_vision: false,
@@ -306,6 +317,9 @@ fn parse_embed_model(value: &Value, provider_key: &str) -> Result<ModelInfo, Err
         output_token_rate: None,
         image_input_token_rate: None,
         image_output_token_rate: None,
+        cached_input_token_rate: None,
+        cache_creation_token_rate: None,
+        max_output_tokens: None,
         supports_streaming: false,
         supports_tools: false,
         supports_vision: false,
@@ -318,15 +332,17 @@ fn parse_embed_model(value: &Value, provider_key: &str) -> Result<ModelInfo, Err
     })
 }
 
-fn pricing_rates(value: &Value) -> (Option<f64>, Option<f64>) {
+fn pricing_rates(value: &Value) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
     let pricing = match value.get("pricingPer1M").and_then(Value::as_object) {
         Some(pricing) => pricing,
-        None => return (None, None),
+        None => return (None, None, None, None),
     };
 
     let input = pricing.get("input").and_then(Value::as_f64);
     let output = pricing.get("output").and_then(Value::as_f64);
-    (input, output)
+    let cached_input = pricing.get("cached_input").and_then(Value::as_f64);
+    let cache_creation = pricing.get("cached_input_creation").and_then(Value::as_f64);
+    (input, output, cached_input, cache_creation)
 }
 
 fn get_str(value: &Value, field: &str) -> Result<String, Error> {

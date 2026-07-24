@@ -122,6 +122,8 @@ impl OpenaiStreamParser {
                         input_tokens: Some(usage.input_tokens),
                         output_tokens: Some(usage.output_tokens),
                         total_tokens: Some(usage.total_tokens),
+                        cached_input_tokens: usage.input_tokens_details.as_ref().map(|d| d.cached_tokens),
+                        cache_creation_tokens: None,
                     })
             }
             OpenaiResponseStreamEvent::ResponseCreated(ev) => {
@@ -129,6 +131,8 @@ impl OpenaiStreamParser {
                     request_id: ev.response.id,
                     input_tokens: ev.response.usage.as_ref().map(|usage| usage.input_tokens),
                     output_tokens: ev.response.usage.as_ref().map(|usage| usage.output_tokens),
+                    cached_input_tokens: None,
+                    cache_creation_tokens: None,
                 })
             }
             OpenaiResponseStreamEvent::Error(ev) => {
@@ -172,6 +176,8 @@ impl StreamParser for OpenaiStreamParser {
                     input_tokens: Some(usage.prompt_tokens),
                     output_tokens: Some(usage.completion_tokens),
                     total_tokens: Some(usage.total_tokens),
+                    cached_input_tokens: usage.prompt_tokens_details.as_ref().map(|d| d.cached_tokens),
+                    cache_creation_tokens: None,
                 };
             }
 

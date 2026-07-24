@@ -341,6 +341,8 @@ impl StreamParser for MistralConversationStreamParser {
                         input_tokens,
                         output_tokens,
                         total_tokens,
+                        cached_input_tokens: None,
+                        cache_creation_tokens: None,
                     };
                 }
             }
