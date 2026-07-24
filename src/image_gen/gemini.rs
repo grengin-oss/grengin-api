@@ -88,7 +88,8 @@ impl GeminiImageGenApis for ReqwestClient {
         model: &str,
         prompt: &str,
         input_images: &[InputImage],
-    ) -> Result<ImageGenResult, Error> {
+        _count: u8,
+    ) -> Result<Vec<ImageGenResult>, Error> {
         let mut parts = input_images
             .iter()
             .map(|img| Part::Inline {
@@ -120,34 +121,20 @@ impl GeminiImageGenApis for ReqwestClient {
         }
 
         let parsed: ImageGenResponse = resp.json().await?;
+        let input_tokens = parsed.usage_metadata.as_ref().and_then(|u| u.prompt_token_count).unwrap_or(0);
+        let output_tokens = parsed.usage_metadata.as_ref().and_then(|u| u.candidates_token_count).unwrap_or(0);
 
-        let input_tokens = parsed
-            .usage_metadata
-            .as_ref()
-            .and_then(|u| u.prompt_token_count)
-            .unwrap_or(0);
-        let output_tokens = parsed
-            .usage_metadata
-            .as_ref()
-            .and_then(|u| u.candidates_token_count)
-            .unwrap_or(0);
-
-        for part in parsed
-            .candidates
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("gemini response has no candidates"))?
-            .content
-            .parts
-        {
-            if let Some(inline) = part.inline_data {
-                return Ok(ImageGenResult {
-                    bytes: B64.decode(&inline.data)?,
-                    content_type: inline.mime_type,
-                    text_input_tokens: input_tokens,
-                    image_input_tokens: 0,
-                    output_tokens,
-                });
+        for candidate in parsed.candidates {
+            for part in candidate.content.parts {
+                if let Some(inline) = part.inline_data {
+                    return Ok(vec![ImageGenResult {
+                        bytes: B64.decode(&inline.data)?,
+                        content_type: inline.mime_type,
+                        text_input_tokens: input_tokens,
+                        image_input_tokens: 0,
+                        output_tokens,
+                    }]);
+                }
             }
         }
 

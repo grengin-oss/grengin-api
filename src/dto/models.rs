@@ -64,6 +64,7 @@ pub struct ModelInfo {
     pub supports_vision: bool,
     pub supports_pdf_native: bool,
     pub supports_web_search: bool,
+    pub supports_multiple_images: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_images: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]

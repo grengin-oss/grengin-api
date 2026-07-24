@@ -209,6 +209,7 @@ pub struct ChatInput {
     pub conversation_id: Option<Uuid>,
     pub messages: Vec<MessageRequest>,
     pub temperature: Option<f32>,
+    pub image_count: Option<u8>,
 }
 
 #[derive(Deserialize, ToSchema, IntoParams)]

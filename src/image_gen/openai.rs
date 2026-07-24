@@ -55,21 +55,22 @@ impl OpenaiImageGenApis for ReqwestClient {
         input_images: &[InputImage],
         size: Option<&str>,
         quality: Option<&str>,
-    ) -> Result<ImageGenResult, Error> {
-        let (b64, text_input_tokens, image_input_tokens, output_tokens) = if input_images.is_empty() {
-            let body = TextToImageRequest { model, prompt, n: 1, size, quality };
+        count: u8,
+    ) -> Result<Vec<ImageGenResult>, Error> {
+        if input_images.is_empty() {
+            let body = TextToImageRequest { model, prompt, n: count, size, quality };
             let resp = self
                 .post(format!("{OPENAI_API_URL}/v1/images/generations"))
                 .bearer_auth(&settings.api_key)
                 .json(&body)
                 .send()
                 .await?;
-            extract_b64(resp).await?
+            extract_all(resp).await
         } else {
             let mut form = multipart::Form::new()
                 .text("model", model.to_string())
                 .text("prompt", prompt.to_string())
-                .text("n", "1");
+                .text("n", count.to_string());
             if let Some(s) = size { form = form.text("size", s.to_string()); }
             if let Some(q) = quality { form = form.text("quality", q.to_string()); }
             for img in input_images {
@@ -84,33 +85,18 @@ impl OpenaiImageGenApis for ReqwestClient {
                 .multipart(form)
                 .send()
                 .await?;
-            extract_b64(resp).await?
-        };
-
-        Ok(ImageGenResult {
-            bytes: B64.decode(&b64)?,
-            content_type: "image/png".to_string(),
-            text_input_tokens,
-            image_input_tokens,
-            output_tokens,
-        })
+            extract_all(resp).await
+        }
     }
 }
 
-async fn extract_b64(resp: reqwest::Response) -> Result<(String, i32, i32, i32), Error> {
+async fn extract_all(resp: reqwest::Response) -> Result<Vec<ImageGenResult>, Error> {
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow!("openai image gen {status}: {body}"));
     }
     let parsed: ImageGenResponse = resp.json().await?;
-    let b64 = parsed
-        .data
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("openai image response has empty data array"))?
-        .b64_json
-        .ok_or_else(|| anyhow!("openai image response missing b64_json field"))?;
     let (text_input_tokens, image_input_tokens, output_tokens) = parsed
         .usage
         .map(|u| {
@@ -119,5 +105,20 @@ async fn extract_b64(resp: reqwest::Response) -> Result<(String, i32, i32, i32),
             (text, image, u.output_tokens)
         })
         .unwrap_or((0, 0, 0));
-    Ok((b64, text_input_tokens, image_input_tokens, output_tokens))
+    let n = parsed.data.len().max(1) as i32;
+    parsed
+        .data
+        .into_iter()
+        .map(|item| {
+            let b64 = item.b64_json.ok_or_else(|| anyhow!("openai image response missing b64_json field"))?;
+            Ok(ImageGenResult {
+                bytes: B64.decode(&b64)?,
+                content_type: "image/png".to_string(),
+                // tokens are reported once for the whole request; split evenly per image
+                text_input_tokens: text_input_tokens / n,
+                image_input_tokens: image_input_tokens / n,
+                output_tokens: output_tokens / n,
+            })
+        })
+        .collect()
 }

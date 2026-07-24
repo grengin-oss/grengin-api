@@ -601,7 +601,7 @@ pub async fn handle_chat_stream(
         }
     }
 
-    let (input_rate, output_rate, image_input_rate, image_output_rate, is_image_gen) =
+    let (input_rate, output_rate, image_input_rate, image_output_rate, is_image_gen, supports_multiple_images) =
         match get_model_info_cached(&app_state.req_client, &model_name).await {
             Ok(Some(model)) => (
                 model.input_token_rate,
@@ -609,11 +609,12 @@ pub async fn handle_chat_stream(
                 model.image_input_token_rate,
                 model.image_output_token_rate,
                 model.model_type == ModelType::ImageGenerator,
+                model.supports_multiple_images,
             ),
-            Ok(None) => (None, None, None, None, false),
+            Ok(None) => (None, None, None, None, false, false),
             Err(error) => {
                 eprintln!("models cache error: {error}");
-                (None, None, None, None, false)
+                (None, None, None, None, false, false)
             }
         };
     if let Some(conversation_id) = req.conversation_id {
@@ -1271,15 +1272,27 @@ pub async fn handle_chat_stream(
         if is_image_gen {
             let img_message_id = Uuid::new_v4();
             let now = Utc::now();
-            match generate_and_save(&app_state, claims.user_id, &provider, &model_name, &image_prompt, &input_image_file_ids).await {
-                Ok((file_id, content_type, text_input_tokens, image_input_tokens, img_output_tokens)) => {
-                    let effective_output_rate = if image_input_tokens > 0 { image_output_rate.or(output_rate) } else { output_rate };
+            let count = if supports_multiple_images { req.image_count.unwrap_or(1).max(1) } else { 1 };
+            match generate_and_save(&app_state, claims.user_id, &provider, &model_name, &image_prompt, &input_image_file_ids, count).await {
+                Ok(generated) => {
+                    let files_meta: Vec<serde_json::Value> = generated.iter().map(|(file_id, content_type, _, _, _)| {
+                        let ext = if content_type == "image/png" { "png" } else { "webp" };
+                        serde_json::to_value(File {
+                            id: *file_id,
+                            name: format!("{file_id}.{ext}"),
+                            content_type: content_type.clone(),
+                            size: None,
+                            openai_id: None,
+                            base64: None,
+                        }).unwrap_or_default()
+                    }).collect();
+                    let (total_text_input, total_image_input, total_output) = generated.iter().fold((0i32, 0i32, 0i32), |acc, (_, _, ti, ii, o)| (acc.0 + ti, acc.1 + ii, acc.2 + o));
+                    let effective_output_rate = if total_image_input > 0 { image_output_rate.or(output_rate) } else { output_rate };
                     image_gen_cost =
-                        calculate_cost_decimal(text_input_tokens, 0, input_rate, None)
-                        + calculate_cost_decimal(image_input_tokens, 0, image_input_rate, None)
-                        + calculate_cost_decimal(0, img_output_tokens, None, effective_output_rate);
-                    let total_input_tokens = text_input_tokens + image_input_tokens;
-                    let ext = if content_type == "image/png" { "png" } else { "webp" };
+                        calculate_cost_decimal(total_text_input, 0, input_rate, None)
+                        + calculate_cost_decimal(total_image_input, 0, image_input_rate, None)
+                        + calculate_cost_decimal(0, total_output, None, effective_output_rate);
+                    let total_input_tokens = total_text_input + total_image_input;
                     let img_msg = messages::ActiveModel {
                         id: Set(img_message_id),
                         conversation_id: Set(conversation_id.clone()),
@@ -1290,8 +1303,8 @@ pub async fn handle_chat_stream(
                         model_provider: Set(provider.clone()),
                         model_name: Set(model_name.clone()),
                         request_tokens: Set(total_input_tokens),
-                        response_tokens: Set(img_output_tokens),
-                        total_tokens: Set(total_input_tokens + img_output_tokens),
+                        response_tokens: Set(total_output),
+                        total_tokens: Set(total_input_tokens + total_output),
                         latency: Set(latency),
                         cost: Set(image_gen_cost),
                         request_id: Set(None),
@@ -1299,16 +1312,7 @@ pub async fn handle_chat_stream(
                         tools_results: Set(vec![]),
                         created_at: Set(now),
                         updated_at: Set(now),
-                        metadata: Set(Some(json!({
-                            "files": [File {
-                                id: file_id,
-                                name: format!("{file_id}.{ext}"),
-                                content_type: content_type.clone(),
-                                size: None,
-                                openai_id: None,
-                                base64: None,
-                            }]
-                        }))),
+                        metadata: Set(Some(json!({ "files": files_meta }))),
                     };
                     if let Err(e) = img_msg.insert(&app_state.database).await {
                         eprintln!("image gen message insert error: {e}");
@@ -1335,15 +1339,17 @@ pub async fn handle_chat_stream(
                             }
                         }
                     }
-                    if let Ok(data) = serde_json::to_string(&json!({
-                        "message_id": img_message_id,
-                        "file_id": file_id,
-                        "content_type": content_type,
-                        "cost": image_gen_cost.to_f32().unwrap_or(0.0),
-                    })) {
-                        yield Event::default()
-                            .event(ChatStreamEvents::ImageGenerated.to_string())
-                            .data(data);
+                    for (file_id, content_type, _, _, _) in &generated {
+                        if let Ok(data) = serde_json::to_string(&json!({
+                            "message_id": img_message_id,
+                            "file_id": file_id,
+                            "content_type": content_type,
+                            "cost": image_gen_cost.to_f32().unwrap_or(0.0),
+                        })) {
+                            yield Event::default()
+                                .event(ChatStreamEvents::ImageGenerated.to_string())
+                                .data(data);
+                        }
                     }
                 }
                 Err(e) => {

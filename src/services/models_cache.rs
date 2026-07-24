@@ -242,6 +242,7 @@ fn parse_text_model(value: &Value) -> Result<ModelInfo, Error> {
         supports_vision: true,
         supports_pdf_native: true,
         supports_web_search: false,
+        supports_multiple_images: false,
         max_images: None,
         dimensions: None,
         price_per_image: None,
@@ -257,6 +258,7 @@ fn parse_image_model(value: &Value) -> Result<ModelInfo, Error> {
     let output_token_rate = pricing.and_then(|p| p.get("output")).and_then(Value::as_f64);
     let image_input_token_rate = pricing.and_then(|p| p.get("image_input")).and_then(Value::as_f64);
     let image_output_token_rate = pricing.and_then(|p| p.get("image_output")).and_then(Value::as_f64);
+    let supports_multiple_images = value.get("supportsMultipleImages").and_then(Value::as_bool).unwrap_or(false);
 
     Ok(ModelInfo {
         key,
@@ -273,6 +275,7 @@ fn parse_image_model(value: &Value) -> Result<ModelInfo, Error> {
         supports_vision: false,
         supports_pdf_native: false,
         supports_web_search: false,
+        supports_multiple_images,
         max_images: None,
         dimensions: None,
         price_per_image: None,
@@ -308,6 +311,7 @@ fn parse_embed_model(value: &Value, provider_key: &str) -> Result<ModelInfo, Err
         supports_vision: false,
         supports_pdf_native: false,
         supports_web_search: false,
+        supports_multiple_images: false,
         max_images: None,
         dimensions,
         price_per_image: None,

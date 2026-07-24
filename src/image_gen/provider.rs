@@ -26,7 +26,8 @@ pub trait OpenaiImageGenApis {
         input_images: &[InputImage],
         size: Option<&str>,
         quality: Option<&str>,
-    ) -> Result<ImageGenResult, Error>;
+        count: u8,
+    ) -> Result<Vec<ImageGenResult>, Error>;
 }
 
 #[async_trait]
@@ -37,5 +38,6 @@ pub trait GeminiImageGenApis {
         model: &str,
         prompt: &str,
         input_images: &[InputImage],
-    ) -> Result<ImageGenResult, Error>;
+        count: u8,
+    ) -> Result<Vec<ImageGenResult>, Error>;
 }
