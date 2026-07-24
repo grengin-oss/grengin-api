@@ -132,6 +132,7 @@ pub async fn get_chats(
                         message_count: conversation_with_count.message_count.max(0) as u64,
                         messages: None,
                         search_score: page.scores.get(conversation_id).copied(),
+                        search_snippet: page.snippets.get(conversation_id).cloned(),
                     });
                 }
             }
@@ -212,6 +213,7 @@ pub async fn get_chats(
                             message_count: conversation_with_count.message_count.max(0) as u64,
                             messages: None,
                             search_score: None,
+                            search_snippet: None,
                         };
                         response.push(conversation_response);
                     }
@@ -313,6 +315,7 @@ pub async fn get_chats(
             message_count,
             messages: None,
             search_score: None,
+            search_snippet: None,
         };
         response.push(conversation_response);
     }
@@ -384,6 +387,7 @@ pub async fn get_chat_by_id(
         messages: Some(Vec::new()),
         message_count,
         search_score: None,
+        search_snippet: None,
     };
 
     messages_models.into_iter().for_each(|message_model| {
@@ -505,6 +509,7 @@ pub async fn update_chat_by_id(
         messages: None,
         message_count,
         search_score: None,
+        search_snippet: None,
     };
     Ok((StatusCode::OK, Json(response)))
 }

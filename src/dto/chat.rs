@@ -32,6 +32,8 @@ pub struct ConversationResponse {
     pub message_count: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub search_score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_snippet: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
