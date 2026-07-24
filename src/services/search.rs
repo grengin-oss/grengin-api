@@ -22,6 +22,7 @@ pub struct LexicalSearchPage {
     pub conversation_ids: Vec<Uuid>,
     pub total: u64,
     pub snippets: HashMap<Uuid, String>,
+    pub scores: HashMap<Uuid, f32>,
 }
 
 pub struct SemanticConversationPage {
@@ -137,6 +138,7 @@ pub async fn lexical_conversation_search(
             conversation_ids: Vec::new(),
             total: 0,
             snippets: HashMap::new(),
+            scores: HashMap::new(),
         });
     }
 
@@ -184,8 +186,10 @@ pub async fn lexical_conversation_search(
 
     let mut conversation_ids = Vec::with_capacity(rows.len());
     let mut snippets = HashMap::new();
+    let mut scores = HashMap::new();
     for row in rows {
         snippets.insert(row.conversation_id, truncate_snippet(&row.snippet));
+        scores.insert(row.conversation_id, row.rank);
         conversation_ids.push(row.conversation_id);
     }
 
@@ -193,6 +197,7 @@ pub async fn lexical_conversation_search(
         conversation_ids,
         total: total as u64,
         snippets,
+        scores,
     })
 }
 

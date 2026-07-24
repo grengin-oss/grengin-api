@@ -30,6 +30,8 @@ pub struct ConversationResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub messages: Option<Vec<MessageResponse>>,
     pub message_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_score: Option<f32>,
 }
 
 #[derive(Serialize, ToSchema)]

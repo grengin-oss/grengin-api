@@ -131,6 +131,7 @@ pub async fn get_chats(
                         last_message_at: conversation_with_count.last_message_at,
                         message_count: conversation_with_count.message_count.max(0) as u64,
                         messages: None,
+                        search_score: page.scores.get(conversation_id).copied(),
                     });
                 }
             }
@@ -210,6 +211,7 @@ pub async fn get_chats(
                             last_message_at: conversation_with_count.last_message_at,
                             message_count: conversation_with_count.message_count.max(0) as u64,
                             messages: None,
+                            search_score: None,
                         };
                         response.push(conversation_response);
                     }
@@ -310,6 +312,7 @@ pub async fn get_chats(
             last_message_at: conversation_with_count.last_message_at,
             message_count,
             messages: None,
+            search_score: None,
         };
         response.push(conversation_response);
     }
@@ -380,6 +383,7 @@ pub async fn get_chat_by_id(
         last_message_at: conversation_model.last_message_at,
         messages: Some(Vec::new()),
         message_count,
+        search_score: None,
     };
 
     messages_models.into_iter().for_each(|message_model| {
@@ -500,6 +504,7 @@ pub async fn update_chat_by_id(
         last_message_at: conversation_model.last_message_at,
         messages: None,
         message_count,
+        search_score: None,
     };
     Ok((StatusCode::OK, Json(response)))
 }
