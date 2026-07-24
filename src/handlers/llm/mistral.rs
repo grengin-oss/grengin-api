@@ -19,7 +19,7 @@ use crate::{
 
 use super::{
     StreamErrorKind, StreamParseResult, StreamParser, ToolInput, build_tool_call,
-    build_tool_input_delta, parse_web_search_action, CONV_SEARCH_TOOL_NAME,
+    build_tool_input_delta, parse_web_search_action,
 };
 
 #[derive(Debug, Clone)]
@@ -307,19 +307,6 @@ pub fn build_mistral_tools(
 ) -> Option<Vec<MistralTool>> {
     let mut tools = Vec::new();
     if !use_conversations {
-        tools.push(MistralTool::Function {
-            function: MistralToolDefinition {
-                name: CONV_SEARCH_TOOL_NAME.to_string(),
-                description: Some("Search the user's past conversations by keyword. Use when the user asks about previous chats or wants to find something from conversation history.".to_string()),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string", "description": "Keywords to search for in past conversations" }
-                    },
-                    "required": ["query"]
-                }),
-            },
-        });
         for descriptor in mcp_tool_lookup.values() {
             let description = descriptor
                 .description

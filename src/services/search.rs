@@ -74,7 +74,22 @@ struct LexicalRow {
     rank: f32,
 }
 
-// to_tsvector / @@ / plainto_tsquery / ts_rank / DISTINCT ON are not expressible in SeaORM.
+// Splits a natural-language query into OR-joined keywords for websearch_to_tsquery.
+// plainto_tsquery uses AND semantics, causing 0 results when query words span multiple messages.
+fn build_fts_or_query(raw: &str) -> String {
+    let terms: Vec<String> = raw
+        .split(|c: char| !c.is_alphabetic())
+        .map(|w| w.to_lowercase())
+        .filter(|w| w.len() >= 2)
+        .collect();
+    if terms.is_empty() {
+        raw.trim().to_string()
+    } else {
+        terms.join(" or ")
+    }
+}
+
+// to_tsvector / @@ / websearch_to_tsquery / ts_rank / DISTINCT ON are not expressible in SeaORM.
 pub async fn lexical_conversation_search(
     db: &sea_orm::DatabaseConnection,
     user_id: Uuid,
@@ -89,6 +104,7 @@ pub async fn lexical_conversation_search(
         r#"AND c."archivedAt" IS NULL"#
     };
 
+    let fts_query = build_fts_or_query(query);
     let count_sql = format!(
         r#"
         SELECT COUNT(DISTINCT c."id") as count
@@ -98,7 +114,7 @@ pub async fn lexical_conversation_search(
             AND m."role" IN ('user', 'assistant')
         WHERE c."userId" = $1
           AND to_tsvector('english', coalesce(c."title", '') || ' ' || m."messageContent")
-              @@ plainto_tsquery('english', $2)
+              @@ websearch_to_tsquery('english', $2)
           {archived_filter}
         "#
     );
@@ -106,7 +122,7 @@ pub async fn lexical_conversation_search(
     let count_row = CountRow::find_by_statement(Statement::from_sql_and_values(
         DatabaseBackend::Postgres,
         &count_sql,
-        vec![user_id.into(), query.into()],
+        vec![user_id.into(), fts_query.clone().into()],
     ))
     .one(db)
     .await
@@ -116,7 +132,6 @@ pub async fn lexical_conversation_search(
     })?;
 
     let total = count_row.map(|r| r.count).unwrap_or(0);
-    eprintln!("[lexical_search] query={query:?} total={total} archived={archived}");
     if total == 0 {
         return Ok(LexicalSearchPage {
             conversation_ids: Vec::new(),
@@ -133,7 +148,7 @@ pub async fn lexical_conversation_search(
                 left(m."messageContent", 240) AS "snippet",
                 ts_rank(
                     to_tsvector('english', coalesce(c."title", '') || ' ' || m."messageContent"),
-                    plainto_tsquery('english', $1)
+                    websearch_to_tsquery('english', $1)
                 )                            AS "rank"
             FROM "conversations" c
             INNER JOIN "messages" m ON m."conversationId" = c."id"
@@ -141,7 +156,7 @@ pub async fn lexical_conversation_search(
                 AND m."role" IN ('user', 'assistant')
             WHERE c."userId" = $2
               AND to_tsvector('english', coalesce(c."title", '') || ' ' || m."messageContent")
-                  @@ plainto_tsquery('english', $1)
+                  @@ websearch_to_tsquery('english', $1)
               {archived_filter}
             ORDER BY c."id", "rank" DESC
         ) sub
@@ -154,7 +169,7 @@ pub async fn lexical_conversation_search(
         DatabaseBackend::Postgres,
         &data_sql,
         vec![
-            query.into(),
+            fts_query.into(),
             user_id.into(),
             (limit as i64).into(),
             (offset as i64).into(),
@@ -174,7 +189,6 @@ pub async fn lexical_conversation_search(
         conversation_ids.push(row.conversation_id);
     }
 
-    eprintln!("[lexical_search] query={query:?} returned={}", conversation_ids.len());
     Ok(LexicalSearchPage {
         conversation_ids,
         total: total as u64,
