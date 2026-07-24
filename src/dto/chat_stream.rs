@@ -3,6 +3,27 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
+#[derive(Serialize, ToSchema)]
+pub struct ActiveSkillInfo {
+    pub id: Uuid,
+    pub identifier: String,
+    pub name: String,
+    pub avatar: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SkillsActivePayload {
+    pub skills: Vec<ActiveSkillInfo>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ArtifactSavedPayload {
+    pub id: Uuid,
+    pub file_id: Uuid,
+    pub title: String,
+    pub content_type: String,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BudgetWarningPayload {
     pub department_id: Uuid,
@@ -15,6 +36,7 @@ pub struct BudgetWarningPayload {
 #[serde(rename_all = "snake_case")]
 pub enum ChatStreamEvents {
     Conversation,
+    Skills,
     MessageStart,
     Delta,
     MessageEnd,
@@ -23,20 +45,18 @@ pub enum ChatStreamEvents {
     ToolResult,
     Cancelled,
     Done,
-    Artifact,
+    #[serde(rename = "artifact_start")]
+    ArtifactStart,
+    #[serde(rename = "artifact_delta")]
+    ArtifactDelta,
+    #[serde(rename = "artifact_end")]
+    ArtifactEnd,
+    #[serde(rename = "artifact_saved")]
+    ArtifactSaved,
     #[serde(rename = "budget_warning")]
     DepartmentBudgetWarning,
     #[serde(rename = "llm_error")]
     LlmError,
-}
-
-#[derive(Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ArtifactStreamEvent {
-    pub id: String,
-    pub title: String,
-    pub content_type: String,
-    pub content: String,
 }
 
 impl ChatStreamEvents {
@@ -183,6 +203,7 @@ pub struct ChatInput {
     pub web_search: bool,
     pub selected_tools: Option<Vec<String>>,
     pub selected_mcp_servers: Option<Vec<Uuid>>,
+    pub selected_skills: Option<Vec<Uuid>>,
     pub conversation_id: Option<Uuid>,
     pub messages: Vec<MessageRequest>,
     pub temperature: Option<f32>,

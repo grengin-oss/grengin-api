@@ -6,7 +6,11 @@ use uuid::Uuid;
 use crate::{
     auth::error::AuthError,
     dto::projects::{ProjectChatResponse, ProjectMcpServerResponse, ProjectResponse, ProjectSourceResponse},
-    models::{conversation_projects, conversations, mcp_servers, project_mcp_servers, project_members, project_sources, projects},
+    models::{
+        conversation_projects, conversations, mcp_servers, project_mcp_servers, project_members,
+        project_sources, project_sources::ProcessingStatus, projects,
+        projects::ProjectVisibility,
+    },
 };
 
 pub async fn get_project_or_404(
@@ -28,7 +32,7 @@ pub async fn ensure_project_read_access(
     project: &projects::Model,
     db: &DatabaseConnection,
 ) -> Result<(), AuthError> {
-    if project.owner_id == user_id || project.visibility == "team" {
+    if project.owner_id == user_id || project.visibility == ProjectVisibility::Team {
         return Ok(());
     }
     let is_member = project_members::Entity::find()
@@ -74,7 +78,7 @@ pub async fn ensure_project_write_access(
 pub fn build_visibility_condition(user_id: Uuid, member_project_ids: Vec<Uuid>) -> Condition {
     let mut cond = Condition::any()
         .add(projects::Column::OwnerId.eq(user_id))
-        .add(projects::Column::Visibility.eq("team"));
+        .add(projects::Column::Visibility.eq(ProjectVisibility::Team));
     if !member_project_ids.is_empty() {
         cond = cond.add(projects::Column::Id.is_in(member_project_ids));
     }
@@ -177,6 +181,22 @@ pub fn to_project_response(
     }
 }
 
+pub fn source_to_response(s: project_sources::Model) -> ProjectSourceResponse {
+    ProjectSourceResponse {
+        id: s.id,
+        project_id: s.project_id,
+        file_name: s.file_name,
+        file_type: s.file_type,
+        file_size: s.file_size,
+        origin: s.origin,
+        uploaded_at: s.uploaded_at,
+        file_id: s.file_id,
+        processing_status: ProcessingStatus::try_from(s.processing_status)
+            .unwrap_or(ProcessingStatus::Error),
+        processing_error: s.processing_error,
+    }
+}
+
 pub async fn fetch_project_sources(
     project_id: Uuid,
     db: &DatabaseConnection,
@@ -189,18 +209,7 @@ pub async fn fetch_project_sources(
             eprintln!("db sources fetch error: {e}");
             AuthError::DbTimeout
         })?;
-    Ok(sources
-        .into_iter()
-        .map(|s| ProjectSourceResponse {
-            id: s.id,
-            project_id: s.project_id,
-            file_name: s.file_name,
-            file_type: s.file_type,
-            file_size: s.file_size,
-            origin: s.origin,
-            uploaded_at: s.uploaded_at,
-        })
-        .collect())
+    Ok(sources.into_iter().map(source_to_response).collect())
 }
 
 pub async fn fetch_project_chats(
@@ -250,9 +259,6 @@ pub fn is_valid_category(s: &str) -> bool {
     crate::models::projects::VALID_CATEGORIES.contains(&s)
 }
 
-pub fn is_valid_visibility(s: &str) -> bool {
-    crate::models::projects::VALID_VISIBILITIES.contains(&s)
-}
 
 pub async fn fetch_project_mcp_servers(
     project_id: Uuid,

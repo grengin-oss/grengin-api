@@ -13,10 +13,7 @@ use crate::{
         normalize_gemini_parameters,
     },
     llm::provider::GeminiApis,
-    services::{
-        artifacts::{ARTIFACT_TOOL_DESC, ARTIFACT_TOOL_NAME},
-        mcp_tools::McpToolDescriptor,
-    },
+    services::mcp_tools::McpToolDescriptor,
 };
 
 use crate::handlers::llm::{
@@ -233,7 +230,6 @@ impl StreamParser for GeminiStreamParser {
 pub fn build_gemini_tools(
     web_search: bool,
     mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
-    artifact_schema: &Value,
 ) -> Option<Value> {
     let mut tools: Vec<Value> = Vec::new();
     if web_search {
@@ -251,13 +247,10 @@ pub fn build_gemini_tools(
             "parameters": normalize_gemini_parameters(&descriptor.input_schema),
         }));
     }
-    function_declarations.push(json!({
-        "name": ARTIFACT_TOOL_NAME,
-        "description": ARTIFACT_TOOL_DESC,
-        "parameters": normalize_gemini_parameters(artifact_schema),
-    }));
-    tools.push(json!({ "function_declarations": function_declarations }));
-    Some(Value::Array(tools))
+    if !function_declarations.is_empty() {
+        tools.push(json!({ "function_declarations": function_declarations }));
+    }
+    if tools.is_empty() { None } else { Some(Value::Array(tools)) }
 }
 
 pub fn build_gemini_tool_config(

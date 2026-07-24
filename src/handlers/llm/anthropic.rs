@@ -19,10 +19,7 @@ use crate::{
         AnthropicWebSearchTool,
     },
     llm::{prompt::Prompt, provider::AnthropicApis},
-    services::{
-        artifacts::{ARTIFACT_TOOL_DESC, ARTIFACT_TOOL_NAME},
-        mcp_tools::McpToolDescriptor,
-    },
+    services::mcp_tools::McpToolDescriptor,
 };
 
 /// Anthropic stream parser
@@ -239,7 +236,6 @@ impl StreamParser for AnthropicStreamParser {
 pub fn build_anthropic_tools(
     web_search: bool,
     mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
-    artifact_schema: Value,
 ) -> Option<Vec<AnthropicToolUnion>> {
     let mut tools = Vec::new();
     if web_search {
@@ -256,11 +252,6 @@ pub fn build_anthropic_tools(
             input_schema: descriptor.input_schema.clone(),
         }));
     }
-    tools.push(AnthropicToolUnion::ClientTool(AnthropicTool {
-        name: ARTIFACT_TOOL_NAME.to_string(),
-        description: ARTIFACT_TOOL_DESC.to_string(),
-        input_schema: artifact_schema,
-    }));
     if tools.is_empty() { None } else { Some(tools) }
 }
 

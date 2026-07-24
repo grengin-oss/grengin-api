@@ -1,4 +1,6 @@
 use crate::auth::claims::Claims;
+use crate::dto::artifacts::{ArtifactListResponse, ArtifactResponse};
+use crate::handlers::artifacts;
 use crate::auth::error::{AuthError, AuthErrorCode, AuthErrorDetailVariant, Error};
 use crate::docs::{app_error_catlog::AppErrorCatalogItem, security::ApiSecurityAddon};
 use crate::dto::admin_ai::{
@@ -69,16 +71,21 @@ use crate::dto::system_metrics::{
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::dto::projects::{
     AddMcpServerRequest, AddMemberRequest, AddSourceRequest, ArtifactCreateRequest,
-    InstructionsUpdateRequest, LinkProjectRequest, ProjectCreateRequest, ProjectDetailResponse,
-    ProjectListQuery, ProjectListResponse, ProjectMcpServerResponse, ProjectMemberResponse,
-    ProjectResponse, ProjectSourceResponse, ProjectUpdateRequest, ShareProjectResponse,
-    UserSearchItem, UserSearchResponse,
+    ArtifactUpdateRequest, InstructionsUpdateRequest, LinkProjectRequest, ProjectCreateRequest,
+    ProjectDetailResponse, ProjectListQuery, ProjectListResponse, ProjectMcpServerResponse,
+    ProjectMemberResponse, ProjectResponse, ProjectSourceResponse, ProjectUpdateRequest,
+    ShareProjectResponse, UserSearchItem, UserSearchResponse,
+};
+use crate::dto::skills::{
+    ConversationSkillResponse, LinkSkillRequest, SkillCreateRequest, SkillListQuery,
+    SkillListResponse, SkillResponse, SkillToolsConfig, SkillUpdateRequest,
+    UserSkillCreateRequest, UserSkillListQuery, UserSkillUpdateRequest,
 };
 use crate::handlers::{
     admin_ai, admin_analytics, admin_audit, admin_department, admin_department_budgets,
     admin_embedding, admin_mcp, admin_prompts, admin_reconfigure, admin_roles, admin_sso_provider,
     admin_system, admin_users, auth, branding, chat, chat_stream, file, mcp, me, me_prompts,
-    message, models, notifications, oidc, open_error, projects,
+    me_skills, message, models, notifications, oidc, open_error, projects, skills,
 };
 use crate::models::departments::{ActionOnExceed, BudgetPeriod};
 use crate::models::mcp_access_policies::{McpAccessType, McpPermission};
@@ -90,6 +97,9 @@ use utoipa::OpenApi;
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        artifacts::get_artifact,
+        artifacts::list_conversation_artifacts,
+        artifacts::delete_artifact,
         auth::handle_refresh_token,
         oidc::oidc_login_start,
         oidc::oidc_oauth_callback_get,
@@ -229,15 +239,33 @@ use utoipa::OpenApi;
         projects::delete_project_source,
         projects::list_project_artifacts,
         projects::add_project_artifact,
+        projects::get_project_artifact,
+        projects::update_project_artifact,
+        projects::delete_project_artifact,
         projects::share_project,
         projects::link_project_to_conversation,
         projects::unlink_project_from_conversation,
         projects::list_project_mcp_servers,
         projects::add_project_mcp_server,
         projects::remove_project_mcp_server,
+        skills::list_skills,
+        skills::get_skill,
+        skills::create_skill,
+        skills::update_skill,
+        skills::delete_skill,
+        skills::list_conversation_skill_links,
+        skills::link_skill,
+        skills::unlink_skill,
+        me_skills::list_my_skills,
+        me_skills::get_my_skill,
+        me_skills::create_my_skill,
+        me_skills::update_my_skill,
+        me_skills::delete_my_skill,
     ),
     components(
         schemas(
+            ArtifactResponse,
+            ArtifactListResponse,
             AuthInit,
             AuthToken,
             TokenType,
@@ -405,10 +433,22 @@ use utoipa::OpenApi;
             InstructionsUpdateRequest,
             AddSourceRequest,
             ArtifactCreateRequest,
+            ArtifactUpdateRequest,
             ShareProjectResponse,
             LinkProjectRequest,
             ProjectMcpServerResponse,
             AddMcpServerRequest,
+            SkillToolsConfig,
+            SkillCreateRequest,
+            SkillUpdateRequest,
+            SkillListQuery,
+            SkillResponse,
+            SkillListResponse,
+            LinkSkillRequest,
+            ConversationSkillResponse,
+            UserSkillCreateRequest,
+            UserSkillUpdateRequest,
+            UserSkillListQuery,
         )
     ),
     tags(
@@ -418,6 +458,8 @@ use utoipa::OpenApi;
         (name = "me", description = "Current user permissions"),
         (name = "mcp", description = "MCP tools & connections"),
         (name = "root", description = "Root / health"),
+        (name = "skills", description = "Skills management & conversation skill links"),
+        (name = "artifacts", description = "Chat artifact retrieval & deletion"),
     ),
     modifiers(
         &ApiSecurityAddon

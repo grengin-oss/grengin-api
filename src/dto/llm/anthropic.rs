@@ -4,7 +4,7 @@ use serde_json::Value;
 
 // ============== Constants ==============
 
-pub const ANTHROPIC_DEFAULT_MAX_TOKENS: i32 = 4096;
+pub const ANTHROPIC_DEFAULT_MAX_TOKENS: i32 = 128000;
 
 // ============== Request Structures ==============
 

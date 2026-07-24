@@ -76,6 +76,9 @@ impl MistralApis for ReqwestClient {
             model: model_name,
             messages,
             stream: true,
+            stream_options: Some(crate::dto::llm::mistral::MistralStreamOptions {
+                include_usage: true,
+            }),
             temperature,
             tools,
             tool_choice,
@@ -114,6 +117,7 @@ impl MistralApis for ReqwestClient {
             model: model_name,
             messages,
             stream: false,
+            stream_options: None,
             temperature: None,
             tools: None,
             tool_choice: None,

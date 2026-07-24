@@ -80,6 +80,7 @@ pub trait OpenaiApis {
         openai_settings: &OpenaiSettings,
         model_name: String,
         input: Vec<String>,
+        dimensions: Option<i32>,
     ) -> Result<crate::dto::llm::openai::OpenaiEmbeddingResponse, Error>;
     async fn openai_list_models(
         &self,

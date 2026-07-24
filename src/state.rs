@@ -30,6 +30,8 @@ pub struct AppState {
     pub stream_cancellations: RwLock<HashMap<Uuid, Arc<StreamCancel>>>,
 }
 
+pub type SharedState = Arc<AppState>;
+
 pub struct StreamCancel {
     cancelled: AtomicBool,
     notify: Notify,
@@ -411,4 +413,4 @@ impl AppState {
     }
 }
 
-pub type SharedState = Arc<AppState>;
+

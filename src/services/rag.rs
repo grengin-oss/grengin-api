@@ -5,12 +5,12 @@ use sea_orm::{
     Statement,
     sea_query::{Alias, BinOper, Expr, Order},
 };
-use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
     config::setting::EmbeddingSettings,
+    dto::embeddings::{GeminiEmbeddingResponse, MistralEmbeddingResponse},
     dto::files::File,
     error::AppError,
     llm::{
@@ -20,10 +20,9 @@ use crate::{
         provider::{AnthropicApis, OpenaiApis},
     },
     models::{conversation_summaries, message_embeddings, messages, messages::ChatRole},
+    services::embedders_cache::get_model_dimensions,
     state::SharedState,
 };
-
-const MESSAGE_EMBEDDING_VECTOR_DIM: usize = 1536;
 
 pub struct RecentMessages {
     pub prompts: Vec<Prompt>,
@@ -47,26 +46,6 @@ struct RetrievedMessageRow {
     role: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct MistralEmbeddingResponse {
-    data: Vec<MistralEmbeddingData>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MistralEmbeddingData {
-    embedding: Vec<f32>,
-    index: usize,
-}
-
-#[derive(Debug, Deserialize)]
-struct GeminiEmbeddingResponse {
-    embedding: Option<GeminiEmbeddingData>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GeminiEmbeddingData {
-    values: Vec<f32>,
-}
 
 pub async fn load_recent_prompts(
     db: &DatabaseConnection,
@@ -277,9 +256,10 @@ pub async fn embed_messages(
         return Ok(());
     }
 
-    let embeddings = match generate_embeddings(app_state, &embedding_config, inputs).await? {
-        Some(embeddings) => embeddings,
-        None => return Ok(()),
+    let embeddings = match generate_embeddings(app_state, &embedding_config, inputs).await {
+        Err(e) => return Err(e),
+        Ok(None) => return Ok(()),
+        Ok(Some(v)) => v,
     };
 
     for (target, embedding) in filtered_targets.into_iter().zip(embeddings.into_iter()) {
@@ -451,44 +431,18 @@ async fn generate_embedding(
     Ok(embeddings.and_then(|mut vecs| vecs.pop()))
 }
 
-fn normalize_embedding_dimensions(mut embedding: Vec<f32>) -> Vec<f32> {
-    match embedding.len().cmp(&MESSAGE_EMBEDDING_VECTOR_DIM) {
-        std::cmp::Ordering::Equal => embedding,
-        std::cmp::Ordering::Greater => {
-            embedding.truncate(MESSAGE_EMBEDDING_VECTOR_DIM);
-            embedding
-        }
-        std::cmp::Ordering::Less => {
-            embedding.resize(MESSAGE_EMBEDDING_VECTOR_DIM, 0.0);
-            embedding
-        }
-    }
-}
-
-fn normalize_embeddings_for_storage(embeddings: Vec<Vec<f32>>) -> Vec<Vec<f32>> {
-    embeddings
-        .into_iter()
-        .map(normalize_embedding_dimensions)
-        .collect()
-}
-
-fn gemini_embedding_model_candidates(model: &str) -> Vec<String> {
-    let normalized = model.trim().trim_start_matches("models/").to_string();
-    let mut candidates = vec![normalized.clone()];
-    if normalized.eq_ignore_ascii_case("text-embedding-004")
-        || normalized.eq_ignore_ascii_case("embedding-001")
-    {
-        candidates.push("gemini-embedding-001".to_string());
-    }
-    candidates
-}
-
-async fn generate_embeddings(
+pub async fn generate_embeddings(
     app_state: &SharedState,
     config: &EmbeddingSettings,
     inputs: Vec<String>,
 ) -> Result<Option<Vec<Vec<f32>>>, AppError> {
-    match config.provider.to_lowercase().as_str() {
+    let provider = config.provider.to_lowercase();
+    let target_dim = match config.dimensions {
+        Some(d) => Some(d as usize),
+        None => get_model_dimensions(&app_state.req_client, &provider, &config.model).await,
+    };
+
+    match provider.as_str() {
         "openai" => {
             let openai_settings = match app_state.settings.openai.read().await.clone() {
                 Some(settings) if settings.is_enabled => settings,
@@ -496,7 +450,7 @@ async fn generate_embeddings(
             };
             let response = app_state
                 .req_client
-                .openai_create_embedding(&openai_settings, config.model.clone(), inputs)
+                .openai_create_embedding(&openai_settings, config.model.clone(), inputs, config.dimensions)
                 .await
                 .map_err(|e| {
                     eprintln!("embedding request error: {e}");
@@ -506,11 +460,11 @@ async fn generate_embeddings(
                 })?;
             let mut data = response.data;
             data.sort_by_key(|item| item.index);
-            let embeddings = data
-                .into_iter()
-                .map(|item| item.embedding)
-                .collect::<Vec<Vec<f32>>>();
-            Ok(Some(normalize_embeddings_for_storage(embeddings)))
+            Ok(Some(
+                data.into_iter()
+                    .map(|item| normalize_to_target(item.embedding, target_dim))
+                    .collect(),
+            ))
         }
         "mistral" => {
             let mistral_settings = match app_state.settings.mistral.read().await.clone() {
@@ -551,18 +505,17 @@ async fn generate_embeddings(
                 })?;
             let mut data = response.data;
             data.sort_by_key(|item| item.index);
-            Ok(Some(normalize_embeddings_for_storage(
+            Ok(Some(
                 data.into_iter()
-                    .map(|item| item.embedding)
-                    .collect::<Vec<Vec<f32>>>(),
-            )))
+                    .map(|item| normalize_to_target(item.embedding, target_dim))
+                    .collect(),
+            ))
         }
         "gemini" => {
             let gemini_settings = match app_state.settings.gemini.read().await.clone() {
                 Some(settings) if settings.is_enabled => settings,
                 _ => return Ok(None),
             };
-            let model_candidates = gemini_embedding_model_candidates(&config.model);
             let mut embeddings = Vec::with_capacity(inputs.len());
             for input in inputs {
                 let mut body = serde_json::Map::new();
@@ -575,60 +528,66 @@ async fn generate_embeddings(
                 if let Some(dimensions) = config.dimensions {
                     body.insert("outputDimensionality".to_string(), json!(dimensions));
                 }
-                let mut embedded = None;
-                for model_name in &model_candidates {
-                    let response = app_state
-                        .req_client
-                        .post(format!(
-                            "{GEMINI_API_URL}/v1beta/models/{model_name}:embedContent"
-                        ))
-                        .header("x-goog-api-key", gemini_settings.api_key.clone())
-                        .header("content-type", "application/json")
-                        .json(&body)
-                        .send()
-                        .await
-                        .map_err(|e| {
-                            eprintln!("gemini embedding request error: {e}");
-                            AppError::LlmProviderNotConfigured {
-                                provider: "gemini".to_string(),
-                            }
-                        })?;
-
-                    if response.status().as_u16() == 404 {
-                        continue;
-                    }
-                    if !response.status().is_success() {
-                        let status = response.status();
-                        let body = response.text().await.unwrap_or_default();
-                        eprintln!("gemini embedding status error: {status} body: {body}");
-                        return Err(AppError::LlmProviderNotConfigured {
-                            provider: "gemini".to_string(),
-                        });
-                    }
-
-                    let parsed: GeminiEmbeddingResponse = response.json().await.map_err(|e| {
-                        eprintln!("gemini embedding decode error: {e}");
+                let response = app_state
+                    .req_client
+                    .post(format!(
+                        "{GEMINI_API_URL}/v1beta/models/{}:embedContent",
+                        config.model
+                    ))
+                    .header("x-goog-api-key", gemini_settings.api_key.clone())
+                    .header("content-type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        eprintln!("gemini embedding request error: {e}");
                         AppError::LlmProviderNotConfigured {
                             provider: "gemini".to_string(),
                         }
                     })?;
-                    if let Some(embedding) = parsed.embedding {
-                        embedded = Some(embedding.values);
-                    }
-                    if embedded.is_some() {
-                        break;
-                    }
+
+                if !response.status().is_success() {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    eprintln!("gemini embedding status error: {status} body: {body}");
+                    return Err(AppError::LlmProviderNotConfigured {
+                        provider: "gemini".to_string(),
+                    });
                 }
-                if let Some(embedding) = embedded {
-                    embeddings.push(embedding);
+
+                let parsed: GeminiEmbeddingResponse = response.json().await.map_err(|e| {
+                    eprintln!("gemini embedding decode error: {e}");
+                    AppError::LlmProviderNotConfigured {
+                        provider: "gemini".to_string(),
+                    }
+                })?;
+                if let Some(embedding) = parsed.embedding {
+                    embeddings.push(normalize_to_target(embedding.values, target_dim));
                 }
             }
             if embeddings.is_empty() {
                 return Ok(None);
             }
-            Ok(Some(normalize_embeddings_for_storage(embeddings)))
+            Ok(Some(embeddings))
         }
         _ => Ok(None),
+    }
+}
+
+fn normalize_to_target(mut embedding: Vec<f32>, target_dim: Option<usize>) -> Vec<f32> {
+    let Some(target) = target_dim else {
+        return embedding;
+    };
+    match embedding.len().cmp(&target) {
+        std::cmp::Ordering::Equal => embedding,
+        std::cmp::Ordering::Greater => {
+            embedding.truncate(target);
+            embedding
+        }
+        std::cmp::Ordering::Less => {
+            embedding.resize(target, 0.0);
+            embedding
+        }
     }
 }
 
@@ -739,7 +698,7 @@ async fn insert_message_embedding(
     Ok(())
 }
 
-fn format_pgvector(values: &[f32]) -> String {
+pub fn format_pgvector(values: &[f32]) -> String {
     let mut out = String::from("[");
     for (idx, value) in values.iter().enumerate() {
         if idx > 0 {
@@ -749,6 +708,67 @@ fn format_pgvector(values: &[f32]) -> String {
     }
     out.push(']');
     out
+}
+
+pub async fn build_project_retrieval_prompt(
+    app_state: &SharedState,
+    project_id: uuid::Uuid,
+    query: &str,
+    top_k: usize,
+) -> Result<Option<String>, AppError> {
+    if !app_state.settings.rag.enabled {
+        return Ok(None);
+    }
+    let embedding_config = match app_state.settings.get_embedding_config().await {
+        Some(c) if c.is_enabled => c,
+        _ => return Ok(None),
+    };
+
+    let embeddings = match generate_embeddings(app_state, &embedding_config, vec![query.to_string()]).await? {
+        Some(v) if !v.is_empty() => v,
+        _ => return Ok(None),
+    };
+    let query_vector = format_pgvector(&embeddings[0]);
+
+    let sql = format!(
+        r#"
+        SELECT psc."content",
+               ps."fileName"
+        FROM "project_source_chunks" psc
+        JOIN "project_sources" ps ON ps."id" = psc."projectSourceId"
+        WHERE psc."projectId" = $1
+          AND ps."processingStatus" = 'ready'
+        ORDER BY psc."embedding" <=> '{}'::vector
+        LIMIT $2
+        "#,
+        query_vector
+    );
+
+    let rows = app_state
+        .database
+        .query_all(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &sql,
+            vec![project_id.into(), (top_k as i64).into()],
+        ))
+        .await
+        .map_err(|e| {
+            eprintln!("project chunk retrieval error: {e}");
+            AppError::DbTimeout
+        })?;
+
+    if rows.is_empty() {
+        return Ok(None);
+    }
+
+    let mut context = String::from("Relevant project documents:\n\n");
+    for row in rows {
+        let content: String = row.try_get("", "content").unwrap_or_default();
+        let file_name: String = row.try_get("", "fileName").unwrap_or_default();
+        context.push_str(&format!("— {file_name}\n{content}\n\n"));
+    }
+
+    Ok(Some(context.trim_end().to_string()))
 }
 
 impl ChatRole {

@@ -17,16 +17,20 @@ use crate::{
     auth::{claims::Claims, error::{AuthError, Error}},
     dto::projects::{
         AddMcpServerRequest, AddMemberRequest, AddSourceRequest, ArtifactCreateRequest,
-        InstructionsUpdateRequest, LinkProjectRequest, MemberSearchQuery, ProjectCreateRequest,
-        ProjectDetailResponse, ProjectListQuery, ProjectListResponse, ProjectMcpServerResponse,
-        ProjectMemberResponse, ProjectResponse, ProjectSourceResponse, ProjectUpdateRequest,
-        ShareProjectResponse, UserSearchItem, UserSearchResponse,
+        ArtifactUpdateRequest, InstructionsUpdateRequest, LinkProjectRequest, MemberSearchQuery,
+        ProjectCreateRequest, ProjectDetailResponse, ProjectListQuery, ProjectListResponse,
+        ProjectMcpServerResponse, ProjectMemberResponse, ProjectResponse, ProjectSourceResponse,
+        ProjectUpdateRequest, ShareProjectResponse, UserSearchItem, UserSearchResponse,
     },
     models::{
         conversation_projects, conversations, mcp_servers, project_mcp_servers, project_members,
-        project_sources, projects, users,
+        project_sources, projects, projects::ProjectVisibility, users,
     },
-    services::project_helpers::*,
+    models::project_sources::ProcessingStatus,
+    services::{
+        project_helpers::*,
+        project_source_processing::{delete_source_chunks, spawn_process_source, write_artifact_file},
+    },
     state::SharedState,
 };
 
@@ -69,7 +73,7 @@ pub async fn list_projects(
     if let Some(category) = query.category.as_deref().filter(|v| !v.is_empty()) {
         select = select.filter(projects::Column::Category.eq(category));
     }
-    if let Some(vis) = query.visibility.as_deref().filter(|v| !v.is_empty()) {
+    if let Some(vis) = query.visibility {
         select = select.filter(projects::Column::Visibility.eq(vis));
     }
 
@@ -122,10 +126,7 @@ pub async fn create_project(
         return Err(AuthError::InvalidRequest { field: "category" });
     }
 
-    let visibility = req.visibility.as_deref().unwrap_or("private").trim().to_ascii_lowercase();
-    if !is_valid_visibility(&visibility) {
-        return Err(AuthError::InvalidRequest { field: "visibility" });
-    }
+    let visibility = req.visibility.unwrap_or(ProjectVisibility::Private);
 
     let now = Utc::now();
     let inserted = projects::ActiveModel {
@@ -274,10 +275,6 @@ pub async fn update_project(
         active.category = Set(cat);
     }
     if let Some(vis) = req.visibility {
-        let vis = vis.trim().to_ascii_lowercase();
-        if !is_valid_visibility(&vis) {
-            return Err(AuthError::InvalidRequest { field: "visibility" });
-        }
         active.visibility = Set(vis);
     }
 
@@ -498,6 +495,12 @@ pub async fn add_project_source(
         return Err(AuthError::InvalidRequest { field: "origin" });
     }
 
+    let processing_status = if req.file_id.is_some() {
+        ProcessingStatus::Pending
+    } else {
+        ProcessingStatus::NoFile
+    };
+
     let inserted = project_sources::ActiveModel {
         id: Set(Uuid::new_v4()),
         project_id: Set(id),
@@ -506,6 +509,9 @@ pub async fn add_project_source(
         file_size: Set(req.file_size),
         origin: Set(origin),
         uploaded_at: Set(Utc::now()),
+        file_id: Set(req.file_id),
+        processing_status: Set(processing_status.to_string()),
+        processing_error: Set(None),
     }
     .insert(&app_state.database)
     .await
@@ -514,15 +520,11 @@ pub async fn add_project_source(
         AuthError::DbTimeout
     })?;
 
-    Ok((StatusCode::CREATED, Json(ProjectSourceResponse {
-        id: inserted.id,
-        project_id: inserted.project_id,
-        file_name: inserted.file_name,
-        file_type: inserted.file_type,
-        file_size: inserted.file_size,
-        origin: inserted.origin,
-        uploaded_at: inserted.uploaded_at,
-    })))
+    if let Some(fid) = inserted.file_id {
+        spawn_process_source(app_state, inserted.id, inserted.project_id, fid);
+    }
+
+    Ok((StatusCode::CREATED, Json(source_to_response(inserted))))
 }
 
 #[utoipa::path(
@@ -871,18 +873,7 @@ pub async fn list_project_artifacts(
             AuthError::DbTimeout
         })?;
 
-    let result = artifacts
-        .into_iter()
-        .map(|s| ProjectSourceResponse {
-            id: s.id,
-            project_id: s.project_id,
-            file_name: s.file_name,
-            file_type: s.file_type,
-            file_size: s.file_size,
-            origin: s.origin,
-            uploaded_at: s.uploaded_at,
-        })
-        .collect();
+    let result = artifacts.into_iter().map(source_to_response).collect();
 
     Ok((StatusCode::OK, Json(result)))
 }
@@ -935,6 +926,16 @@ pub async fn add_project_artifact(
     let file_name = format!("{sanitized}.{ext}");
     let file_size = req.content.len() as i64;
 
+    let (file_uuid, _) = write_artifact_file(
+        &app_state.database,
+        claims.user_id,
+        &file_name,
+        &content_type,
+        &req.content,
+    )
+    .await
+    .map_err(|_| AuthError::DbTimeout)?;
+
     let inserted = project_sources::ActiveModel {
         id: Set(Uuid::new_v4()),
         project_id: Set(id),
@@ -943,6 +944,9 @@ pub async fn add_project_artifact(
         file_size: Set(file_size),
         origin: Set("artifact".to_string()),
         uploaded_at: Set(Utc::now()),
+        file_id: Set(Some(file_uuid)),
+        processing_status: Set(ProcessingStatus::Pending.to_string()),
+        processing_error: Set(None),
     }
     .insert(&app_state.database)
     .await
@@ -951,15 +955,209 @@ pub async fn add_project_artifact(
         AuthError::DbTimeout
     })?;
 
-    Ok((StatusCode::CREATED, Json(ProjectSourceResponse {
-        id: inserted.id,
-        project_id: inserted.project_id,
-        file_name: inserted.file_name,
-        file_type: inserted.file_type,
-        file_size: inserted.file_size,
-        origin: inserted.origin,
-        uploaded_at: inserted.uploaded_at,
-    })))
+    spawn_process_source(app_state, inserted.id, inserted.project_id, file_uuid);
+
+    Ok((StatusCode::CREATED, Json(source_to_response(inserted))))
+}
+
+// --- artifact CRUD ---
+
+#[utoipa::path(
+    get,
+    path = "/projects/{id}/artifacts/{artifact_id}",
+    tag = "projects",
+    params(
+        ("id" = Uuid, Path, description = "Project id"),
+        ("artifact_id" = Uuid, Path, description = "Artifact id"),
+    ),
+    responses(
+        (status = 200, body = ProjectSourceResponse),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token"),
+        (status = 403, content_type = "application/json", body = Error, description = "Access denied"),
+        (status = 404, content_type = "application/json", body = Error, description = "Artifact not found"),
+    )
+)]
+pub async fn get_project_artifact(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Path((id, artifact_id)): Path<(Uuid, Uuid)>,
+) -> Result<(StatusCode, Json<ProjectSourceResponse>), AuthError> {
+    let project = get_project_or_404(id, &app_state.database).await?;
+    ensure_project_read_access(claims.user_id, &project, &app_state.database).await?;
+
+    let artifact = project_sources::Entity::find()
+        .filter(project_sources::Column::Id.eq(artifact_id))
+        .filter(project_sources::Column::ProjectId.eq(id))
+        .filter(project_sources::Column::Origin.eq("artifact"))
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db artifact fetch error: {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+
+    Ok((StatusCode::OK, Json(source_to_response(artifact))))
+}
+
+#[utoipa::path(
+    put,
+    path = "/projects/{id}/artifacts/{artifact_id}",
+    tag = "projects",
+    params(
+        ("id" = Uuid, Path, description = "Project id"),
+        ("artifact_id" = Uuid, Path, description = "Artifact id"),
+    ),
+    request_body = ArtifactUpdateRequest,
+    responses(
+        (status = 200, body = ProjectSourceResponse),
+        (status = 400, content_type = "application/json", body = Error, description = "Invalid fields"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token"),
+        (status = 403, content_type = "application/json", body = Error, description = "Access denied"),
+        (status = 404, content_type = "application/json", body = Error, description = "Artifact not found"),
+    )
+)]
+pub async fn update_project_artifact(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Path((id, artifact_id)): Path<(Uuid, Uuid)>,
+    Json(req): Json<ArtifactUpdateRequest>,
+) -> Result<(StatusCode, Json<ProjectSourceResponse>), AuthError> {
+    let project = get_project_or_404(id, &app_state.database).await?;
+    ensure_project_read_access(claims.user_id, &project, &app_state.database).await?;
+
+    let artifact = project_sources::Entity::find()
+        .filter(project_sources::Column::Id.eq(artifact_id))
+        .filter(project_sources::Column::ProjectId.eq(id))
+        .filter(project_sources::Column::Origin.eq("artifact"))
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db artifact fetch error: {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+
+    use sea_orm::IntoActiveModel;
+    let mut active = artifact.clone().into_active_model();
+
+    let new_content_type = req.content_type.as_deref().map(|ct| ct.trim().to_ascii_lowercase());
+    if let Some(ref ct) = new_content_type {
+        if !matches!(ct.as_str(), "text/html" | "text/markdown") {
+            return Err(AuthError::InvalidRequest { field: "content_type" });
+        }
+        active.file_type = Set(ct.clone());
+    }
+
+    let resolved_content_type = new_content_type
+        .as_deref()
+        .unwrap_or(&artifact.file_type)
+        .to_string();
+    let ext = if resolved_content_type == "text/html" { "html" } else { "md" };
+
+    let new_title = req.title.as_deref().map(|t| t.trim().to_string());
+    if let Some(ref title) = new_title {
+        if title.is_empty() {
+            return Err(AuthError::InvalidRequest { field: "title" });
+        }
+        let sanitized: String = title
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { ' ' })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("_");
+        active.file_name = Set(format!("{sanitized}.{ext}"));
+    }
+
+    let mut retrigger_file_id: Option<Uuid> = None;
+
+    if let Some(ref content) = req.content {
+        let file_name = active.file_name.clone().unwrap();
+        let (file_uuid, _) = write_artifact_file(
+            &app_state.database,
+            claims.user_id,
+            &file_name,
+            &resolved_content_type,
+            content,
+        )
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
+
+        active.file_id = Set(Some(file_uuid));
+        active.file_size = Set(content.len() as i64);
+        active.processing_status = Set(ProcessingStatus::Pending.to_string());
+        active.processing_error = Set(None);
+        retrigger_file_id = Some(file_uuid);
+    }
+
+    let updated = active.update(&app_state.database).await.map_err(|e| {
+        eprintln!("db artifact update error: {e}");
+        AuthError::DbTimeout
+    })?;
+
+    if let Some(fid) = retrigger_file_id {
+        spawn_process_source(app_state, updated.id, updated.project_id, fid);
+    }
+
+    Ok((StatusCode::OK, Json(source_to_response(updated))))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/projects/{id}/artifacts/{artifact_id}",
+    tag = "projects",
+    params(
+        ("id" = Uuid, Path, description = "Project id"),
+        ("artifact_id" = Uuid, Path, description = "Artifact id"),
+    ),
+    responses(
+        (status = 204, description = "Artifact deleted"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token"),
+        (status = 403, content_type = "application/json", body = Error, description = "Access denied"),
+        (status = 404, content_type = "application/json", body = Error, description = "Artifact not found"),
+    )
+)]
+pub async fn delete_project_artifact(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Path((id, artifact_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, AuthError> {
+    let project = get_project_or_404(id, &app_state.database).await?;
+    ensure_project_read_access(claims.user_id, &project, &app_state.database).await?;
+
+    let artifact = project_sources::Entity::find()
+        .filter(project_sources::Column::Id.eq(artifact_id))
+        .filter(project_sources::Column::ProjectId.eq(id))
+        .filter(project_sources::Column::Origin.eq("artifact"))
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db artifact fetch error: {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+
+    delete_source_chunks(&app_state.database, artifact_id).await.map_err(|_| AuthError::DbTimeout)?;
+
+    project_sources::Entity::delete_by_id(artifact_id)
+        .exec(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db artifact delete error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    if let Some(fid) = artifact.file_id {
+        if let Ok(Some(file)) = crate::models::files::Entity::find_by_id(fid)
+            .one(&app_state.database)
+            .await
+        {
+            let _ = tokio::fs::remove_file(&file.local_path).await;
+        }
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // --- project MCP server helpers ---

@@ -2,9 +2,9 @@ use crate::{
     auth::{claims::Claims, error::Error},
     dto::{
         chat_stream::{
-            BudgetWarningPayload, ChatInput, ChatStream, ChatStreamEvent,
-            ChatStreamEvents, ChatStreamPayload, ChatStreamToolCall, ChatStreamToolResult,
-            ChatStreamWebSearchAction, ChatToolKind,
+            ActiveSkillInfo, ArtifactSavedPayload, BudgetWarningPayload, ChatInput, ChatStream,
+            ChatStreamEvent, ChatStreamEvents, ChatStreamPayload, ChatStreamToolCall,
+            ChatStreamToolResult, ChatStreamWebSearchAction, ChatToolKind, SkillsActivePayload,
         },
         files::File,
         llm::anthropic::{
@@ -14,6 +14,7 @@ use crate::{
         llm::mistral::{MistralConversationFunctionResult, MistralMessage, MistralToolCall},
         llm::openai::OpenaiInputItem,
     },
+    dto::skills::SkillToolsConfig,
     error::{AppError, ChatStreamError, ErrorResponse},
     handlers::llm::{
         StreamParseResult, StreamParser, StreamWebSearchAction as ParsedWebSearchAction,
@@ -54,9 +55,10 @@ use crate::{
     },
     services::{
         artifacts::{
-            ARTIFACT_TOOL_NAME, ARTIFACT_SYSTEM_HINT,
-            artifact_tool_schema, build_artifact_emit,
+            ARTIFACT_SYSTEM_HINT, ArtifactAccum, ArtifactParser, ArtifactParseEvent,
+            content_type_to_ext,
         },
+        chat_helpers::LlmProviderConfig,
         budget_allocation::{get_department_budget_status, refresh_department_budget_available},
         department_policies::check_model_allowed,
         mcp_helpers::{
@@ -71,6 +73,7 @@ use crate::{
             load_recent_prompts, load_summary, update_conversation_summary,
         },
         system_prompts,
+        skills_helpers::{load_skill_knowledge_for_stream, load_skills_for_stream},
     },
     state::SharedState,
     utils::chat_stream::{
@@ -101,12 +104,6 @@ use std::{collections::HashMap, convert::Infallible};
 use tokio::time::Instant;
 use uuid::Uuid;
 
-enum LlmProviderConfig {
-    OpenAI(crate::config::setting::OpenaiSettings),
-    Anthropic(crate::config::setting::AnthropicSettings),
-    Mistral(crate::config::setting::MistralSettings),
-    Gemini(crate::config::setting::GeminiSettings),
-}
 
 
 #[utoipa::path(
@@ -132,6 +129,13 @@ enum LlmProviderConfig {
       value = json!({
         "event": "budget_warning",
         "data": { "department_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "budget_available": "1.25", "action": "warn", "message": "Department budget is running low." }
+      })
+    )),
+    ("skills" = (
+      description = "event:skills — emitted when one or more skills are active (builtin skills are always auto-included). Emitted before message_start.",
+      value = json!({
+        "event": "skills",
+        "data": { "skills": [{ "id": "00000000-0000-0000-0000-000000000001", "identifier": "artifact-create", "name": "Artifact Creator" }] }
       })
     )),
     ("message_start" = (
@@ -169,11 +173,32 @@ enum LlmProviderConfig {
         "data": { "tool_result": { "tool_name": "web_search_call", "tool_id": "ws_123", "kind": "web_search", "status": "success", "web_search": { "query": "latest rust release", "results": [{ "title": "Rust 1.80 released", "url": "https://blog.rust-lang.org" }] } } }
       })
     )),
-    ("artifact" = (
-      description = "event:artifact — emitted when the model produces an artifact (code block, document, etc.).",
+    ("artifact_start" = (
+      description = "event:artifact_start — emitted when an artifact opening tag is parsed. Signals start of streamed artifact content.",
       value = json!({
-        "event": "artifact",
-        "data": { "id": "art_abc123", "title": "Hello World in Rust", "contentType": "application/vnd.grengin.code+rust", "content": "fn main() { println!(\"Hello, world!\"); }" }
+        "event": "artifact_start",
+        "data": { "id": "art_abc123", "title": "Hello World Page", "contentType": "text/html" }
+      })
+    )),
+    ("artifact_delta" = (
+      description = "event:artifact_delta — streamed content chunk for an in-progress artifact.",
+      value = json!({
+        "event": "artifact_delta",
+        "data": { "id": "art_abc123", "chunk": "<!DOCTYPE html>\n<html>" }
+      })
+    )),
+    ("artifact_end" = (
+      description = "event:artifact_end — emitted when the artifact closing tag is parsed. Artifact is now complete.",
+      value = json!({
+        "event": "artifact_end",
+        "data": { "id": "art_abc123" }
+      })
+    )),
+    ("artifact_saved" = (
+      description = "event:artifact_saved — emitted after the stream ends once the artifact has been persisted to disk and the database. Contains the saved artifact and file IDs. streamId links back to the artifact_start/delta/end events.",
+      value = json!({
+        "event": "artifact_saved",
+        "data": { "streamId": "art_abc123", "id": "e6096689-e23b-488a-b6f3-340d32edc723", "fileId": "75127ab4-08ea-4570-9132-0f78ef24083a", "title": "Hello World Page", "contentType": "text/html" }
       })
     )),
     ("message_end" = (
@@ -252,6 +277,13 @@ pub async fn handle_chat_stream_path_doc() {}
         "data": { "department_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "budget_available": "1.25", "action": "warn", "message": "Department budget is running low." }
       })
     )),
+    ("skills" = (
+      description = "event:skills — emitted when one or more skills are active (builtin skills are always auto-included). Emitted before message_start.",
+      value = json!({
+        "event": "skills",
+        "data": { "skills": [{ "id": "00000000-0000-0000-0000-000000000001", "identifier": "artifact-create", "name": "Artifact Creator" }] }
+      })
+    )),
     ("message_start" = (
       description = "event:message_start — emitted when the assistant message record is created.",
       value = json!({
@@ -287,11 +319,32 @@ pub async fn handle_chat_stream_path_doc() {}
         "data": { "tool_result": { "tool_name": "web_search_call", "tool_id": "ws_123", "kind": "web_search", "status": "success", "web_search": { "query": "latest rust release", "results": [{ "title": "Rust 1.80 released", "url": "https://blog.rust-lang.org" }] } } }
       })
     )),
-    ("artifact" = (
-      description = "event:artifact — emitted when the model produces an artifact (code block, document, etc.).",
+    ("artifact_start" = (
+      description = "event:artifact_start — emitted when an artifact opening tag is parsed. Signals start of streamed artifact content.",
       value = json!({
-        "event": "artifact",
-        "data": { "id": "art_abc123", "title": "Hello World in Rust", "contentType": "application/vnd.grengin.code+rust", "content": "fn main() { println!(\"Hello, world!\"); }" }
+        "event": "artifact_start",
+        "data": { "id": "art_abc123", "title": "Hello World Page", "contentType": "text/html" }
+      })
+    )),
+    ("artifact_delta" = (
+      description = "event:artifact_delta — streamed content chunk for an in-progress artifact.",
+      value = json!({
+        "event": "artifact_delta",
+        "data": { "id": "art_abc123", "chunk": "<!DOCTYPE html>\n<html>" }
+      })
+    )),
+    ("artifact_end" = (
+      description = "event:artifact_end — emitted when the artifact closing tag is parsed. Artifact is now complete.",
+      value = json!({
+        "event": "artifact_end",
+        "data": { "id": "art_abc123" }
+      })
+    )),
+    ("artifact_saved" = (
+      description = "event:artifact_saved — emitted after the stream ends once the artifact has been persisted to disk and the database. Contains the saved artifact and file IDs. streamId links back to the artifact_start/delta/end events.",
+      value = json!({
+        "event": "artifact_saved",
+        "data": { "streamId": "art_abc123", "id": "e6096689-e23b-488a-b6f3-340d32edc723", "fileId": "75127ab4-08ea-4570-9132-0f78ef24083a", "title": "Hello World Page", "contentType": "text/html" }
       })
     )),
     ("message_end" = (
@@ -407,6 +460,7 @@ pub async fn handle_chat_stream(
     let selected_tools = req.selected_tools.clone().unwrap_or_default();
     let request_selected_mcp_servers = req.selected_mcp_servers.clone().unwrap_or_default();
     let selected_mcp_servers = request_selected_mcp_servers.clone();
+    let transient_skill_ids = req.selected_skills.clone().unwrap_or_default();
     let web_search = req.web_search;
     let openai_settings = app_state.settings.openai.read().await.clone();
     let anthropic_settings = app_state.settings.anthropic.read().await.clone();
@@ -862,14 +916,80 @@ pub async fn handle_chat_stream(
             }
         }
     }
-    if let Some(sys) = previous_prompts.iter_mut().find(|p| p.role == ChatRole::System) {
-        sys.text = format!("{}\n\n{}", sys.text, ARTIFACT_SYSTEM_HINT);
-    } else {
-        previous_prompts.insert(0, Prompt {
-            role: ChatRole::System,
-            text: ARTIFACT_SYSTEM_HINT.to_string(),
-            files: Vec::new(),
-        });
+    let active_skills =
+        load_skills_for_stream(&app_state.database, conversation_id, &transient_skill_ids).await;
+    let mut skill_web_search = false;
+    let mut skill_mcp_server_ids: Vec<Uuid> = Vec::new();
+    if !active_skills.is_empty() {
+        let skill_ids: Vec<uuid::Uuid> = active_skills.iter().map(|s| s.id).collect();
+        let knowledge_map = load_skill_knowledge_for_stream(&app_state.database, &skill_ids).await;
+        let skill_role_blocks: Vec<String> = active_skills
+            .iter()
+            .filter_map(|s| {
+                let instructions = s.instructions.as_deref().unwrap_or("").trim().to_string();
+                let knowledge = knowledge_map.get(&s.id).cloned().unwrap_or_default();
+                if instructions.is_empty() && knowledge.is_empty() {
+                    return None;
+                }
+                let mut block = format!("## Skill: {}", s.name);
+                if !instructions.is_empty() {
+                    block.push('\n');
+                    block.push_str(&instructions);
+                }
+                if !knowledge.is_empty() {
+                    block.push_str("\n\n### Knowledge\n");
+                    block.push_str(&knowledge);
+                }
+                Some(block)
+            })
+            .collect();
+        if !skill_role_blocks.is_empty() {
+            let skill_text = skill_role_blocks.join("\n\n---\n\n");
+            if let Some(sys) = previous_prompts.iter_mut().find(|p| p.role == ChatRole::System) {
+                sys.text = format!("{}\n\n---\n\n{}", sys.text, skill_text);
+            } else {
+                previous_prompts.insert(0, Prompt {
+                    role: ChatRole::System,
+                    text: skill_text,
+                    files: Vec::new(),
+                });
+            }
+        }
+        for skill in &active_skills {
+            if let Some(config_json) = &skill.tools_config {
+                let config = SkillToolsConfig::from_json(config_json);
+                if config.web_search {
+                    skill_web_search = true;
+                }
+                for id in config.mcp_server_ids {
+                    if !skill_mcp_server_ids.contains(&id) {
+                        skill_mcp_server_ids.push(id);
+                    }
+                }
+            }
+        }
+    }
+    let artifact_enabled = active_skills.iter().any(|s| s.identifier == "artifact-create");
+    let web_search = web_search || skill_web_search;
+    let selected_mcp_servers = {
+        let mut merged = selected_mcp_servers;
+        for id in skill_mcp_server_ids {
+            if !merged.contains(&id) {
+                merged.push(id);
+            }
+        }
+        merged
+    };
+    if artifact_enabled {
+        if let Some(sys) = previous_prompts.iter_mut().find(|p| p.role == ChatRole::System) {
+            sys.text = format!("{}\n\n{}", sys.text, ARTIFACT_SYSTEM_HINT);
+        } else {
+            previous_prompts.insert(0, Prompt {
+                role: ChatRole::System,
+                text: ARTIFACT_SYSTEM_HINT.to_string(),
+                files: Vec::new(),
+            });
+        }
     }
     let provider_is_openai = provider.to_lowercase() == "openai";
     let provider_is_anthropic = provider.to_lowercase() == "anthropic";
@@ -878,7 +998,7 @@ pub async fn handle_chat_stream(
     let gemini_web_search_only = provider_is_gemini
         && web_search
         && selected_tools.is_empty()
-        && request_selected_mcp_servers.is_empty();
+        && selected_mcp_servers.is_empty();
     let supports_mcp_tools =
         provider_is_openai || provider_is_anthropic || provider_is_mistral || provider_is_gemini;
     let (mcp_openai_tools, mcp_tool_lookup, mcp_server_summaries) =
@@ -912,19 +1032,17 @@ pub async fn handle_chat_stream(
             );
         }
     }
-    let artifact_tool_schema = artifact_tool_schema();
-
-    let openai_tools = build_openai_tools(web_search, mcp_openai_tools, artifact_tool_schema.clone());
-    let anthropic_tools = build_anthropic_tools(web_search, &mcp_tool_lookup, artifact_tool_schema.clone());
-    let mistral_tools = build_mistral_tools(mistral_use_conversations, &mcp_tool_lookup, artifact_tool_schema.clone());
+    let openai_tools = build_openai_tools(web_search, mcp_openai_tools);
+    let anthropic_tools = build_anthropic_tools(web_search, &mcp_tool_lookup);
+    let mistral_tools = build_mistral_tools(mistral_use_conversations, &mcp_tool_lookup);
     let mistral_conversation_tools = if mistral_use_conversations {
-        build_mistral_conversation_tools(web_search, supports_mcp_tools, &mcp_tool_lookup, artifact_tool_schema.clone())
+        build_mistral_conversation_tools(web_search, supports_mcp_tools, &mcp_tool_lookup)
     } else {
         None
     };
     let mistral_tool_choice = build_mistral_tool_choice(&selected_tools, &mcp_tool_lookup, mistral_tools.is_some());
     let gemini_tools = if provider_is_gemini {
-        build_gemini_tools(web_search, &mcp_tool_lookup, &artifact_tool_schema)
+        build_gemini_tools(web_search, &mcp_tool_lookup)
     } else {
         None
     };
@@ -1053,6 +1171,8 @@ pub async fn handle_chat_stream(
     let sse_stream = async_stream::try_stream! {
        let mut message_content = String::new();
        let mut stream_message_content = String::new();
+       let mut artifact_parser = ArtifactParser::new();
+       let mut artifact_accumulator: HashMap<String, ArtifactAccum> = HashMap::new();
        let mut request_tokens = 0;
        let mut response_tokens = 0;
        let mut total_tokens = 0;
@@ -1113,6 +1233,19 @@ pub async fn handle_chat_stream(
         if let Some(payload) = budget_warning.take() {
            let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
            yield Event::default().event(ChatStreamEvents::DepartmentBudgetWarning.to_string()).data(data);
+        }
+        if !active_skills.is_empty() {
+            let skills_payload = SkillsActivePayload {
+                skills: active_skills.iter().map(|s| ActiveSkillInfo {
+                    id: s.id,
+                    identifier: s.identifier.clone(),
+                    name: s.name.clone(),
+                    avatar: s.avatar.clone(),
+                }).collect(),
+            };
+            if let Ok(data) = serde_json::to_string(&skills_payload) {
+                yield Event::default().event(ChatStreamEvents::Skills.to_string()).data(data);
+            }
         }
         let new_message_id = Uuid::new_v4();
         let assistant_created_at = Utc::now();
@@ -1256,22 +1389,46 @@ pub async fn handle_chat_stream(
                              .update(&app_state.database)
                              .await
                              .expect("failed to update in new llm response in table messages");
-                           if !text.is_empty() {
+                           let (passthrough, parse_events) = artifact_parser.push(text);
+                           if !passthrough.is_empty() {
                                let chat_stream = ChatStream {
-                                   id:None,
-                                   title:None,
-                                   message_id:None,
-                                   is_new:None,
-                                   content: Some(text.to_string()),
-                                   input_tokens:None,
-                                   output_tokens:None,
-                                   latency_ms:None,
-                                   cost:None,
-                                   event:None,
-                                   tool_call:None,
-                                   tool_result:None,
+                                   id: None, title: None, message_id: None, is_new: None,
+                                   content: Some(passthrough),
+                                   input_tokens: None, output_tokens: None, latency_ms: None, cost: None,
+                                   event: None, tool_call: None, tool_result: None,
                                };
                                yield Event::default().event(ChatStreamEvents::Delta.to_string()).data(chat_stream.to_string());
+                           }
+                           for parse_event in parse_events {
+                               match parse_event {
+                                   ArtifactParseEvent::Start { id, title, content_type } => {
+                                       artifact_accumulator.insert(id.clone(), ArtifactAccum {
+                                           title: title.clone(),
+                                           content_type: content_type.clone(),
+                                           content: String::new(),
+                                       });
+                                       if let Ok(data) = serde_json::to_string(&serde_json::json!({
+                                           "id": id, "title": title, "contentType": content_type,
+                                       })) {
+                                           yield Event::default().event(ChatStreamEvents::ArtifactStart.to_string()).data(data);
+                                       }
+                                   }
+                                   ArtifactParseEvent::Delta { id, chunk } => {
+                                       if let Some(acc) = artifact_accumulator.get_mut(&id) {
+                                           acc.content.push_str(&chunk);
+                                       }
+                                       if let Ok(data) = serde_json::to_string(&serde_json::json!({
+                                           "id": id, "chunk": chunk,
+                                       })) {
+                                           yield Event::default().event(ChatStreamEvents::ArtifactDelta.to_string()).data(data);
+                                       }
+                                   }
+                                   ArtifactParseEvent::End { id } => {
+                                       if let Ok(data) = serde_json::to_string(&serde_json::json!({ "id": id })) {
+                                           yield Event::default().event(ChatStreamEvents::ArtifactEnd.to_string()).data(data);
+                                       }
+                                   }
+                               }
                            }
                        }
                        StreamParseResult::TokenUsage{ request_id:req_id,input_tokens, output_tokens, total_tokens:t_tokens} => {
@@ -1398,32 +1555,6 @@ pub async fn handle_chat_stream(
                                    tool_inputs.insert(tool_id.clone(), value.clone());
                                    parsed_input = Some(value);
                                }
-                           }
-                           // Emit artifact once complete JSON is accumulated (Anthropic streams
-                           // args via ToolInput; Mistral/Gemini emit complete JSON in ToolCall).
-                           if resolved_name == ARTIFACT_TOOL_NAME {
-                               if let (Some(tool_id), Some(args)) =
-                                   (tool_input.tool_id.as_ref(), parsed_input.as_ref())
-                               {
-                                   if !seen_tool_call_ids.contains(tool_id) {
-                                       if let Some(emit) = build_artifact_emit(args, Some(tool_id.clone())) {
-                                           seen_tool_call_ids.insert(tool_id.clone());
-                                           tool_calls.push(serde_json::to_value(&emit.tool_call_event.tool_call).unwrap_or_else(|_| json!({})));
-                                           new_llm_message.tools_calls = Set(tool_calls.clone());
-                                           tool_results.push(serde_json::to_value(&emit.tool_result_event.tool_result).unwrap_or_else(|_| json!({})));
-                                           new_llm_message.tools_results = Set(tool_results.clone());
-                                           new_llm_message.updated_at = Set(Utc::now());
-                                           new_llm_message.clone().update(&app_state.database).await
-                                               .expect("failed to save artifact tool call/result");
-                                           yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(emit.tool_call_event.to_string());
-                                           if let Ok(data) = serde_json::to_string(&emit.artifact_event) {
-                                               yield Event::default().event(ChatStreamEvents::Artifact.to_string()).data(data);
-                                           }
-                                           yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(emit.tool_result_event.to_string());
-                                       }
-                                   }
-                               }
-                               continue;
                            }
                            if is_web_search {
                                let _ = update_web_search_action_state(
@@ -1571,39 +1702,6 @@ pub async fn handle_chat_stream(
                            yield Event::default().event(ChatStreamEvents::Event.to_string()).data(chat_stream.to_string());
                        }
                        StreamParseResult::ToolCall(call) => {
-                           // Anthropic fires ToolCall at ContentBlockStart with empty input {};
-                           // actual args accumulate via ToolInput into tool_inputs. For
-                           // Mistral/Gemini/OpenAI the complete args arrive here directly.
-                           // Only insert into seen_tool_call_ids when we actually emit.
-                           if call.tool_name == ARTIFACT_TOOL_NAME {
-                               let args = call.tool_id.as_ref()
-                                   .and_then(|id| tool_inputs.get(id))
-                                   .cloned()
-                                   .unwrap_or_else(|| tool_input_to_value(call.input.as_ref()));
-                               let already_emitted = call.tool_id.as_ref()
-                                   .map(|id| seen_tool_call_ids.contains(id))
-                                   .unwrap_or(false);
-                               if !already_emitted {
-                                   if let Some(emit) = build_artifact_emit(&args, call.tool_id.clone()) {
-                                       if let Some(id) = call.tool_id.as_ref() {
-                                           seen_tool_call_ids.insert(id.clone());
-                                       }
-                                       tool_calls.push(serde_json::to_value(&emit.tool_call_event.tool_call).unwrap_or_else(|_| json!({})));
-                                       new_llm_message.tools_calls = Set(tool_calls.clone());
-                                       tool_results.push(serde_json::to_value(&emit.tool_result_event.tool_result).unwrap_or_else(|_| json!({})));
-                                       new_llm_message.tools_results = Set(tool_results.clone());
-                                       new_llm_message.updated_at = Set(Utc::now());
-                                       new_llm_message.clone().update(&app_state.database).await
-                                           .expect("failed to save artifact tool call/result");
-                                       yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(emit.tool_call_event.to_string());
-                                       if let Ok(data) = serde_json::to_string(&emit.artifact_event) {
-                                           yield Event::default().event(ChatStreamEvents::Artifact.to_string()).data(data);
-                                       }
-                                       yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(emit.tool_result_event.to_string());
-                                   }
-                               }
-                               continue;
-                           }
                            if let Some(id) = call.tool_id.as_ref() {
                                if !seen_tool_call_ids.insert(id.clone()) {
                                    continue;
@@ -2493,6 +2591,112 @@ pub async fn handle_chat_stream(
                if flush_dirty {
                    new_llm_message.updated_at = Set(Utc::now());
                    let _ = new_llm_message.clone().update(&app_state.database).await;
+               }
+               let (remaining, flush_events) = artifact_parser.flush();
+               if !remaining.is_empty() {
+                   let chat_stream = ChatStream {
+                       content: Some(remaining),
+                       id: None, title: None, message_id: None, is_new: None,
+                       input_tokens: None, output_tokens: None, latency_ms: None, cost: None,
+                       event: None, tool_call: None, tool_result: None,
+                   };
+                   yield Event::default().event(ChatStreamEvents::Delta.to_string()).data(chat_stream.to_string());
+               }
+               for flush_event in flush_events {
+                   match flush_event {
+                       ArtifactParseEvent::Delta { id, chunk } => {
+                           if let Some(acc) = artifact_accumulator.get_mut(&id) {
+                               acc.content.push_str(&chunk);
+                           }
+                           if let Ok(data) = serde_json::to_string(&json!({ "id": id, "chunk": chunk })) {
+                               yield Event::default().event(ChatStreamEvents::ArtifactDelta.to_string()).data(data);
+                           }
+                       }
+                       ArtifactParseEvent::End { id } => {
+                           if let Ok(data) = serde_json::to_string(&json!({ "id": id })) {
+                               yield Event::default().event(ChatStreamEvents::ArtifactEnd.to_string()).data(data);
+                           }
+                       }
+                       ArtifactParseEvent::Start { .. } => {}
+                   }
+               }
+               if !artifact_accumulator.is_empty() {
+                   let mut saved_artifacts: Vec<serde_json::Value> = Vec::new();
+                   for (stream_id, acc) in artifact_accumulator.drain() {
+                       let artifact_id = stream_id.parse::<Uuid>().unwrap_or_else(|_| Uuid::new_v4());
+                       let file_id = Uuid::new_v4();
+                       let ext = content_type_to_ext(&acc.content_type);
+                       let safe_title = acc.title.chars().map(|c| match c {
+                           '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                           other => other,
+                       }).collect::<String>();
+                       let filename = format!("{}.{}", safe_title, ext);
+                       let user_folder = format!("/data/files/{}/artifact/{}", claims.user_id, file_id);
+                       let local_path = format!("{}/{}", user_folder, filename);
+                       if let Err(e) = tokio::fs::create_dir_all(&user_folder).await {
+                           eprintln!("artifact dir create error: {e}");
+                           continue;
+                       }
+                       if let Err(e) = tokio::fs::write(&local_path, acc.content.as_bytes()).await {
+                           eprintln!("artifact file write error: {e}");
+                           continue;
+                       }
+                       let file_size = acc.content.len() as i64;
+                       let new_file = crate::models::files::ActiveModel {
+                           id: Set(file_id),
+                           user_id: Set(claims.user_id),
+                           name: Set(filename.clone()),
+                           content_type: Set(acc.content_type.clone()),
+                           size: Set(file_size),
+                           local_path: Set(local_path),
+                           description: Set(Some(format!("Artifact: {}", acc.title))),
+                           url: Set(None),
+                           status: Set(crate::models::files::FileUploadStatus::Uploaded),
+                           created_at: Set(Utc::now()),
+                           updated_at: Set(Utc::now()),
+                           metadata: Set(None),
+                       };
+                       if let Err(e) = new_file.insert(&app_state.database).await {
+                           eprintln!("artifact file db insert error: {e}");
+                           continue;
+                       }
+                       let new_artifact = crate::models::artifacts::ActiveModel {
+                           id: Set(artifact_id),
+                           file_id: Set(file_id),
+                           message_id: Set(new_message_id),
+                           conversation_id: Set(conversation_id),
+                           title: Set(acc.title.clone()),
+                           content_type: Set(acc.content_type.clone()),
+                           created_at: Set(Utc::now()),
+                           updated_at: Set(Utc::now()),
+                       };
+                       if let Err(e) = new_artifact.insert(&app_state.database).await {
+                           eprintln!("artifact db insert error: {e}");
+                           continue;
+                       }
+                       saved_artifacts.push(json!({
+                           "id": artifact_id,
+                           "file_id": file_id,
+                           "title": acc.title,
+                           "content_type": acc.content_type,
+                       }));
+                       if let Ok(data) = serde_json::to_string(&ArtifactSavedPayload {
+                           id: artifact_id,
+                           file_id,
+                           title: acc.title.clone(),
+                           content_type: acc.content_type.clone(),
+                       }) {
+                           yield Event::default().event(ChatStreamEvents::ArtifactSaved.to_string()).data(data);
+                       }
+                   }
+                   if !saved_artifacts.is_empty() {
+                       new_llm_message.metadata = Set(Some(json!({
+                           "webSearch": req.web_search,
+                           "artifacts": saved_artifacts,
+                       })));
+                       new_llm_message.updated_at = Set(Utc::now());
+                       let _ = new_llm_message.clone().update(&app_state.database).await;
+                   }
                }
                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
                break;

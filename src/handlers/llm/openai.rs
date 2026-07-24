@@ -19,7 +19,6 @@ use crate::{
         OpenaiWebSearchAction,
     },
     llm::provider::OpenaiApis,
-    services::artifacts::{ARTIFACT_TOOL_DESC, ARTIFACT_TOOL_NAME},
 };
 
 #[derive(Debug, Clone)]
@@ -524,19 +523,12 @@ fn parse_tool_input(value: Value) -> Option<ToolInput> {
 pub fn build_openai_tools(
     web_search: bool,
     mcp_openai_tools: Vec<OpenaiTool>,
-    artifact_schema: Value,
 ) -> Option<Vec<OpenaiTool>> {
     let mut tools = Vec::new();
     if web_search {
         tools.push(OpenaiTool::web_search());
     }
     tools.extend(mcp_openai_tools);
-    tools.push(OpenaiTool::Function {
-        name: ARTIFACT_TOOL_NAME.to_string(),
-        description: Some(ARTIFACT_TOOL_DESC.to_string()),
-        parameters: artifact_schema,
-        strict: None,
-    });
     if tools.is_empty() { None } else { Some(tools) }
 }
 

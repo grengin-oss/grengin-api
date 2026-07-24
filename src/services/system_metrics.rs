@@ -1,6 +1,6 @@
 use std::{fs, path::Path, time::Instant};
 
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+use sea_orm::{DatabaseBackend, FromQueryResult, Statement};
 
 use crate::{
     auth::error::AuthError,
@@ -8,6 +8,32 @@ use crate::{
     state::SharedState,
 };
 use sysinfo::{Disks, System};
+
+#[derive(Debug, FromQueryResult)]
+struct ConnectionStatsRow {
+    total_connections: i64,
+    active_connections: i64,
+    idle_connections: i64,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct DatabaseSizeRow {
+    database_size_bytes: i64,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct DatabaseStatRow {
+    numbackends: i64,
+    xact_commit: i64,
+    xact_rollback: i64,
+    blks_read: i64,
+    blks_hit: i64,
+    tup_returned: i64,
+    tup_fetched: i64,
+    tup_inserted: i64,
+    tup_updated: i64,
+    tup_deleted: i64,
+}
 
 pub fn collect_machine_metrics() -> MachineMetrics {
     let mut system = System::new_all();
@@ -87,90 +113,67 @@ pub fn collect_container_metrics() -> ContainerMetrics {
 }
 
 pub async fn collect_database_metrics(app_state: &SharedState) -> Result<DatabaseMetrics, AuthError> {
+    let db = &app_state.database;
+
     let latency_started = Instant::now();
-    app_state
-        .database
-        .query_one(Statement::from_string(
-            DatabaseBackend::Postgres,
-            "SELECT 1".to_string(),
-        ))
-        .await
-        .map_err(|e| {
-            eprintln!("system metrics db ping error: {e}");
-            AuthError::DbTimeout
-        })?;
+    db.ping().await.map_err(|e| {
+        eprintln!("system metrics db ping error: {e}");
+        AuthError::DbTimeout
+    })?;
     let roundtrip_latency_ms = Some(latency_started.elapsed().as_secs_f64() * 1000.0);
 
-    let conn_row = query_row(
-        app_state,
-        r#"
-            SELECT
-                COUNT(*)::bigint AS total_connections,
-                COUNT(*) FILTER (WHERE state = 'active')::bigint AS active_connections,
-                COUNT(*) FILTER (WHERE state = 'idle')::bigint AS idle_connections
-            FROM pg_stat_activity
-            WHERE datname = current_database()
-        "#,
-    )
-    .await;
-    let size_row = query_row(
-        app_state,
+    let conn_stats = ConnectionStatsRow::find_by_statement(Statement::from_string(
+        DatabaseBackend::Postgres,
+        r#"SELECT
+            COUNT(*)::bigint AS total_connections,
+            COUNT(*) FILTER (WHERE state = 'active')::bigint AS active_connections,
+            COUNT(*) FILTER (WHERE state = 'idle')::bigint AS idle_connections
+        FROM pg_stat_activity WHERE datname = current_database()"#,
+    ))
+    .one(db)
+    .await
+    .ok()
+    .flatten();
+
+    let db_size = DatabaseSizeRow::find_by_statement(Statement::from_string(
+        DatabaseBackend::Postgres,
         "SELECT pg_database_size(current_database())::bigint AS database_size_bytes",
-    )
-    .await;
-    let stat_row = query_row(
-        app_state,
-        r#"
-            SELECT
-                numbackends::bigint AS numbackends,
-                xact_commit::bigint AS xact_commit,
-                xact_rollback::bigint AS xact_rollback,
-                blks_read::bigint AS blks_read,
-                blks_hit::bigint AS blks_hit,
-                tup_returned::bigint AS tup_returned,
-                tup_fetched::bigint AS tup_fetched,
-                tup_inserted::bigint AS tup_inserted,
-                tup_updated::bigint AS tup_updated,
-                tup_deleted::bigint AS tup_deleted
-            FROM pg_stat_database
-            WHERE datname = current_database()
-        "#,
-    )
-    .await;
+    ))
+    .one(db)
+    .await
+    .ok()
+    .flatten();
+
+    let db_stat = DatabaseStatRow::find_by_statement(Statement::from_string(
+        DatabaseBackend::Postgres,
+        r#"SELECT
+            numbackends::bigint, xact_commit::bigint, xact_rollback::bigint,
+            blks_read::bigint, blks_hit::bigint, tup_returned::bigint,
+            tup_fetched::bigint, tup_inserted::bigint, tup_updated::bigint, tup_deleted::bigint
+        FROM pg_stat_database WHERE datname = current_database()"#,
+    ))
+    .one(db)
+    .await
+    .ok()
+    .flatten();
 
     Ok(DatabaseMetrics {
         roundtrip_latency_ms,
-        total_connections: get_i64_col(conn_row.as_ref(), "total_connections"),
-        active_connections: get_i64_col(conn_row.as_ref(), "active_connections"),
-        idle_connections: get_i64_col(conn_row.as_ref(), "idle_connections"),
-        database_size_bytes: get_i64_col(size_row.as_ref(), "database_size_bytes"),
-        numbackends: get_i64_col(stat_row.as_ref(), "numbackends"),
-        xact_commit: get_i64_col(stat_row.as_ref(), "xact_commit"),
-        xact_rollback: get_i64_col(stat_row.as_ref(), "xact_rollback"),
-        blks_read: get_i64_col(stat_row.as_ref(), "blks_read"),
-        blks_hit: get_i64_col(stat_row.as_ref(), "blks_hit"),
-        tup_returned: get_i64_col(stat_row.as_ref(), "tup_returned"),
-        tup_fetched: get_i64_col(stat_row.as_ref(), "tup_fetched"),
-        tup_inserted: get_i64_col(stat_row.as_ref(), "tup_inserted"),
-        tup_updated: get_i64_col(stat_row.as_ref(), "tup_updated"),
-        tup_deleted: get_i64_col(stat_row.as_ref(), "tup_deleted"),
+        total_connections: conn_stats.as_ref().map(|r| r.total_connections),
+        active_connections: conn_stats.as_ref().map(|r| r.active_connections),
+        idle_connections: conn_stats.as_ref().map(|r| r.idle_connections),
+        database_size_bytes: db_size.map(|r| r.database_size_bytes),
+        numbackends: db_stat.as_ref().map(|r| r.numbackends),
+        xact_commit: db_stat.as_ref().map(|r| r.xact_commit),
+        xact_rollback: db_stat.as_ref().map(|r| r.xact_rollback),
+        blks_read: db_stat.as_ref().map(|r| r.blks_read),
+        blks_hit: db_stat.as_ref().map(|r| r.blks_hit),
+        tup_returned: db_stat.as_ref().map(|r| r.tup_returned),
+        tup_fetched: db_stat.as_ref().map(|r| r.tup_fetched),
+        tup_inserted: db_stat.as_ref().map(|r| r.tup_inserted),
+        tup_updated: db_stat.as_ref().map(|r| r.tup_updated),
+        tup_deleted: db_stat.as_ref().map(|r| r.tup_deleted),
     })
-}
-
-async fn query_row(app_state: &SharedState, sql: &str) -> Option<sea_orm::QueryResult> {
-    app_state
-        .database
-        .query_one(Statement::from_string(
-            DatabaseBackend::Postgres,
-            sql.to_string(),
-        ))
-        .await
-        .ok()
-        .flatten()
-}
-
-fn get_i64_col(row: Option<&sea_orm::QueryResult>, col: &str) -> Option<i64> {
-    row.and_then(|record| record.try_get::<i64>("", col).ok())
 }
 
 fn is_inside_container() -> bool {

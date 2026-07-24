@@ -1,3 +1,4 @@
+pub mod artifacts;
 pub mod admin_ai;
 pub mod admin_analytics;
 pub mod admin_audit;
@@ -20,9 +21,11 @@ pub mod llm;
 pub mod mcp;
 pub mod me;
 pub mod me_prompts;
+pub mod me_skills;
 pub mod message;
 pub mod models;
 pub mod notifications;
 pub mod oidc;
 pub mod open_error;
 pub mod projects;
+pub mod skills;

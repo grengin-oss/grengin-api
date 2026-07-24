@@ -56,6 +56,8 @@ pub struct OpenaiChatCompletionRequest {
 pub struct OpenaiEmbeddingRequest {
     pub model: String,
     pub input: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dimensions: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]

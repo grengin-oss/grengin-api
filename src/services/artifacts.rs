@@ -1,109 +1,186 @@
-use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::dto::chat_stream::{
-    ArtifactStreamEvent, ChatStream, ChatStreamToolCall, ChatStreamToolInput, ChatStreamToolResult,
-    ChatToolKind,
-};
-
-pub const ARTIFACT_TOOL_NAME: &str = "create_artifact";
-
-pub const ARTIFACT_TOOL_DESC: &str = "Use this tool to output a standalone document — \
-a complete HTML page, a full Markdown file, or a long code file — \
-that is best viewed separately from your conversational reply. \
-Before calling this tool, briefly describe in your reply what you are building. \
-After this tool completes, write a short description of what you built.";
-
-pub const ARTIFACT_SYSTEM_HINT: &str = "When the user asks you to produce a standalone HTML page, \
-Markdown document, or a complete self-contained code file: \
-first write one sentence in your reply saying what you are about to create, \
-then call the `create_artifact` tool with the full content, \
-then after the tool call write a brief description of what you built.";
-
-pub fn artifact_tool_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "title":       { "type": "string", "description": "Short descriptive title for the artifact" },
-            "contentType": { "type": "string", "enum": ["text/html", "text/markdown"], "description": "MIME type of the content" },
-            "content":     { "type": "string", "description": "Full content of the artifact" }
-        },
-        "required": ["title", "contentType", "content"]
-    })
+pub struct ArtifactAccum {
+    pub title: String,
+    pub content_type: String,
+    pub content: String,
 }
 
-pub struct ArtifactEmit {
-    pub tool_call_event: ChatStream,
-    pub artifact_event: ArtifactStreamEvent,
-    pub tool_result_event: ChatStream,
-}
-
-pub fn build_artifact_emit(args: &Value, tool_id: Option<String>) -> Option<ArtifactEmit> {
-    let content = args["content"].as_str().unwrap_or("").to_string();
-    if content.is_empty() {
-        return None;
+pub fn content_type_to_ext(content_type: &str) -> &'static str {
+    match content_type {
+        "text/html" => "html",
+        "text/markdown" => "md",
+        "application/javascript" | "text/javascript" => "js",
+        "text/css" => "css",
+        "application/json" => "json",
+        "image/svg+xml" => "svg",
+        _ => "txt",
     }
-    let title = args["title"].as_str().unwrap_or("Untitled").to_string();
-    let content_type = args["contentType"].as_str().unwrap_or("text/html").to_string();
+}
 
-    let tool_call_event = ChatStream {
-        id: None,
-        title: None,
-        message_id: None,
-        is_new: None,
-        content: None,
-        input_tokens: None,
-        output_tokens: None,
-        latency_ms: None,
-        cost: None,
-        event: None,
-        tool_call: Some(ChatStreamToolCall {
-            tool_name: ARTIFACT_TOOL_NAME.to_string(),
-            tool_id: tool_id.clone(),
-            input_text: None,
-            input: Some(ChatStreamToolInput::Json {
-                value: serde_json::json!({
-                    "title": title,
-                    "contentType": content_type,
-                    "content": args["content"],
-                }),
-            }),
-            kind: Some(ChatToolKind::Other),
-            web_search: None,
-        }),
-        tool_result: None,
-    };
+pub const ARTIFACT_SYSTEM_HINT: &str = "When producing a standalone artifact — a complete HTML page, \
+full Markdown document, or self-contained code file — wrap it in XML tags:\n\n\
+<artifact type=\"text/html\" title=\"Descriptive title\">\n\
+...full content here...\n\
+</artifact>\n\n\
+Supported types: text/html, text/markdown, text/plain, application/javascript, text/css.\n\
+Only use this for complete standalone files, not for short inline snippets.\n\
+Before the tag, write one sentence describing what you are building.";
 
-    let artifact_id = Uuid::new_v4().to_string();
-    let artifact_event = ArtifactStreamEvent {
-        id: artifact_id.clone(),
-        title: title.clone(),
-        content_type: content_type.clone(),
-        content,
-    };
+pub enum ArtifactParseEvent {
+    Start { id: String, title: String, content_type: String },
+    Delta { id: String, chunk: String },
+    End { id: String },
+}
 
-    let tool_result = ChatStreamToolResult {
-        tool_name: Some(ARTIFACT_TOOL_NAME.to_string()),
-        tool_id: tool_id.clone(),
-        kind: Some(ChatToolKind::Other),
-        status: Some("success".to_string()),
-        output: Some(json!({ "artifactId": artifact_id, "title": title, "contentType": content_type })),
-        web_search: None,
-    };
-    let tool_result_event = ChatStream {
-        id: None,
-        title: None,
-        message_id: None,
-        is_new: None,
-        content: None,
-        input_tokens: None,
-        output_tokens: None,
-        latency_ms: None,
-        cost: None,
-        event: None,
-        tool_call: None,
-        tool_result: Some(tool_result),
-    };
+pub struct ArtifactParser {
+    buffer: String,
+    current_id: Option<String>,
+}
 
-    Some(ArtifactEmit { tool_call_event, artifact_event, tool_result_event })
+impl ArtifactParser {
+    pub fn new() -> Self {
+        Self { buffer: String::new(), current_id: None }
+    }
+
+    pub fn push(&mut self, text: &str) -> (String, Vec<ArtifactParseEvent>) {
+        self.buffer.push_str(text);
+        self.process()
+    }
+
+    pub fn flush(&mut self) -> (String, Vec<ArtifactParseEvent>) {
+        let mut events = Vec::new();
+        if let Some(id) = self.current_id.take() {
+            let chunk = std::mem::take(&mut self.buffer);
+            let chunk = chunk.trim_end_matches('\n').to_string();
+            if !chunk.is_empty() {
+                events.push(ArtifactParseEvent::Delta { id: id.clone(), chunk });
+            }
+            events.push(ArtifactParseEvent::End { id });
+            (String::new(), events)
+        } else {
+            let rest = std::mem::take(&mut self.buffer);
+            (rest, events)
+        }
+    }
+
+    fn process(&mut self) -> (String, Vec<ArtifactParseEvent>) {
+        let mut passthrough = String::new();
+        let mut events = Vec::new();
+
+        loop {
+            if self.current_id.is_none() {
+                // Outside: scan for opening tag
+                if let Some(open_start) = self.buffer.find("<artifact") {
+                    passthrough.push_str(&self.buffer[..open_start]);
+                    self.buffer = self.buffer[open_start..].to_string();
+
+                    if let Some(tag_end_rel) = self.buffer.find('>') {
+                        let tag_end = tag_end_rel + 1;
+                        let opening_tag = self.buffer[..tag_end].to_string();
+                        self.buffer = self.buffer[tag_end..].to_string();
+
+                        if self.buffer.starts_with('\n') {
+                            self.buffer = self.buffer[1..].to_string();
+                        }
+
+                        let title = extract_attr(&opening_tag, "title")
+                            .unwrap_or_else(|| "Untitled".to_string());
+                        let content_type = extract_attr(&opening_tag, "type")
+                            .unwrap_or_else(|| "text/plain".to_string());
+                        let id = Uuid::new_v4().to_string();
+
+                        events.push(ArtifactParseEvent::Start {
+                            id: id.clone(),
+                            title,
+                            content_type,
+                        });
+                        self.current_id = Some(id);
+                        // Continue loop to drain buffered content
+                    } else {
+                        // Opening tag not yet complete — hold
+                        break;
+                    }
+                } else {
+                    // No <artifact — pass through, holding the tail in case it's a partial tag.
+                    // Work on bytes to avoid slicing inside multi-byte UTF-8 characters.
+                    let hold = b"<artifact".len() - 1; // 8
+                    let buf_bytes = self.buffer.as_bytes();
+                    if buf_bytes.len() > hold {
+                        let artifact_pfx = b"<artifact";
+                        // Byte slice — never panics regardless of multi-byte chars.
+                        let tail_bytes = &buf_bytes[buf_bytes.len() - hold..];
+                        let mut found_partial = false;
+                        for n in (1..=tail_bytes.len()).rev() {
+                            if artifact_pfx.starts_with(&tail_bytes[tail_bytes.len() - n..]) {
+                                // The n matching bytes are all ASCII (prefix of "<artifact"),
+                                // so split = buf_bytes.len() - n is a valid char boundary.
+                                let split = buf_bytes.len() - n;
+                                passthrough.push_str(&self.buffer[..split]);
+                                self.buffer = self.buffer[split..].to_string();
+                                found_partial = true;
+                                break;
+                            }
+                        }
+                        if !found_partial {
+                            passthrough.push_str(&self.buffer);
+                            self.buffer.clear();
+                        }
+                    }
+                    break;
+                }
+            } else {
+                // Inside: stream content until closing tag
+                let id = self.current_id.clone().unwrap();
+
+                if let Some(close_rel) = self.buffer.find("</artifact>") {
+                    let chunk = self.buffer[..close_rel].trim_end_matches('\n').to_string();
+                    if !chunk.is_empty() {
+                        events.push(ArtifactParseEvent::Delta { id: id.clone(), chunk });
+                    }
+                    self.buffer = self.buffer[close_rel + "</artifact>".len()..].to_string();
+                    events.push(ArtifactParseEvent::End { id });
+                    self.current_id = None;
+                    // Continue loop to process text after closing tag
+                } else {
+                    // No closing tag yet — emit what we safely can, hold the tail.
+                    // Use floor_char_boundary so we never split inside a multi-byte char.
+                    let hold = b"</artifact>".len() - 1; // 10
+                    if self.buffer.len() > hold {
+                        let split = floor_char_boundary(&self.buffer, self.buffer.len() - hold);
+                        let chunk = self.buffer[..split].to_string();
+                        self.buffer = self.buffer[split..].to_string();
+                        if !chunk.is_empty() {
+                            events.push(ArtifactParseEvent::Delta { id, chunk });
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        (passthrough, events)
+    }
+}
+
+/// Returns the largest index ≤ i that is a valid UTF-8 char boundary in s.
+fn floor_char_boundary(s: &str, i: usize) -> usize {
+    let mut j = i.min(s.len());
+    while j > 0 && !s.is_char_boundary(j) {
+        j -= 1;
+    }
+    j
+}
+
+fn extract_attr(tag: &str, attr: &str) -> Option<String> {
+    for quote in ['"', '\''] {
+        let pattern = format!("{}={}", attr, quote);
+        if let Some(start) = tag.find(&pattern) {
+            let after = &tag[start + pattern.len()..];
+            if let Some(end) = after.find(quote) {
+                return Some(after[..end].to_string());
+            }
+        }
+    }
+    None
 }

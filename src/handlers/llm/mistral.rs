@@ -14,10 +14,7 @@ use crate::{
     },
     llm::{prompt::Prompt, provider::MistralApis},
     models::messages::ChatRole,
-    services::{
-        artifacts::{ARTIFACT_TOOL_DESC, ARTIFACT_TOOL_NAME},
-        mcp_tools::McpToolDescriptor,
-    },
+    services::mcp_tools::McpToolDescriptor,
 };
 
 use super::{
@@ -35,6 +32,7 @@ struct MistralToolCallMeta {
 pub struct MistralStreamParser {
     tool_calls: Mutex<HashMap<String, MistralToolCallMeta>>,
     index_to_id: Mutex<HashMap<u32, String>>,
+    pending_usage: Mutex<Option<StreamParseResult>>,
 }
 
 impl MistralStreamParser {
@@ -42,6 +40,7 @@ impl MistralStreamParser {
         Self {
             tool_calls: Mutex::new(HashMap::new()),
             index_to_id: Mutex::new(HashMap::new()),
+            pending_usage: Mutex::new(None),
         }
     }
 
@@ -177,6 +176,15 @@ impl Default for MistralStreamParser {
 impl StreamParser for MistralStreamParser {
     fn parse_event(&self, data: &str) -> StreamParseResult {
         let trimmed = data.trim();
+        // Drain any usage stashed by a prior delta+usage chunk (via the pending loop).
+        if trimmed.is_empty() {
+            if let Ok(mut guard) = self.pending_usage.lock() {
+                if let Some(tu) = guard.take() {
+                    return tu;
+                }
+            }
+            return StreamParseResult::None;
+        }
         if trimmed == "[DONE]" || trimmed == "null" {
             return StreamParseResult::None;
         }
@@ -219,11 +227,27 @@ impl StreamParser for MistralStreamParser {
         }
 
         if let Ok(chunk) = serde_json::from_value::<MistralChatCompletionChunk>(value.clone()) {
-            // Process choices (text / tool calls) BEFORE checking usage so that a chunk
+            // If this chunk carries usage, build the TokenUsage result now.
+            // When content is also present we stash it and drain it via the pending loop;
+            // when content is absent we return it directly.
+            let token_usage = chunk.usage.as_ref().map(|usage| StreamParseResult::TokenUsage {
+                request_id: Some(chunk.id.clone()),
+                input_tokens: Some(usage.prompt_tokens),
+                output_tokens: Some(usage.completion_tokens),
+                total_tokens: Some(usage.total_tokens),
+            });
+
+            // Process choices (text / tool calls) BEFORE emitting usage so that a chunk
             // carrying both finish_reason:"tool_calls" and usage doesn't lose the tool call.
             if let Some(choice) = chunk.choices.first() {
                 let finish_reason = choice.finish_reason.as_deref();
-                if let Some(text) = choice.delta.content.clone() {
+                if let Some(text) = choice.delta.content.clone().filter(|s| !s.is_empty()) {
+                    // Stash usage so the pending loop can drain it after this delta.
+                    if let Some(tu) = token_usage {
+                        if let Ok(mut guard) = self.pending_usage.lock() {
+                            *guard = Some(tu);
+                        }
+                    }
                     return StreamParseResult::TextDelta {
                         text,
                         request_id: Some(chunk.id),
@@ -245,13 +269,8 @@ impl StreamParser for MistralStreamParser {
                 }
             }
 
-            if let Some(usage) = chunk.usage {
-                return StreamParseResult::TokenUsage {
-                    request_id: Some(chunk.id),
-                    input_tokens: Some(usage.prompt_tokens),
-                    output_tokens: Some(usage.completion_tokens),
-                    total_tokens: Some(usage.total_tokens),
-                };
+            if let Some(tu) = token_usage {
+                return tu;
             }
         }
 
@@ -280,20 +299,9 @@ impl StreamParser for MistralStreamParser {
     }
 }
 
-pub fn build_mistral_artifact_fn(artifact_schema: Value) -> MistralTool {
-    MistralTool::Function {
-        function: MistralToolDefinition {
-            name: ARTIFACT_TOOL_NAME.to_string(),
-            description: Some(ARTIFACT_TOOL_DESC.to_string()),
-            parameters: artifact_schema,
-        },
-    }
-}
-
 pub fn build_mistral_tools(
     use_conversations: bool,
     mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
-    artifact_schema: Value,
 ) -> Option<Vec<MistralTool>> {
     let mut tools = Vec::new();
     if !use_conversations {
@@ -311,7 +319,6 @@ pub fn build_mistral_tools(
             });
         }
     }
-    tools.push(build_mistral_artifact_fn(artifact_schema));
     if tools.is_empty() { None } else { Some(tools) }
 }
 
@@ -349,7 +356,6 @@ pub fn build_mistral_conversation_tools(
     web_search: bool,
     supports_mcp_tools: bool,
     mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
-    artifact_schema: Value,
 ) -> Option<Vec<MistralTool>> {
     let mut tools = Vec::new();
     if web_search {
@@ -370,7 +376,6 @@ pub fn build_mistral_conversation_tools(
             });
         }
     }
-    tools.push(build_mistral_artifact_fn(artifact_schema));
     if tools.is_empty() { None } else { Some(tools) }
 }
 

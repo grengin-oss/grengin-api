@@ -529,6 +529,12 @@ fn resolve_audit_action(method: &Method, route: &str) -> Option<AuditRouteAction
             snapshot_target: SnapshotTarget::Message,
         }),
 
+        ("DELETE", "/artifacts/{id}") => Some(AuditRouteAction {
+            action: "artifact_deleted",
+            resource_type: Some("artifact"),
+            resource_param: Some("id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
         ("POST", "/files") => Some(AuditRouteAction {
             action: "file_uploaded",
             resource_type: Some("file"),
@@ -907,6 +913,56 @@ fn resolve_audit_action(method: &Method, route: &str) -> Option<AuditRouteAction
             Some(AuditRouteAction {
                 action: "project_unlinked_from_conversation",
                 resource_type: Some("conversation_project"),
+                resource_param: Some("conversation_id"),
+                snapshot_target: SnapshotTarget::None,
+            })
+        }
+        ("POST", "/me/skills") => Some(AuditRouteAction {
+            action: "user_skill_created",
+            resource_type: Some("skill"),
+            resource_param: None,
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("PUT", "/me/skills/{id}") => Some(AuditRouteAction {
+            action: "user_skill_updated",
+            resource_type: Some("skill"),
+            resource_param: Some("id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("DELETE", "/me/skills/{id}") => Some(AuditRouteAction {
+            action: "user_skill_deleted",
+            resource_type: Some("skill"),
+            resource_param: Some("id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("POST", "/admin/skills") => Some(AuditRouteAction {
+            action: "skill_created",
+            resource_type: Some("skill"),
+            resource_param: None,
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("PUT", "/admin/skills/{id}") => Some(AuditRouteAction {
+            action: "skill_updated",
+            resource_type: Some("skill"),
+            resource_param: Some("id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("DELETE", "/admin/skills/{id}") => Some(AuditRouteAction {
+            action: "skill_deleted",
+            resource_type: Some("skill"),
+            resource_param: Some("id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("POST", "/conversations/{conversation_id}/skills") => Some(AuditRouteAction {
+            action: "skill_linked_to_conversation",
+            resource_type: Some("conversation_skill"),
+            resource_param: Some("conversation_id"),
+            snapshot_target: SnapshotTarget::None,
+        }),
+        ("DELETE", "/conversations/{conversation_id}/skills/{skill_id}") => {
+            Some(AuditRouteAction {
+                action: "skill_unlinked_from_conversation",
+                resource_type: Some("conversation_skill"),
                 resource_param: Some("conversation_id"),
                 snapshot_target: SnapshotTarget::None,
             })
