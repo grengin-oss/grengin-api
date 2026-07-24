@@ -10,6 +10,7 @@ use uuid::Uuid;
 use super::{
     StreamErrorKind, StreamParseResult, StreamParser, StreamWebSearchResult, ToolInput, ToolResult,
     build_tool_call, build_tool_input_delta, parse_web_search_action, tool_name_is_web_search,
+    CONV_SEARCH_TOOL_NAME,
 };
 use crate::{
     config::setting::OpenaiSettings,
@@ -534,6 +535,18 @@ pub fn build_openai_tools(
     if web_search {
         tools.push(OpenaiTool::web_search());
     }
+    tools.push(OpenaiTool::Function {
+        name: CONV_SEARCH_TOOL_NAME.to_string(),
+        description: Some("Search the user's past conversations by keyword. Use when the user asks about previous chats or wants to find something from conversation history.".to_string()),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Keywords to search for in past conversations" }
+            },
+            "required": ["query"]
+        }),
+        strict: None,
+    });
     tools.extend(mcp_openai_tools);
     if tools.is_empty() { None } else { Some(tools) }
 }

@@ -16,7 +16,7 @@ use crate::{
     error::{AppError, ChatStreamError, ErrorResponse},
     handlers::llm::{
         StreamParseResult, StreamParser, StreamWebSearchAction as ParsedWebSearchAction,
-        StreamWebSearchState, ToolCall, ToolInput,
+        StreamWebSearchState, ToolCall, ToolInput, CONV_SEARCH_TOOL_NAME,
         anthropic::{
             AnthropicStreamParser, build_anthropic_continuation, build_anthropic_tools,
             make_anthropic_tool_blocks,
@@ -53,6 +53,7 @@ use crate::{
         projects, users,
     },
     services::{
+        search,
         artifacts::{
             ARTIFACT_SYSTEM_HINT, ArtifactAccum, ArtifactParser, ArtifactParseEvent,
             content_type_to_ext,
@@ -1808,8 +1809,9 @@ pub async fn handle_chat_stream(
                                }
                            }
 
-                           if mcp_tooling_enabled
-                               && resolve_mcp_tool_descriptor(&mcp_tool_lookup, &resolved_name).is_some()
+                           let is_conv_search = resolved_name == CONV_SEARCH_TOOL_NAME;
+                           if is_conv_search || (mcp_tooling_enabled
+                               && resolve_mcp_tool_descriptor(&mcp_tool_lookup, &resolved_name).is_some())
                            {
                                if let (Some(tool_id), Some(input_value)) =
                                    (tool_input.tool_id.clone(), parsed_input.clone())
@@ -1913,8 +1915,9 @@ pub async fn handle_chat_stream(
                                }
                            }
                            let is_web_search = call.is_web_search();
-                           if mcp_tooling_enabled
-                               && resolve_mcp_tool_descriptor(&mcp_tool_lookup, &call.tool_name).is_some()
+                           if call.tool_name == CONV_SEARCH_TOOL_NAME
+                               || (mcp_tooling_enabled
+                                   && resolve_mcp_tool_descriptor(&mcp_tool_lookup, &call.tool_name).is_some())
                            {
                                pending_mcp_tool_calls.push(call.clone());
                                if let Some(id) = call.tool_id.as_ref() {
@@ -2136,8 +2139,9 @@ pub async fn handle_chat_stream(
                            .expect("failed to update llm response in table messages");
                        // remove cancel handle once stream ends
                        app_state.clear_stream_cancel(new_message_id).await;
-                       if mcp_tooling_enabled
-                           && !pending_mcp_tool_calls.is_empty()
+                       let has_pending_calls = !pending_mcp_tool_calls.is_empty();
+                       if (mcp_tooling_enabled || has_pending_calls)
+                           && has_pending_calls
                            && tool_round < max_tool_rounds
                        {
                            let mut tool_outputs: Vec<OpenaiInputItem> = Vec::new();
@@ -2148,14 +2152,105 @@ pub async fn handle_chat_stream(
                            let mut mistral_function_results_entries: Vec<MistralConversationFunctionResult> = Vec::new();
                            let mut gemini_model_tool_messages: Vec<GeminiContent> = Vec::new();
                            let mut gemini_function_response_messages: Vec<GeminiContent> = Vec::new();
+                           let mut conv_search_has_results = false;
 
-                           if anthropic_tooling_enabled && !stream_message_content.trim().is_empty() {
+                           if (anthropic_tooling_enabled || provider_is_anthropic) && !stream_message_content.trim().is_empty() {
                                anthropic_tool_use_blocks.push(AnthropicContentBlock::Text {
                                    text: stream_message_content.clone(),
                                });
                            }
 
                            for call in pending_mcp_tool_calls.drain(..) {
+                               // Handle conv_search before MCP lookup — it runs locally, not via MCP.
+                               if call.tool_name == CONV_SEARCH_TOOL_NAME {
+                                   let mut args_value = tool_input_to_value(call.input.as_ref());
+                                   if let Some(tool_id) = call.tool_id.as_ref() {
+                                       let use_buffered = matches!(args_value, Value::Null)
+                                           || matches!(args_value, Value::Object(ref map) if map.is_empty());
+                                       if use_buffered {
+                                           if let Some(buffered) = tool_inputs.get(tool_id) {
+                                               args_value = buffered.clone();
+                                           }
+                                       }
+                                   }
+                                   let args_for_call = match &args_value {
+                                       Value::Object(_) => args_value.clone(),
+                                       Value::Null => json!({}),
+                                       other => json!({ "value": other }),
+                                   };
+                                   let query = args_value.get("query").and_then(Value::as_str).unwrap_or("").to_string();
+                                   eprintln!("[conv_search] LLM called search_conversations query={query:?}");
+                                   let output_payload = match search::lexical_conversation_search(
+                                       &app_state.database, claims.user_id, &query, false, 5, 0,
+                                   ).await {
+                                       Ok(page) if !page.conversation_ids.is_empty() => {
+                                           let results: Vec<Value> = page.conversation_ids.iter().map(|id| {
+                                               let snippet = page.snippets.get(id).cloned().unwrap_or_default();
+                                               json!({ "conversation_id": id, "snippet": snippet })
+                                           }).collect();
+                                           json!({ "results": results })
+                                       }
+                                       Ok(_) => json!({ "results": [], "message": "No matching conversations found" }),
+                                       Err(_) => json!({ "error": "search failed", "is_error": true }),
+                                   };
+
+                                   if let Some(id) = call.tool_id.as_ref() {
+                                       completed_tr.insert(id.clone());
+                                   }
+                                   let tool_result = ChatStreamToolResult {
+                                       tool_name: Some(call.tool_name.clone()),
+                                       tool_id: call.tool_id.clone(),
+                                       kind: Some(ChatToolKind::Other),
+                                       status: Some("success".to_string()),
+                                       output: Some(output_payload.clone()),
+                                       web_search: None,
+                                   };
+                                   tool_results.push(serde_json::to_value(&tool_result).unwrap_or_else(|_| json!({})));
+                                   new_llm_message.tools_results = Set(tool_results.clone());
+                                   new_llm_message.updated_at = Set(Utc::now());
+                                   let _ = new_llm_message.clone().update(&app_state.database).await;
+                                   let chat_stream = ChatStream {
+                                       id: None, title: None, message_id: None, is_new: None,
+                                       content: None, input_tokens: None, output_tokens: None,
+                                       latency_ms: None, cost: None, event: None,
+                                       tool_call: None, tool_result: Some(tool_result),
+                                   };
+                                   yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(chat_stream.to_string());
+
+                                   if let Some(call_id) = call.tool_id.clone() {
+                                       if provider_is_openai {
+                                           tool_outputs.push(make_openai_function_output(call_id.clone(), &output_payload));
+                                       }
+                                       if provider_is_anthropic {
+                                           let (use_block, result_block) = make_anthropic_tool_blocks(
+                                               call_id.clone(), call.tool_name.clone(), args_for_call.clone(), &output_payload, false,
+                                           );
+                                           anthropic_tool_use_blocks.push(use_block);
+                                           anthropic_tool_result_blocks.push(result_block);
+                                       }
+                                       if provider_is_gemini {
+                                           let thought_signature = call.raw.as_ref().and_then(|raw| {
+                                               raw.get("thoughtSignature").cloned()
+                                                   .or_else(|| raw.get("thought_signature").cloned())
+                                           });
+                                           let (model_turn, user_turn) = build_gemini_tool_messages(
+                                               call_id.clone(), call.tool_name.clone(), args_for_call.clone(), &output_payload, thought_signature,
+                                           );
+                                           gemini_model_tool_messages.push(model_turn);
+                                           gemini_function_response_messages.push(user_turn);
+                                       }
+                                       if provider_is_mistral && !mistral_use_conversations {
+                                           let (tool_call, tool_message) = make_mistral_tool_result(
+                                               call_id, call.tool_name.clone(), args_for_call.clone(), &output_payload,
+                                           );
+                                           mistral_tool_calls.push(tool_call);
+                                           mistral_tool_messages.push(tool_message);
+                                       }
+                                   }
+                                   conv_search_has_results = true;
+                                   continue;
+                               }
+
                                let Some(tool_ref) = resolve_mcp_tool_descriptor(&mcp_tool_lookup, &call.tool_name).cloned() else {
                                    continue;
                                };
@@ -2431,7 +2526,7 @@ pub async fn handle_chat_stream(
 
                            if oauth_required_seen {
                                stream_finished = true;
-                           } else if openai_tooling_enabled {
+                           } else if openai_tooling_enabled || (provider_is_openai && conv_search_has_results) {
                                if tool_outputs.is_empty() || openai_response_id.is_none() {
                                    stream_finished = true;
                                } else {
@@ -2451,7 +2546,7 @@ pub async fn handle_chat_stream(
                                    tool_round += 1;
                                    stream_should_continue = true;
                                }
-                           } else if mistral_tooling_enabled {
+                           } else if mistral_tooling_enabled || (provider_is_mistral && conv_search_has_results) {
                                if mistral_tool_messages.is_empty() {
                                    stream_finished = true;
                                } else {
@@ -2465,7 +2560,7 @@ pub async fn handle_chat_stream(
                                    tool_round += 1;
                                    stream_should_continue = true;
                                }
-                           } else if anthropic_tooling_enabled {
+                           } else if anthropic_tooling_enabled || (provider_is_anthropic && conv_search_has_results) {
                                if anthropic_tool_result_blocks.is_empty() {
                                    stream_finished = true;
                                } else {
@@ -2482,7 +2577,7 @@ pub async fn handle_chat_stream(
                                    tool_round += 1;
                                    stream_should_continue = true;
                                }
-                           } else if gemini_tooling_enabled {
+                           } else if gemini_tooling_enabled || (provider_is_gemini && conv_search_has_results) {
                                if gemini_function_response_messages.is_empty() {
                                    stream_finished = true;
                                } else {

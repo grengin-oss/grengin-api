@@ -7,6 +7,7 @@ pub mod tool;
 
 pub use tool::{
     ToolCall, ToolInput, ToolInputDelta, ToolKind, ToolResult, tool_name_is_web_search,
+    CONV_SEARCH_TOOL_NAME,
 };
 
 /// Typed classification of a stream-level error from any LLM provider.

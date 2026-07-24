@@ -8,7 +8,7 @@ use serde_json::Value;
 use super::{
     StreamErrorKind, StreamParseResult, StreamParser, StreamWebSearchAction, StreamWebSearchResult,
     ToolInput, build_tool_call, build_tool_input_delta, parse_web_search_action,
-    tool_name_is_web_search,
+    tool_name_is_web_search, CONV_SEARCH_TOOL_NAME,
 };
 use crate::{
     config::setting::AnthropicSettings,
@@ -253,6 +253,17 @@ pub fn build_anthropic_tools(
     if web_search {
         tools.push(AnthropicToolUnion::WebSearchTool(AnthropicWebSearchTool::new(Some(5))));
     }
+    tools.push(AnthropicToolUnion::ClientTool(AnthropicTool {
+        name: CONV_SEARCH_TOOL_NAME.to_string(),
+        description: "Search the user's past conversations by keyword. Use when the user asks about previous chats or wants to find something from conversation history.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Keywords to search for in past conversations" }
+            },
+            "required": ["query"]
+        }),
+    }));
     for descriptor in mcp_tool_lookup.values() {
         let description = descriptor
             .description

@@ -8,6 +8,8 @@ pub enum ToolKind {
     Other,
 }
 
+pub const CONV_SEARCH_TOOL_NAME: &str = "search_conversations";
+
 pub fn tool_name_is_web_search(name: &str) -> bool {
     name.contains("web_search")
 }

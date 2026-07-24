@@ -18,7 +18,7 @@ use crate::{
 
 use crate::handlers::llm::{
     StreamErrorKind, StreamParseResult, StreamParser, StreamWebSearchResult, ToolInput,
-    build_tool_call,
+    build_tool_call, CONV_SEARCH_TOOL_NAME,
 };
 
 #[derive(Default)]
@@ -237,7 +237,17 @@ pub fn build_gemini_tools(
     if web_search {
         tools.push(json!({ "google_search": {} }));
     }
-    let mut function_declarations: Vec<Value> = Vec::new();
+    let mut function_declarations: Vec<Value> = vec![json!({
+        "name": CONV_SEARCH_TOOL_NAME,
+        "description": "Search the user's past conversations by keyword. Use when the user asks about previous chats or wants to find something from conversation history.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Keywords to search for in past conversations" }
+            },
+            "required": ["query"]
+        }
+    })];
     for descriptor in mcp_tool_lookup.values() {
         let description = descriptor
             .description
@@ -260,11 +270,7 @@ pub fn build_gemini_tool_config(
     selected_tools: &[String],
     mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
 ) -> Option<Value> {
-    // function_calling_config is only valid when function_declarations are present.
-    // Sending it with only google_search causes a 400.
-    if mcp_tool_lookup.is_empty() {
-        return None;
-    }
+    // conv_search is always in function_declarations, so tool_config is always valid.
     let mut config = serde_json::Map::new();
     if web_search {
         config.insert(

@@ -116,6 +116,7 @@ pub async fn lexical_conversation_search(
     })?;
 
     let total = count_row.map(|r| r.count).unwrap_or(0);
+    eprintln!("[lexical_search] query={query:?} total={total} archived={archived}");
     if total == 0 {
         return Ok(LexicalSearchPage {
             conversation_ids: Vec::new(),
@@ -173,6 +174,7 @@ pub async fn lexical_conversation_search(
         conversation_ids.push(row.conversation_id);
     }
 
+    eprintln!("[lexical_search] query={query:?} returned={}", conversation_ids.len());
     Ok(LexicalSearchPage {
         conversation_ids,
         total: total as u64,
