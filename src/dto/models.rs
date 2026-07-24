@@ -1,5 +1,13 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+
+#[derive(Serialize, Deserialize, Clone, ToSchema, PartialEq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelType {
+    TextGenerator,
+    ImageGenerator,
+    TextEmbedder,
+}
 
 #[derive(Serialize, ToSchema)]
 pub struct ModelsResponse {
@@ -40,17 +48,27 @@ pub struct ModelInfo {
     pub key: String,
     pub name: String,
     pub engine: String,
+    pub model_type: ModelType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_token_rate: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_token_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_input_token_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_output_token_rate: Option<f64>,
     pub supports_streaming: bool,
     pub supports_tools: bool,
     pub supports_vision: bool,
     pub supports_pdf_native: bool,
     pub supports_web_search: bool,
+    pub supports_multiple_images: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_images: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dimensions: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_per_image: Option<f64>,
 }

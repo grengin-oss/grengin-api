@@ -4,6 +4,7 @@ pub mod artifacts;
 pub mod branding_helpers;
 pub mod chat_helpers;
 pub mod embedding_helpers;
+pub mod image_gen_helpers;
 pub mod department_helpers;
 pub mod mcp_service;
 pub mod embedders_cache;

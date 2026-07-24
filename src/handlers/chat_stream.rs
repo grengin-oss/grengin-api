@@ -37,7 +37,8 @@ use crate::{
         openai::{OpenaiStreamParser, build_openai_tools, make_openai_function_output},
         update_web_search_action_state, update_web_search_results_state,
     },
-    services::models_cache::get_model_info_cached,
+    dto::models::ModelType,
+    services::{image_gen_helpers::generate_and_save, models_cache::get_model_info_cached},
     llm::{
         prompt::Prompt,
         provider::{
@@ -138,6 +139,13 @@ use uuid::Uuid;
         "data": { "skills": [{ "id": "00000000-0000-0000-0000-000000000001", "identifier": "artifact-create", "name": "Artifact Creator" }] }
       })
     )),
+    ("image_generated" = (
+      description = "event:image_generated — emitted for image generation models instead of the LLM event sequence (message_start/delta/message_end). Contains the saved file and cost. Always followed immediately by done.",
+      value = json!({
+        "event": "image_generated",
+        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "file_id": "92deac9e-7f9f-4d4f-a69b-43737cc2b3a7", "content_type": "image/png", "cost": 0.04 }
+      })
+    )),
     ("message_start" = (
       description = "event:message_start — emitted when the assistant message record is created.",
       value = json!({
@@ -216,30 +224,30 @@ use uuid::Uuid;
       })
     )),
     ("done" = (
-      description = "event:done — final event. Always emitted last (even after llm_error or cancelled).",
+      description = "event:done — final event. Always emitted last (even after ai_error or cancelled).",
       value = json!({
         "event": "done",
         "data": {}
       })
     )),
-    ("llm_error_quota" = (
-      description = "event:llm_error (code 4005) — provider rate limit or API quota exhausted. Read detail.code to distinguish error types. Stream ends after this event.",
+    ("ai_error_quota" = (
+      description = "event:ai_error (code 4005) — provider rate limit or API quota exhausted. Read detail.code to distinguish error types. Stream ends after this event.",
       value = json!({
-        "event": "llm_error",
+        "event": "ai_error",
         "data": { "detail": { "type": "rich", "code": 4005, "description": "The openai API quota or rate limit has been exhausted.", "solution": "Check your API key quota and billing, or wait for the rate limit window to reset.", "description_key": "error.llm.api_quota_exhausted.description", "solution_key": "error.llm.api_quota_exhausted.solution", "params": { "app": "grengin", "provider": "openai" }, "external_code": null } }
       })
     )),
-    ("llm_error_provider" = (
-      description = "event:llm_error (code 4006) — provider returned an error inside the stream (discontinued model, bad request, server error). Stream ends after this event.",
+    ("ai_error_provider" = (
+      description = "event:ai_error (code 4006) — provider returned an error inside the stream (discontinued model, bad request, server error). Stream ends after this event.",
       value = json!({
-        "event": "llm_error",
+        "event": "ai_error",
         "data": { "detail": { "type": "rich", "code": 4006, "description": "Error from mistral: The model `mistral-small-latest` has been deprecated.", "solution": "Verify the selected model is available and your API key is valid.", "description_key": "error.llm.stream_provider_error.description", "solution_key": "error.llm.stream_provider_error.solution", "params": { "app": "grengin", "provider": "mistral", "message": "The model `mistral-small-latest` has been deprecated." }, "external_code": null } }
       })
     )),
-    ("llm_error_connection" = (
-      description = "event:llm_error (code 4007) — failed to initiate or reconnect a stream request. Stream ends after this event.",
+    ("ai_error_connection" = (
+      description = "event:ai_error (code 4007) — failed to initiate or reconnect a stream request. Stream ends after this event.",
       value = json!({
-        "event": "llm_error",
+        "event": "ai_error",
         "data": { "detail": { "type": "rich", "code": 4007, "description": "Failed to establish or maintain a stream connection to gemini.", "solution": "Try again. If the problem persists, check the provider's status page.", "description_key": "error.llm.stream_connection_failed.description", "solution_key": "error.llm.stream_connection_failed.solution", "params": { "app": "grengin", "provider": "gemini" }, "external_code": null } }
       })
     ))
@@ -284,6 +292,13 @@ pub async fn handle_chat_stream_path_doc() {}
         "data": { "skills": [{ "id": "00000000-0000-0000-0000-000000000001", "identifier": "artifact-create", "name": "Artifact Creator" }] }
       })
     )),
+    ("image_generated" = (
+      description = "event:image_generated — emitted for image generation models instead of the LLM event sequence (message_start/delta/message_end). Contains the saved file and cost. Always followed immediately by done.",
+      value = json!({
+        "event": "image_generated",
+        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "file_id": "92deac9e-7f9f-4d4f-a69b-43737cc2b3a7", "content_type": "image/png", "cost": 0.04 }
+      })
+    )),
     ("message_start" = (
       description = "event:message_start — emitted when the assistant message record is created.",
       value = json!({
@@ -362,30 +377,30 @@ pub async fn handle_chat_stream_path_doc() {}
       })
     )),
     ("done" = (
-      description = "event:done — final event. Always emitted last (even after llm_error or cancelled).",
+      description = "event:done — final event. Always emitted last (even after ai_error or cancelled).",
       value = json!({
         "event": "done",
         "data": {}
       })
     )),
-    ("llm_error_quota" = (
-      description = "event:llm_error (code 4005) — provider rate limit or API quota exhausted. Read detail.code to distinguish error types. Stream ends after this event.",
+    ("ai_error_quota" = (
+      description = "event:ai_error (code 4005) — provider rate limit or API quota exhausted. Read detail.code to distinguish error types. Stream ends after this event.",
       value = json!({
-        "event": "llm_error",
+        "event": "ai_error",
         "data": { "detail": { "type": "rich", "code": 4005, "description": "The openai API quota or rate limit has been exhausted.", "solution": "Check your API key quota and billing, or wait for the rate limit window to reset.", "description_key": "error.llm.api_quota_exhausted.description", "solution_key": "error.llm.api_quota_exhausted.solution", "params": { "app": "grengin", "provider": "openai" }, "external_code": null } }
       })
     )),
-    ("llm_error_provider" = (
-      description = "event:llm_error (code 4006) — provider returned an error inside the stream (discontinued model, bad request, server error). Stream ends after this event.",
+    ("ai_error_provider" = (
+      description = "event:ai_error (code 4006) — provider returned an error inside the stream (discontinued model, bad request, server error). Stream ends after this event.",
       value = json!({
-        "event": "llm_error",
+        "event": "ai_error",
         "data": { "detail": { "type": "rich", "code": 4006, "description": "Error from mistral: The model `mistral-small-latest` has been deprecated.", "solution": "Verify the selected model is available and your API key is valid.", "description_key": "error.llm.stream_provider_error.description", "solution_key": "error.llm.stream_provider_error.solution", "params": { "app": "grengin", "provider": "mistral", "message": "The model `mistral-small-latest` has been deprecated." }, "external_code": null } }
       })
     )),
-    ("llm_error_connection" = (
-      description = "event:llm_error (code 4007) — failed to initiate or reconnect a stream request. Stream ends after this event.",
+    ("ai_error_connection" = (
+      description = "event:ai_error (code 4007) — failed to initiate or reconnect a stream request. Stream ends after this event.",
       value = json!({
-        "event": "llm_error",
+        "event": "ai_error",
         "data": { "detail": { "type": "rich", "code": 4007, "description": "Failed to establish or maintain a stream connection to gemini.", "solution": "Try again. If the problem persists, check the provider's status page.", "description_key": "error.llm.stream_connection_failed.description", "solution_key": "error.llm.stream_connection_failed.solution", "params": { "app": "grengin", "provider": "gemini" }, "external_code": null } }
       })
     ))
@@ -456,7 +471,7 @@ pub async fn handle_chat_stream(
     Json(req): Json<ChatInput>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, AppError> {
     let start = Instant::now();
-    let provider = req.provider.clone().unwrap_or_else(|| "openai".to_string());
+    let provider = req.provider.clone();
     let selected_tools = req.selected_tools.clone().unwrap_or_default();
     let request_selected_mcp_servers = req.selected_mcp_servers.clone().unwrap_or_default();
     let selected_mcp_servers = request_selected_mcp_servers.clone();
@@ -479,10 +494,7 @@ pub async fn handle_chat_stream(
                     provider: provider.clone(),
                 });
             }
-            let model = req
-                .model_name
-                .clone()
-                .unwrap_or_else(|| "gpt-5.2".to_string());
+            let model = req.model_name.clone();
             (LlmProviderConfig::OpenAI(settings), model)
         }
         "anthropic" => {
@@ -497,10 +509,7 @@ pub async fn handle_chat_stream(
                     provider: provider.clone(),
                 });
             }
-            let model = req
-                .model_name
-                .clone()
-                .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+            let model = req.model_name.clone();
             (LlmProviderConfig::Anthropic(settings), model)
         }
         "mistral" => {
@@ -514,10 +523,7 @@ pub async fn handle_chat_stream(
                     provider: provider.clone(),
                 });
             }
-            let model = req
-                .model_name
-                .clone()
-                .unwrap_or_else(|| "mistral-small-2603".to_string());
+            let model = req.model_name.clone();
             (LlmProviderConfig::Mistral(settings), model)
         }
         "gemini" => {
@@ -531,10 +537,7 @@ pub async fn handle_chat_stream(
                     provider: provider.clone(),
                 });
             }
-            let model = req
-                .model_name
-                .clone()
-                .unwrap_or_else(|| "gemini-2.5-flash".to_string());
+            let model = req.model_name.clone();
             (LlmProviderConfig::Gemini(settings), model)
         }
         _ => {
@@ -598,13 +601,20 @@ pub async fn handle_chat_stream(
         }
     }
 
-    let (input_rate, output_rate) =
+    let (input_rate, output_rate, image_input_rate, image_output_rate, is_image_gen, supports_multiple_images) =
         match get_model_info_cached(&app_state.req_client, &model_name).await {
-            Ok(Some(model)) => (model.input_token_rate, model.output_token_rate),
-            Ok(None) => (None, None),
+            Ok(Some(model)) => (
+                model.input_token_rate,
+                model.output_token_rate,
+                model.image_input_token_rate,
+                model.image_output_token_rate,
+                model.model_type == ModelType::ImageGenerator,
+                model.supports_multiple_images,
+            ),
+            Ok(None) => (None, None, None, None, false, false),
             Err(error) => {
                 eprintln!("models cache error: {error}");
-                (None, None)
+                (None, None, None, None, false, false)
             }
         };
     if let Some(conversation_id) = req.conversation_id {
@@ -614,11 +624,18 @@ pub async fn handle_chat_stream(
        "webSearch":req.web_search,
        "selectedTools":selected_tools.clone()
     });
-    let retrieval_query = req
-        .messages
-        .last()
-        .map(|message| message.content.clone())
+    let last_message = req.messages.last();
+    let retrieval_query = last_message
+        .map(|m| m.content.clone())
         .unwrap_or_default();
+    let input_image_file_ids: Vec<Uuid> = req
+        .messages
+        .iter()
+        .rev()
+        .find(|m| !m.files.is_empty())
+        .map(|m| m.files.iter().map(|f| f.id).collect())
+        .unwrap_or_default();
+    let image_prompt = retrieval_query.clone();
     let mut summary_prompt: Option<Prompt> = None;
     let mut retrieval_prompt: Option<Prompt> = None;
     let mut recent_prompts: Vec<Prompt> = Vec::new();
@@ -916,8 +933,11 @@ pub async fn handle_chat_stream(
             }
         }
     }
-    let active_skills =
-        load_skills_for_stream(&app_state.database, conversation_id, &transient_skill_ids).await;
+    let active_skills = if is_image_gen {
+        vec![]
+    } else {
+        load_skills_for_stream(&app_state.database, conversation_id, &transient_skill_ids).await
+    };
     let mut skill_web_search = false;
     let mut skill_mcp_server_ids: Vec<Uuid> = Vec::new();
     if !active_skills.is_empty() {
@@ -1072,8 +1092,8 @@ pub async fn handle_chat_stream(
         &mcp_tool_lookup,
         mistral_use_conversations,
     );
-    // Create event source based on provider
-    let event_source = match &provider_config {
+    // Create event source based on provider (skipped for image generation models)
+    let event_source = if !is_image_gen { Some(match &provider_config {
         LlmProviderConfig::OpenAI(settings) => {
             app_state
                 .req_client
@@ -1153,9 +1173,9 @@ pub async fn handle_chat_stream(
     }
     .map_err(|_| AppError::LlmProviderNotConfigured {
         provider: provider.clone(),
-    })?;
-    // Create stream parser based on provider
-    let stream_parser: Box<dyn StreamParser> = match &provider_config {
+    })?) } else { None };
+    // Create stream parser based on provider (skipped for image generation models)
+    let stream_parser: Option<Box<dyn StreamParser>> = if !is_image_gen { Some(match &provider_config {
         LlmProviderConfig::OpenAI(_) => Box::new(OpenaiStreamParser::new()),
         LlmProviderConfig::Anthropic(_) => Box::new(AnthropicStreamParser::new()),
         LlmProviderConfig::Mistral(_) => {
@@ -1166,7 +1186,7 @@ pub async fn handle_chat_stream(
             }
         }
         LlmProviderConfig::Gemini(_) => Box::new(GeminiStreamParser::new()),
-    };
+    }) } else { None };
 
     let sse_stream = async_stream::try_stream! {
        let mut message_content = String::new();
@@ -1176,6 +1196,7 @@ pub async fn handle_chat_stream(
        let mut request_tokens = 0;
        let mut response_tokens = 0;
        let mut total_tokens = 0;
+       let mut image_gen_cost: Decimal = Decimal::ZERO;
        let mut request_id: Option<String> = None;
        let mut openai_response_id: Option<String> = None;
        let mut tool_calls: Vec<serde_json::Value> = Vec::new();
@@ -1247,6 +1268,116 @@ pub async fn handle_chat_stream(
                 yield Event::default().event(ChatStreamEvents::Skills.to_string()).data(data);
             }
         }
+        // Image generation — no LLM stream, just generate + save + emit one event
+        if is_image_gen {
+            let img_message_id = Uuid::new_v4();
+            let now = Utc::now();
+            let count = if supports_multiple_images { req.image_count.unwrap_or(1).max(1) } else { 1 };
+            match generate_and_save(&app_state, claims.user_id, &provider, &model_name, &image_prompt, &input_image_file_ids, count).await {
+                Ok(generated) => {
+                    let files_meta: Vec<serde_json::Value> = generated.iter().map(|(file_id, content_type, _, _, _)| {
+                        let ext = if content_type == "image/png" { "png" } else { "webp" };
+                        serde_json::to_value(File {
+                            id: *file_id,
+                            name: format!("{file_id}.{ext}"),
+                            content_type: content_type.clone(),
+                            size: None,
+                            openai_id: None,
+                            base64: None,
+                        }).unwrap_or_default()
+                    }).collect();
+                    let (total_text_input, total_image_input, total_output) = generated.iter().fold((0i32, 0i32, 0i32), |acc, (_, _, ti, ii, o)| (acc.0 + ti, acc.1 + ii, acc.2 + o));
+                    let effective_output_rate = if total_image_input > 0 { image_output_rate.or(output_rate) } else { output_rate };
+                    image_gen_cost =
+                        calculate_cost_decimal(total_text_input, 0, input_rate, None)
+                        + calculate_cost_decimal(total_image_input, 0, image_input_rate, None)
+                        + calculate_cost_decimal(0, total_output, None, effective_output_rate);
+                    let total_input_tokens = total_text_input + total_image_input;
+                    let img_msg = messages::ActiveModel {
+                        id: Set(img_message_id),
+                        conversation_id: Set(conversation_id.clone()),
+                        previous_message_id: Set(previous_message_id),
+                        deleted: Set(false),
+                        role: Set(ChatRole::Assistant),
+                        message_content: Set(String::new()),
+                        model_provider: Set(provider.clone()),
+                        model_name: Set(model_name.clone()),
+                        request_tokens: Set(total_input_tokens),
+                        response_tokens: Set(total_output),
+                        total_tokens: Set(total_input_tokens + total_output),
+                        latency: Set(latency),
+                        cost: Set(image_gen_cost),
+                        request_id: Set(None),
+                        tools_calls: Set(vec![]),
+                        tools_results: Set(vec![]),
+                        created_at: Set(now),
+                        updated_at: Set(now),
+                        metadata: Set(Some(json!({ "files": files_meta }))),
+                    };
+                    if let Err(e) = img_msg.insert(&app_state.database).await {
+                        eprintln!("image gen message insert error: {e}");
+                    }
+                    if let Ok(Some(conversation)) = conversations::Entity::find_by_id(conversation_id.clone())
+                        .one(&app_state.database)
+                        .await
+                    {
+                        let new_total = conversation.total_cost + image_gen_cost;
+                        let mut active_conv = conversation.into_active_model();
+                        active_conv.total_cost = Set(new_total);
+                        active_conv.updated_at = Set(now);
+                        let _ = active_conv.update(&app_state.database).await;
+                    }
+                    if let Ok(Some(user)) = users::Entity::find_by_id(claims.user_id)
+                        .one(&app_state.database)
+                        .await
+                    {
+                        if let Some(department_id) = user.department_id {
+                            if let Err(e) = refresh_department_budget_available(&app_state.database, department_id).await {
+                                eprintln!("image gen budget refresh error: {e}");
+                            } else if let Err(e) = emit_budget_alerts(&app_state, department_id).await {
+                                eprintln!("image gen budget alert error: {e:?}");
+                            }
+                        }
+                    }
+                    for (file_id, content_type, _, _, _) in &generated {
+                        if let Ok(data) = serde_json::to_string(&json!({
+                            "message_id": img_message_id,
+                            "file_id": file_id,
+                            "content_type": content_type,
+                            "cost": image_gen_cost.to_f32().unwrap_or(0.0),
+                        })) {
+                            yield Event::default()
+                                .event(ChatStreamEvents::ImageGenerated.to_string())
+                                .data(data);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("image gen error: {e:#}");
+                    let err_str = e.to_string();
+                    let stream_err = if err_str.contains(" 429 ") {
+                        ChatStreamError::ApiQuotaExhausted { provider: provider.clone() }
+                    } else {
+                        let message = err_str
+                            .split_once(": ")
+                            .and_then(|(_, body)| extract_llm_error_message(body))
+                            .unwrap_or(err_str);
+                        ChatStreamError::ProviderError { provider: provider.clone(), message }
+                    };
+                    if let Ok(data) = serde_json::to_string(&stream_err.to_response()) {
+                        yield Event::default()
+                            .event(ChatStreamEvents::AiError.to_string())
+                            .data(data);
+                    }
+                }
+            }
+            yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+            return;
+        }
+
+        // Unwrap is safe — both are Some when !is_image_gen
+        let stream_parser = stream_parser.expect("stream_parser is None only for image gen");
+
         let new_message_id = Uuid::new_v4();
         let assistant_created_at = Utc::now();
         let mut new_llm_message = messages::ActiveModel {
@@ -1278,7 +1409,7 @@ pub async fn handle_chat_stream(
 
        let cancel_handle = app_state.register_stream_cancel(new_message_id).await;
 
-       let mut event_source = event_source;
+       let mut event_source = event_source.expect("event_source is None only for image gen");
        let mut final_message_cost = Decimal::from(0);
        loop {
            let mut stream_should_continue = false;
@@ -1899,7 +2030,7 @@ pub async fn handle_chat_stream(
                          let data = serde_json::to_string(
                              &ChatStreamError::from_stream_error(*kind, provider.clone(), message.clone()).to_response()
                          ).unwrap_or_else(|_| "{}".to_string());
-                         yield Event::default().event(ChatStreamEvents::LlmError.to_string()).data(data);
+                         yield Event::default().event(ChatStreamEvents::AiError.to_string()).data(data);
                          stream_finished = true;
                          break;
                        }
@@ -2319,14 +2450,14 @@ pub async fn handle_chat_stream(
                                provider, status, body
                            );
                            let data = serde_json::to_string(&stream_err.to_response()).unwrap_or_else(|_| "{}".to_string());
-                           yield Event::default().event(ChatStreamEvents::LlmError.to_string()).data(data);
+                           yield Event::default().event(ChatStreamEvents::AiError.to_string()).data(data);
                            stream_finished = true;
                            break;
                        }
                        _ => {
                            let stream_err = ChatStreamError::ConnectionFailed { provider: provider.clone() };
                            let data = serde_json::to_string(&stream_err.to_response()).unwrap_or_else(|_| "{}".to_string());
-                           yield Event::default().event(ChatStreamEvents::LlmError.to_string()).data(data);
+                           yield Event::default().event(ChatStreamEvents::AiError.to_string()).data(data);
                            stream_finished = true;
                            break;
                        }
@@ -2363,7 +2494,7 @@ pub async fn handle_chat_stream(
                                eprintln!("openai continuation error: {e}");
                                let stream_err = ChatStreamError::ConnectionFailed { provider: provider.clone() };
                                let data = serde_json::to_string(&stream_err.to_response()).unwrap_or_else(|_| "{}".to_string());
-                               yield Event::default().event(ChatStreamEvents::LlmError.to_string()).data(data);
+                               yield Event::default().event(ChatStreamEvents::AiError.to_string()).data(data);
                                stream_finished = true;
                            }
                        }
@@ -2395,7 +2526,7 @@ pub async fn handle_chat_stream(
                                eprintln!("anthropic continuation error: {e}");
                                let stream_err = ChatStreamError::ConnectionFailed { provider: provider.clone() };
                                let data = serde_json::to_string(&stream_err.to_response()).unwrap_or_else(|_| "{}".to_string());
-                               yield Event::default().event(ChatStreamEvents::LlmError.to_string()).data(data);
+                               yield Event::default().event(ChatStreamEvents::AiError.to_string()).data(data);
                                stream_finished = true;
                            }
                        }
@@ -2426,7 +2557,7 @@ pub async fn handle_chat_stream(
                                    eprintln!("mistral conversation continuation error: {e}");
                                    let stream_err = ChatStreamError::ConnectionFailed { provider: provider.clone() };
                                    let data = serde_json::to_string(&stream_err.to_response()).unwrap_or_else(|_| "{}".to_string());
-                                   yield Event::default().event(ChatStreamEvents::LlmError.to_string()).data(data);
+                                   yield Event::default().event(ChatStreamEvents::AiError.to_string()).data(data);
                                    stream_finished = true;
                                }
                            }
@@ -2456,7 +2587,7 @@ pub async fn handle_chat_stream(
                                    eprintln!("mistral continuation error: {e}");
                                    let stream_err = ChatStreamError::ConnectionFailed { provider: provider.clone() };
                                    let data = serde_json::to_string(&stream_err.to_response()).unwrap_or_else(|_| "{}".to_string());
-                                   yield Event::default().event(ChatStreamEvents::LlmError.to_string()).data(data);
+                                   yield Event::default().event(ChatStreamEvents::AiError.to_string()).data(data);
                                    stream_finished = true;
                                }
                            }
@@ -2489,7 +2620,7 @@ pub async fn handle_chat_stream(
                                eprintln!("gemini continuation error: {e}");
                                let stream_err = ChatStreamError::ConnectionFailed { provider: provider.clone() };
                                let data = serde_json::to_string(&stream_err.to_response()).unwrap_or_else(|_| "{}".to_string());
-                               yield Event::default().event(ChatStreamEvents::LlmError.to_string()).data(data);
+                               yield Event::default().event(ChatStreamEvents::AiError.to_string()).data(data);
                                stream_finished = true;
                            }
                        }
@@ -2510,7 +2641,7 @@ pub async fn handle_chat_stream(
                if total_tokens == 0 {
                    total_tokens = request_tokens + response_tokens;
                }
-               let message_cost = if final_message_cost > Decimal::from(0) {
+               let token_cost = if final_message_cost > Decimal::from(0) {
                    final_message_cost
                } else {
                    calculate_cost_decimal(
@@ -2520,6 +2651,7 @@ pub async fn handle_chat_stream(
                        output_rate,
                    )
                };
+               let message_cost = token_cost + image_gen_cost;
                if let Ok(Some(conversation)) = conversations::Entity::find_by_id(conversation_id.clone())
                  .one(&app_state.database)
                  .await
