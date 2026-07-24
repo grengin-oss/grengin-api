@@ -77,6 +77,39 @@ pub fn calculate_cost_decimal(
     Decimal::from_f64(cost).unwrap_or_else(|| Decimal::from(0))
 }
 
+/// Cost calculation for LLM streams that carry prompt-caching token buckets.
+///
+/// `input_tokens` is the total from the provider (includes cached + creation subsets).
+/// Fallback rule: if a cache rate is None, use `input_rate` to avoid underestimation.
+pub fn calculate_llm_cost(
+    input_tokens: i32,
+    cached_input_tokens: i32,
+    cache_creation_tokens: i32,
+    output_tokens: i32,
+    input_rate: Option<f64>,
+    cached_input_rate: Option<f64>,
+    cache_creation_rate: Option<f64>,
+    output_rate: Option<f64>,
+) -> Decimal {
+    let input_rate_val = input_rate.unwrap_or(0.0);
+    let output_rate_val = output_rate.unwrap_or(0.0);
+    // Fall back to input_rate when cache rates are absent to avoid underestimating.
+    let cached_rate_val = cached_input_rate.unwrap_or(input_rate_val);
+    let creation_rate_val = cache_creation_rate.unwrap_or(input_rate_val);
+
+    if input_rate_val == 0.0 && output_rate_val == 0.0 {
+        return Decimal::from(0);
+    }
+
+    let regular = (input_tokens - cached_input_tokens - cache_creation_tokens).max(0);
+    let cost = (regular as f64 * input_rate_val
+        + cached_input_tokens as f64 * cached_rate_val
+        + cache_creation_tokens as f64 * creation_rate_val
+        + output_tokens as f64 * output_rate_val)
+        / 1_000_000.0;
+    Decimal::from_f64(cost).unwrap_or_else(|| Decimal::from(0))
+}
+
 pub fn to_chat_web_search_result(state: &StreamWebSearchState) -> ChatStreamWebSearchResult {
     ChatStreamWebSearchResult {
         query: state.query.clone(),

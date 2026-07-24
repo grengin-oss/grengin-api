@@ -2,10 +2,6 @@ use crate::{llm::prompt::Prompt, models::messages::ChatRole};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-// ============== Constants ==============
-
-pub const ANTHROPIC_DEFAULT_MAX_TOKENS: i32 = 128000;
-
 // ============== Request Structures ==============
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -36,11 +36,12 @@ impl StreamErrorKind {
 pub enum StreamParseResult {
     None,
 
-    // PATCH: include optional usage on start (useful for Anthropic message_start)
     MessageStart {
         request_id: String,
         input_tokens: Option<u32>,
         output_tokens: Option<u32>,
+        cached_input_tokens: Option<u32>,
+        cache_creation_tokens: Option<u32>,
     },
 
     TextDelta {
@@ -73,12 +74,13 @@ pub enum StreamParseResult {
 
     ToolResult(ToolResult),
 
-    // NEW: token usage updates mid/final stream
     TokenUsage {
         request_id: Option<String>,
         input_tokens: Option<u32>,
         output_tokens: Option<u32>,
         total_tokens: Option<u32>,
+        cached_input_tokens: Option<u32>,
+        cache_creation_tokens: Option<u32>,
     },
 
     Error {
@@ -234,11 +236,7 @@ impl StreamParseResult {
     pub fn request_id(&self) -> Option<String> {
         match self {
             StreamParseResult::TextDelta { request_id, .. } => request_id.clone(),
-            StreamParseResult::MessageStart {
-                request_id,
-                input_tokens: _,
-                output_tokens: _,
-            } => Some(request_id.clone()),
+            StreamParseResult::MessageStart { request_id, .. } => Some(request_id.clone()),
             _ => None,
         }
     }

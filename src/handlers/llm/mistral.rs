@@ -235,6 +235,8 @@ impl StreamParser for MistralStreamParser {
                 input_tokens: Some(usage.prompt_tokens),
                 output_tokens: Some(usage.completion_tokens),
                 total_tokens: Some(usage.total_tokens),
+                cached_input_tokens: None,
+                cache_creation_tokens: None,
             });
 
             // Process choices (text / tool calls) BEFORE emitting usage so that a chunk

@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
-
 use anyhow::Error;
 use reqwest::Client as ReqwestClient;
 use reqwest_eventsource::EventSource;
@@ -81,12 +80,21 @@ impl StreamParser for AnthropicStreamParser {
                         v.pointer("/message/usage/output_tokens")
                             .and_then(|x| x.as_u64()),
                     );
+                    let cache_creation_tokens = u64_to_u32(
+                        v.pointer("/message/usage/cache_creation_input_tokens")
+                            .and_then(|x| x.as_u64()),
+                    );
+                    let cached_input_tokens = u64_to_u32(
+                        v.pointer("/message/usage/cache_read_input_tokens")
+                            .and_then(|x| x.as_u64()),
+                    );
 
-                    // PATCH: MessageStart now carries tokens
                     return StreamParseResult::MessageStart {
                         request_id,
                         input_tokens,
                         output_tokens,
+                        cached_input_tokens,
+                        cache_creation_tokens,
                     };
                 }
 
@@ -101,6 +109,8 @@ impl StreamParser for AnthropicStreamParser {
                             input_tokens: None,
                             output_tokens,
                             total_tokens: None,
+                            cached_input_tokens: None,
+                            cache_creation_tokens: None,
                         };
                     }
                 }
@@ -118,6 +128,8 @@ impl StreamParser for AnthropicStreamParser {
                     request_id: message.id,
                     input_tokens: None,
                     output_tokens: None,
+                    cached_input_tokens: None,
+                    cache_creation_tokens: None,
                 },
 
                 AnthropicStreamEvent::ContentBlockStart {

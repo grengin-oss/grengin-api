@@ -7,9 +7,7 @@ use crate::{
             ChatStreamToolResult, ChatStreamWebSearchAction, ChatToolKind, SkillsActivePayload,
         },
         files::File,
-        llm::anthropic::{
-            ANTHROPIC_DEFAULT_MAX_TOKENS, AnthropicContentBlock, AnthropicMessage,
-        },
+        llm::anthropic::{AnthropicContentBlock, AnthropicMessage},
         llm::gemini::{prompts_to_gemini_payload, GeminiContent},
         llm::mistral::{MistralConversationFunctionResult, MistralMessage, MistralToolCall},
         llm::openai::OpenaiInputItem,
@@ -78,7 +76,7 @@ use crate::{
     },
     state::SharedState,
     utils::chat_stream::{
-        calculate_cost_decimal, extract_llm_error_message, is_rate_limit_error,
+        calculate_cost_decimal, calculate_llm_cost, extract_llm_error_message, is_rate_limit_error,
         to_chat_tool_input, to_chat_web_search_result, tool_input_to_value,
         tool_result_status_from_output,
     },
@@ -601,20 +599,23 @@ pub async fn handle_chat_stream(
         }
     }
 
-    let (input_rate, output_rate, image_input_rate, image_output_rate, is_image_gen, supports_multiple_images) =
+    let (input_rate, output_rate, image_input_rate, image_output_rate, cached_input_rate, cache_creation_rate, anthropic_max_tokens, is_image_gen, supports_multiple_images) =
         match get_model_info_cached(&app_state.req_client, &model_name).await {
             Ok(Some(model)) => (
                 model.input_token_rate,
                 model.output_token_rate,
                 model.image_input_token_rate,
                 model.image_output_token_rate,
+                model.cached_input_token_rate,
+                model.cache_creation_token_rate,
+                model.max_output_tokens.unwrap_or(128000),
                 model.model_type == ModelType::ImageGenerator,
                 model.supports_multiple_images,
             ),
-            Ok(None) => (None, None, None, None, false, false),
+            Ok(None) => (None, None, None, None, None, None, 128000, false, false),
             Err(error) => {
                 eprintln!("models cache error: {error}");
-                (None, None, None, None, false, false)
+                (None, None, None, None, None, None, 128000, false, false)
             }
         };
     if let Some(conversation_id) = req.conversation_id {
@@ -1116,7 +1117,7 @@ pub async fn handle_chat_stream(
                 .anthropic_chat_stream(
                     settings,
                     model_name.clone(),
-                    ANTHROPIC_DEFAULT_MAX_TOKENS,
+                    anthropic_max_tokens,
                     req.temperature,
                     previous_prompts,
                     anthropic_tools.clone(),
@@ -1196,6 +1197,8 @@ pub async fn handle_chat_stream(
        let mut request_tokens = 0;
        let mut response_tokens = 0;
        let mut total_tokens = 0;
+       let mut cached_input_tokens_acc: i32 = 0;
+       let mut cache_creation_tokens_acc: i32 = 0;
        let mut image_gen_cost: Decimal = Decimal::ZERO;
        let mut request_id: Option<String> = None;
        let mut openai_response_id: Option<String> = None;
@@ -1416,10 +1419,14 @@ pub async fn handle_chat_stream(
            let mut stream_finished = false;
            while let Some(event) = tokio::select! {
                _ = cancel_handle.cancelled() => {
-                   let cancel_cost = calculate_cost_decimal(
+                   let cancel_cost = calculate_llm_cost(
                        request_tokens,
+                       cached_input_tokens_acc,
+                       cache_creation_tokens_acc,
                        response_tokens,
                        input_rate,
+                       cached_input_rate,
+                       cache_creation_rate,
                        output_rate,
                    );
                    final_message_cost = cancel_cost;
@@ -1509,10 +1516,14 @@ pub async fn handle_chat_stream(
                            new_llm_message.request_tokens = Set(request_tokens);
                            new_llm_message.response_tokens = Set(response_tokens);
                            new_llm_message.total_tokens = Set(request_tokens + response_tokens);
-                           new_llm_message.cost = Set(calculate_cost_decimal(
+                           new_llm_message.cost = Set(calculate_llm_cost(
                                request_tokens,
+                               cached_input_tokens_acc,
+                               cache_creation_tokens_acc,
                                response_tokens,
                                input_rate,
+                               cached_input_rate,
+                               cache_creation_rate,
                                output_rate,
                            ));
                            new_llm_message
@@ -1562,7 +1573,7 @@ pub async fn handle_chat_stream(
                                }
                            }
                        }
-                       StreamParseResult::TokenUsage{ request_id:req_id,input_tokens, output_tokens, total_tokens:t_tokens} => {
+                       StreamParseResult::TokenUsage{ request_id:req_id,input_tokens, output_tokens, total_tokens:t_tokens, cached_input_tokens, cache_creation_tokens} => {
                           let accumulate_tokens = mcp_tooling_enabled && tool_round > 0;
                           if let Some(tokens) = input_tokens {
                             if accumulate_tokens {
@@ -1585,14 +1596,32 @@ pub async fn handle_chat_stream(
                               total_tokens = tokens.clone() as i32;
                             }
                           }
+                          if let Some(tokens) = cached_input_tokens {
+                            if accumulate_tokens {
+                              cached_input_tokens_acc += *tokens as i32;
+                            } else {
+                              cached_input_tokens_acc = *tokens as i32;
+                            }
+                          }
+                          if let Some(tokens) = cache_creation_tokens {
+                            if accumulate_tokens {
+                              cache_creation_tokens_acc += *tokens as i32;
+                            } else {
+                              cache_creation_tokens_acc = *tokens as i32;
+                            }
+                          }
                           if req_id.is_some() {
                             openai_response_id = req_id.clone();
                           }
                           request_id = req_id.clone();
-                          let cost = calculate_cost_decimal(
+                          let cost = calculate_llm_cost(
                               request_tokens,
+                              cached_input_tokens_acc,
+                              cache_creation_tokens_acc,
                               response_tokens,
                               input_rate,
+                              cached_input_rate,
+                              cache_creation_rate,
                               output_rate,
                           );
                           new_llm_message.request_id = Set(request_id);
@@ -1622,7 +1651,7 @@ pub async fn handle_chat_stream(
                          };
                          yield Event::default().event(ChatStreamEvents::MessageEnd.to_string()).data(message_end.to_string());
                        }
-                       StreamParseResult::MessageStart { request_id:req_id,input_tokens,output_tokens} => {
+                       StreamParseResult::MessageStart { request_id:req_id,input_tokens,output_tokens,cached_input_tokens,cache_creation_tokens} => {
                           let accumulate_tokens = mcp_tooling_enabled && tool_round > 0;
                           if let Some(tokens) = input_tokens {
                             if accumulate_tokens {
@@ -1636,6 +1665,20 @@ pub async fn handle_chat_stream(
                               response_tokens += tokens.clone() as i32;
                             } else {
                               response_tokens = tokens.clone() as i32;
+                            }
+                          }
+                          if let Some(tokens) = cached_input_tokens {
+                            if accumulate_tokens {
+                              cached_input_tokens_acc += *tokens as i32;
+                            } else {
+                              cached_input_tokens_acc = *tokens as i32;
+                            }
+                          }
+                          if let Some(tokens) = cache_creation_tokens {
+                            if accumulate_tokens {
+                              cache_creation_tokens_acc += *tokens as i32;
+                            } else {
+                              cache_creation_tokens_acc = *tokens as i32;
                             }
                           }
                           let message_start = ChatStream{
@@ -1660,10 +1703,14 @@ pub async fn handle_chat_stream(
                           new_llm_message.request_tokens = Set(request_tokens);
                           new_llm_message.response_tokens = Set(response_tokens);
                           new_llm_message.total_tokens = Set(request_tokens + response_tokens);
-                          new_llm_message.cost = Set(calculate_cost_decimal(
+                          new_llm_message.cost = Set(calculate_llm_cost(
                               request_tokens,
+                              cached_input_tokens_acc,
+                              cache_creation_tokens_acc,
                               response_tokens,
                               input_rate,
+                              cached_input_rate,
+                              cache_creation_rate,
                               output_rate,
                           ));
                           new_llm_message
@@ -2044,10 +2091,14 @@ pub async fn handle_chat_stream(
                        if total_tokens == 0 {
                            total_tokens = request_tokens + response_tokens;
                          }
-                         let message_cost = calculate_cost_decimal(
+                         let message_cost = calculate_llm_cost(
                            request_tokens,
+                           cached_input_tokens_acc,
+                           cache_creation_tokens_acc,
                            response_tokens,
                            input_rate,
+                           cached_input_rate,
+                           cache_creation_rate,
                            output_rate,
                          );
                          final_message_cost = message_cost;
@@ -2509,7 +2560,7 @@ pub async fn handle_chat_stream(
                            .anthropic_chat_stream_with_messages(
                                settings,
                                model_name.clone(),
-                               ANTHROPIC_DEFAULT_MAX_TOKENS,
+                               anthropic_max_tokens,
                                req.temperature,
                                messages,
                                system_prompt,
@@ -2644,10 +2695,14 @@ pub async fn handle_chat_stream(
                let token_cost = if final_message_cost > Decimal::from(0) {
                    final_message_cost
                } else {
-                   calculate_cost_decimal(
+                   calculate_llm_cost(
                        request_tokens,
+                       cached_input_tokens_acc,
+                       cache_creation_tokens_acc,
                        response_tokens,
                        input_rate,
+                       cached_input_rate,
+                       cache_creation_rate,
                        output_rate,
                    )
                };
@@ -2830,6 +2885,21 @@ pub async fn handle_chat_stream(
                        let _ = new_llm_message.clone().update(&app_state.database).await;
                    }
                }
+               let finished_event = ChatStream {
+                   id: None,
+                   title: None,
+                   message_id: Some(new_message_id),
+                   is_new: None,
+                   content: None,
+                   input_tokens: Some(request_tokens),
+                   output_tokens: Some(response_tokens),
+                   latency_ms: Some(latency),
+                   cost: message_cost.to_f32(),
+                   event: None,
+                   tool_call: None,
+                   tool_result: None,
+               };
+               yield Event::default().event(ChatStreamEvents::StreamFinished.to_string()).data(finished_event.to_string());
                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
                break;
            }
