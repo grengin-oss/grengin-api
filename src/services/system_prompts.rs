@@ -167,14 +167,6 @@ async fn resolve_system_default(
         }
     }
 
-    if prompt.is_none() {
-        prompt = role_prompts::Entity::find()
-            .filter(role_prompts::Column::IsSystem.eq(true))
-            .order_by_asc(role_prompts::Column::CreatedAt)
-            .one(db)
-            .await?;
-    }
-
     let Some(prompt) = prompt else {
         return Ok(None);
     };

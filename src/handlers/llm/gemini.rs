@@ -258,8 +258,13 @@ pub fn build_gemini_tool_config(
     selected_tools: &[String],
     mcp_tool_lookup: &HashMap<String, McpToolDescriptor>,
 ) -> Option<Value> {
+    // function_calling_config is only valid when function_declarations are present.
+    // Sending it with only google_search causes a 400.
+    if mcp_tool_lookup.is_empty() {
+        return None;
+    }
     let mut config = serde_json::Map::new();
-    if web_search && !mcp_tool_lookup.is_empty() {
+    if web_search {
         config.insert(
             "include_server_side_tool_invocations".to_string(),
             json!(true),
@@ -277,11 +282,7 @@ pub fn build_gemini_tool_config(
             json!({ "mode": "AUTO" }),
         );
     }
-    if config.is_empty() {
-        None
-    } else {
-        Some(Value::Object(config))
-    }
+    Some(Value::Object(config))
 }
 
 pub fn build_gemini_tool_messages(
