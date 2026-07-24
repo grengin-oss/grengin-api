@@ -19,7 +19,10 @@ use crate::{
         prompt::{Prompt, PromptTextResponse},
         provider::{AnthropicApis, OpenaiApis},
     },
-    models::{conversation_summaries, message_embeddings, messages, messages::ChatRole},
+    models::{
+        conversation_summaries, message_embeddings, messages, messages::ChatRole,
+        project_source_chunks, project_sources,
+    },
     services::embedders_cache::get_model_dimensions,
     state::SharedState,
 };
@@ -44,6 +47,14 @@ struct RetrievedMessageRow {
     message_content: String,
     #[sea_orm(from_alias = "role")]
     role: String,
+}
+
+#[derive(Debug, sea_orm::FromQueryResult)]
+struct ProjectChunkRow {
+    #[sea_orm(from_alias = "content")]
+    content: String,
+    #[sea_orm(from_alias = "fileName")]
+    file_name: String,
 }
 
 
@@ -120,10 +131,7 @@ pub async fn build_retrieval_prompt(
         Some(config) if config.is_enabled => config,
         _ => return Ok(None),
     };
-    let boundary = match boundary {
-        Some(boundary) => boundary,
-        None => return Ok(None),
-    };
+    let boundary = boundary.unwrap_or_else(Utc::now);
     let embedding = match generate_embedding(app_state, &embedding_config, query_text).await? {
         Some(embedding) => embedding,
         None => return Ok(None),
@@ -195,33 +203,36 @@ pub async fn build_retrieval_prompt(
 pub fn assemble_prompts_with_budget(
     summary: Option<Prompt>,
     retrieval: Option<Prompt>,
+    project_retrieval: Option<Prompt>,
     mut recent: Vec<Prompt>,
     mut current: Vec<Prompt>,
     max_tokens: usize,
 ) -> Vec<Prompt> {
+    // Tier 1: everything
     let mut prompts = Vec::new();
-    if let Some(summary_prompt) = summary.clone() {
-        prompts.push(summary_prompt);
-    }
-    if let Some(retrieval_prompt) = retrieval.clone() {
-        prompts.push(retrieval_prompt);
-    }
-    prompts.append(&mut recent.clone());
-    prompts.append(&mut current.clone());
-    if estimate_tokens(&prompts) <= max_tokens {
-        return prompts;
-    }
+    if let Some(p) = summary.clone() { prompts.push(p); }
+    if let Some(p) = retrieval.clone() { prompts.push(p); }
+    if let Some(p) = project_retrieval.clone() { prompts.push(p); }
+    prompts.extend(recent.clone());
+    prompts.extend(current.clone());
+    if estimate_tokens(&prompts) <= max_tokens { return prompts; }
 
+    // Tier 2: drop conversation history (lowest value density)
     let mut prompts = Vec::new();
-    if let Some(summary_prompt) = summary {
-        prompts.push(summary_prompt);
-    }
-    prompts.append(&mut recent.clone());
-    prompts.append(&mut current.clone());
-    if estimate_tokens(&prompts) <= max_tokens {
-        return prompts;
-    }
+    if let Some(p) = summary.clone() { prompts.push(p); }
+    if let Some(p) = project_retrieval.clone() { prompts.push(p); }
+    prompts.extend(recent.clone());
+    prompts.extend(current.clone());
+    if estimate_tokens(&prompts) <= max_tokens { return prompts; }
 
+    // Tier 3: drop project docs too
+    let mut prompts = Vec::new();
+    if let Some(p) = summary.clone() { prompts.push(p); }
+    prompts.extend(recent.clone());
+    prompts.extend(current.clone());
+    if estimate_tokens(&prompts) <= max_tokens { return prompts; }
+
+    // Tier 4: bare — recent + current only
     let mut prompts = Vec::new();
     prompts.append(&mut recent);
     prompts.append(&mut current);
@@ -730,27 +741,35 @@ pub async fn build_project_retrieval_prompt(
     };
     let query_vector = format_pgvector(&embeddings[0]);
 
-    let sql = format!(
-        r#"
-        SELECT psc."content",
-               ps."fileName"
-        FROM "project_source_chunks" psc
-        JOIN "project_sources" ps ON ps."id" = psc."projectSourceId"
-        WHERE psc."projectId" = $1
-          AND ps."processingStatus" = 'ready'
-        ORDER BY psc."embedding" <=> '{}'::vector
-        LIMIT $2
-        "#,
-        query_vector
+    // <=> cosine operator and ::vector cast have no SeaORM integration.
+    let distance_expr = Expr::col((
+        project_source_chunks::Entity,
+        project_source_chunks::Column::Embedding,
+    ))
+    .binary(
+        BinOper::Custom("<=>".into()),
+        Expr::val(query_vector).cast_as(Alias::new("vector")),
     );
 
-    let rows = app_state
-        .database
-        .query_all(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            &sql,
-            vec![project_id.into(), (top_k as i64).into()],
-        ))
+    let rows = project_source_chunks::Entity::find()
+        .join(JoinType::InnerJoin, project_source_chunks::Relation::ProjectSource.def())
+        .filter(project_source_chunks::Column::ProjectId.eq(project_id))
+        .filter(project_source_chunks::Column::Provider.eq(embedding_config.provider.clone()))
+        .filter(project_source_chunks::Column::Model.eq(embedding_config.model.clone()))
+        .filter(project_sources::Column::ProcessingStatus.eq("ready"))
+        .select_only()
+        .column_as(
+            Expr::col((project_source_chunks::Entity, project_source_chunks::Column::Content)),
+            "content",
+        )
+        .column_as(
+            Expr::col((project_sources::Entity, project_sources::Column::FileName)),
+            "fileName",
+        )
+        .order_by(distance_expr, Order::Asc)
+        .limit(top_k as u64)
+        .into_model::<ProjectChunkRow>()
+        .all(&app_state.database)
         .await
         .map_err(|e| {
             eprintln!("project chunk retrieval error: {e}");
@@ -763,9 +782,7 @@ pub async fn build_project_retrieval_prompt(
 
     let mut context = String::from("Relevant project documents:\n\n");
     for row in rows {
-        let content: String = row.try_get("", "content").unwrap_or_default();
-        let file_name: String = row.try_get("", "fileName").unwrap_or_default();
-        context.push_str(&format!("— {file_name}\n{content}\n\n"));
+        context.push_str(&format!("— {}\n{}\n\n", row.file_name, row.content));
     }
 
     Ok(Some(context.trim_end().to_string()))

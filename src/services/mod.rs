@@ -11,7 +11,6 @@ pub mod embedders_cache;
 pub mod models_cache;
 pub mod oidc_proxy;
 pub mod oidc_service;
-pub mod chat_stream_prompts;
 pub mod me_helpers;
 pub mod me_skills_helpers;
 pub mod sso_seed;
