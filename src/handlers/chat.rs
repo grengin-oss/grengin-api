@@ -21,7 +21,6 @@ use axum::{
     extract::{Path, Query, State},
 };
 use chrono::Utc;
-use migration::extension::postgres::PgExpr;
 use num_traits::cast::ToPrimitive;
 use reqwest::StatusCode;
 use sea_orm::{
@@ -69,6 +68,82 @@ pub async fn get_chats(
     } else {
         None
     };
+
+    if !enable_semantic {
+        if let Some(search_text) = search.as_ref() {
+            let page = search::lexical_conversation_search(
+                &app_state.database,
+                claims.user_id,
+                search_text,
+                archived,
+                limit,
+                offset,
+            )
+            .await?;
+
+            if !page.conversation_ids.is_empty() {
+                let mut select = conversations::Entity::find()
+                    .select_only()
+                    .columns(conversations::Column::iter())
+                    .column_as(messages::Column::Id.count(), "messageCount")
+                    .left_join(messages::Entity)
+                    .filter(conversations::Column::UserId.eq(claims.user_id))
+                    .filter(conversations::Column::Id.is_in(page.conversation_ids.clone()));
+
+                if archived {
+                    select = select.filter(conversations::Column::ArchivedAt.is_not_null());
+                } else {
+                    select = select.filter(conversations::Column::ArchivedAt.is_null());
+                }
+
+                let rows: Vec<ConversationWithCount> = select
+                    .group_by(conversations::Column::Id)
+                    .into_model::<ConversationWithCount>()
+                    .all(&app_state.database)
+                    .await
+                    .map_err(|e| {
+                        eprintln!("lexical search conversation fetch error: {e}");
+                        AppError::DbTimeout
+                    })?;
+
+                let mut row_map = std::collections::HashMap::new();
+                for row in rows {
+                    row_map.insert(row.id, row);
+                }
+
+                for conversation_id in &page.conversation_ids {
+                    let Some(conversation_with_count) = row_map.remove(conversation_id) else {
+                        continue;
+                    };
+                    let web_search_enabled =
+                        resolve_web_search_enabled(conversation_with_count.metadata.as_ref());
+                    response.push(ConversationResponse {
+                        id: conversation_with_count.id,
+                        title: conversation_with_count.title,
+                        web_search_enabled,
+                        archived: conversation_with_count.archived_at.is_some(),
+                        archived_at: conversation_with_count.archived_at,
+                        model: conversation_with_count.model_name,
+                        total_tokens: conversation_with_count.total_tokens,
+                        total_cost: conversation_with_count.total_cost.to_f32().unwrap_or_default(),
+                        created_at: conversation_with_count.created_at,
+                        updated_at: conversation_with_count.updated_at,
+                        last_message_at: conversation_with_count.last_message_at,
+                        message_count: conversation_with_count.message_count.max(0) as u64,
+                        messages: None,
+                    });
+                }
+            }
+            let payload = PaginatedConversations {
+                total: page.total,
+                limit,
+                offset,
+                conversations: response,
+                semantic_results: semantic_results_fallback,
+            };
+            return Ok((StatusCode::OK, Json(payload)));
+        }
+    }
 
     if enable_semantic {
         if let Some(search_text) = search.as_ref() {
@@ -169,13 +244,6 @@ pub async fn get_chats(
 
     let mut count_query =
         conversations::Entity::find().filter(conversations::Column::UserId.eq(claims.user_id));
-    if let Some(title) = search.as_ref() {
-        count_query = count_query.filter(
-            conversations::Column::Title
-                .into_expr()
-                .ilike(format!("%{}%", title)),
-        );
-    }
     if archived {
         count_query = count_query.filter(conversations::Column::ArchivedAt.is_not_null());
     } else {
@@ -193,13 +261,6 @@ pub async fn get_chats(
         .left_join(messages::Entity)
         .filter(conversations::Column::UserId.eq(claims.user_id));
 
-    if let Some(title) = search.as_ref() {
-        select = select.filter(
-            conversations::Column::Title
-                .into_expr()
-                .ilike(format!("%{}%", title)),
-        );
-    }
     if archived {
         select = select.filter(conversations::Column::ArchivedAt.is_not_null());
     } else {
