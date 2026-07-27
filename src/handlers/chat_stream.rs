@@ -68,8 +68,9 @@ use crate::{
         mcp_tools::load_openai_mcp_tools,
         notifications::emit_budget_alerts,
         rag::{
-            EmbeddingTarget, assemble_prompts_with_budget, build_retrieval_prompt, embed_messages,
-            load_recent_prompts, load_summary, update_conversation_summary,
+            EmbeddingTarget, assemble_prompts_with_budget, build_project_retrieval_prompt,
+            build_retrieval_prompt, embed_messages, load_recent_prompts, load_summary,
+            update_conversation_summary,
         },
         system_prompts,
         skills_helpers::{load_skill_knowledge_for_stream, load_skills_for_stream},
@@ -639,7 +640,9 @@ pub async fn handle_chat_stream(
     let image_prompt = retrieval_query.clone();
     let mut summary_prompt: Option<Prompt> = None;
     let mut retrieval_prompt: Option<Prompt> = None;
+    let mut project_retrieval_prompt: Option<Prompt> = None;
     let mut recent_prompts: Vec<Prompt> = Vec::new();
+    let mut linked_project_ids: Vec<Uuid> = Vec::new();
     let (conversation_id, title) = if let Some(Path(conversation_id)) = chat_id {
         let conversation = conversations::Entity::find_by_id(conversation_id.clone())
             .filter(conversations::Column::ArchivedAt.is_null())
@@ -662,6 +665,15 @@ pub async fn handle_chat_stream(
                 eprintln!("Db update one error {:?}", e);
                 AppError::DbTimeout
             })?;
+        linked_project_ids = conversation_projects::Entity::find()
+            .select_only()
+            .column(conversation_projects::Column::ProjectId)
+            .filter(conversation_projects::Column::ConversationId.eq(conversation_id))
+            .into_tuple::<Uuid>()
+            .all(&app_state.database)
+            .await
+            .unwrap_or_default();
+
         if app_state.settings.rag.enabled {
             let recent = load_recent_prompts(
                 &app_state.database,
@@ -671,26 +683,49 @@ pub async fn handle_chat_stream(
             .await?;
             let recent_boundary = recent.boundary;
             recent_prompts = recent.prompts;
-            if let Some(summary) = load_summary(&app_state.database, conversation_id).await? {
-                if !summary.summary.trim().is_empty() {
-                    summary_prompt = Some(Prompt {
-                        role: ChatRole::System,
-                        text: format!("Conversation summary:\n{}", summary.summary),
-                        files: Vec::new(),
-                    });
+            if app_state.settings.rag.summary_enabled {
+                if let Some(summary) = load_summary(&app_state.database, conversation_id).await? {
+                    if !summary.summary.trim().is_empty() {
+                        summary_prompt = Some(Prompt {
+                            role: ChatRole::System,
+                            text: format!("Conversation summary:\n{}", summary.summary),
+                            files: Vec::new(),
+                        });
+                    }
                 }
             }
-            if let Some(retrieval_text) = build_retrieval_prompt(
-                &app_state,
-                conversation_id,
-                &retrieval_query,
-                recent_boundary,
-            )
-            .await?
-            {
+            let top_k = app_state.settings.rag.retrieval_top_k;
+            let retrieval_future = async {
+                if app_state.settings.rag.retrieval_enabled {
+                    build_retrieval_prompt(&app_state, conversation_id, &retrieval_query, recent_boundary).await
+                } else {
+                    Ok(None)
+                }
+            };
+            let (retrieval_result, project_retrieval_results) = tokio::join!(
+                retrieval_future,
+                futures_util::future::join_all(
+                    linked_project_ids.iter().map(|pid| {
+                        build_project_retrieval_prompt(&app_state, *pid, &retrieval_query, top_k)
+                    })
+                ),
+            );
+            if let Some(text) = retrieval_result? {
                 retrieval_prompt = Some(Prompt {
                     role: ChatRole::System,
-                    text: retrieval_text,
+                    text,
+                    files: Vec::new(),
+                });
+            }
+            let combined_project_text: String = project_retrieval_results
+                .into_iter()
+                .filter_map(|r| r.ok().flatten())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if !combined_project_text.is_empty() {
+                project_retrieval_prompt = Some(Prompt {
+                    role: ChatRole::System,
+                    text: combined_project_text,
                     files: Vec::new(),
                 });
             }
@@ -869,6 +904,7 @@ pub async fn handle_chat_stream(
         assemble_prompts_with_budget(
             summary_prompt,
             retrieval_prompt,
+            project_retrieval_prompt,
             recent_prompts,
             current_prompts.clone(),
             app_state.settings.rag.max_context_tokens,
@@ -892,17 +928,9 @@ pub async fn handle_chat_stream(
             );
         }
     }
-    let project_ids: Vec<Uuid> = conversation_projects::Entity::find()
-        .select_only()
-        .column(conversation_projects::Column::ProjectId)
-        .filter(conversation_projects::Column::ConversationId.eq(conversation_id))
-        .into_tuple::<Uuid>()
-        .all(&app_state.database)
-        .await
-        .unwrap_or_default();
-    if !project_ids.is_empty() {
+    if !linked_project_ids.is_empty() {
         let linked_projects = projects::Entity::find()
-            .filter(projects::Column::Id.is_in(project_ids.clone()))
+            .filter(projects::Column::Id.is_in(linked_project_ids.clone()))
             .all(&app_state.database)
             .await
             .unwrap_or_default();
@@ -2741,14 +2769,18 @@ pub async fn handle_chat_stream(
                    });
                }
                if app_state.settings.rag.enabled {
-                   let targets = std::mem::take(&mut embedding_targets);
-                   let state = app_state.clone();
-                   let provider_clone = provider.clone();
-                   let model_clone = model_name.clone();
-                   tokio::spawn(async move {
-                       let _ = embed_messages(&state, targets).await;
-                       let _ = update_conversation_summary(&state, conversation_id, &provider_clone, &model_clone).await;
-                   });
+                   let do_embed = app_state.settings.rag.retrieval_enabled;
+                   let do_summary = app_state.settings.rag.summary_enabled;
+                   if do_embed || do_summary {
+                       let targets = std::mem::take(&mut embedding_targets);
+                       let state = app_state.clone();
+                       let provider_clone = provider.clone();
+                       let model_clone = model_name.clone();
+                       tokio::spawn(async move {
+                           if do_embed { let _ = embed_messages(&state, targets).await; }
+                           if do_summary { let _ = update_conversation_summary(&state, conversation_id, &provider_clone, &model_clone).await; }
+                       });
+                   }
                }
                // Flush any tool calls that were emitted to the client but never got a result.
                // Happens when the stream errors or is cancelled mid-execution.

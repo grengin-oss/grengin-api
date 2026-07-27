@@ -109,6 +109,8 @@ pub struct EmbeddingSettings {
 #[derive(Clone)]
 pub struct RagSettings {
     pub enabled: bool,
+    pub summary_enabled: bool,
+    pub retrieval_enabled: bool,
     pub recent_message_pairs: usize,
     pub retrieval_top_k: usize,
     pub max_context_tokens: usize,
@@ -701,6 +703,14 @@ impl RagSettings {
             .ok()
             .and_then(|val| val.parse::<bool>().ok())
             .unwrap_or(false);
+        let summary_enabled = std::env::var("RAG_SUMMARY_ENABLED")
+            .ok()
+            .and_then(|val| val.parse::<bool>().ok())
+            .unwrap_or(true);
+        let retrieval_enabled = std::env::var("RAG_RETRIEVAL_ENABLED")
+            .ok()
+            .and_then(|val| val.parse::<bool>().ok())
+            .unwrap_or(true);
         let recent_message_pairs = std::env::var("RAG_RECENT_MESSAGE_PAIRS")
             .ok()
             .and_then(|val| val.parse::<usize>().ok())
@@ -722,6 +732,8 @@ impl RagSettings {
         });
         Self {
             enabled,
+            summary_enabled,
+            retrieval_enabled,
             recent_message_pairs,
             retrieval_top_k,
             max_context_tokens,
