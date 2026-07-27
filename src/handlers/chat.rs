@@ -3,7 +3,7 @@ use crate::{
     dto::{
         chat::{
             ArchiveChatRequest, ArtifactMeta, ConversationResponse, MessageParts, MessageResponse,
-            PaginatedConversations, SemanticResult, TokenUsage,
+            PaginatedConversations, SearchMode, SemanticResult, TokenUsage,
         },
         common::PaginationQuery,
         files::File,
@@ -99,6 +99,7 @@ pub async fn get_chats(
                     last_message_at: c.last_message_at,
                     message_count: c.message_count.max(0) as u64,
                     messages: None,
+                    search_mode: Some(SearchMode::Lexical),
                     search_score: lex_page.scores.get(conversation_id).copied(),
                     search_snippet: lex_page.snippets.get(conversation_id).cloned(),
                 });
@@ -150,6 +151,7 @@ pub async fn get_chats(
                         last_message_at: c.last_message_at,
                         message_count: c.message_count.max(0) as u64,
                         messages: None,
+                        search_mode: Some(SearchMode::Semantic),
                         search_score: snippet.map(|s| (1.0 - s.distance as f32).max(0.0)),
                         search_snippet: snippet.map(|s| s.snippet.clone()),
                     });
@@ -247,6 +249,7 @@ pub async fn get_chats(
             last_message_at: conversation_with_count.last_message_at,
             message_count,
             messages: None,
+            search_mode: None,
             search_score: None,
             search_snippet: None,
         };
@@ -348,6 +351,7 @@ pub async fn get_chat_by_id(
         last_message_at: conversation_model.last_message_at,
         messages: Some(Vec::new()),
         message_count,
+        search_mode: None,
         search_score: None,
         search_snippet: None,
     };
@@ -470,6 +474,7 @@ pub async fn update_chat_by_id(
         last_message_at: conversation_model.last_message_at,
         messages: None,
         message_count,
+        search_mode: None,
         search_score: None,
         search_snippet: None,
     };

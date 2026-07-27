@@ -5,6 +5,13 @@ use std::collections::HashMap;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
+#[derive(Serialize, ToSchema, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchMode {
+    Lexical,
+    Semantic,
+}
+
 #[derive(Deserialize, ToSchema, IntoParams)]
 pub struct ArchiveChatRequest {
     pub title: String,
@@ -30,6 +37,8 @@ pub struct ConversationResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub messages: Option<Vec<MessageResponse>>,
     pub message_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_mode: Option<SearchMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub search_score: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
