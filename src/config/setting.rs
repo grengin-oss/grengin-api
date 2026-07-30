@@ -146,6 +146,31 @@ fn env_flag_any(names: &[&str]) -> bool {
     })
 }
 
+fn is_localhost_redirect_url(value: &str) -> bool {
+    Url::parse(value)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+        .and_then(|url| url.host_str().map(|host| host.to_string()))
+        .map(|host| host == "localhost" || host.ends_with(".localhost"))
+        .unwrap_or(false)
+}
+
+fn should_use_grengin_proxy(
+    has_local_credentials: bool,
+    proxy_requested: bool,
+    redirect_url: &str,
+    instance_connected: bool,
+) -> bool {
+    let is_localhost = is_localhost_redirect_url(redirect_url);
+    let proxy_requested = proxy_requested || (!has_local_credentials && is_localhost);
+    proxy_requested && (is_localhost || instance_connected)
+}
+
+pub(crate) fn grengin_proxy_access_allowed() -> bool {
+    let redirect_url = std::env::var("REDIRECT_URL").unwrap_or_default();
+    is_localhost_redirect_url(&redirect_url) || env_flag_any(&["GRENGIN_INSTANCE_CONNECTED"])
+}
+
 fn csv_env(name: &str) -> Vec<String> {
     std::env::var(name)
         .ok()
@@ -493,14 +518,17 @@ impl GoogleSettings {
         let google_client_secret_local = read_non_empty_env(&["GOOGLE_CLIENT_SECRET"]);
         let has_local_google_credentials =
             google_client_id_local.is_some() && google_client_secret_local.is_some();
-        let use_proxy =
-            env_flag_any(&["SSO_PROXY_AUTO_ENABLE", "SSO_PROXY_ENABLED"])
-                || !has_local_google_credentials;
+        let app_redirect_url =
+            std::env::var("REDIRECT_URL").map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
+        let use_proxy = should_use_grengin_proxy(
+            has_local_google_credentials,
+            env_flag_any(&["SSO_PROXY_AUTO_ENABLE", "SSO_PROXY_ENABLED"]),
+            &app_redirect_url,
+            env_flag_any(&["GRENGIN_INSTANCE_CONNECTED"]),
+        );
 
         let (client_id, client_secret, redirect_url, allowed_domains, use_grengin_proxy) =
             if use_proxy {
-                let app_redirect_url = std::env::var("REDIRECT_URL")
-                    .map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
                 let client_id = read_non_empty_env(&[
                     "GRENGIN_PROXY_GOOGLE_CLIENT_ID",
                     "GOOGLE_CLIENT_ID",
@@ -520,11 +548,10 @@ impl GoogleSettings {
                     true,
                 )
             } else {
-                let client_id = google_client_id_local.ok_or(ConfigError::Missing("GOOGLE_CLIENT_ID"))?;
-                let client_secret =
-                    google_client_secret_local.ok_or(ConfigError::Missing("GOOGLE_CLIENT_SECRET"))?;
-                let app_redirect_url = std::env::var("REDIRECT_URL")
-                    .map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
+                let client_id =
+                    google_client_id_local.ok_or(ConfigError::Missing("GOOGLE_CLIENT_ID"))?;
+                let client_secret = google_client_secret_local
+                    .ok_or(ConfigError::Missing("GOOGLE_CLIENT_SECRET"))?;
                 (
                     client_id,
                     client_secret,
@@ -552,21 +579,21 @@ impl AzureSettings {
         let azure_client_secret_local = read_non_empty_env(&["AZURE_CLIENT_SECRET"]);
         let has_local_azure_credentials =
             azure_client_id_local.is_some() && azure_client_secret_local.is_some();
-        let use_proxy =
-            env_flag_any(&["SSO_PROXY_AUTO_ENABLE", "SSO_PROXY_ENABLED"])
-                || !has_local_azure_credentials;
+        let app_redirect_url =
+            std::env::var("REDIRECT_URL").map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
+        let use_proxy = should_use_grengin_proxy(
+            has_local_azure_credentials,
+            env_flag_any(&["SSO_PROXY_AUTO_ENABLE", "SSO_PROXY_ENABLED"]),
+            &app_redirect_url,
+            env_flag_any(&["GRENGIN_INSTANCE_CONNECTED"]),
+        );
 
         let (client_id, client_secret, tenant_id, redirect_url, allowed_domains, use_grengin_proxy) =
             if use_proxy {
-                let app_redirect_url = std::env::var("REDIRECT_URL")
-                    .map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
-                let client_id =
-                    read_non_empty_env(&["GRENGIN_PROXY_AZURE_CLIENT_ID"])
-                        .unwrap_or_else(|| "managed-by-grengin-proxy".to_string());
-                let client_secret = read_non_empty_env(&[
-                    "GRENGIN_PROXY_AZURE_CLIENT_SECRET",
-                ])
-                .unwrap_or_else(|| "managed-by-grengin-proxy".to_string());
+                let client_id = read_non_empty_env(&["GRENGIN_PROXY_AZURE_CLIENT_ID"])
+                    .unwrap_or_else(|| "managed-by-grengin-proxy".to_string());
+                let client_secret = read_non_empty_env(&["GRENGIN_PROXY_AZURE_CLIENT_SECRET"])
+                    .unwrap_or_else(|| "managed-by-grengin-proxy".to_string());
                 let tenant_id =
                     read_non_empty_env(&["GRENGIN_PROXY_AZURE_TENANT_ID", "AZURE_TENANT_ID"])
                         .unwrap_or_else(|| "common".to_string());
@@ -579,13 +606,12 @@ impl AzureSettings {
                     true,
                 )
             } else {
-                let client_id = azure_client_id_local.ok_or(ConfigError::Missing("AZURE_CLIENT_ID"))?;
+                let client_id =
+                    azure_client_id_local.ok_or(ConfigError::Missing("AZURE_CLIENT_ID"))?;
                 let client_secret =
                     azure_client_secret_local.ok_or(ConfigError::Missing("AZURE_CLIENT_SECRET"))?;
                 let tenant_id = std::env::var("AZURE_TENANT_ID")
                     .map_err(|_| ConfigError::Missing("AZURE_TENANT_ID"))?;
-                let app_redirect_url = std::env::var("REDIRECT_URL")
-                    .map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
                 (
                     client_id,
                     client_secret,
@@ -744,10 +770,35 @@ pub enum ConfigError {
 
 #[cfg(test)]
 mod tests {
-    use super::{EmbeddingSettings, RagSettings};
+    use super::{EmbeddingSettings, RagSettings, should_use_grengin_proxy};
     use std::sync::{LazyLock, Mutex};
 
     static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    #[test]
+    fn public_proxy_requires_explicit_enablement_and_connection() {
+        let public_url = "https://chat.example.com";
+
+        assert!(!should_use_grengin_proxy(false, false, public_url, false));
+        assert!(!should_use_grengin_proxy(false, true, public_url, false));
+        assert!(should_use_grengin_proxy(false, true, public_url, true));
+    }
+
+    #[test]
+    fn localhost_without_credentials_uses_development_fallback() {
+        assert!(should_use_grengin_proxy(
+            false,
+            false,
+            "http://localhost:8080",
+            false
+        ));
+        assert!(!should_use_grengin_proxy(
+            true,
+            false,
+            "http://localhost:8080",
+            false
+        ));
+    }
 
     fn clear_embedding_env() {
         // SAFETY: tests serialize env mutations with ENV_LOCK.

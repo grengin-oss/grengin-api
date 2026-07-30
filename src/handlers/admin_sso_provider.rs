@@ -6,6 +6,7 @@ use crate::{
         permissions::{PERMISSION_SSO_PROVIDERS_MANAGE, PERMISSION_SSO_PROVIDERS_VIEW},
         sso_provider::{is_editable, sso_providers_list},
     },
+    config::setting::grengin_proxy_access_allowed,
     dto::admin_sso_providers::{
         EditableField, GrenginProxySetupRequest, SsoProvider, SsoProviderEditable,
         SsoProviderUpdate, SsoProviderValidationRequest, SsoProviderValidationResponse,
@@ -67,9 +68,15 @@ fn env_seed_for_template(
                 "1" | "true" | "yes" | "y" | "on"
             )
         })
-        .unwrap_or(false);
+        .unwrap_or(false)
+        && grengin_proxy_access_allowed();
     let proxy_jit = std::env::var("GRENGIN_PROXY_JIT_PROVISIONING")
-        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off"))
+        .map(|v| {
+            !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "false" | "0" | "no" | "off"
+            )
+        })
         .unwrap_or(false);
     let proxy_allowed_domains: Vec<String> = std::env::var("GRENGIN_PROXY_ALLOWED_DOMAINS")
         .unwrap_or_default()
@@ -748,7 +755,7 @@ pub async fn update_sso_provider_by_id(
 
 /// Returns true when provider can use Grengin's managed SSO proxy flow.
 fn grengin_proxy_available_for_provider(provider: &str) -> bool {
-    matches!(provider, "google" | "azure")
+    matches!(provider, "google" | "azure") && grengin_proxy_access_allowed()
 }
 
 /// POST /admin/sso-providers/:provider_id/quick-setup
@@ -786,6 +793,12 @@ pub async fn quick_setup_grengin_proxy(
         })?
         .ok_or(AuthError::ResourceNotFound)?;
 
+    if !grengin_proxy_available_for_provider(&model.provider) {
+        return Err(AuthError::SsoProviderNotConfigured {
+            provider: Some(model.provider.clone()),
+        });
+    }
+
     let proxy_client_id = "managed-by-grengin-proxy".to_string();
     let proxy_client_secret_plain = "managed-by-grengin-proxy".to_string();
 
@@ -800,8 +813,11 @@ pub async fn quick_setup_grengin_proxy(
 
     let app_redirect_url =
         std::env::var("REDIRECT_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
-    let proxy_redirect_url =
-        format!("{}/auth/{}/callback", app_redirect_url.trim_end_matches('/'), model.provider);
+    let proxy_redirect_url = format!(
+        "{}/auth/{}/callback",
+        app_redirect_url.trim_end_matches('/'),
+        model.provider
+    );
 
     let tenant_id = match model.provider.as_str() {
         "azure" => Some(
