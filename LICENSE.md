@@ -1,6 +1,6 @@
 # Grengin Sustainable Use License (SUL)
 
-Version 1.1 — June 2026
+Version 1.1 - June 2026
 
 Copyright (c) 2025–2026 Perter Technology Solutions Private Limited
 
