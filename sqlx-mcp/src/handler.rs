@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::db_manager::DatabaseManager;
 use crate::read_only::is_read_only_sql;
 use rmcp::{

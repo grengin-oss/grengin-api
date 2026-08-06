@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::{Error, anyhow};
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use openssl::sha::sha256;
 use serde_json::Value;
 use uuid::Uuid;

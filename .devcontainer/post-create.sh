@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+# SPDX-License-Identifier: Apache-2.0
+
 set -e
 
 echo "==> Setting up Grengin API development environment..."

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     handlers::message::{delete_chat_message_by_id, edit_chat_message_by_id_and_stream},
     state::SharedState,

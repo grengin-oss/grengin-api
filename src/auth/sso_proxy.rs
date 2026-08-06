@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use reqwest::Url;
 
 /// Returns the SSO proxy URL (where the Cloudflare worker is deployed).

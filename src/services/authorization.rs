@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use chrono::Utc;
 use sea_orm::sea_query::{Alias, BinOper, Expr};
 use sea_orm::{

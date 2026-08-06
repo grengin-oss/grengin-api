@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::auth::claims::Claims;
 use crate::dto::artifacts::{ArtifactListResponse, ArtifactResponse};
 use crate::handlers::artifacts;

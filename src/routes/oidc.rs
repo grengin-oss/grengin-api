@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     handlers::oidc::{
         azure_mobile_oauth_callback_get, azure_mobile_oauth_callback_post, oidc_login_start,

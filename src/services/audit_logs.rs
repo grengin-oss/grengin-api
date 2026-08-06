@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{env, time::Duration};
 
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};

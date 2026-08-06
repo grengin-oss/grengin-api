@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{fs, path::Path, time::Instant};
 
 use sea_orm::{DatabaseBackend, FromQueryResult, Statement};

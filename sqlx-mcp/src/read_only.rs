@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use std::borrow::Cow;
 
 const READ_ONLY_START_KEYWORDS: &[&str] =

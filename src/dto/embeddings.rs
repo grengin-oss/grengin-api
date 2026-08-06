@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use serde::Deserialize;
 
 // Response envelope from https://meta.grengin.com/providers/{provider}/text_embedders.json

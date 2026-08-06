@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 #[derive(Debug, Clone, Copy)]
 pub struct PermissionDefinition {
     pub domain: &'static str,

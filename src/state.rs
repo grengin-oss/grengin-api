@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     auth::{azure::build_azure_client, encryption::decrypt_key, google::build_google_client},
     config::setting::{ConfigError, OidcClient, Settings},

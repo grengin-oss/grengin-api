@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use chrono::{DateTime, Utc};
 use sea_orm::{JsonValue, entity::prelude::*};
 use serde::{Deserialize, Serialize};

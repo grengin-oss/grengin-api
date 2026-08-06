@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::models::mcp_servers::McpTransportType;
 use chrono::{DateTime, Duration, Utc};
 use oauth2::{

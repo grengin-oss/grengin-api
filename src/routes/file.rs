@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     handlers::file::{delete_file_by_id, download_file, get_file_by_id, get_files, upload_file},
     state::SharedState,

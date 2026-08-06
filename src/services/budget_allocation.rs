@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     handlers::admin_department_budgets::departments_budget_select,
     models::{conversations, departments, messages, users},
