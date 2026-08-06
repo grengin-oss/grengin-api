@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 pub use sea_orm_migration::prelude::*;
 
 mod m20250102_000001_add_redirect_url_to_sso_providers;

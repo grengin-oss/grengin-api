@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::dto::admin_sso_providers::SsoProviderTemplate;
 
 pub fn sso_providers_list() -> Vec<SsoProviderTemplate> {

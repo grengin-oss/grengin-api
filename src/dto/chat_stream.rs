@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{dto::files::File, models::messages::ChatRole};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 pub enum LlmProviderConfig {
     OpenAI(crate::config::setting::OpenaiSettings),
     Anthropic(crate::config::setting::AnthropicSettings),

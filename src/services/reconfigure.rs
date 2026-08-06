@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use axum::http::HeaderMap;
 use std::{fs, path::Path, process::Command as StdCommand, time::Duration};
 use tokio::process::Command;

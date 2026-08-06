@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::docs::{
     app_error_catlog::{AppErrorCatalogItem, build_app_error_catalog},
     auth_error_catlog::{AuthErrorCatalogItem, build_auth_error_catalog},

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     handlers::skills::{
         create_skill, delete_skill, get_skill, link_skill, list_conversation_skill_links,

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::error::{AppError, ChatStreamError, ErrorCode, ErrorDetail};
 use axum::http::StatusCode;
 use std::collections::BTreeMap;

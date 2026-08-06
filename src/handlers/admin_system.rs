@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 use axum::{Json, extract::State};
 use chrono::Utc;
 use reqwest::StatusCode;

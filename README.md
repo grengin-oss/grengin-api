@@ -7,7 +7,7 @@
 <h1 align="center">Grengin API</h1>
 
 <p align="center">
-  The source-available Rust backend for the self-hosted Grengin AI platform.
+  The open-source Rust backend for the self-hosted Grengin AI platform.
 </p>
 
 <p align="center">
@@ -15,15 +15,15 @@
   <a href="https://grengin.com/docs">Documentation</a> |
   <a href="https://github.com/grengin-oss/grengin">Grengin application</a> |
   <a href="https://github.com/grengin-oss/grengin/releases">Releases</a> |
-  <a href="LICENSE.md">License</a>
+  <a href="LICENSE">License</a>
 </p>
 
 <p align="center">
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-2024-000000?logo=rust&amp;logoColor=white">
   <img alt="Axum" src="https://img.shields.io/badge/Axum-0.8-1f2937">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-pgvector-4169E1?logo=postgresql&amp;logoColor=white">
   <img alt="Docker" src="https://img.shields.io/badge/Docker-amd64%20%7C%20arm64-2496ED?logo=docker&amp;logoColor=white">
-  <img alt="License" src="https://img.shields.io/badge/License-SUL%201.1-16a34a">
 </p>
 
 `grengin-api` provides Grengin's authentication, authorization, AI model
@@ -225,19 +225,22 @@ Report security issues privately through the contact details on
 
 ## Contributing
 
-Bug fixes, documentation improvements, and focused feature contributions are
-welcome. Open an issue before starting a large change so scope and API contracts
-can be agreed first.
-
-By contributing, you agree that your contribution is licensed under the
-[Grengin Sustainable Use License](LICENSE.md).
+Issues and small pull requests are welcome; see
+[CONTRIBUTING.md](CONTRIBUTING.md). There is no contributor agreement
+to sign, since Apache 2.0 Section 5 already covers submissions.
 
 ## License
 
-Grengin API is source-available under the
-[Grengin Sustainable Use License 1.1](LICENSE.md). It is free to self-host,
-modify, and use internally, including for commercial operations. There is no
-revenue threshold. Selling, white-labeling, or operating Grengin as a competing
-hosted service requires a separate agreement.
+Grengin is free and open source software under the
+[Apache License 2.0](LICENSE).
 
-For managed hosting or commercial permissions, contact `contact@grengin.com`.
+Use it, modify it, self-host it, embed it, resell it, or run it as a
+managed service, commercially or not, at any company size. No usage
+caps, no commercial license, nothing to sign. Releases published
+before this one remain under the Grengin Sustainable Use License they
+shipped with.
+
+The Grengin name and logo are trademarks of Perter Technology
+Solutions Private Limited and are not covered by the Apache license.
+Forks and third-party distributions need their own name; see
+[TRADEMARKS.md](TRADEMARKS.md).

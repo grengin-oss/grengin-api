@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
+// SPDX-License-Identifier: Apache-2.0
+
 // m20260127_000003_add_department_budget_columns.rs
 
 use sea_orm_migration::prelude::*;
