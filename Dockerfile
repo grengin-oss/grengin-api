@@ -47,6 +47,7 @@ RUN case "$TARGETARCH" in \
 
 # runtime: static binary; only certs if your app makes HTTPS requests
 FROM scratch
+LABEL org.opencontainers.image.licenses="Apache-2.0"
 # for HTTPS/TLS trust store:
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /usr/local/bin/grengin-api /usr/local/bin/app

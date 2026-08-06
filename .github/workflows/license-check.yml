@@ -1,0 +1,19 @@
+# Fails the build if a dependency's license is outside the allow list in
+# deny.toml. Also add this workflow (and a copy of deny.toml) to the root
+# repository for the installer crate.
+
+name: License check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses

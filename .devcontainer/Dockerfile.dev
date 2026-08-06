@@ -1,4 +1,5 @@
 FROM mcr.microsoft.com/devcontainers/rust:1-bookworm
+LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 # Install additional dependencies
 RUN apt-get update && apt-get install -y \
