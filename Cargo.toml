@@ -2,6 +2,8 @@
 name = "grengin-api"
 version = "0.3.23"
 edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/grengin-oss/grengin-api"
 
 [workspace]
 members = [".", "migration", "sqlx-mcp"]
@@ -46,6 +48,6 @@ infer = "0.22"
 zip = "2.2"
 
 # [profile.release]
-# opt-level = 3  
-# lto = true     
-# codegen-units = 1 
+# opt-level = 3
+# lto = true
+# codegen-units = 1

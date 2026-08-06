@@ -7,7 +7,7 @@
 <h1 align="center">Grengin API</h1>
 
 <p align="center">
-  The source-available Rust backend for the self-hosted Grengin AI platform.
+  The open-source Rust backend for the self-hosted Grengin AI platform.
 </p>
 
 <p align="center">
@@ -23,7 +23,7 @@
   <img alt="Axum" src="https://img.shields.io/badge/Axum-0.8-1f2937">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-pgvector-4169E1?logo=postgresql&amp;logoColor=white">
   <img alt="Docker" src="https://img.shields.io/badge/Docker-amd64%20%7C%20arm64-2496ED?logo=docker&amp;logoColor=white">
-  <img alt="License" src="https://img.shields.io/badge/License-SUL%201.1-16a34a">
+  <img alt="License" src="https://img.shields.io/badge/License-Apache%202.0-16a34a">
 </p>
 
 `grengin-api` provides Grengin's authentication, authorization, AI model
@@ -229,15 +229,15 @@ Bug fixes, documentation improvements, and focused feature contributions are
 welcome. Open an issue before starting a large change so scope and API contracts
 can be agreed first.
 
-By contributing, you agree that your contribution is licensed under the
-[Grengin Sustainable Use License](LICENSE.md).
+Unless stated otherwise, contributions submitted to this repository are
+licensed under the [Apache License 2.0](LICENSE.md), as described in Section 5
+of the license.
 
 ## License
 
-Grengin API is source-available under the
-[Grengin Sustainable Use License 1.1](LICENSE.md). It is free to self-host,
-modify, and use internally, including for commercial operations. There is no
-revenue threshold. Selling, white-labeling, or operating Grengin as a competing
-hosted service requires a separate agreement.
+Grengin API is open source under the [Apache License 2.0](LICENSE.md). You may
+use, modify, and distribute it, including for commercial purposes, subject to
+the license terms and the attribution notices in [NOTICE](NOTICE).
 
-For managed hosting or commercial permissions, contact `contact@grengin.com`.
+The Apache License does not grant permission to use the Grengin trademarks,
+service marks, or branding except as allowed by Section 6 of the license.
