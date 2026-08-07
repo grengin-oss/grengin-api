@@ -37,12 +37,12 @@ use uuid::Uuid;
     get,
     path = "/chat",
     tag = "chat",
+    description = "List conversations. When search is provided, results use PostgreSQL full-text lexical search across conversation titles and message content, with semantic search as an automatic fallback when lexical search returns no matches.",
     params(
         ("limit" = Option<u64>, Query, description = "Number of items per page (default: 20, max: 100)"),
         ("offset" = Option<u64>, Query, description = "Number of items to skip (default: 0)"),
         ("archived" = Option<bool>, Query, description = "Filter by archived status. If not provided, returns only non-archived conversations"),
-        ("search" = Option<String>, Query, description = "Search text (title match by default; use semantic=true to enable semantic search)"),
-        ("semantic" = Option<bool>, Query, description = "Enable semantic search for query text (default: false)"),
+        ("search" = Option<String>, Query, description = "Search conversation titles and message content. Lexical full-text search runs first, followed automatically by semantic search when no lexical matches are found."),
     ),
     responses(
         (status = 200, body = PaginatedConversations),
