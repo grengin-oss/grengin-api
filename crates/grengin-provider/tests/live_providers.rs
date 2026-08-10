@@ -210,6 +210,6 @@ live_test!(
     "Anthropic",
     "ANTHROPIC_API_KEY",
     "https://api.anthropic.com/v1/",
-    "claude-3-5-haiku-latest",
+    "claude-haiku-4-5-20251001",
     ANTHROPIC
 );
