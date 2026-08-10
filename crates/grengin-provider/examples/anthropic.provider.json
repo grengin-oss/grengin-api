@@ -1,0 +1,93 @@
+{
+  "$schema": "../schema/provider-plugin-v1.schema.json",
+  "manifestVersion": "1.0",
+  "id": "anthropic",
+  "version": "1.0.0",
+  "name": "Anthropic",
+  "baseUrl": "https://api.anthropic.com/v1/",
+  "credentials": [
+    {
+      "id": "api_key",
+      "type": "secret",
+      "required": true,
+      "label": "API key"
+    }
+  ],
+  "capabilities": {
+    "chat": {
+      "streaming": true,
+      "tools": false,
+      "vision": false,
+      "reasoning": false
+    }
+  },
+  "mappings": {
+    "message": {
+      "role": { "$get": "item.role" },
+      "content": { "$map": "item.content", "using": "content_part" }
+    },
+    "content_part": {
+      "$switch": { "$get": "item.type" },
+      "cases": {
+        "text": {
+          "type": { "$literal": "text" },
+          "text": { "$get": "item.text" }
+        }
+      }
+    }
+  },
+  "operations": {
+    "chatStream": {
+      "method": "POST",
+      "path": "messages",
+      "headers": {
+        "x-api-key": { "secret": "api_key" },
+        "anthropic-version": { "literal": "2023-06-01" }
+      },
+      "bodyEncoding": "json",
+      "body": {
+        "model": { "$get": "request.model" },
+        "messages": { "$map": "request.messages", "using": "message" },
+        "max_tokens": { "$get": "request.maxTokens" },
+        "temperature": { "$omitIfNull": { "$get": "request.temperature" } },
+        "stream": { "$literal": true }
+      },
+      "response": {
+        "bodyEncoding": "sse",
+        "eventDataEncoding": "json",
+        "rules": [
+          {
+            "id": "message_start",
+            "when": { "pointer": "/type", "equals": "message_start" },
+            "emit": "messageStart",
+            "fields": { "requestId": "/message/id" }
+          },
+          {
+            "id": "input_usage",
+            "when": { "pointer": "/type", "equals": "message_start" },
+            "emit": "usage",
+            "fields": { "inputTokens": "/message/usage/input_tokens" }
+          },
+          {
+            "id": "text",
+            "when": { "pointer": "/delta/type", "equals": "text_delta" },
+            "emit": "textDelta",
+            "value": "/delta/text"
+          },
+          {
+            "id": "output_usage",
+            "when": { "pointer": "/type", "equals": "message_delta" },
+            "emit": "usage",
+            "fields": { "outputTokens": "/usage/output_tokens" }
+          },
+          {
+            "id": "completed",
+            "when": { "pointer": "/delta/stop_reason", "notNull": true },
+            "emit": "completed",
+            "fields": { "finishReason": "/delta/stop_reason" }
+          }
+        ]
+      }
+    }
+  }
+}

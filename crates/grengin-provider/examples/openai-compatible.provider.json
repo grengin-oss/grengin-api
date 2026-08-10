@@ -1,0 +1,229 @@
+{
+  "$schema": "../schema/provider-plugin-v1.schema.json",
+  "manifestVersion": "1.0",
+  "id": "openai-compatible",
+  "version": "1.0.0",
+  "name": "OpenAI-compatible",
+  "description": "Reference manifest for hosted or self-hosted OpenAI-compatible HTTP/SSE APIs.",
+  "baseUrl": "https://api.openai.com/v1/",
+  "credentials": [
+    {
+      "id": "api_key",
+      "type": "secret",
+      "required": true,
+      "label": "API key"
+    }
+  ],
+  "capabilities": {
+    "chat": {
+      "streaming": true,
+      "tools": true,
+      "vision": false,
+      "reasoning": false
+    },
+    "embeddings": true,
+    "imageGeneration": true,
+    "modelListing": true
+  },
+  "mappings": {
+    "message": {
+      "$switch": { "$get": "item.role" },
+      "cases": {
+        "system": {
+          "role": { "$literal": "system" },
+          "content": { "$map": "item.content", "using": "content_part" }
+        },
+        "user": {
+          "role": { "$literal": "user" },
+          "content": { "$map": "item.content", "using": "content_part" }
+        },
+        "assistant": {
+          "role": { "$literal": "assistant" },
+          "content": { "$map": "item.content", "using": "content_part" },
+          "tool_calls": {
+            "$omitIfNull": { "$map": "item.toolCalls", "using": "tool_call" }
+          }
+        },
+        "tool": {
+          "role": { "$literal": "tool" },
+          "tool_call_id": { "$get": "item.toolResult.callId" },
+          "content": { "$jsonEncode": { "$get": "item.toolResult.output" } }
+        }
+      }
+    },
+    "content_part": {
+      "$switch": { "$get": "item.type" },
+      "cases": {
+        "text": {
+          "type": { "$literal": "text" },
+          "text": { "$get": "item.text" }
+        }
+      }
+    },
+    "tool": {
+      "type": { "$literal": "function" },
+      "function": {
+        "name": { "$get": "item.name" },
+        "description": { "$omitIfNull": { "$get": "item.description" } },
+        "parameters": { "$get": "item.parameters" }
+      }
+    },
+    "tool_call": {
+      "id": { "$get": "item.id" },
+      "type": { "$literal": "function" },
+      "function": {
+        "name": { "$get": "item.name" },
+        "arguments": { "$jsonEncode": { "$get": "item.arguments" } }
+      }
+    }
+  },
+  "models": [],
+  "operations": {
+    "chatStream": {
+      "method": "POST",
+      "path": "chat/completions",
+      "headers": {
+        "Authorization": {
+          "secret": "api_key",
+          "prefix": "Bearer "
+        }
+      },
+      "bodyEncoding": "json",
+      "body": {
+        "model": { "$get": "request.model" },
+        "messages": { "$map": "request.messages", "using": "message" },
+        "temperature": { "$omitIfNull": { "$get": "request.temperature" } },
+        "max_completion_tokens": { "$omitIfNull": { "$get": "request.maxTokens" } },
+        "tools": { "$omitIfNull": { "$map": "request.tools", "using": "tool" } },
+        "stream": { "$literal": true },
+        "stream_options": { "$literal": { "include_usage": true } }
+      },
+      "response": {
+        "bodyEncoding": "sse",
+        "eventDataEncoding": "json",
+        "doneData": "[DONE]",
+        "rules": [
+          {
+            "id": "message_start",
+            "when": { "pointer": "/id", "exists": true },
+            "emit": "messageStart",
+            "fields": { "requestId": "/id" }
+          },
+          {
+            "id": "text",
+            "when": { "pointer": "/choices/0/delta/content", "exists": true },
+            "emit": "textDelta",
+            "value": "/choices/0/delta/content"
+          },
+          {
+            "id": "tool_start",
+            "forEach": "/choices/0/delta/tool_calls",
+            "when": { "pointer": "/id", "exists": true },
+            "emit": "toolCallStart",
+            "fields": {
+              "id": "/id",
+              "name": "/function/name",
+              "index": "/index"
+            }
+          },
+          {
+            "id": "tool_arguments",
+            "forEach": "/choices/0/delta/tool_calls",
+            "when": { "pointer": "/function/arguments", "exists": true },
+            "emit": "toolArgumentsDelta",
+            "fields": {
+              "index": "/index",
+              "fragment": "/function/arguments"
+            }
+          },
+          {
+            "id": "usage",
+            "when": { "pointer": "/usage", "exists": true },
+            "emit": "usage",
+            "fields": {
+              "inputTokens": "/usage/prompt_tokens",
+              "outputTokens": "/usage/completion_tokens",
+              "totalTokens": "/usage/total_tokens",
+              "cachedInputTokens": "/usage/prompt_tokens_details/cached_tokens"
+            }
+          },
+          {
+            "id": "completed",
+            "when": { "pointer": "/choices/0/finish_reason", "notNull": true },
+            "emit": "completed",
+            "fields": { "finishReason": "/choices/0/finish_reason" }
+          }
+        ]
+      },
+      "continuation": {
+        "mode": "replay_messages",
+        "maxToolRounds": 3
+      }
+    },
+    "embeddings": {
+      "method": "POST",
+      "path": "embeddings",
+      "headers": {
+        "Authorization": {
+          "secret": "api_key",
+          "prefix": "Bearer "
+        }
+      },
+      "bodyEncoding": "json",
+      "body": {
+        "model": { "$get": "request.model" },
+        "input": { "$get": "request.inputs" },
+        "dimensions": { "$omitIfNull": { "$get": "request.dimensions" } }
+      },
+      "maxBatchSize": 2048,
+      "response": {
+        "bodyEncoding": "json",
+        "itemsPointer": "/data",
+        "vectorPointer": "/embedding",
+        "indexPointer": "/index",
+        "usage": { "totalTokens": "/usage/total_tokens" }
+      }
+    },
+    "imageGeneration": {
+      "method": "POST",
+      "path": "images/generations",
+      "headers": {
+        "Authorization": {
+          "secret": "api_key",
+          "prefix": "Bearer "
+        }
+      },
+      "bodyEncoding": "json",
+      "body": {
+        "model": { "$get": "request.model" },
+        "prompt": { "$get": "request.prompt" },
+        "n": { "$get": "request.count" },
+        "size": { "$omitIfNull": { "$get": "request.size" } },
+        "quality": { "$omitIfNull": { "$get": "request.quality" } },
+        "response_format": { "$literal": "b64_json" }
+      },
+      "response": {
+        "bodyEncoding": "json",
+        "imagesPointer": "/data",
+        "base64Pointer": "/b64_json",
+        "defaultMediaType": "image/png"
+      }
+    },
+    "listModels": {
+      "method": "GET",
+      "path": "models",
+      "headers": {
+        "Authorization": {
+          "secret": "api_key",
+          "prefix": "Bearer "
+        }
+      },
+      "bodyEncoding": "none",
+      "response": {
+        "bodyEncoding": "json",
+        "modelsPointer": "/data",
+        "idPointer": "/id"
+      }
+    }
+  }
+}

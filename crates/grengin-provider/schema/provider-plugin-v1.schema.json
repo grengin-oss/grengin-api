@@ -1,0 +1,1163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProviderManifestV1",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "baseUrl": {
+      "type": "string"
+    },
+    "capabilities": {
+      "$ref": "#/$defs/ManifestCapabilities"
+    },
+    "configurationSchema": {
+      "default": null
+    },
+    "credentials": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/CredentialDefinition"
+      }
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "id": {
+      "type": "string"
+    },
+    "manifestVersion": {
+      "type": "string"
+    },
+    "mappings": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/MappingExpression"
+      },
+      "default": {}
+    },
+    "models": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ManifestModel"
+      }
+    },
+    "name": {
+      "type": "string"
+    },
+    "operations": {
+      "$ref": "#/$defs/ProviderOperations"
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "manifestVersion",
+    "id",
+    "version",
+    "name",
+    "baseUrl",
+    "capabilities",
+    "operations"
+  ],
+  "$defs": {
+    "ArrayExpression": {
+      "type": "object",
+      "properties": {
+        "$array": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$array"
+      ]
+    },
+    "Base64Expression": {
+      "type": "object",
+      "properties": {
+        "$base64": {
+          "$ref": "#/$defs/MappingExpression"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$base64"
+      ]
+    },
+    "BodyEncoding": {
+      "type": "string",
+      "enum": [
+        "json",
+        "form",
+        "multipart",
+        "text",
+        "binary",
+        "none"
+      ]
+    },
+    "ChatBodyEncoding": {
+      "type": "string",
+      "enum": [
+        "sse"
+      ]
+    },
+    "ChatOperation": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "bodyEncoding": {
+          "$ref": "#/$defs/BodyEncoding",
+          "default": "json"
+        },
+        "continuation": {
+          "$ref": "#/$defs/ContinuationSpec",
+          "default": {
+            "captures": {},
+            "maxToolRounds": 3,
+            "mode": "replay_messages"
+          }
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/HeaderValueSpec"
+          },
+          "default": {}
+        },
+        "maxResponseBytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "method": {
+          "$ref": "#/$defs/HttpMethod",
+          "default": "POST"
+        },
+        "path": {
+          "type": "string"
+        },
+        "query": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          },
+          "default": {}
+        },
+        "response": {
+          "$ref": "#/$defs/ChatResponseSpec"
+        },
+        "timeoutMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "response"
+      ]
+    },
+    "ChatResponseSpec": {
+      "type": "object",
+      "properties": {
+        "bodyEncoding": {
+          "$ref": "#/$defs/ChatBodyEncoding",
+          "default": "sse"
+        },
+        "doneData": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "eventDataEncoding": {
+          "$ref": "#/$defs/EventDataEncoding",
+          "default": "json"
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResponseRule"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "rules"
+      ]
+    },
+    "ContinuationMode": {
+      "type": "string",
+      "enum": [
+        "replay_messages"
+      ]
+    },
+    "ContinuationSpec": {
+      "type": "object",
+      "properties": {
+        "captures": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "maxToolRounds": {
+          "type": "integer",
+          "format": "uint8",
+          "default": 3,
+          "maximum": 255,
+          "minimum": 0
+        },
+        "mode": {
+          "$ref": "#/$defs/ContinuationMode",
+          "default": "replay_messages"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CredentialDefinition": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "required": {
+          "type": "boolean",
+          "default": false
+        },
+        "type": {
+          "$ref": "#/$defs/CredentialType"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type"
+      ]
+    },
+    "CredentialType": {
+      "type": "string",
+      "enum": [
+        "secret",
+        "text"
+      ]
+    },
+    "EmbeddingOperation": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "bodyEncoding": {
+          "$ref": "#/$defs/BodyEncoding",
+          "default": "json"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/HeaderValueSpec"
+          },
+          "default": {}
+        },
+        "maxBatchSize": {
+          "type": "integer",
+          "format": "uint",
+          "default": 2048,
+          "minimum": 0
+        },
+        "maxResponseBytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "method": {
+          "$ref": "#/$defs/HttpMethod",
+          "default": "POST"
+        },
+        "path": {
+          "type": "string"
+        },
+        "query": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          },
+          "default": {}
+        },
+        "response": {
+          "$ref": "#/$defs/EmbeddingResponseSpec"
+        },
+        "timeoutMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "response"
+      ]
+    },
+    "EmbeddingResponseSpec": {
+      "type": "object",
+      "properties": {
+        "bodyEncoding": {
+          "$ref": "#/$defs/StructuredBodyEncoding",
+          "default": "json"
+        },
+        "indexPointer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "itemsPointer": {
+          "type": "string"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageMapping"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "vectorPointer": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "itemsPointer",
+        "vectorPointer"
+      ]
+    },
+    "EventDataEncoding": {
+      "type": "string",
+      "enum": [
+        "json",
+        "text"
+      ]
+    },
+    "EventKind": {
+      "type": "string",
+      "enum": [
+        "messageStart",
+        "textDelta",
+        "reasoningDelta",
+        "toolCallStart",
+        "toolArgumentsDelta",
+        "toolCallEnd",
+        "usage",
+        "providerEvent",
+        "error",
+        "completed"
+      ]
+    },
+    "GetExpression": {
+      "type": "object",
+      "properties": {
+        "$get": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$get"
+      ]
+    },
+    "HeaderValueSpec": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "literal": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "literal"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "prefix": {
+              "type": "string",
+              "default": ""
+            },
+            "secret": {
+              "type": "string"
+            },
+            "suffix": {
+              "type": "string",
+              "default": ""
+            }
+          },
+          "required": [
+            "secret"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mapping": {
+              "$ref": "#/$defs/MappingExpression"
+            }
+          },
+          "required": [
+            "mapping"
+          ]
+        }
+      ]
+    },
+    "HttpMethod": {
+      "type": "string",
+      "enum": [
+        "GET",
+        "POST",
+        "PUT",
+        "PATCH"
+      ]
+    },
+    "IfExpression": {
+      "type": "object",
+      "properties": {
+        "$if": {
+          "$ref": "#/$defs/MappingExpression"
+        },
+        "else": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "then": {
+          "$ref": "#/$defs/MappingExpression"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$if",
+        "then"
+      ]
+    },
+    "ImageBodyEncoding": {
+      "type": "string",
+      "enum": [
+        "json",
+        "binary"
+      ]
+    },
+    "ImageOperation": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "bodyEncoding": {
+          "$ref": "#/$defs/BodyEncoding",
+          "default": "json"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/HeaderValueSpec"
+          },
+          "default": {}
+        },
+        "maxResponseBytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "method": {
+          "$ref": "#/$defs/HttpMethod",
+          "default": "POST"
+        },
+        "path": {
+          "type": "string"
+        },
+        "query": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          },
+          "default": {}
+        },
+        "response": {
+          "$ref": "#/$defs/ImageResponseSpec"
+        },
+        "timeoutMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "response"
+      ]
+    },
+    "ImageResponseSpec": {
+      "type": "object",
+      "properties": {
+        "base64Pointer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "bodyEncoding": {
+          "$ref": "#/$defs/ImageBodyEncoding",
+          "default": "json"
+        },
+        "defaultMediaType": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "imagesPointer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "mediaTypePointer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "urlPointer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageMapping"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "JsonEncodeExpression": {
+      "type": "object",
+      "properties": {
+        "$jsonEncode": {
+          "$ref": "#/$defs/MappingExpression"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$jsonEncode"
+      ]
+    },
+    "LiteralExpression": {
+      "type": "object",
+      "properties": {
+        "$literal": true
+      },
+      "additionalProperties": false,
+      "required": [
+        "$literal"
+      ]
+    },
+    "ManifestCapabilities": {
+      "type": "object",
+      "properties": {
+        "chat": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManifestChatCapabilities"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "embeddings": {
+          "type": "boolean",
+          "default": false
+        },
+        "imageGeneration": {
+          "type": "boolean",
+          "default": false
+        },
+        "modelListing": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "ManifestChatCapabilities": {
+      "type": "object",
+      "properties": {
+        "reasoning": {
+          "type": "boolean",
+          "default": false
+        },
+        "streaming": {
+          "type": "boolean",
+          "default": false
+        },
+        "tools": {
+          "type": "boolean",
+          "default": false
+        },
+        "vision": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "ManifestModel": {
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/ManifestCapabilities",
+          "default": {
+            "chat": null,
+            "embeddings": false,
+            "imageGeneration": false,
+            "modelListing": false
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "metadata": {
+          "default": null
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name"
+      ]
+    },
+    "MapExpression": {
+      "type": "object",
+      "properties": {
+        "$map": {
+          "type": "string"
+        },
+        "using": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$map",
+        "using"
+      ]
+    },
+    "MappingExpression": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LiteralExpression"
+        },
+        {
+          "$ref": "#/$defs/GetExpression"
+        },
+        {
+          "$ref": "#/$defs/OmitIfNullExpression"
+        },
+        {
+          "$ref": "#/$defs/JsonEncodeExpression"
+        },
+        {
+          "$ref": "#/$defs/Base64Expression"
+        },
+        {
+          "$ref": "#/$defs/MapExpression"
+        },
+        {
+          "$ref": "#/$defs/IfExpression"
+        },
+        {
+          "$ref": "#/$defs/SwitchExpression"
+        },
+        {
+          "$ref": "#/$defs/MergeExpression"
+        },
+        {
+          "$ref": "#/$defs/ObjectExpression"
+        },
+        {
+          "$ref": "#/$defs/ArrayExpression"
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        },
+        true
+      ]
+    },
+    "MatchCondition": {
+      "type": "object",
+      "properties": {
+        "equals": {
+          "default": null
+        },
+        "exists": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "notNull": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "pointer": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pointer"
+      ]
+    },
+    "MergeExpression": {
+      "type": "object",
+      "properties": {
+        "$merge": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$merge"
+      ]
+    },
+    "ModelListOperation": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "bodyEncoding": {
+          "$ref": "#/$defs/BodyEncoding",
+          "default": "json"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/HeaderValueSpec"
+          },
+          "default": {}
+        },
+        "maxResponseBytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "method": {
+          "$ref": "#/$defs/HttpMethod",
+          "default": "POST"
+        },
+        "path": {
+          "type": "string"
+        },
+        "query": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          },
+          "default": {}
+        },
+        "response": {
+          "$ref": "#/$defs/ModelListResponseSpec"
+        },
+        "timeoutMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "response"
+      ]
+    },
+    "ModelListResponseSpec": {
+      "type": "object",
+      "properties": {
+        "bodyEncoding": {
+          "$ref": "#/$defs/StructuredBodyEncoding",
+          "default": "json"
+        },
+        "idPointer": {
+          "type": "string"
+        },
+        "modelsPointer": {
+          "type": "string"
+        },
+        "namePointer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "modelsPointer",
+        "idPointer"
+      ]
+    },
+    "ObjectExpression": {
+      "type": "object",
+      "properties": {
+        "$object": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$object"
+      ]
+    },
+    "OmitIfNullExpression": {
+      "type": "object",
+      "properties": {
+        "$omitIfNull": {
+          "$ref": "#/$defs/MappingExpression"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$omitIfNull"
+      ]
+    },
+    "ProviderOperations": {
+      "type": "object",
+      "properties": {
+        "chatStream": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChatOperation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "embeddings": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EmbeddingOperation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "imageGeneration": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImageOperation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "listModels": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelListOperation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "ResponseRule": {
+      "type": "object",
+      "properties": {
+        "constants": {
+          "type": "object",
+          "additionalProperties": true,
+          "default": {}
+        },
+        "emit": {
+          "$ref": "#/$defs/EventKind"
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "forEach": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "id": {
+          "type": "string"
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MatchCondition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "emit"
+      ]
+    },
+    "StructuredBodyEncoding": {
+      "type": "string",
+      "enum": [
+        "json",
+        "text_json"
+      ]
+    },
+    "SwitchExpression": {
+      "type": "object",
+      "properties": {
+        "$switch": {
+          "$ref": "#/$defs/MappingExpression"
+        },
+        "cases": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        },
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$switch",
+        "cases"
+      ]
+    },
+    "UsageMapping": {
+      "type": "object",
+      "properties": {
+        "cacheCreationTokens": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "cachedInputTokens": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "inputTokens": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "outputTokens": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "totalTokens": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
