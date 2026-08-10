@@ -165,6 +165,14 @@ live_test!(
     OPENAI_COMPATIBLE
 );
 live_test!(
+    openrouter_chat_smoke,
+    "OpenRouter",
+    "OPEN_ROUTER_API_KEY",
+    "https://openrouter.ai/api/v1/",
+    "openrouter/auto",
+    OPENAI_COMPATIBLE
+);
+live_test!(
     mistral_chat_smoke,
     "Mistral",
     "MISTRAL_API_KEY",
