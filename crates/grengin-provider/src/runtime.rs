@@ -990,17 +990,19 @@ async fn ensure_success(response: Response) -> Result<Response, ProviderError> {
         return Ok(response);
     }
     let status = response.status();
-    let body = read_limited(response, MAX_ERROR_BODY_BYTES).await?;
-    let message = String::from_utf8_lossy(&body).trim().to_string();
-    if matches!(
-        status,
-        StatusCode::TOO_MANY_REQUESTS | StatusCode::PAYMENT_REQUIRED
-    ) {
-        return Err(ProviderError::QuotaExhausted(message));
+    let _ = read_limited(response, MAX_ERROR_BODY_BYTES).await?;
+    if status == StatusCode::PAYMENT_REQUIRED {
+        return Err(ProviderError::PaymentRequired);
+    }
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        return Err(ProviderError::QuotaExhausted);
     }
     Err(ProviderError::HttpStatus {
         status: status.as_u16(),
-        message,
+        message: status
+            .canonical_reason()
+            .unwrap_or("provider request failed")
+            .to_string(),
     })
 }
 

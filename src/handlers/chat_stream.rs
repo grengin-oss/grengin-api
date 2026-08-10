@@ -2751,7 +2751,7 @@ pub async fn handle_chat_stream(
                            break;
                        }
                        LlmStreamError::Provider(error) => {
-                           let stream_err = if matches!(&error, grengin_provider::ProviderError::QuotaExhausted(_)) {
+                           let stream_err = if matches!(&error, grengin_provider::ProviderError::QuotaExhausted) {
                                ChatStreamError::ApiQuotaExhausted { provider: provider.clone() }
                            } else {
                                ChatStreamError::ProviderError {

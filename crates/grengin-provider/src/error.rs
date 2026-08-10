@@ -35,8 +35,11 @@ pub enum ProviderError {
     #[error("provider returned HTTP {status}: {message}")]
     HttpStatus { status: u16, message: String },
 
-    #[error("provider quota or rate limit was exhausted: {0}")]
-    QuotaExhausted(String),
+    #[error("provider quota or rate limit was exhausted")]
+    QuotaExhausted,
+
+    #[error("provider billing is required")]
+    PaymentRequired,
 
     #[error("provider stream ended unexpectedly")]
     StreamEnded,

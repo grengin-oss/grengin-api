@@ -124,7 +124,8 @@ fn error_class(error: &grengin_provider::ProviderError) -> &'static str {
         grengin_provider::ProviderError::HeaderNotAllowed(_) => "header_not_allowed",
         grengin_provider::ProviderError::Transport(_) => "transport",
         grengin_provider::ProviderError::HttpStatus { .. } => "http_status",
-        grengin_provider::ProviderError::QuotaExhausted(_) => "quota_exhausted",
+        grengin_provider::ProviderError::QuotaExhausted => "quota_exhausted",
+        grengin_provider::ProviderError::PaymentRequired => "payment_required",
         grengin_provider::ProviderError::StreamEnded => "stream_ended",
         grengin_provider::ProviderError::Cancelled => "cancelled",
         grengin_provider::ProviderError::ResponseTooLarge => "response_too_large",
@@ -170,6 +171,14 @@ live_test!(
     "OPEN_ROUTER_API_KEY",
     "https://openrouter.ai/api/v1/",
     "openrouter/auto",
+    OPENAI_COMPATIBLE
+);
+live_test!(
+    cerebras_chat_smoke,
+    "Cerebras",
+    "CEREBRAS_API_KEY",
+    "https://api.cerebras.ai/v1/",
+    "gpt-oss-120b",
     OPENAI_COMPATIBLE
 );
 live_test!(

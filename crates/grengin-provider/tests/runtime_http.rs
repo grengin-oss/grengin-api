@@ -351,14 +351,8 @@ async fn accepts_direct_binary_image_responses() {
     assert_eq!(result.images[0].media_type, "image/webp");
 }
 
-#[tokio::test]
-async fn maps_rate_limits_without_leaking_credentials() {
-    let (base_url, _) = serve_once(
-        "429 Too Many Requests",
-        "application/json",
-        br#"{"error":"slow down"}"#.to_vec(),
-    )
-    .await;
+async fn embedding_error(status: &str, body: &[u8]) -> ProviderError {
+    let (base_url, _) = serve_once(status, "application/json", body.to_vec()).await;
     let provider = DeclarativeProvider::new(
         manifest(
             &base_url,
@@ -377,7 +371,7 @@ async fn maps_rate_limits_without_leaking_credentials() {
         runtime(base_url),
     )
     .unwrap();
-    let error = provider
+    provider
         .embeddings()
         .unwrap()
         .embed(EmbeddingRequest {
@@ -387,7 +381,53 @@ async fn maps_rate_limits_without_leaking_credentials() {
             options: Value::Null,
         })
         .await
-        .unwrap_err();
-    assert!(matches!(error, ProviderError::QuotaExhausted(_)));
+        .unwrap_err()
+}
+
+#[tokio::test]
+async fn maps_rate_limits_without_leaking_provider_bodies() {
+    let error = embedding_error(
+        "429 Too Many Requests",
+        br#"{"error":"secret response detail"}"#,
+    )
+    .await;
+    assert!(matches!(error, ProviderError::QuotaExhausted));
+    assert!(!error.to_string().contains("secret response detail"));
     assert!(!error.to_string().contains("super-secret"));
+}
+
+#[tokio::test]
+async fn distinguishes_payment_required_from_rate_limits() {
+    let error = embedding_error(
+        "402 Payment Required",
+        br#"{"message":"billing account detail"}"#,
+    )
+    .await;
+    assert!(matches!(error, ProviderError::PaymentRequired));
+    assert!(!error.to_string().contains("billing account detail"));
+}
+
+#[tokio::test]
+async fn keeps_other_http_errors_bounded_and_generic() {
+    let unauthorized =
+        embedding_error("401 Unauthorized", br#"{"error":"credential fingerprint"}"#).await;
+    assert!(matches!(
+        unauthorized,
+        ProviderError::HttpStatus { status: 401, .. }
+    ));
+    assert_eq!(
+        unauthorized.to_string(),
+        "provider returned HTTP 401: Unauthorized"
+    );
+
+    let server_error = embedding_error(
+        "503 Service Unavailable",
+        br#"{"error":"internal provider trace"}"#,
+    )
+    .await;
+    assert!(matches!(
+        server_error,
+        ProviderError::HttpStatus { status: 503, .. }
+    ));
+    assert!(!server_error.to_string().contains("internal provider trace"));
 }
