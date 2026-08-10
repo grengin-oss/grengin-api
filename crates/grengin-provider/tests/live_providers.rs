@@ -182,6 +182,14 @@ live_test!(
     OPENAI_COMPATIBLE
 );
 live_test!(
+    deepseek_chat_smoke,
+    "DeepSeek",
+    "DEEPSEEK_API_KEY",
+    "https://api.deepseek.com/v1/",
+    "deepseek-v4-flash",
+    OPENAI_COMPATIBLE
+);
+live_test!(
     mistral_chat_smoke,
     "Mistral",
     "MISTRAL_API_KEY",
