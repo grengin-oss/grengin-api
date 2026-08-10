@@ -584,7 +584,38 @@ pub async fn generate_embeddings(
             }
             Ok(Some(embeddings))
         }
-        _ => Ok(None),
+        _ => {
+            let Some(plugin) = app_state.provider_registry.get_by_str(&provider).await else {
+                return Ok(None);
+            };
+            let Some(embedder) = plugin.embeddings() else {
+                return Ok(None);
+            };
+            let response = embedder
+                .embed(grengin_provider::EmbeddingRequest {
+                    model: grengin_provider::ModelId::new(config.model.clone()),
+                    inputs,
+                    dimensions: config.dimensions.and_then(|value| u32::try_from(value).ok()),
+                    options: serde_json::Value::Null,
+                })
+                .await
+                .map_err(|error| {
+                    eprintln!(
+                        "provider plugin embedding failed: {}",
+                        crate::services::provider_chat::provider_error_class(&error)
+                    );
+                    AppError::LlmProviderNotConfigured {
+                        provider: provider.clone(),
+                    }
+                })?;
+            Ok(Some(
+                response
+                    .vectors
+                    .into_iter()
+                    .map(|embedding| normalize_to_target(embedding, target_dim))
+                    .collect(),
+            ))
+        }
     }
 }
 

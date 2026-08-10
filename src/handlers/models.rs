@@ -108,6 +108,48 @@ pub async fn get_list_models(
         });
     }
 
+    for descriptor in app_state.provider_registry.descriptors().await {
+        let provider_key = descriptor.id.to_string();
+        let Some(plugin) = app_state.provider_registry.get(&descriptor.id).await else {
+            continue;
+        };
+        let Some(model_provider) = plugin.models() else {
+            continue;
+        };
+        let plugin_models = match model_provider.list_models().await {
+            Ok(models) => models,
+            Err(error) => {
+                eprintln!(
+                    "provider plugin model listing failed: {}",
+                    crate::services::provider_chat::provider_error_class(&error)
+                );
+                continue;
+            }
+        };
+        let mut models = plugin_models
+            .into_iter()
+            .map(|model| crate::services::provider_models::to_model_info(&provider_key, model))
+            .filter(|model| model.model_type != ModelType::TextEmbedder)
+            .collect::<Vec<_>>();
+        if let Some(allowed) = &allowed_set {
+            models.retain(|model| {
+                allowed.contains(&(provider_key.clone(), model.key.to_lowercase()))
+                    || allowed.contains(&(provider_key.clone(), model.name.to_lowercase()))
+            });
+        }
+        if models.is_empty() {
+            continue;
+        }
+        filtered_providers.push(ProviderInfo {
+            key: provider_key,
+            name: descriptor.name,
+            icon: String::new(),
+            icon_dark: String::new(),
+            status: "enabled".to_string(),
+            models,
+        });
+    }
+
     (
         status,
         Json(ModelsResponse {

@@ -31,4 +31,5 @@ pub mod notifications;
 pub mod oidc;
 pub mod open_error;
 pub mod projects;
+pub mod provider_plugins;
 pub mod skills;

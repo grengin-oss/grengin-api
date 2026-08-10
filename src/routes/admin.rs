@@ -44,6 +44,11 @@ use crate::{
             add_new_user, delete_user, get_user_by_id, get_users, patch_user_status, update_user,
         },
         branding::{get_admin_branding, update_branding},
+        provider_plugins::{
+            delete_provider_plugin, disable_provider_plugin, enable_provider_plugin,
+            get_provider_plugin, get_provider_plugin_schema, install_provider_plugin,
+            list_provider_plugins, test_provider_plugin_connection, validate_provider_plugin,
+        },
     },
     state::SharedState,
 };
@@ -69,6 +74,34 @@ pub fn admin_routes() -> Router<SharedState> {
             get(get_embedding_config).put(update_embedding_config),
         )
         .route("/admin/ai-engines", get(get_ai_engines))
+        .route(
+            "/admin/provider-plugins",
+            get(list_provider_plugins).post(install_provider_plugin),
+        )
+        .route(
+            "/admin/provider-plugins/schema",
+            get(get_provider_plugin_schema),
+        )
+        .route(
+            "/admin/provider-plugins/validate",
+            post(validate_provider_plugin),
+        )
+        .route(
+            "/admin/provider-plugins/{provider_key}",
+            get(get_provider_plugin).delete(delete_provider_plugin),
+        )
+        .route(
+            "/admin/provider-plugins/{provider_key}/enable",
+            post(enable_provider_plugin),
+        )
+        .route(
+            "/admin/provider-plugins/{provider_key}/disable",
+            post(disable_provider_plugin),
+        )
+        .route(
+            "/admin/provider-plugins/{provider_key}/test",
+            post(test_provider_plugin_connection),
+        )
         .route(
             "/admin/ai-engines/{engine_key}",
             put(update_ai_engines_by_key).get(get_ai_engines_by_key),

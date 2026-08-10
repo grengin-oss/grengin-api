@@ -10,6 +10,7 @@ use crate::{
     services::notifications::NotificationEvent,
 };
 use anyhow::Error;
+use grengin_provider::ProviderRegistry;
 use reqwest::Client as ReqwestClient;
 use sea_orm::{Database, DatabaseConnection, EntityTrait};
 use std::{
@@ -31,6 +32,7 @@ pub struct AppState {
     pub mcp_clients: RwLock<HashMap<Uuid, Arc<McpServerClient>>>,
     pub notification_hub: broadcast::Sender<NotificationEvent>,
     pub stream_cancellations: RwLock<HashMap<Uuid, Arc<StreamCancel>>>,
+    pub provider_registry: ProviderRegistry,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -93,10 +95,14 @@ impl AppState {
             mcp_clients: RwLock::new(HashMap::new()),
             notification_hub,
             stream_cancellations: RwLock::new(HashMap::new()),
+            provider_registry: ProviderRegistry::new(),
         };
         state.refresh_azure_client().await?;
         state.refresh_google_client().await?;
         let _ = state.load_mcp_servers_from_db().await;
+        let _ = crate::services::provider_plugins::load_enabled_providers(&state)
+            .await
+            .map_err(|error| eprintln!("Loading provider plugins failed: {error}"));
         Ok(Arc::new(state))
     }
 
@@ -415,5 +421,3 @@ impl AppState {
         clients.remove(server_id);
     }
 }
-
-

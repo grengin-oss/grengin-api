@@ -1,11 +1,16 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
+use grengin_provider::ProviderPlugin;
+
 pub enum LlmProviderConfig {
     OpenAI(crate::config::setting::OpenaiSettings),
     Anthropic(crate::config::setting::AnthropicSettings),
     Mistral(crate::config::setting::MistralSettings),
     Gemini(crate::config::setting::GeminiSettings),
+    Plugin(Arc<dyn ProviderPlugin>),
 }
 
 pub fn resolve_web_search_enabled(metadata: Option<&serde_json::Value>) -> bool {

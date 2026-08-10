@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::auth::claims::Claims;
-use crate::dto::artifacts::{ArtifactListResponse, ArtifactResponse};
-use crate::handlers::artifacts;
 use crate::auth::error::{AuthError, AuthErrorCode, AuthErrorDetailVariant, Error};
 use crate::docs::{app_error_catlog::AppErrorCatalogItem, security::ApiSecurityAddon};
 use crate::dto::admin_ai::{
@@ -33,6 +31,7 @@ use crate::dto::analytics::{
     AnalyticsOverview, AnalyticsTimeSeries, DepartmentAnalytics, DepartmentAnalyticsQuery,
     ScopedUserAnalyticsQuery, UserAnalytics,
 };
+use crate::dto::artifacts::{ArtifactListResponse, ArtifactResponse};
 use crate::dto::audit_logs::{
     AuditLogAction, AuditLogEntry, AuditLogExportFormat, AuditLogRedactResponse,
     AuditLogsExportQuery, AuditLogsQuery, AuditLogsResponse,
@@ -62,16 +61,6 @@ use crate::dto::notifications::{
     NotificationDto, NotificationsListQuery, NotificationsListResponse,
 };
 use crate::dto::oauth::AuthCallback;
-use crate::dto::prompts::{
-    DepartmentPromptAssignmentCreate, DepartmentPromptAssignmentListQuery,
-    DepartmentPromptAssignmentResponse, DepartmentPromptAssignmentUpdate, PromptFeedbackRequest,
-    PromptMetricsQuery, PromptMetricsResponse, PromptSource, RolePromptCreate, RolePromptListQuery,
-    RolePromptResponse, RolePromptUpdate, SystemPromptResponse, UserPromptPreferenceRequest,
-};
-use crate::dto::system_metrics::{
-    ContainerMetrics, DatabaseMetrics, DiskMetrics, MachineMetrics, SystemMetricsResponse,
-};
-use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::dto::projects::{
     AddMcpServerRequest, AddMemberRequest, AddSourceRequest, ArtifactCreateRequest,
     ArtifactUpdateRequest, InstructionsUpdateRequest, LinkProjectRequest, ProjectCreateRequest,
@@ -79,16 +68,33 @@ use crate::dto::projects::{
     ProjectMemberResponse, ProjectResponse, ProjectSourceResponse, ProjectUpdateRequest,
     ShareProjectResponse, UserSearchItem, UserSearchResponse,
 };
+use crate::dto::prompts::{
+    DepartmentPromptAssignmentCreate, DepartmentPromptAssignmentListQuery,
+    DepartmentPromptAssignmentResponse, DepartmentPromptAssignmentUpdate, PromptFeedbackRequest,
+    PromptMetricsQuery, PromptMetricsResponse, PromptSource, RolePromptCreate, RolePromptListQuery,
+    RolePromptResponse, RolePromptUpdate, SystemPromptResponse, UserPromptPreferenceRequest,
+};
+use crate::dto::provider_plugins::{
+    ProviderCredentialDefinitionResponse, ProviderCredentialSlotResponse,
+    ProviderPluginConnectionTestResponse, ProviderPluginInstallRequest, ProviderPluginResponse,
+    ProviderPluginValidationRequest, ProviderPluginValidationResponse,
+};
 use crate::dto::skills::{
     ConversationSkillResponse, LinkSkillRequest, SkillCreateRequest, SkillListQuery,
-    SkillListResponse, SkillResponse, SkillToolsConfig, SkillUpdateRequest,
-    UserSkillCreateRequest, UserSkillListQuery, UserSkillUpdateRequest,
+    SkillListResponse, SkillResponse, SkillToolsConfig, SkillUpdateRequest, UserSkillCreateRequest,
+    UserSkillListQuery, UserSkillUpdateRequest,
 };
+use crate::dto::system_metrics::{
+    ContainerMetrics, DatabaseMetrics, DiskMetrics, MachineMetrics, SystemMetricsResponse,
+};
+use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
+use crate::handlers::artifacts;
 use crate::handlers::{
     admin_ai, admin_analytics, admin_audit, admin_department, admin_department_budgets,
     admin_embedding, admin_mcp, admin_prompts, admin_reconfigure, admin_roles, admin_sso_provider,
     admin_system, admin_users, auth, branding, chat, chat_stream, file, mcp, me, me_prompts,
-    me_skills, message, models, notifications, oidc, open_error, projects, skills,
+    me_skills, message, models, notifications, oidc, open_error, projects, provider_plugins,
+    skills,
 };
 use crate::models::departments::{ActionOnExceed, BudgetPeriod};
 use crate::models::mcp_access_policies::{McpAccessType, McpPermission};
@@ -135,6 +141,15 @@ use utoipa::OpenApi;
         admin_ai::validate_ai_engines_by_key,
         admin_ai::delete_ai_engines_api_key_key,
         admin_ai::get_ai_engine_models_by_key,
+        provider_plugins::get_provider_plugin_schema,
+        provider_plugins::validate_provider_plugin,
+        provider_plugins::install_provider_plugin,
+        provider_plugins::list_provider_plugins,
+        provider_plugins::get_provider_plugin,
+        provider_plugins::enable_provider_plugin,
+        provider_plugins::disable_provider_plugin,
+        provider_plugins::delete_provider_plugin,
+        provider_plugins::test_provider_plugin_connection,
         admin_sso_provider::get_sso_providers,
         admin_sso_provider::get_sso_provider_by_id,
         admin_sso_provider::validate_sso_provider_by_id,
@@ -452,6 +467,13 @@ use utoipa::OpenApi;
             UserSkillCreateRequest,
             UserSkillUpdateRequest,
             UserSkillListQuery,
+            ProviderPluginValidationRequest,
+            ProviderPluginValidationResponse,
+            ProviderPluginInstallRequest,
+            ProviderCredentialDefinitionResponse,
+            ProviderCredentialSlotResponse,
+            ProviderPluginResponse,
+            ProviderPluginConnectionTestResponse,
         )
     ),
     tags(

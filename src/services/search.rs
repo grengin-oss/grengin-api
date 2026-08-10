@@ -464,7 +464,13 @@ async fn generate_search_embedding(
         }
         "mistral" => generate_mistral_search_embedding(app_state, config, text, target_dim).await,
         "gemini" => generate_gemini_search_embedding(app_state, config, text, target_dim).await,
-        _ => Ok(None),
+        _ => crate::services::rag::generate_embeddings(
+            app_state,
+            config,
+            vec![text.to_string()],
+        )
+        .await
+        .map(|embeddings| embeddings.and_then(|mut embeddings| embeddings.pop())),
     }
 }
 

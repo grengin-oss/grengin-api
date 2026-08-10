@@ -3,6 +3,8 @@
 
 use crate::{
     auth::{claims::Claims, error::Error},
+    dto::models::ModelType,
+    dto::skills::SkillToolsConfig,
     dto::{
         chat_stream::{
             ActiveSkillInfo, ArtifactSavedPayload, BudgetWarningPayload, ChatInput, ChatStream,
@@ -11,11 +13,10 @@ use crate::{
         },
         files::File,
         llm::anthropic::{AnthropicContentBlock, AnthropicMessage},
-        llm::gemini::{prompts_to_gemini_payload, GeminiContent},
+        llm::gemini::{GeminiContent, prompts_to_gemini_payload},
         llm::mistral::{MistralConversationFunctionResult, MistralMessage, MistralToolCall},
         llm::openai::OpenaiInputItem,
     },
-    dto::skills::SkillToolsConfig,
     error::{AppError, ChatStreamError, ErrorResponse},
     handlers::llm::{
         StreamParseResult, StreamParser, StreamWebSearchAction as ParsedWebSearchAction,
@@ -38,8 +39,6 @@ use crate::{
         openai::{OpenaiStreamParser, build_openai_tools, make_openai_function_output},
         update_web_search_action_state, update_web_search_results_state,
     },
-    dto::models::ModelType,
-    services::{image_gen_helpers::generate_and_save, models_cache::get_model_info_cached},
     llm::{
         prompt::Prompt,
         provider::{
@@ -57,27 +56,31 @@ use crate::{
     },
     services::{
         artifacts::{
-            ARTIFACT_SYSTEM_HINT, ArtifactAccum, ArtifactParser, ArtifactParseEvent,
+            ARTIFACT_SYSTEM_HINT, ArtifactAccum, ArtifactParseEvent, ArtifactParser,
             content_type_to_ext,
         },
-        chat_helpers::LlmProviderConfig,
         budget_allocation::{get_department_budget_status, refresh_department_budget_available},
+        chat_helpers::LlmProviderConfig,
         department_policies::check_model_allowed,
         mcp_helpers::{
-            build_mcp_oauth_prompt, build_mcp_server_context,
-            resolve_mcp_oauth_token, resolve_mcp_tool_descriptor,
-            McpOauthErrorPayload, McpOauthPrompt, McpOauthRequiredEvent,
+            McpOauthErrorPayload, McpOauthPrompt, McpOauthRequiredEvent, build_mcp_oauth_prompt,
+            build_mcp_server_context, resolve_mcp_oauth_token, resolve_mcp_tool_descriptor,
         },
         mcp_tools::load_openai_mcp_tools,
         notifications::emit_budget_alerts,
+        provider_chat::{
+            LlmStreamError, LlmStreamEvent, PluginStreamParser, build_plugin_chat_request,
+            native_event_stream, plugin_event_stream, provider_error_class,
+        },
         rag::{
             EmbeddingTarget, assemble_prompts_with_budget, build_project_retrieval_prompt,
             build_retrieval_prompt, embed_messages, load_recent_prompts, load_summary,
             update_conversation_summary,
         },
-        system_prompts,
         skills_helpers::{load_skill_knowledge_for_stream, load_skills_for_stream},
+        system_prompts,
     },
+    services::{image_gen_helpers::generate_and_save, models_cache::get_model_info_cached},
     state::SharedState,
     utils::chat_stream::{
         calculate_cost_decimal, calculate_llm_cost, extract_llm_error_message, is_rate_limit_error,
@@ -97,7 +100,6 @@ use chrono::Utc;
 use futures_util::StreamExt;
 use num_traits::ToPrimitive;
 use reqwest::StatusCode;
-use reqwest_eventsource::Event as ReqwestEvent;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
     QueryOrder, QuerySelect, prelude::Decimal,
@@ -106,8 +108,6 @@ use serde_json::{Value, json};
 use std::{collections::HashMap, convert::Infallible};
 use tokio::time::Instant;
 use uuid::Uuid;
-
-
 
 #[utoipa::path(
     post,
@@ -484,7 +484,8 @@ pub async fn handle_chat_stream(
     let mistral_settings = app_state.settings.mistral.read().await.clone();
     let gemini_settings = app_state.settings.gemini.read().await.clone();
     // Select provider configuration and set default model
-    let (provider_config, model_name) = match provider.to_lowercase().as_str() {
+    let provider_key = provider.to_lowercase();
+    let (provider_config, model_name) = match provider_key.as_str() {
         "openai" => {
             let settings = openai_settings
                 .clone()
@@ -542,11 +543,21 @@ pub async fn handle_chat_stream(
             let model = req.model_name.clone();
             (LlmProviderConfig::Gemini(settings), model)
         }
-        _ => {
-            return Err(AppError::InvalidLlmProvider {
-                provider: provider.clone(),
-            });
-        }
+        _ => match app_state.provider_registry.get_by_str(&provider_key).await {
+            Some(plugin) if plugin.chat().is_some() || plugin.images().is_some() => {
+                (LlmProviderConfig::Plugin(plugin), req.model_name.clone())
+            }
+            Some(_) => {
+                return Err(AppError::LlmProviderNotConfigured {
+                    provider: provider.clone(),
+                });
+            }
+            None => {
+                return Err(AppError::InvalidLlmProvider {
+                    provider: provider.clone(),
+                });
+            }
+        },
     };
     let mut budget_warning: Option<BudgetWarningPayload> = None;
     let user = users::Entity::find_by_id(claims.user_id)
@@ -603,25 +614,109 @@ pub async fn handle_chat_stream(
         }
     }
 
-    let (input_rate, output_rate, image_input_rate, image_output_rate, cached_input_rate, cache_creation_rate, anthropic_max_tokens, is_image_gen, supports_multiple_images) =
-        match get_model_info_cached(&app_state.req_client, &model_name).await {
-            Ok(Some(model)) => (
-                model.input_token_rate,
-                model.output_token_rate,
-                model.image_input_token_rate,
-                model.image_output_token_rate,
-                model.cached_input_token_rate,
-                model.cache_creation_token_rate,
-                model.max_output_tokens.unwrap_or(128000),
-                model.model_type == ModelType::ImageGenerator,
-                model.supports_multiple_images,
-            ),
-            Ok(None) => (None, None, None, None, None, None, 128000, false, false),
+    let plugin_model_info = if let LlmProviderConfig::Plugin(plugin) = &provider_config {
+        match crate::services::provider_models::find_provider_model(plugin.as_ref(), &model_name)
+            .await
+        {
+            Ok(Some(model)) => Some(crate::services::provider_models::to_model_info(
+                &provider_key,
+                model,
+            )),
+            Ok(None) => None,
             Err(error) => {
-                eprintln!("models cache error: {error}");
-                (None, None, None, None, None, None, 128000, false, false)
+                eprintln!(
+                    "provider plugin model lookup failed: {}",
+                    provider_error_class(&error)
+                );
+                None
             }
-        };
+        }
+    } else {
+        None
+    };
+    let plugin_is_image_only = matches!(
+        &provider_config,
+        LlmProviderConfig::Plugin(plugin)
+            if plugin.images().is_some() && plugin.chat().is_none()
+    );
+    let (
+        input_rate,
+        output_rate,
+        image_input_rate,
+        image_output_rate,
+        cached_input_rate,
+        cache_creation_rate,
+        anthropic_max_tokens,
+        is_image_gen,
+        supports_multiple_images,
+    ) = match get_model_info_cached(&app_state.req_client, &model_name).await {
+        Ok(Some(model)) => (
+            model.input_token_rate,
+            model.output_token_rate,
+            model.image_input_token_rate,
+            model.image_output_token_rate,
+            model.cached_input_token_rate,
+            model.cache_creation_token_rate,
+            model.max_output_tokens.unwrap_or(128000),
+            model.model_type == ModelType::ImageGenerator,
+            model.supports_multiple_images,
+        ),
+        Ok(None) => plugin_model_info.as_ref().map_or(
+            (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                128000,
+                plugin_is_image_only,
+                false,
+            ),
+            |model| {
+                (
+                    model.input_token_rate,
+                    model.output_token_rate,
+                    model.image_input_token_rate,
+                    model.image_output_token_rate,
+                    model.cached_input_token_rate,
+                    model.cache_creation_token_rate,
+                    model.max_output_tokens.unwrap_or(128000),
+                    model.model_type == ModelType::ImageGenerator,
+                    model.supports_multiple_images,
+                )
+            },
+        ),
+        Err(error) => {
+            eprintln!("models cache error: {error}");
+            plugin_model_info.as_ref().map_or(
+                (
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    128000,
+                    plugin_is_image_only,
+                    false,
+                ),
+                |model| {
+                    (
+                        model.input_token_rate,
+                        model.output_token_rate,
+                        model.image_input_token_rate,
+                        model.image_output_token_rate,
+                        model.cached_input_token_rate,
+                        model.cache_creation_token_rate,
+                        model.max_output_tokens.unwrap_or(128000),
+                        model.model_type == ModelType::ImageGenerator,
+                        model.supports_multiple_images,
+                    )
+                },
+            )
+        }
+    };
     if let Some(conversation_id) = req.conversation_id {
         chat_id = Some(Path(conversation_id));
     }
@@ -630,9 +725,7 @@ pub async fn handle_chat_stream(
        "selectedTools":selected_tools.clone()
     });
     let last_message = req.messages.last();
-    let retrieval_query = last_message
-        .map(|m| m.content.clone())
-        .unwrap_or_default();
+    let retrieval_query = last_message.map(|m| m.content.clone()).unwrap_or_default();
     let input_image_file_ids: Vec<Uuid> = req
         .messages
         .iter()
@@ -700,18 +793,22 @@ pub async fn handle_chat_stream(
             let top_k = app_state.settings.rag.retrieval_top_k;
             let retrieval_future = async {
                 if app_state.settings.rag.retrieval_enabled {
-                    build_retrieval_prompt(&app_state, conversation_id, &retrieval_query, recent_boundary).await
+                    build_retrieval_prompt(
+                        &app_state,
+                        conversation_id,
+                        &retrieval_query,
+                        recent_boundary,
+                    )
+                    .await
                 } else {
                     Ok(None)
                 }
             };
             let (retrieval_result, project_retrieval_results) = tokio::join!(
                 retrieval_future,
-                futures_util::future::join_all(
-                    linked_project_ids.iter().map(|pid| {
-                        build_project_retrieval_prompt(&app_state, *pid, &retrieval_query, top_k)
-                    })
-                ),
+                futures_util::future::join_all(linked_project_ids.iter().map(|pid| {
+                    build_project_retrieval_prompt(&app_state, *pid, &retrieval_query, top_k)
+                })),
             );
             if let Some(text) = retrieval_result? {
                 retrieval_prompt = Some(Prompt {
@@ -795,6 +892,11 @@ pub async fn handle_chat_stream(
                     .gemini_get_title(settings, model, first_prompt)
                     .await
             }
+            LlmProviderConfig::Plugin(_) => Ok(crate::llm::prompt::PromptTitleResponse {
+                title: first_prompt.chars().take(80).collect(),
+                input_tokens: 0,
+                output_tokens: 0,
+            }),
         };
         let mut new_metadata = metadata.clone();
         let mut generated_title: Option<String> = None;
@@ -954,14 +1056,20 @@ pub async fn handle_chat_stream(
                 "You are working within the context of the following project(s). Follow their instructions carefully.\n\n{}",
                 project_blocks.join("\n\n---\n\n")
             );
-            if let Some(existing) = previous_prompts.iter_mut().find(|p| p.role == ChatRole::System) {
+            if let Some(existing) = previous_prompts
+                .iter_mut()
+                .find(|p| p.role == ChatRole::System)
+            {
                 existing.text = format!("{}\n\n---\n\n{}", project_text, existing.text);
             } else {
-                previous_prompts.insert(0, Prompt {
-                    role: ChatRole::System,
-                    text: project_text,
-                    files: Vec::new(),
-                });
+                previous_prompts.insert(
+                    0,
+                    Prompt {
+                        role: ChatRole::System,
+                        text: project_text,
+                        files: Vec::new(),
+                    },
+                );
             }
         }
     }
@@ -997,14 +1105,20 @@ pub async fn handle_chat_stream(
             .collect();
         if !skill_role_blocks.is_empty() {
             let skill_text = skill_role_blocks.join("\n\n---\n\n");
-            if let Some(sys) = previous_prompts.iter_mut().find(|p| p.role == ChatRole::System) {
+            if let Some(sys) = previous_prompts
+                .iter_mut()
+                .find(|p| p.role == ChatRole::System)
+            {
                 sys.text = format!("{}\n\n---\n\n{}", sys.text, skill_text);
             } else {
-                previous_prompts.insert(0, Prompt {
-                    role: ChatRole::System,
-                    text: skill_text,
-                    files: Vec::new(),
-                });
+                previous_prompts.insert(
+                    0,
+                    Prompt {
+                        role: ChatRole::System,
+                        text: skill_text,
+                        files: Vec::new(),
+                    },
+                );
             }
         }
         for skill in &active_skills {
@@ -1021,7 +1135,9 @@ pub async fn handle_chat_stream(
             }
         }
     }
-    let artifact_enabled = active_skills.iter().any(|s| s.identifier == "artifact-create");
+    let artifact_enabled = active_skills
+        .iter()
+        .any(|s| s.identifier == "artifact-create");
     let web_search = web_search || skill_web_search;
     let selected_mcp_servers = {
         let mut merged = selected_mcp_servers;
@@ -1033,26 +1149,45 @@ pub async fn handle_chat_stream(
         merged
     };
     if artifact_enabled {
-        if let Some(sys) = previous_prompts.iter_mut().find(|p| p.role == ChatRole::System) {
+        if let Some(sys) = previous_prompts
+            .iter_mut()
+            .find(|p| p.role == ChatRole::System)
+        {
             sys.text = format!("{}\n\n{}", sys.text, ARTIFACT_SYSTEM_HINT);
         } else {
-            previous_prompts.insert(0, Prompt {
-                role: ChatRole::System,
-                text: ARTIFACT_SYSTEM_HINT.to_string(),
-                files: Vec::new(),
-            });
+            previous_prompts.insert(
+                0,
+                Prompt {
+                    role: ChatRole::System,
+                    text: ARTIFACT_SYSTEM_HINT.to_string(),
+                    files: Vec::new(),
+                },
+            );
         }
     }
     let provider_is_openai = provider.to_lowercase() == "openai";
     let provider_is_anthropic = provider.to_lowercase() == "anthropic";
     let provider_is_mistral = provider.to_lowercase() == "mistral";
     let provider_is_gemini = provider.to_lowercase() == "gemini";
+    let provider_is_plugin = matches!(&provider_config, LlmProviderConfig::Plugin(_));
     let gemini_web_search_only = provider_is_gemini
         && web_search
         && selected_tools.is_empty()
         && selected_mcp_servers.is_empty();
-    let supports_mcp_tools =
-        provider_is_openai || provider_is_anthropic || provider_is_mistral || provider_is_gemini;
+    let supports_mcp_tools = provider_is_openai
+        || provider_is_anthropic
+        || provider_is_mistral
+        || provider_is_gemini
+        || matches!(
+            &provider_config,
+            LlmProviderConfig::Plugin(plugin)
+                if plugin
+                    .descriptor()
+                    .capabilities
+                    .chat
+                    .as_ref()
+                    .is_some_and(|chat| chat.tools)
+        );
     let (mcp_openai_tools, mcp_tool_lookup, mcp_server_summaries) =
         if supports_mcp_tools && !gemini_web_search_only {
             load_openai_mcp_tools(
@@ -1092,7 +1227,8 @@ pub async fn handle_chat_stream(
     } else {
         None
     };
-    let mistral_tool_choice = build_mistral_tool_choice(&selected_tools, &mcp_tool_lookup, mistral_tools.is_some());
+    let mistral_tool_choice =
+        build_mistral_tool_choice(&selected_tools, &mcp_tool_lookup, mistral_tools.is_some());
     let gemini_tools = if provider_is_gemini {
         build_gemini_tools(web_search, &mcp_tool_lookup)
     } else {
@@ -1124,101 +1260,160 @@ pub async fn handle_chat_stream(
         &mcp_tool_lookup,
         mistral_use_conversations,
     );
-    // Create event source based on provider (skipped for image generation models)
-    let event_source = if !is_image_gen { Some(match &provider_config {
-        LlmProviderConfig::OpenAI(settings) => {
-            app_state
-                .req_client
-                .openai_chat_stream(
-                    settings,
-                    model_name.clone(),
-                    req.temperature,
-                    previous_prompts,
-                    &claims.user_id,
-                    openai_tools.clone(),
-                    None,
-                    None,
-                    None,
-                )
-                .await
-        }
-        LlmProviderConfig::Anthropic(settings) => {
-            app_state
-                .req_client
-                .anthropic_chat_stream(
-                    settings,
-                    model_name.clone(),
-                    anthropic_max_tokens,
-                    req.temperature,
-                    previous_prompts,
-                    anthropic_tools.clone(),
-                    &claims.user_id,
-                )
-                .await
-        }
-        LlmProviderConfig::Mistral(settings) => {
-            if mistral_use_conversations {
-                app_state
+    // Create event source based on provider (skipped for image generation models).
+    let (event_source, plugin_session): (
+        Option<crate::services::provider_chat::LlmEventStream>,
+        Option<Box<dyn grengin_provider::ChatSession>>,
+    ) = if !is_image_gen {
+        match &provider_config {
+            LlmProviderConfig::OpenAI(settings) => {
+                let source = app_state
                     .req_client
-                    .mistral_conversation_start_stream(
-                        settings,
-                        mistral_inputs.clone(),
-                        mistral_conversation_tools.clone(),
-                        mistral_completion_args.clone(),
-                        Some(model_name.clone()),
-                        None,
-                        if mistral_agent_instructions.is_empty() {
-                            None
-                        } else {
-                            Some(mistral_agent_instructions.clone())
-                        },
-                    )
-                    .await
-            } else {
-                app_state
-                    .req_client
-                    .mistral_chat_stream(
+                    .openai_chat_stream(
                         settings,
                         model_name.clone(),
                         req.temperature,
                         previous_prompts,
-                        mistral_tools.clone(),
-                        mistral_tool_choice.clone(),
+                        &claims.user_id,
+                        openai_tools.clone(),
+                        None,
+                        None,
+                        None,
                     )
                     .await
+                    .map_err(|_| AppError::LlmProviderNotConfigured {
+                        provider: provider.clone(),
+                    })?;
+                (Some(native_event_stream(source)), None)
             }
-        }
-        LlmProviderConfig::Gemini(settings) => {
-            app_state
-                .req_client
-                .gemini_chat_stream_with_contents(
-                    settings,
+            LlmProviderConfig::Anthropic(settings) => {
+                let source = app_state
+                    .req_client
+                    .anthropic_chat_stream(
+                        settings,
+                        model_name.clone(),
+                        anthropic_max_tokens,
+                        req.temperature,
+                        previous_prompts,
+                        anthropic_tools.clone(),
+                        &claims.user_id,
+                    )
+                    .await
+                    .map_err(|_| AppError::LlmProviderNotConfigured {
+                        provider: provider.clone(),
+                    })?;
+                (Some(native_event_stream(source)), None)
+            }
+            LlmProviderConfig::Mistral(settings) => {
+                let source = if mistral_use_conversations {
+                    app_state
+                        .req_client
+                        .mistral_conversation_start_stream(
+                            settings,
+                            mistral_inputs.clone(),
+                            mistral_conversation_tools.clone(),
+                            mistral_completion_args.clone(),
+                            Some(model_name.clone()),
+                            None,
+                            if mistral_agent_instructions.is_empty() {
+                                None
+                            } else {
+                                Some(mistral_agent_instructions.clone())
+                            },
+                        )
+                        .await
+                } else {
+                    app_state
+                        .req_client
+                        .mistral_chat_stream(
+                            settings,
+                            model_name.clone(),
+                            req.temperature,
+                            previous_prompts,
+                            mistral_tools.clone(),
+                            mistral_tool_choice.clone(),
+                        )
+                        .await
+                }
+                .map_err(|_| AppError::LlmProviderNotConfigured {
+                    provider: provider.clone(),
+                })?;
+                (Some(native_event_stream(source)), None)
+            }
+            LlmProviderConfig::Gemini(settings) => {
+                let source = app_state
+                    .req_client
+                    .gemini_chat_stream_with_contents(
+                        settings,
+                        model_name.clone(),
+                        req.temperature,
+                        gemini_system_instruction.clone(),
+                        Value::Array(gemini_contents_seed.clone()),
+                        gemini_tools.clone(),
+                        gemini_tool_config.clone(),
+                    )
+                    .await
+                    .map_err(|_| AppError::LlmProviderNotConfigured {
+                        provider: provider.clone(),
+                    })?;
+                (Some(native_event_stream(source)), None)
+            }
+            LlmProviderConfig::Plugin(plugin) => {
+                let chat = plugin
+                    .chat()
+                    .ok_or_else(|| AppError::LlmProviderNotConfigured {
+                        provider: provider.clone(),
+                    })?;
+                let plugin_request = build_plugin_chat_request(
                     model_name.clone(),
+                    previous_prompts,
                     req.temperature,
-                    gemini_system_instruction.clone(),
-                    Value::Array(gemini_contents_seed.clone()),
-                    gemini_tools.clone(),
-                    gemini_tool_config.clone(),
-                )
-                .await
-        }
-    }
-    .map_err(|_| AppError::LlmProviderNotConfigured {
-        provider: provider.clone(),
-    })?) } else { None };
-    // Create stream parser based on provider (skipped for image generation models)
-    let stream_parser: Option<Box<dyn StreamParser>> = if !is_image_gen { Some(match &provider_config {
-        LlmProviderConfig::OpenAI(_) => Box::new(OpenaiStreamParser::new()),
-        LlmProviderConfig::Anthropic(_) => Box::new(AnthropicStreamParser::new()),
-        LlmProviderConfig::Mistral(_) => {
-            if mistral_use_conversations {
-                Box::new(MistralConversationStreamParser::new())
-            } else {
-                Box::new(MistralStreamParser::new())
+                    u32::try_from(anthropic_max_tokens).ok(),
+                    &mcp_tool_lookup,
+                    req.config.clone().unwrap_or(Value::Null),
+                );
+                let mut session = chat.start(plugin_request).await.map_err(|error| {
+                    eprintln!(
+                        "provider plugin chat start failed: {}",
+                        provider_error_class(&error)
+                    );
+                    AppError::LlmProviderNotConfigured {
+                        provider: provider.clone(),
+                    }
+                })?;
+                let source = session.stream().await.map_err(|error| {
+                    eprintln!(
+                        "provider plugin stream start failed: {}",
+                        provider_error_class(&error)
+                    );
+                    AppError::LlmProviderNotConfigured {
+                        provider: provider.clone(),
+                    }
+                })?;
+                (Some(plugin_event_stream(source)), Some(session))
             }
         }
-        LlmProviderConfig::Gemini(_) => Box::new(GeminiStreamParser::new()),
-    }) } else { None };
+    } else {
+        (None, None)
+    };
+    // Create stream parser based on provider (skipped for image generation models)
+    let stream_parser: Option<Box<dyn StreamParser>> = if !is_image_gen {
+        Some(match &provider_config {
+            LlmProviderConfig::OpenAI(_) => Box::new(OpenaiStreamParser::new()),
+            LlmProviderConfig::Anthropic(_) => Box::new(AnthropicStreamParser::new()),
+            LlmProviderConfig::Mistral(_) => {
+                if mistral_use_conversations {
+                    Box::new(MistralConversationStreamParser::new())
+                } else {
+                    Box::new(MistralStreamParser::new())
+                }
+            }
+            LlmProviderConfig::Gemini(_) => Box::new(GeminiStreamParser::new()),
+            LlmProviderConfig::Plugin(_) => Box::new(PluginStreamParser::new()),
+        })
+    } else {
+        None
+    };
 
     let sse_stream = async_stream::try_stream! {
        let mut message_content = String::new();
@@ -1247,6 +1442,9 @@ pub async fn handle_chat_stream(
        let anthropic_tooling_enabled = provider_is_anthropic && mcp_tooling_enabled;
        let mistral_tooling_enabled = provider_is_mistral && mcp_tooling_enabled;
        let gemini_tooling_enabled = provider_is_gemini && mcp_tooling_enabled;
+       let plugin_tooling_enabled = provider_is_plugin && mcp_tooling_enabled;
+       let mut plugin_session = plugin_session;
+       let mut plugin_next_tool_results: Option<Vec<grengin_provider::ToolResult>> = None;
        let mut openai_previous_response_id: Option<String> = None;
        let mut openai_next_input: Option<Vec<OpenaiInputItem>> = None;
        let mut tool_round: usize = 0;
@@ -1500,20 +1698,19 @@ pub async fn handle_chat_stream(
                ev = event_source.next() => ev,
            } {
            match event {
-               Ok(ReqwestEvent::Open) => {}
-               Ok(ReqwestEvent::Message(msg)) => {
-                   let mut data_for_parse = msg.data.clone();
+               Ok(LlmStreamEvent::Open) => {}
+               Ok(LlmStreamEvent::Message { event: event_name, data }) => {
+                   let mut data_for_parse = data.clone();
                    if mistral_use_conversations {
-                       let parsed = serde_json::from_str::<Value>(&msg.data).unwrap_or(Value::String(msg.data.clone()));
-                       if !msg.event.is_empty() {
-                           let event_name = msg.event.as_str();
+                       let parsed = serde_json::from_str::<Value>(&data).unwrap_or(Value::String(data));
+                       if !event_name.is_empty() {
                            if event_name == "conversation.response.started" {
                                if let Some(conversation_id) = parsed.get("conversation_id").and_then(|v| v.as_str()) {
                                    mistral_conversation_id = Some(conversation_id.to_string());
                                }
                            }
                            data_for_parse = json!({
-                               "event": event_name,
+                               "event": event_name.as_str(),
                                "data": parsed,
                            })
                            .to_string();
@@ -2118,7 +2315,7 @@ pub async fn handle_chat_stream(
                }
                Err(e) => {
                    match e {
-                     reqwest_eventsource::Error::StreamEnded => {
+                     LlmStreamError::Ended => {
                        if total_tokens == 0 {
                            total_tokens = request_tokens + response_tokens;
                          }
@@ -2160,6 +2357,7 @@ pub async fn handle_chat_stream(
                            let mut mistral_function_results_entries: Vec<MistralConversationFunctionResult> = Vec::new();
                            let mut gemini_model_tool_messages: Vec<GeminiContent> = Vec::new();
                            let mut gemini_function_response_messages: Vec<GeminiContent> = Vec::new();
+                           let mut plugin_tool_results: Vec<grengin_provider::ToolResult> = Vec::new();
 
                            if anthropic_tooling_enabled && !stream_message_content.trim().is_empty() {
                                anthropic_tool_use_blocks.push(AnthropicContentBlock::Text {
@@ -2407,6 +2605,14 @@ pub async fn handle_chat_stream(
                                }
 
                                if let Some(call_id) = call.tool_id.clone() {
+                                   if plugin_tooling_enabled {
+                                       plugin_tool_results.push(grengin_provider::ToolResult {
+                                           call_id: grengin_provider::ToolCallId::new(call_id.clone()),
+                                           name: call.tool_name.clone(),
+                                           output: output_payload.clone(),
+                                           is_error,
+                                       });
+                                   }
                                    if openai_tooling_enabled {
                                        tool_outputs.push(make_openai_function_output(
                                            call_id.clone(),
@@ -2443,6 +2649,14 @@ pub async fn handle_chat_stream(
 
                            if oauth_required_seen {
                                stream_finished = true;
+                           } else if plugin_tooling_enabled {
+                               if plugin_tool_results.is_empty() {
+                                   stream_finished = true;
+                               } else {
+                                   plugin_next_tool_results = Some(plugin_tool_results);
+                                   tool_round += 1;
+                                   stream_should_continue = true;
+                               }
                            } else if openai_tooling_enabled {
                                if tool_outputs.is_empty() || openai_response_id.is_none() {
                                    stream_finished = true;
@@ -2513,7 +2727,7 @@ pub async fn handle_chat_stream(
                        }
                        break;
                        },
-                       reqwest_eventsource::Error::InvalidStatusCode(status, response) => {
+                       LlmStreamError::InvalidStatus(status, response) => {
                            let body = response
                                .text()
                                .await
@@ -2536,7 +2750,25 @@ pub async fn handle_chat_stream(
                            stream_finished = true;
                            break;
                        }
-                       _ => {
+                       LlmStreamError::Provider(error) => {
+                           let stream_err = if matches!(&error, grengin_provider::ProviderError::QuotaExhausted(_)) {
+                               ChatStreamError::ApiQuotaExhausted { provider: provider.clone() }
+                           } else {
+                               ChatStreamError::ProviderError {
+                                   provider: provider.clone(),
+                                   message: format!("provider plugin request failed ({})", provider_error_class(&error)),
+                               }
+                           };
+                           eprintln!(
+                               "provider plugin stream failed: {}",
+                               provider_error_class(&error)
+                           );
+                           let data = serde_json::to_string(&stream_err.to_response()).unwrap_or_else(|_| "{}".to_string());
+                           yield Event::default().event(ChatStreamEvents::AiError.to_string()).data(data);
+                           stream_finished = true;
+                           break;
+                       }
+                       LlmStreamError::Connection => {
                            let stream_err = ChatStreamError::ConnectionFailed { provider: provider.clone() };
                            let data = serde_json::to_string(&stream_err.to_response()).unwrap_or_else(|_| "{}".to_string());
                            yield Event::default().event(ChatStreamEvents::AiError.to_string()).data(data);
@@ -2568,7 +2800,7 @@ pub async fn handle_chat_stream(
                            .await
                        {
                            Ok(es) => {
-                               event_source = es;
+                               event_source = native_event_stream(es);
                                stream_message_content.clear();
                                continue;
                            }
@@ -2600,7 +2832,7 @@ pub async fn handle_chat_stream(
                            .await
                        {
                            Ok(es) => {
-                               event_source = es;
+                               event_source = native_event_stream(es);
                                stream_message_content.clear();
                                continue;
                            }
@@ -2631,7 +2863,7 @@ pub async fn handle_chat_stream(
                                .await
                            {
                                Ok(es) => {
-                                   event_source = es;
+                                   event_source = native_event_stream(es);
                                    stream_message_content.clear();
                                    continue;
                                }
@@ -2661,7 +2893,7 @@ pub async fn handle_chat_stream(
                                .await
                            {
                                Ok(es) => {
-                                   event_source = es;
+                                   event_source = native_event_stream(es);
                                    stream_message_content.clear();
                                    continue;
                                }
@@ -2694,7 +2926,7 @@ pub async fn handle_chat_stream(
                            .await
                        {
                            Ok(es) => {
-                               event_source = es;
+                               event_source = native_event_stream(es);
                                stream_message_content.clear();
                                continue;
                            }
@@ -2708,6 +2940,35 @@ pub async fn handle_chat_stream(
                        }
                    } else {
                        stream_finished = true;
+                   }
+               } else if let LlmProviderConfig::Plugin(_) = &provider_config {
+                   let next_results = plugin_next_tool_results.take();
+                   match (plugin_session.as_mut(), next_results) {
+                       (Some(session), Some(results)) => {
+                           match session.continue_with_tools(results).await {
+                               Ok(stream) => {
+                                   event_source = plugin_event_stream(stream);
+                                   stream_message_content.clear();
+                                   continue;
+                               }
+                               Err(error) => {
+                                   eprintln!(
+                                       "provider plugin continuation failed: {}",
+                                       provider_error_class(&error)
+                                   );
+                                   let stream_err = ChatStreamError::ConnectionFailed {
+                                       provider: provider.clone(),
+                                   };
+                                   let data = serde_json::to_string(&stream_err.to_response())
+                                       .unwrap_or_else(|_| "{}".to_string());
+                                   yield Event::default()
+                                       .event(ChatStreamEvents::AiError.to_string())
+                                       .data(data);
+                                   stream_finished = true;
+                               }
+                           }
+                       }
+                       _ => stream_finished = true,
                    }
                } else {
                    stream_finished = true;
