@@ -1607,9 +1607,9 @@ dependencies = [
  "chrono",
  "csv",
  "futures-util",
- "grengin-provider",
  "infer",
  "jsonwebtoken",
+ "llm-plugin",
  "migration",
  "num-traits",
  "oauth2",
@@ -1635,26 +1635,6 @@ dependencies = [
  "utoipa-swagger-ui",
  "uuid",
  "zip 2.4.2",
-]
-
-[[package]]
-name = "grengin-provider"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "async-trait",
- "base64 0.22.1",
- "futures-core",
- "futures-util",
- "jsonschema",
- "percent-encoding",
- "reqwest",
- "schemars 1.1.0",
- "serde",
- "serde_json",
- "thiserror 2.0.17",
- "tokio",
- "url",
 ]
 
 [[package]]
@@ -2318,6 +2298,26 @@ name = "litemap"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
+
+[[package]]
+name = "llm-plugin"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "base64 0.22.1",
+ "futures-core",
+ "futures-util",
+ "jsonschema",
+ "percent-encoding",
+ "reqwest",
+ "schemars 1.1.0",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
+ "url",
+]
 
 [[package]]
 name = "lock_api"

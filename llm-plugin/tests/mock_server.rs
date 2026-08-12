@@ -17,7 +17,7 @@ use std::{
 };
 
 use futures_util::StreamExt;
-use grengin_provider::{
+use llm_plugin::{
     ChatMessage, ChatRequest, ChatRole, ContentPart, DeclarativeProvider, EmbeddingRequest,
     ImageRequest, ModelId, ProviderError, ProviderEvent, ProviderManifestV1, ProviderPlugin,
     ProviderRuntimeConfig, ToolCallId, ToolDefinition, ToolResult,
@@ -141,6 +141,7 @@ fn request(model: &str, text: &str, tools: Vec<ToolDefinition>) -> ChatRequest {
         max_tokens: Some(512),
         tools,
         tool_choice: None,
+        web_search: false,
         options: Value::Null,
     }
 }
@@ -157,7 +158,7 @@ fn weather_tool() -> ToolDefinition {
     }
 }
 
-async fn drain(stream: &mut grengin_provider::ProviderEventStream) -> Vec<ProviderEvent> {
+async fn drain(stream: &mut llm_plugin::ProviderEventStream) -> Vec<ProviderEvent> {
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
         events.push(event.expect("stream failed"));
@@ -429,9 +430,7 @@ async fn anthropic_manifest_routes_web_search_and_a_client_tool_from_one_index_s
         "search for the weather in Paris",
         vec![weather_tool()],
     );
-    chat.options = json!({
-        "nativeTools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 2}]
-    });
+    chat.web_search = true;
     let mut session = provider.chat().unwrap().start(chat).await.unwrap();
     let events = drain(&mut session.stream().await.unwrap()).await;
 

@@ -10,7 +10,7 @@ use crate::{
     services::notifications::NotificationEvent,
 };
 use anyhow::Error;
-use grengin_provider::ProviderRegistry;
+use llm_plugin::ProviderRegistry;
 use reqwest::Client as ReqwestClient;
 use sea_orm::{Database, DatabaseConnection, EntityTrait};
 use std::{

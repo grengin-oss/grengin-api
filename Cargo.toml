@@ -6,7 +6,7 @@ license = "Apache-2.0"
 repository = "https://github.com/grengin-oss/grengin-api"
 
 [workspace]
-members = [".", "crates/grengin-provider", "migration", "sqlx-mcp"]
+members = [".", "llm-plugin", "migration", "sqlx-mcp"]
 
 [dependencies]
 anyhow = { version = "1.0.100", features = ["backtrace"] }
@@ -35,7 +35,7 @@ tower-http = { version = "0.6.7", features = ["cors"] }
 openssl = { version = "0.10.75", features = ["vendored"] }
 num-traits = "0.2.19"
 futures-util = "0.3.31"
-grengin-provider = { path = "crates/grengin-provider" }
+llm-plugin = { path = "llm-plugin" }
 reqwest-eventsource = "0.6.0"
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 utoipa = { version = "5.4.0", features = ["axum_extras", "chrono", "url", "uuid"] }

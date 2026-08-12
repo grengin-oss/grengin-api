@@ -131,7 +131,8 @@ impl SseEventMapper {
         }
     }
 
-    /// True once a completion event has been emitted; every later event is ignored.
+    /// True once a completion event has been emitted. Accounting and diagnostic events may still
+    /// be mapped after completion.
     pub fn is_completed(&self) -> bool {
         self.state.completed
     }
@@ -231,6 +232,11 @@ impl MapperState {
             EventKind::ToolCallStart => {
                 let id = ToolCallId::new(required_string(rule, value, "id")?);
                 let index = optional_u32(rule, value, "index")?.unwrap_or(0);
+                if self.server_tools_by_index.contains_key(&index) {
+                    return Err(ProviderError::ResponseMapping(format!(
+                        "tool index {index} was already assigned to a provider-native tool"
+                    )));
+                }
                 match self.tool_ids_by_index.get(&index) {
                     // Several OpenAI-compatible providers repeat the tool id in every argument
                     // chunk, so re-announcing the same call is a no-op rather than an error.
@@ -266,12 +272,23 @@ impl MapperState {
                 let id = optional_string(rule, value, "id")?.map(ToolCallId::new);
                 let name = required_string(rule, value, "name")?;
                 if let Some(index) = optional_u32(rule, value, "index")? {
-                    // Re-announcing the same block is a no-op, matching client-tool behaviour.
-                    if self.server_tools_by_index.contains_key(&index) {
-                        return Ok(Vec::new());
+                    if self.tool_ids_by_index.contains_key(&index) {
+                        return Err(ProviderError::ResponseMapping(format!(
+                            "provider-native tool index {index} was already assigned to a client tool"
+                        )));
                     }
-                    self.server_tools_by_index
-                        .insert(index, (id.clone(), name.clone()));
+                    let assignment = (id.clone(), name.clone());
+                    match self.server_tools_by_index.get(&index) {
+                        // Re-announcing the same block is a no-op, matching client-tool behaviour.
+                        Some(existing) if existing == &assignment => return Ok(Vec::new()),
+                        Some(_) => {
+                            return Err(ProviderError::ResponseMapping(format!(
+                                "provider-native tool index {index} was assigned more than once"
+                            )));
+                        }
+                        None => {}
+                    }
+                    self.server_tools_by_index.insert(index, assignment);
                 }
                 vec![ProviderEvent::ServerToolStart {
                     id,
@@ -1029,6 +1046,37 @@ mod tests {
             mapper
                 .map(&event(
                     r#"{"index":9,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#
+                ))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_assigning_one_index_to_both_client_and_server_tools() {
+        let mut server_first = SseEventMapper::new(anthropic_block_response());
+        server_first
+            .map(&event(
+                r#"{"index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search"}}"#,
+            ))
+            .unwrap();
+        assert!(
+            server_first
+                .map(&event(
+                    r#"{"index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"lookup"}}"#,
+                ))
+                .is_err()
+        );
+
+        let mut client_first = SseEventMapper::new(anthropic_block_response());
+        client_first
+            .map(&event(
+                r#"{"index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"lookup"}}"#,
+            ))
+            .unwrap();
+        assert!(
+            client_first
+                .map(&event(
+                    r#"{"index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search"}}"#,
                 ))
                 .is_err()
         );

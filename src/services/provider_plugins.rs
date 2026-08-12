@@ -3,7 +3,7 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use grengin_provider::{
+use llm_plugin::{
     DeclarativeProvider, ProviderError, ProviderId, ProviderManifestV1, ProviderRuntimeConfig,
 };
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};

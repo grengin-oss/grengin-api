@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use grengin_provider::ProviderPlugin;
+use llm_plugin::ProviderPlugin;
 
 pub enum LlmProviderConfig {
     OpenAI(crate::config::setting::OpenaiSettings),

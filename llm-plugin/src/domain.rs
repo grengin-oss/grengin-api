@@ -91,6 +91,8 @@ pub struct ChatRequest {
     pub tools: Vec<ToolDefinition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
+    #[serde(default)]
+    pub web_search: bool,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub options: Value,
 }
@@ -208,7 +210,7 @@ pub enum ProviderEvent {
     ToolCallEnd {
         id: ToolCallId,
     },
-    /// A tool the provider runs itself (web search, code execution) has started. Unlike
+    /// A provider-native web search has started. Unlike
     /// [`ProviderEvent::ToolCallStart`] the caller must not execute anything; this is progress
     /// reporting for a side effect the provider already owns.
     ServerToolStart {

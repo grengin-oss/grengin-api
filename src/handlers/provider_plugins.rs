@@ -9,7 +9,7 @@ use axum::{
     http::StatusCode,
 };
 use chrono::Utc;
-use grengin_provider::{
+use llm_plugin::{
     DeclarativeProvider, ProviderManifestV1, ProviderPlugin, ProviderRuntimeConfig,
 };
 use sea_orm::{
@@ -56,7 +56,7 @@ pub async fn get_provider_plugin_schema(
 ) -> Result<Json<serde_json::Value>, AuthError> {
     ensure_view(&claims, &state).await?;
     let schema = serde_json::from_str(include_str!(
-        "../../crates/grengin-provider/schema/provider-plugin-v1.schema.json"
+        "../../llm-plugin/schema/provider-plugin-v1.schema.json"
     ))
     .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
     Ok(Json(schema))
@@ -122,8 +122,8 @@ pub async fn validate_provider_plugin(
                 slot_id: credential.id,
                 label: credential.label,
                 credential_type: match credential.credential_type {
-                    grengin_provider::CredentialType::Secret => "secret",
-                    grengin_provider::CredentialType::Text => "text",
+                    llm_plugin::CredentialType::Secret => "secret",
+                    llm_plugin::CredentialType::Text => "text",
                 }
                 .to_string(),
                 required: credential.required,

@@ -3,16 +3,17 @@ SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# grengin-provider — handoff notes
+# llm-plugin — handoff notes
 
 State of the declarative provider-plugin runtime after a bug-hunt, a web-search implementation, and
 an error-handling review. Written for whoever picks this up next.
 
-`grengin-provider` turns a JSON manifest into a working LLM provider: SSE chat, embeddings, image
+`llm-plugin` turns a JSON manifest into a working LLM provider: SSE chat, embeddings, image
 generation and model listing, with request payloads and response events described declaratively so a
 new provider needs no Rust.
 
-**Branch:** `feat/llm-plugin` · **Tests:** 88 offline, 13 live (`#[ignore]`d) · clippy clean
+**Branch:** `feat/llm-plugin` · **Tests:** 90 plugin + 4 API-boundary offline, 13 live
+(`#[ignore]`d) · clippy clean
 
 ---
 
@@ -20,35 +21,39 @@ new provider needs no Rust.
 
 ```bash
 # Offline suite — no network, no node required for most of it
-cargo test -p grengin-provider
+cargo test -p llm-plugin -j 2
 
 # Regenerate the checked-in JSON schema after ANY manifest type change.
 # `tests/manifests.rs::checked_in_json_schema_is_current` fails until you do.
-cargo run -p grengin-provider --example generate_schema
+cargo run -p llm-plugin --example generate_schema -j 2
 
 # Mock provider server, by hand (curl + jq, no build)
-crates/grengin-provider/tests/mock/smoke.sh          # boots its own server
-crates/grengin-provider/tests/mock/smoke.sh 8080     # target a running one
+llm-plugin/tests/mock/smoke.sh          # boots its own server
+llm-plugin/tests/mock/smoke.sh 8080     # target a running one
 
 # Live providers. NOTE: fish is the default shell here, so wrap the source in bash.
 bash -c 'set -a; source /home/anurag/work/secrets/grengin.sh; set +a
          export GRENGIN_LIVE_PROVIDER_TESTS=1
-         cargo test -p grengin-provider --test live_tooling -- --ignored --nocapture'
+         cargo test -p llm-plugin --test live_tooling -j 2 -- --ignored --nocapture'
 ```
 
 ### Test layout
 
 | Target | Count | What it covers |
 |---|---|---|
-| `src/**` unit tests | 46 | mapping evaluation, SSE decode/map, manifest validation, security |
+| `src/**` unit tests | 47 | mapping evaluation, SSE decode/map, manifest validation, security |
 | `tests/runtime_http.rs` | 29 | runtime against hand-written frames from an in-process Rust server |
 | `tests/mock_server.rs` | 10 | **shipped manifests** against the Node mock provider |
-| `tests/manifests.rs` | 3 | reference manifests parse; checked-in schema is current |
+| `tests/manifests.rs` | 4 | reference and complete examples parse; checked-in schema is current |
 | `tests/live_providers.rs` | 8 | chat smoke per provider (ignored) |
 | `tests/live_tooling.rs` | 5 | MCP tool round trip + web search, real providers (ignored) |
 
 `runtime_http.rs` tests the runtime; `mock_server.rs` tests the manifests we ship. Keep both — the
 usage bug in §2.14 was only caught by the latter.
+
+`examples/example.json` is the complete, machine-valid manifest reference. JSON cannot contain
+comments, so `examples/example.annotated.jsonc` explains the same fields and alternatives for
+authors; submit the `.json` file, never the `.jsonc` guide.
 
 ---
 
@@ -136,6 +141,19 @@ Sealing is now selective via `survives_completion`: content and tool events afte
 dropped as trailing noise; `usage`, `error` and `providerEvent` still apply. **If you touch
 completion handling, keep this distinction.**
 
+### 2.15 Web search bypassed the typed request boundary
+The first implementation required browser-controlled `ChatInput.config.nativeTools` to contain an
+Anthropic-native tool object. That bypassed the product's `web_search` switch, leaked provider
+protocol into the client, and could allow other provider-side tools through a shipped manifest.
+`ChatRequest.web_search` is now canonical. The Anthropic manifest owns its
+`web_search_20250305` declaration and conditionally adds it when the typed flag is true.
+
+Providers also omit server-tool IDs in some citation formats. `PluginStreamParser` now assigns a
+stable stream-local ID, including for result-only events, so the main chat lifecycle does not drop
+those citations. Streamed query JSON is reassembled into the structured web-search state before the
+final result is persisted. Conflicting client/server assignments in one provider index now fail
+closed instead of aliasing two tools.
+
 ---
 
 ## 3. Web search — implemented
@@ -157,8 +175,9 @@ Three mapping additions made it expressible:
 - **`collect` + `itemFields`** — gathers an array into *one* event with per-item field mapping. This
   is what keeps provider internals out: only mapped fields survive, so Anthropic's ~1.2 KB
   `encrypted_content` per citation never reaches the caller. Live payload went from ~30 KB to ~3 KB.
-- **`$concat`** — flattens arrays, so `tools` can carry mapped MCP client tools *plus*
-  `options.nativeTools`. Web search and MCP in one request works.
+- **`$concat`** — flattens arrays, so `tools` can carry mapped MCP client tools *plus* a
+  manifest-owned native web-search declaration selected by `request.webSearch`. Web search and MCP
+  in one request works without browser-supplied provider payloads.
 - **`$coalesce`** — first non-null wins. Anthropic's `max_tokens` is mandatory while
   `ChatRequest.maxTokens` is optional; without this the whole payload failed.
 

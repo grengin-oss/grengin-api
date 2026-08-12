@@ -4,7 +4,7 @@
 use std::{collections::HashMap, pin::Pin};
 
 use futures_util::{Stream, StreamExt};
-use grengin_provider::{
+use llm_plugin::{
     ChatMessage, ChatRequest, ContentPart, ModelId, ProviderError, ProviderEvent,
     ProviderEventErrorKind, ProviderEventStream, TokenUsage, ToolCallId, ToolChoice,
     ToolDefinition,
@@ -16,7 +16,7 @@ use serde_json::Value;
 use crate::{
     handlers::llm::{
         StreamErrorKind, StreamParseResult, StreamParser, StreamWebSearchResult, ToolCall,
-        ToolInput, build_tool_input_delta,
+        ToolInput, build_tool_input_delta, parse_web_search_action,
     },
     llm::prompt::Prompt,
     models::messages::ChatRole,
@@ -118,6 +118,7 @@ pub fn build_plugin_chat_request(
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     tools: &HashMap<String, McpToolDescriptor>,
+    web_search: bool,
     options: Value,
 ) -> ChatRequest {
     let mut tool_definitions = tools
@@ -137,6 +138,7 @@ pub fn build_plugin_chat_request(
         max_tokens,
         tool_choice: (!tool_definitions.is_empty()).then_some(ToolChoice::Auto),
         tools: tool_definitions,
+        web_search,
         options,
     }
 }
@@ -165,10 +167,10 @@ fn prompt_to_message(prompt: Prompt) -> ChatMessage {
     }
     ChatMessage {
         role: match prompt.role {
-            ChatRole::System => grengin_provider::ChatRole::System,
-            ChatRole::User => grengin_provider::ChatRole::User,
-            ChatRole::Assistant => grengin_provider::ChatRole::Assistant,
-            ChatRole::Tool => grengin_provider::ChatRole::Tool,
+            ChatRole::System => llm_plugin::ChatRole::System,
+            ChatRole::User => llm_plugin::ChatRole::User,
+            ChatRole::Assistant => llm_plugin::ChatRole::Assistant,
+            ChatRole::Tool => llm_plugin::ChatRole::Tool,
         },
         content,
         tool_calls: Vec::new(),
@@ -179,12 +181,59 @@ fn prompt_to_message(prompt: Prompt) -> ChatMessage {
 #[derive(Default)]
 pub struct PluginStreamParser {
     tools: std::sync::Mutex<HashMap<ToolCallId, PendingToolCall>>,
+    server_tools: std::sync::Mutex<PendingServerTools>,
 }
 
 struct PendingToolCall {
     name: String,
     index: u32,
     arguments: String,
+}
+
+#[derive(Default)]
+struct PendingServerTools {
+    next_id: u64,
+    ids_by_name: HashMap<String, String>,
+    query_buffers: HashMap<String, String>,
+}
+
+impl PendingServerTools {
+    fn start_id(&mut self, provider_id: Option<ToolCallId>, name: &str) -> String {
+        let id = provider_id.map_or_else(
+            || {
+                let id = format!("plugin-web-search-{}", self.next_id);
+                self.next_id = self.next_id.saturating_add(1);
+                id
+            },
+            |id| id.to_string(),
+        );
+        self.ids_by_name.insert(name.to_string(), id.clone());
+        id
+    }
+
+    fn event_id(&mut self, provider_id: Option<ToolCallId>, name: &str) -> String {
+        if let Some(id) = provider_id {
+            let id = id.to_string();
+            self.ids_by_name.insert(name.to_string(), id.clone());
+            return id;
+        }
+        self.ids_by_name
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| self.start_id(None, name))
+    }
+
+    fn push_query(
+        &mut self,
+        id: &str,
+        fragment: &str,
+    ) -> Option<crate::handlers::llm::StreamWebSearchAction> {
+        let buffer = self.query_buffers.entry(id.to_string()).or_default();
+        buffer.push_str(fragment);
+        serde_json::from_str::<Value>(buffer)
+            .ok()
+            .and_then(|value| parse_web_search_action(&value))
+    }
 }
 
 impl PluginStreamParser {
@@ -272,27 +321,42 @@ impl PluginStreamParser {
                 name,
                 query,
                 queries,
-            } => StreamParseResult::WebSearchAction {
-                tool_name: name,
-                tool_id: id.map(|id| id.to_string()),
-                query,
-                queries: (!queries.is_empty()).then_some(queries),
-            },
+            } => {
+                let Ok(mut server_tools) = self.server_tools.lock() else {
+                    return provider_parse_error("plugin server-tool state is unavailable");
+                };
+                let id = server_tools.start_id(id, &name);
+                StreamParseResult::WebSearchAction {
+                    tool_name: name,
+                    tool_id: Some(id),
+                    query,
+                    queries: (!queries.is_empty()).then_some(queries),
+                }
+            }
             // The provider streams its search query in fragments; forward them the same way client
             // tool input is forwarded so the UI can show the query as it forms.
             ProviderEvent::ServerToolQueryDelta { id, name, fragment } => {
+                let Ok(mut server_tools) = self.server_tools.lock() else {
+                    return provider_parse_error("plugin server-tool state is unavailable");
+                };
+                let id = server_tools.event_id(id, &name);
+                let web_search = server_tools.push_query(&id, &fragment);
                 StreamParseResult::ToolInput(build_tool_input_delta(
                     fragment,
                     None,
                     Some(name),
-                    id.map(|id| id.to_string()),
-                    None,
+                    Some(id),
+                    web_search,
                 ))
             }
             ProviderEvent::ServerToolResult { id, name, results } => {
+                let Ok(mut server_tools) = self.server_tools.lock() else {
+                    return provider_parse_error("plugin server-tool state is unavailable");
+                };
+                let id = server_tools.event_id(id, &name);
                 StreamParseResult::WebSearchResult {
                     tool_name: name,
-                    tool_id: id.map(|id| id.to_string()),
+                    tool_id: Some(id),
                     results: results
                         .into_iter()
                         .map(|result| StreamWebSearchResult {
@@ -355,7 +419,7 @@ fn provider_parse_error(message: &str) -> StreamParseResult {
 
 #[cfg(test)]
 mod tests {
-    use grengin_provider::{ProviderEvent, ToolCallId};
+    use llm_plugin::{ProviderEvent, ServerToolResultItem, ToolCallId};
 
     use super::*;
 
@@ -410,6 +474,72 @@ mod tests {
         assert!(matches!(
             parser.provider_event(ProviderEvent::ToolCallEnd { id }),
             StreamParseResult::Error { .. }
+        ));
+    }
+
+    #[test]
+    fn server_tool_events_receive_one_stable_stream_local_id() {
+        let parser = PluginStreamParser::new();
+        let StreamParseResult::WebSearchAction {
+            tool_id: Some(id), ..
+        } = parser.provider_event(ProviderEvent::ServerToolStart {
+            id: None,
+            name: "web_search".to_string(),
+            query: None,
+            queries: Vec::new(),
+        })
+        else {
+            panic!("expected a web-search start");
+        };
+
+        let StreamParseResult::ToolInput(delta) =
+            parser.provider_event(ProviderEvent::ServerToolQueryDelta {
+                id: None,
+                name: "web_search".to_string(),
+                fragment: r#"{"query":"Rust"}"#.to_string(),
+            })
+        else {
+            panic!("expected a web-search query delta");
+        };
+        assert_eq!(delta.tool_id.as_deref(), Some(id.as_str()));
+        assert_eq!(
+            delta.web_search.and_then(|action| action.query),
+            Some("Rust".to_string())
+        );
+
+        let StreamParseResult::WebSearchResult {
+            tool_id: Some(result_id),
+            ..
+        } = parser.provider_event(ProviderEvent::ServerToolResult {
+            id: None,
+            name: "web_search".to_string(),
+            results: vec![ServerToolResultItem {
+                title: "Rust".to_string(),
+                url: "https://www.rust-lang.org/".to_string(),
+                source: None,
+                page_age: None,
+                snippet: None,
+            }],
+        })
+        else {
+            panic!("expected web-search results");
+        };
+        assert_eq!(result_id, id);
+    }
+
+    #[test]
+    fn result_only_server_tool_events_still_receive_an_id() {
+        let parser = PluginStreamParser::new();
+        assert!(matches!(
+            parser.provider_event(ProviderEvent::ServerToolResult {
+                id: None,
+                name: "web_search".to_string(),
+                results: Vec::new(),
+            }),
+            StreamParseResult::WebSearchResult {
+                tool_id: Some(_),
+                ..
+            }
         ));
     }
 }

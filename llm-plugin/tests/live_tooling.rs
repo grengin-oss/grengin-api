@@ -5,12 +5,12 @@
 //! tool calling with a result round trip, and provider-native web search.
 //!
 //! These are `#[ignore]`d like the other live tests; run them with
-//! `GRENGIN_LIVE_PROVIDER_TESTS=1 cargo test -p grengin-provider --test live_tooling -- --ignored`.
+//! `GRENGIN_LIVE_PROVIDER_TESTS=1 cargo test -p llm-plugin --test live_tooling -- --ignored`.
 
 use std::{collections::BTreeMap, env};
 
 use futures_util::StreamExt;
-use grengin_provider::{
+use llm_plugin::{
     ChatMessage, ChatRequest, ChatRole, ContentPart, DeclarativeProvider, ModelId, ProviderEvent,
     ProviderManifestV1, ProviderPlugin, ProviderRuntimeConfig, ToolCallId, ToolDefinition,
     ToolResult,
@@ -70,6 +70,7 @@ fn request(model: &str, text: &str, tools: Vec<ToolDefinition>) -> ChatRequest {
         max_tokens: Some(1024),
         tools,
         tool_choice: None,
+        web_search: false,
         options: Value::Null,
     }
 }
@@ -89,7 +90,7 @@ fn weather_tool() -> ToolDefinition {
 
 /// Collects a whole stream, panicking with the error class on failure.
 async fn drain(
-    stream: &mut grengin_provider::ProviderEventStream,
+    stream: &mut llm_plugin::ProviderEventStream,
     label: &str,
 ) -> Vec<ProviderEvent> {
     let mut events = Vec::new();
@@ -234,16 +235,12 @@ async fn openrouter_mcp_tool_round_trip() {
     .await;
 }
 
-/// Anthropic's server-side web search through the shipped reference manifest, which now carries
-/// `serverTool*` rules. Only `options.nativeTools` is supplied per request.
+/// Anthropic's server-side web search through the shipped reference manifest, which owns both the
+/// provider-native tool payload and the `serverTool*` response rules.
 fn anthropic_search_provider(api_key: String) -> DeclarativeProvider {
     let mut manifest: Value = serde_json::from_slice(ANTHROPIC).unwrap();
     manifest["baseUrl"] = json!("https://api.anthropic.com/v1/");
     build(manifest, api_key)
-}
-
-fn native_web_search() -> Value {
-    json!([{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}])
 }
 
 #[tokio::test]
@@ -258,7 +255,7 @@ async fn anthropic_web_search_reaches_the_caller_as_structured_citations() {
         "Search the web for the current stable Rust compiler version and cite your sources.",
         Vec::new(),
     );
-    request.options = json!({"nativeTools": native_web_search()});
+    request.web_search = true;
 
     let mut session = provider.chat().unwrap().start(request).await.unwrap();
     let mut stream = session.stream().await.unwrap();
@@ -328,8 +325,8 @@ async fn anthropic_web_search_reaches_the_caller_as_structured_citations() {
     );
 }
 
-/// Web search and MCP client tools in one request, which `$concat` now assembles from the canonical
-/// `request.tools` plus `options.nativeTools`.
+/// Web search and MCP client tools in one request, which `$concat` assembles from canonical MCP
+/// tools plus the manifest-owned native web-search declaration.
 #[tokio::test]
 #[ignore = "requires GRENGIN_LIVE_PROVIDER_TESTS=1 and a provider credential"]
 async fn anthropic_combines_web_search_with_mcp_client_tools() {
@@ -342,7 +339,7 @@ async fn anthropic_combines_web_search_with_mcp_client_tools() {
         "Use the weather tool to get the temperature in Paris. Do not search the web.",
         vec![weather_tool()],
     );
-    request.options = json!({"nativeTools": native_web_search()});
+    request.web_search = true;
 
     let mut session = provider.chat().unwrap().start(request).await.unwrap();
     let mut stream = session.stream().await.unwrap();

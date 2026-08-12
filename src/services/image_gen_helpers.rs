@@ -72,15 +72,15 @@ pub async fn generate_and_save(
                 .ok_or_else(|| anyhow!("provider does not support image generation: {other}"))?;
             let input_images = input_images
                 .into_iter()
-                .map(|image| grengin_provider::InputImage {
+                .map(|image| llm_plugin::InputImage {
                     data: BASE64.encode(image.bytes),
                     media_type: image.content_type,
                     filename: None,
                 })
                 .collect();
             let response = generator
-                .generate(grengin_provider::ImageRequest {
-                    model: grengin_provider::ModelId::new(model),
+                .generate(llm_plugin::ImageRequest {
+                    model: llm_plugin::ModelId::new(model),
                     prompt: prompt.to_string(),
                     input_images,
                     count,

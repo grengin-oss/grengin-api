@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use grengin_provider::ProviderManifestV1;
+use llm_plugin::ProviderManifestV1;
 
 #[test]
 fn reference_openai_compatible_manifest_is_valid() {
@@ -13,6 +13,12 @@ fn reference_openai_compatible_manifest_is_valid() {
     assert!(manifest.capabilities.chat.unwrap().tools);
     assert!(manifest.capabilities.embeddings);
     assert!(manifest.capabilities.image_generation);
+}
+
+#[test]
+fn complete_example_manifest_is_valid() {
+    ProviderManifestV1::from_json(include_bytes!("../examples/example.json"))
+        .expect("the complete example manifest must remain valid");
 }
 
 #[test]

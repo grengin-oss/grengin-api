@@ -4,7 +4,7 @@
 use std::{collections::BTreeMap, env};
 
 use futures_util::StreamExt;
-use grengin_provider::{
+use llm_plugin::{
     ChatMessage, ChatRequest, ChatRole, ContentPart, DeclarativeProvider, ModelId, ProviderEvent,
     ProviderManifestV1, ProviderPlugin, ProviderRuntimeConfig,
 };
@@ -70,6 +70,7 @@ async fn smoke(provider: LiveProvider) {
             max_tokens: Some(16),
             tools: Vec::new(),
             tool_choice: None,
+            web_search: false,
             options: Value::Null,
         })
         .await
@@ -112,23 +113,23 @@ async fn smoke(provider: LiveProvider) {
     );
 }
 
-fn error_class(error: &grengin_provider::ProviderError) -> &'static str {
+fn error_class(error: &llm_plugin::ProviderError) -> &'static str {
     match error {
-        grengin_provider::ProviderError::InvalidManifest(_) => "invalid_manifest",
-        grengin_provider::ProviderError::Configuration(_) => "configuration",
-        grengin_provider::ProviderError::MissingCredential(_) => "missing_credential",
-        grengin_provider::ProviderError::UnsupportedCapability(_) => "unsupported_capability",
-        grengin_provider::ProviderError::PayloadMapping(_) => "payload_mapping",
-        grengin_provider::ProviderError::ResponseMapping(_) => "response_mapping",
-        grengin_provider::ProviderError::UrlNotAllowed(_) => "url_not_allowed",
-        grengin_provider::ProviderError::HeaderNotAllowed(_) => "header_not_allowed",
-        grengin_provider::ProviderError::Transport(_) => "transport",
-        grengin_provider::ProviderError::HttpStatus { .. } => "http_status",
-        grengin_provider::ProviderError::QuotaExhausted => "quota_exhausted",
-        grengin_provider::ProviderError::PaymentRequired => "payment_required",
-        grengin_provider::ProviderError::StreamEnded => "stream_ended",
-        grengin_provider::ProviderError::Cancelled => "cancelled",
-        grengin_provider::ProviderError::ResponseTooLarge => "response_too_large",
+        llm_plugin::ProviderError::InvalidManifest(_) => "invalid_manifest",
+        llm_plugin::ProviderError::Configuration(_) => "configuration",
+        llm_plugin::ProviderError::MissingCredential(_) => "missing_credential",
+        llm_plugin::ProviderError::UnsupportedCapability(_) => "unsupported_capability",
+        llm_plugin::ProviderError::PayloadMapping(_) => "payload_mapping",
+        llm_plugin::ProviderError::ResponseMapping(_) => "response_mapping",
+        llm_plugin::ProviderError::UrlNotAllowed(_) => "url_not_allowed",
+        llm_plugin::ProviderError::HeaderNotAllowed(_) => "header_not_allowed",
+        llm_plugin::ProviderError::Transport(_) => "transport",
+        llm_plugin::ProviderError::HttpStatus { .. } => "http_status",
+        llm_plugin::ProviderError::QuotaExhausted => "quota_exhausted",
+        llm_plugin::ProviderError::PaymentRequired => "payment_required",
+        llm_plugin::ProviderError::StreamEnded => "stream_ended",
+        llm_plugin::ProviderError::Cancelled => "cancelled",
+        llm_plugin::ProviderError::ResponseTooLarge => "response_too_large",
     }
 }
 

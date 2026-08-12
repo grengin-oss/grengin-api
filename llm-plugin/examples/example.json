@@ -1,0 +1,449 @@
+{
+  "$schema": "../schema/provider-plugin-v1.schema.json",
+  "manifestVersion": "1.0",
+  "id": "complete-example",
+  "version": "1.0.0",
+  "name": "Complete provider example",
+  "description": "A schema-valid reference showing every Grengin LLM operation and stream lifecycle.",
+  "baseUrl": "https://api.example.invalid/v1/",
+  "credentials": [
+    {
+      "id": "api_key",
+      "type": "secret",
+      "required": true,
+      "label": "API key"
+    },
+    {
+      "id": "organization_id",
+      "type": "text",
+      "required": true,
+      "label": "Organization ID"
+    }
+  ],
+  "configurationSchema": {
+    "type": "object",
+    "properties": {
+      "apiVersion": {
+        "type": "string",
+        "default": "2026-08-01"
+      },
+      "clientTag": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "webSearchMaxUses": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10,
+        "default": 3
+      }
+    },
+    "required": ["apiVersion", "clientTag", "webSearchMaxUses"],
+    "additionalProperties": false
+  },
+  "capabilities": {
+    "chat": {
+      "streaming": true,
+      "tools": true,
+      "vision": true,
+      "reasoning": true
+    },
+    "embeddings": true,
+    "imageGeneration": true,
+    "modelListing": true
+  },
+  "mappings": {
+    "content_part": {
+      "$switch": { "$get": "item.type" },
+      "cases": {
+        "text": {
+          "type": { "$literal": "text" },
+          "text": { "$get": "item.text" }
+        },
+        "image_url": {
+          "type": { "$literal": "image_url" },
+          "image_url": {
+            "url": { "$get": "item.url" },
+            "media_type": { "$omitIfNull": { "$get": "item.mediaType" } }
+          }
+        },
+        "image_base64": {
+          "type": { "$literal": "image_base64" },
+          "data": { "$get": "item.data" },
+          "media_type": { "$get": "item.mediaType" }
+        },
+        "file": {
+          "type": { "$literal": "file" },
+          "name": { "$get": "item.name" },
+          "data": { "$get": "item.data" },
+          "media_type": { "$get": "item.mediaType" }
+        }
+      }
+    },
+    "message": {
+      "$switch": { "$get": "item.role" },
+      "cases": {
+        "system": {
+          "role": { "$literal": "system" },
+          "content": { "$map": "item.content", "using": "content_part" }
+        },
+        "user": {
+          "role": { "$literal": "user" },
+          "content": { "$map": "item.content", "using": "content_part" }
+        },
+        "assistant": {
+          "role": { "$literal": "assistant" },
+          "content": { "$map": "item.content", "using": "content_part" },
+          "tool_calls": {
+            "$omitIfNull": { "$map": "item.toolCalls", "using": "tool_call" }
+          }
+        },
+        "tool": {
+          "role": { "$literal": "tool" },
+          "tool_call_id": { "$get": "item.toolResult.callId" },
+          "name": { "$get": "item.toolResult.name" },
+          "content": { "$jsonEncode": { "$get": "item.toolResult.output" } },
+          "is_error": { "$get": "item.toolResult.isError" }
+        }
+      }
+    },
+    "tool": {
+      "type": { "$literal": "function" },
+      "function": {
+        "name": { "$get": "item.name" },
+        "description": { "$omitIfNull": { "$get": "item.description" } },
+        "parameters": { "$get": "item.parameters" }
+      }
+    },
+    "tool_call": {
+      "id": { "$get": "item.id" },
+      "type": { "$literal": "function" },
+      "function": {
+        "name": { "$get": "item.name" },
+        "arguments": { "$jsonEncode": { "$get": "item.arguments" } }
+      }
+    },
+    "native_web_search": {
+      "type": { "$literal": "web_search" },
+      "max_uses": {
+        "$coalesce": [
+          { "$get": "config.webSearchMaxUses" },
+          { "$literal": 3 }
+        ]
+      }
+    }
+  },
+  "models": [
+    {
+      "id": "example-chat-1",
+      "name": "Example Chat 1",
+      "capabilities": {
+        "chat": {
+          "streaming": true,
+          "tools": true,
+          "vision": true,
+          "reasoning": true
+        }
+      },
+      "metadata": {
+        "contextWindow": 128000,
+        "source": "static-example"
+      }
+    },
+    {
+      "id": "example-embed-1",
+      "name": "Example Embeddings 1",
+      "capabilities": { "embeddings": true },
+      "metadata": { "dimensions": 1536 }
+    },
+    {
+      "id": "example-image-1",
+      "name": "Example Image 1",
+      "capabilities": { "imageGeneration": true },
+      "metadata": { "formats": ["png", "webp"] }
+    }
+  ],
+  "operations": {
+    "chatStream": {
+      "method": "POST",
+      "path": "chat/${request.model}/completions",
+      "headers": {
+        "Accept": "text/event-stream",
+        "Authorization": { "secret": "api_key", "prefix": "Bearer " },
+        "X-Organization": { "secret": "organization_id" },
+        "X-Plugin-Version": { "literal": "1.0" },
+        "X-Client-Tag": { "mapping": { "$get": "config.clientTag" } }
+      },
+      "query": {
+        "api-version": { "$get": "config.apiVersion" },
+        "feature": { "$literal": ["streaming", "tools"] }
+      },
+      "bodyEncoding": "json",
+      "body": {
+        "$merge": [
+          {
+            "model": { "$get": "request.model" },
+            "messages": { "$map": "request.messages", "using": "message" },
+            "temperature": { "$omitIfNull": { "$get": "request.temperature" } },
+            "max_tokens": {
+              "$coalesce": [
+                { "$get": "request.maxTokens" },
+                { "$literal": 4096 }
+              ]
+            },
+            "tools": {
+              "$omitIfNull": {
+                "$concat": [
+                  { "$map": "request.tools", "using": "tool" },
+                  {
+                    "$if": { "$get": "request.webSearch" },
+                    "then": {
+                      "$array": [
+                        {
+                          "type": { "$literal": "web_search" },
+                          "max_uses": { "$get": "config.webSearchMaxUses" }
+                        }
+                      ]
+                    },
+                    "else": { "$literal": [] }
+                  }
+                ]
+              }
+            },
+            "tool_choice": { "$omitIfNull": { "$get": "request.toolChoice" } },
+            "stream": { "$literal": true },
+            "metadata": {
+              "$object": {
+                "client_tag": { "$get": "config.clientTag" },
+                "client_tag_base64": { "$base64": { "$get": "config.clientTag" } },
+                "labels": {
+                  "$array": [
+                    { "$literal": "grengin" },
+                    { "$literal": "llm-plugin-v1" }
+                  ]
+                },
+                "previous_request_id": {
+                  "$omitIfNull": { "$get": "session.requestId" }
+                }
+              }
+            }
+          },
+          {
+            "$if": { "$get": "request.webSearch" },
+            "then": { "include_citations": { "$literal": true } },
+            "else": { "$literal": {} }
+          }
+        ]
+      },
+      "timeoutMs": 60000,
+      "maxResponseBytes": 8388608,
+      "response": {
+        "bodyEncoding": "sse",
+        "eventDataEncoding": "json",
+        "doneData": "[DONE]",
+        "rules": [
+          {
+            "id": "message_start",
+            "when": { "pointer": "/type", "equals": "message_start" },
+            "emit": "messageStart",
+            "fields": { "requestId": "/request_id" }
+          },
+          {
+            "id": "text_delta",
+            "when": { "pointer": "/type", "equals": "text_delta" },
+            "emit": "textDelta",
+            "value": "/delta/text"
+          },
+          {
+            "id": "reasoning_delta",
+            "when": { "pointer": "/type", "equals": "reasoning_delta" },
+            "emit": "reasoningDelta",
+            "value": "/delta/text"
+          },
+          {
+            "id": "tool_start",
+            "when": { "pointer": "/type", "equals": "tool_start" },
+            "emit": "toolCallStart",
+            "fields": {
+              "id": "/tool/id",
+              "name": "/tool/name",
+              "index": "/tool/index"
+            }
+          },
+          {
+            "id": "tool_arguments",
+            "when": { "pointer": "/type", "equals": "tool_arguments_delta" },
+            "emit": "toolArgumentsDelta",
+            "fields": {
+              "index": "/tool/index",
+              "fragment": "/delta/json"
+            }
+          },
+          {
+            "id": "tool_end",
+            "when": { "pointer": "/type", "equals": "tool_end" },
+            "emit": "toolCallEnd",
+            "fields": { "index": "/tool/index" }
+          },
+          {
+            "id": "search_start",
+            "when": { "pointer": "/type", "equals": "server_tool_start" },
+            "emit": "serverToolStart",
+            "fields": {
+              "id": "/tool/id",
+              "name": "/tool/name",
+              "index": "/tool/index",
+              "query": "/tool/query",
+              "queries": "/tool/queries"
+            }
+          },
+          {
+            "id": "search_query_delta",
+            "when": { "pointer": "/type", "equals": "server_tool_query_delta" },
+            "emit": "serverToolQueryDelta",
+            "fields": {
+              "index": "/tool/index",
+              "fragment": "/delta/json"
+            }
+          },
+          {
+            "id": "search_results",
+            "when": { "pointer": "/type", "equals": "server_tool_result" },
+            "emit": "serverToolResult",
+            "fields": {
+              "id": "/tool/id",
+              "name": "/tool/name",
+              "index": "/tool/index"
+            },
+            "collect": "/results",
+            "itemFields": {
+              "title": "/title",
+              "url": "/url",
+              "source": "/source",
+              "pageAge": "/page_age",
+              "snippet": "/snippet"
+            }
+          },
+          {
+            "id": "usage",
+            "when": { "pointer": "/type", "equals": "usage" },
+            "emit": "usage",
+            "fields": {
+              "inputTokens": "/usage/input_tokens",
+              "outputTokens": "/usage/output_tokens",
+              "totalTokens": "/usage/total_tokens",
+              "cachedInputTokens": "/usage/cached_input_tokens",
+              "cacheCreationTokens": "/usage/cache_creation_tokens"
+            }
+          },
+          {
+            "id": "provider_event",
+            "when": { "pointer": "/type", "equals": "provider_event" },
+            "emit": "providerEvent",
+            "fields": { "kind": "/kind", "data": "/data" }
+          },
+          {
+            "id": "error",
+            "when": { "pointer": "/type", "equals": "error" },
+            "emit": "error",
+            "fields": { "kind": "/error/kind", "message": "/error/message" }
+          },
+          {
+            "id": "completed",
+            "when": { "pointer": "/type", "equals": "completed" },
+            "emit": "completed",
+            "fields": { "finishReason": "/finish_reason" }
+          }
+        ]
+      },
+      "continuation": {
+        "mode": "replay_messages",
+        "maxToolRounds": 4,
+        "captures": { "requestId": "/request_id" }
+      }
+    },
+    "embeddings": {
+      "method": "POST",
+      "path": "embeddings/${request.model}",
+      "headers": {
+        "Authorization": { "secret": "api_key", "prefix": "Bearer " },
+        "X-Client-Tag": { "mapping": { "$get": "config.clientTag" } }
+      },
+      "query": { "api-version": { "$get": "config.apiVersion" } },
+      "bodyEncoding": "json",
+      "body": {
+        "model": { "$get": "request.model" },
+        "input": { "$get": "request.inputs" },
+        "dimensions": { "$omitIfNull": { "$get": "request.dimensions" } },
+        "options": { "$omitIfNull": { "$get": "request.options" } }
+      },
+      "timeoutMs": 30000,
+      "maxResponseBytes": 16777216,
+      "maxBatchSize": 2048,
+      "response": {
+        "bodyEncoding": "json",
+        "itemsPointer": "/data",
+        "vectorPointer": "/embedding",
+        "indexPointer": "/index",
+        "usage": {
+          "inputTokens": "/usage/input_tokens",
+          "outputTokens": "/usage/output_tokens",
+          "totalTokens": "/usage/total_tokens",
+          "cachedInputTokens": "/usage/cached_input_tokens",
+          "cacheCreationTokens": "/usage/cache_creation_tokens"
+        }
+      }
+    },
+    "imageGeneration": {
+      "method": "POST",
+      "path": "images/${request.model}/generations",
+      "headers": {
+        "Authorization": { "secret": "api_key", "prefix": "Bearer " },
+        "X-Client-Tag": { "mapping": { "$get": "config.clientTag" } }
+      },
+      "bodyEncoding": "json",
+      "body": {
+        "model": { "$get": "request.model" },
+        "prompt": { "$get": "request.prompt" },
+        "input_images": { "$get": "request.inputImages" },
+        "count": { "$get": "request.count" },
+        "size": { "$omitIfNull": { "$get": "request.size" } },
+        "quality": { "$omitIfNull": { "$get": "request.quality" } },
+        "options": { "$omitIfNull": { "$get": "request.options" } }
+      },
+      "timeoutMs": 120000,
+      "maxResponseBytes": 67108864,
+      "response": {
+        "bodyEncoding": "json",
+        "imagesPointer": "/data",
+        "base64Pointer": "/b64_json",
+        "urlPointer": "/url",
+        "mediaTypePointer": "/media_type",
+        "defaultMediaType": "image/png",
+        "usage": {
+          "inputTokens": "/usage/input_tokens",
+          "outputTokens": "/usage/output_tokens",
+          "totalTokens": "/usage/total_tokens"
+        }
+      }
+    },
+    "listModels": {
+      "method": "GET",
+      "path": "models",
+      "headers": {
+        "Authorization": { "secret": "api_key", "prefix": "Bearer " }
+      },
+      "query": { "api-version": { "$get": "config.apiVersion" } },
+      "bodyEncoding": "none",
+      "timeoutMs": 15000,
+      "maxResponseBytes": 4194304,
+      "response": {
+        "bodyEncoding": "json",
+        "modelsPointer": "/data",
+        "idPointer": "/id",
+        "namePointer": "/name"
+      }
+    }
+  }
+}

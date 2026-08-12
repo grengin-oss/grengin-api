@@ -95,12 +95,7 @@
         "temperature": { "$omitIfNull": { "$get": "request.temperature" } },
         "max_completion_tokens": { "$omitIfNull": { "$get": "request.maxTokens" } },
         "tools": {
-          "$omitIfNull": {
-            "$concat": [
-              { "$map": "request.tools", "using": "tool" },
-              { "$omitIfNull": { "$get": "request.options.nativeTools" } }
-            ]
-          }
+          "$omitIfNull": { "$map": "request.tools", "using": "tool" }
         },
         "stream": { "$literal": true },
         "stream_options": { "$literal": { "include_usage": true } }
@@ -142,6 +137,15 @@
               "index": "/index",
               "fragment": "/function/arguments"
             }
+          },
+          {
+            "id": "search_start",
+            "when": {
+              "pointer": "/choices/0/delta/annotations",
+              "notNull": true
+            },
+            "emit": "serverToolStart",
+            "constants": { "name": "web_search" }
           },
           {
             "id": "search_results",

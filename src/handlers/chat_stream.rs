@@ -37,7 +37,7 @@ use crate::{
         },
         mistral_conversations::MistralConversationStreamParser,
         openai::{OpenaiStreamParser, build_openai_tools, make_openai_function_output},
-        update_web_search_action_state, update_web_search_results_state,
+        parse_web_search_action, update_web_search_action_state, update_web_search_results_state,
     },
     llm::{
         prompt::Prompt,
@@ -1263,7 +1263,7 @@ pub async fn handle_chat_stream(
     // Create event source based on provider (skipped for image generation models).
     let (event_source, plugin_session): (
         Option<crate::services::provider_chat::LlmEventStream>,
-        Option<Box<dyn grengin_provider::ChatSession>>,
+        Option<Box<dyn llm_plugin::ChatSession>>,
     ) = if !is_image_gen {
         match &provider_config {
             LlmProviderConfig::OpenAI(settings) => {
@@ -1370,6 +1370,7 @@ pub async fn handle_chat_stream(
                     req.temperature,
                     u32::try_from(anthropic_max_tokens).ok(),
                     &mcp_tool_lookup,
+                    web_search,
                     req.config.clone().unwrap_or(Value::Null),
                 );
                 let mut session = chat.start(plugin_request).await.map_err(|error| {
@@ -1444,7 +1445,7 @@ pub async fn handle_chat_stream(
        let gemini_tooling_enabled = provider_is_gemini && mcp_tooling_enabled;
        let plugin_tooling_enabled = provider_is_plugin && mcp_tooling_enabled;
        let mut plugin_session = plugin_session;
-       let mut plugin_next_tool_results: Option<Vec<grengin_provider::ToolResult>> = None;
+       let mut plugin_next_tool_results: Option<Vec<llm_plugin::ToolResult>> = None;
        let mut openai_previous_response_id: Option<String> = None;
        let mut openai_next_input: Option<Vec<OpenaiInputItem>> = None;
        let mut tool_round: usize = 0;
@@ -1962,12 +1963,19 @@ pub async fn handle_chat_stream(
                                    parsed_input = Some(value);
                                }
                            }
+                           let parsed_web_search = is_web_search
+                               .then(|| parsed_input.as_ref().and_then(parse_web_search_action))
+                               .flatten();
+                           let web_search_action = tool_input
+                               .web_search
+                               .clone()
+                               .or(parsed_web_search);
                            if is_web_search {
                                let _ = update_web_search_action_state(
                                    &mut web_search_state,
                                    &mut last_web_search_call_id,
                                    tool_input.tool_id.clone(),
-                                   tool_input.web_search.clone(),
+                                   web_search_action.clone(),
                                );
                            }
                            let tool_call = ChatStreamToolCall {
@@ -1976,7 +1984,7 @@ pub async fn handle_chat_stream(
                                input_text: Some(tool_input.partial_json.clone()),
                                input: None,
                                kind: Some(if is_web_search { ChatToolKind::WebSearch } else { ChatToolKind::Other }),
-                               web_search: tool_input.web_search.clone().map(|action| ChatStreamWebSearchAction {
+                               web_search: web_search_action.clone().map(|action| ChatStreamWebSearchAction {
                                    query: action.query.clone(),
                                    queries: action.queries.clone(),
                                }),
@@ -2030,7 +2038,7 @@ pub async fn handle_chat_stream(
                                            input: Some(ToolInput::Json(input_value.clone())),
                                            index: tool_input.index,
                                            raw: None,
-                                           web_search: tool_input.web_search.clone(),
+                                           web_search: web_search_action.clone(),
                                        };
                                        pending_mcp_tool_calls.push(call);
                                        emitted_tc.insert(tool_id.clone(), resolved_name.clone());
@@ -2045,8 +2053,7 @@ pub async fn handle_chat_stream(
                                            } else {
                                                ChatToolKind::Other
                                            }),
-                                           web_search: tool_input
-                                               .web_search
+                                           web_search: web_search_action
                                                .clone()
                                                .map(|action| ChatStreamWebSearchAction {
                                                    query: action.query.clone(),
@@ -2357,7 +2364,7 @@ pub async fn handle_chat_stream(
                            let mut mistral_function_results_entries: Vec<MistralConversationFunctionResult> = Vec::new();
                            let mut gemini_model_tool_messages: Vec<GeminiContent> = Vec::new();
                            let mut gemini_function_response_messages: Vec<GeminiContent> = Vec::new();
-                           let mut plugin_tool_results: Vec<grengin_provider::ToolResult> = Vec::new();
+                           let mut plugin_tool_results: Vec<llm_plugin::ToolResult> = Vec::new();
 
                            if anthropic_tooling_enabled && !stream_message_content.trim().is_empty() {
                                anthropic_tool_use_blocks.push(AnthropicContentBlock::Text {
@@ -2606,8 +2613,8 @@ pub async fn handle_chat_stream(
 
                                if let Some(call_id) = call.tool_id.clone() {
                                    if plugin_tooling_enabled {
-                                       plugin_tool_results.push(grengin_provider::ToolResult {
-                                           call_id: grengin_provider::ToolCallId::new(call_id.clone()),
+                                       plugin_tool_results.push(llm_plugin::ToolResult {
+                                           call_id: llm_plugin::ToolCallId::new(call_id.clone()),
                                            name: call.tool_name.clone(),
                                            output: output_payload.clone(),
                                            is_error,
@@ -2751,7 +2758,7 @@ pub async fn handle_chat_stream(
                            break;
                        }
                        LlmStreamError::Provider(error) => {
-                           let stream_err = if matches!(&error, grengin_provider::ProviderError::QuotaExhausted) {
+                           let stream_err = if matches!(&error, llm_plugin::ProviderError::QuotaExhausted) {
                                ChatStreamError::ApiQuotaExhausted { provider: provider.clone() }
                            } else {
                                ChatStreamError::ProviderError {

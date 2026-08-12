@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use grengin_provider::{ProviderError, ProviderModel, ProviderPlugin};
+use llm_plugin::{ProviderError, ProviderModel, ProviderPlugin};
 
 use crate::dto::models::{ModelInfo, ModelType};
 
@@ -95,7 +95,7 @@ fn metadata_bool(model: &ProviderModel, key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use grengin_provider::{ModelId, ProviderCapabilities, ProviderModel};
+    use llm_plugin::{ModelId, ProviderCapabilities, ProviderModel};
 
     use super::*;
 

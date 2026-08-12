@@ -592,8 +592,8 @@ pub async fn generate_embeddings(
                 return Ok(None);
             };
             let response = embedder
-                .embed(grengin_provider::EmbeddingRequest {
-                    model: grengin_provider::ModelId::new(config.model.clone()),
+                .embed(llm_plugin::EmbeddingRequest {
+                    model: llm_plugin::ModelId::new(config.model.clone()),
                     inputs,
                     dimensions: config.dimensions.and_then(|value| u32::try_from(value).ok()),
                     options: serde_json::Value::Null,

@@ -94,7 +94,19 @@
           "$omitIfNull": {
             "$concat": [
               { "$map": "request.tools", "using": "tool" },
-              { "$omitIfNull": { "$get": "request.options.nativeTools" } }
+              {
+                "$if": { "$get": "request.webSearch" },
+                "then": {
+                  "$literal": [
+                    {
+                      "type": "web_search_20250305",
+                      "name": "web_search",
+                      "max_uses": 3
+                    }
+                  ]
+                },
+                "else": { "$literal": [] }
+              }
             ]
           }
         },

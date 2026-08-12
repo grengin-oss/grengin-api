@@ -4,7 +4,7 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use futures_util::StreamExt;
-use grengin_provider::{
+use llm_plugin::{
     ChatRequest, DeclarativeProvider, EmbeddingRequest, ImageRequest, ModelId, ProviderError,
     ProviderEvent, ProviderEventStream, ProviderManifestV1, ProviderPlugin, ProviderRuntimeConfig,
     ToolCallId, ToolResult,
@@ -173,6 +173,7 @@ fn chat_request(model: &str) -> ChatRequest {
         max_tokens: None,
         tools: Vec::new(),
         tool_choice: None,
+        web_search: false,
         options: Value::Null,
     }
 }
@@ -1129,7 +1130,7 @@ async fn uploads_multipart_bodies_with_decoded_file_parts() {
         .images()
         .unwrap()
         .generate(ImageRequest {
-            input_images: vec![grengin_provider::InputImage {
+            input_images: vec![llm_plugin::InputImage {
                 data: "AQID".to_string(),
                 media_type: "image/png".to_string(),
                 filename: None,
