@@ -317,6 +317,12 @@ custom key is absent, it loads only an `enabled` persisted plugin, decrypts and 
 multi-replica deployments where the replica serving chat may not be the one that handled install or
 enable. Disabled, invalid, missing, and undecryptable records fail closed.
 
+`llm-plugin/tests/staging_chat.sh` verifies this boundary against staging without polling. It checks
+the installed provider, plain delta streaming, provider error mapping, native web search, and the
+read-only `db_status` MCP tool, then deletes only the conversations it created. By default it reads
+`API_URL` and `API_KEY` from the repository-local `.grengin_auth`; every setting can be overridden
+with the `GRENGIN_STAGING_*` environment variables documented at the top of the script.
+
 ---
 
 ## 9. Environment gotchas
