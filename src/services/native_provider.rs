@@ -17,6 +17,7 @@ use llm_plugin::{
 };
 use reqwest::Client as ReqwestClient;
 use reqwest_eventsource::{Event as ReqwestEvent, EventSource};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
@@ -53,7 +54,7 @@ use crate::{
         prompt::Prompt,
         provider::{AnthropicApis, GeminiApis, MistralApis, OpenaiApis},
     },
-    models::messages::ChatRole,
+    models::{messages::ChatRole, provider_plugins as provider_plugin_records},
     state::SharedState,
 };
 
@@ -119,14 +120,43 @@ pub async fn resolve_provider(
             NativeProvider::new(client, user_id, NativeProviderKind::Gemini(settings))
         }
         _ => {
-            return state
-                .provider_registry
-                .get_by_str(provider_key)
+            if let Some(provider) = state.provider_registry.get_by_str(provider_key).await {
+                return Ok(provider);
+            }
+            let plugin = provider_plugin_records::Entity::find()
+                .filter(provider_plugin_records::Column::ProviderKey.eq(provider_key))
+                .one(&state.database)
                 .await
-                .ok_or(ResolveProviderError::Unknown);
+                .map_err(|_| ResolveProviderError::NotConfigured)?
+                .ok_or(ResolveProviderError::Unknown)?;
+            ensure_persisted_provider_enabled(&plugin.status)?;
+            let provider = super::provider_plugins::build_provider(
+                &state.database,
+                &state.settings.auth.app_key,
+                &plugin,
+            )
+            .await
+            .map_err(|_| ResolveProviderError::NotConfigured)?;
+            let provider: Arc<dyn ProviderPlugin> = Arc::new(provider);
+            state.provider_registry.register(provider.clone()).await;
+            return Ok(provider);
         }
     };
     Ok(Arc::new(provider))
+}
+
+fn ensure_persisted_provider_enabled(
+    status: &provider_plugin_records::ProviderPluginStatus,
+) -> Result<(), ResolveProviderError> {
+    match status {
+        provider_plugin_records::ProviderPluginStatus::Enabled => Ok(()),
+        provider_plugin_records::ProviderPluginStatus::Disabled => {
+            Err(ResolveProviderError::Disabled)
+        }
+        provider_plugin_records::ProviderPluginStatus::Invalid => {
+            Err(ResolveProviderError::NotConfigured)
+        }
+    }
 }
 
 fn ensure_enabled(enabled: bool) -> Result<(), ResolveProviderError> {
@@ -1457,6 +1487,28 @@ mod tests {
     use llm_plugin::{ChatMessage, ModelId};
 
     use super::*;
+
+    #[test]
+    fn persisted_provider_status_fails_closed_unless_enabled() {
+        assert!(
+            ensure_persisted_provider_enabled(
+                &provider_plugin_records::ProviderPluginStatus::Enabled
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            ensure_persisted_provider_enabled(
+                &provider_plugin_records::ProviderPluginStatus::Disabled
+            ),
+            Err(ResolveProviderError::Disabled)
+        ));
+        assert!(matches!(
+            ensure_persisted_provider_enabled(
+                &provider_plugin_records::ProviderPluginStatus::Invalid
+            ),
+            Err(ResolveProviderError::NotConfigured)
+        ));
+    }
 
     #[test]
     fn canonical_file_references_survive_native_conversion() {

@@ -12,7 +12,7 @@ an error-handling review. Written for whoever picks this up next.
 generation and model listing, with request payloads and response events described declaratively so a
 new provider needs no Rust.
 
-**Branch:** `feat/llm-plugin` · **Tests:** 90 plugin + 27 API offline, 13 live
+**Branch:** `feat/llm-plugin` · **Tests:** 90 plugin + 28 API offline, 13 live
 (`#[ignore]`d) · `llm-plugin` and the new native adapter are clippy clean
 
 ---
@@ -310,6 +310,12 @@ de-duplicated, and unfinished parallel calls close in stream-index order.
 `src/services/provider_chat.rs` owns canonical request construction, event parsing, and generic title
 generation. The Docker dependency-cache stage must copy `llm-plugin/Cargo.toml` and create its dummy
 `src/lib.rs` before `cargo fetch`; the real crate is copied for the build stage.
+
+The provider registry is process-local. `resolve_provider` therefore treats it as a cache: when a
+custom key is absent, it loads only an `enabled` persisted plugin, decrypts and compiles it through
+`services::provider_plugins::build_provider`, then registers it locally. This is required on
+multi-replica deployments where the replica serving chat may not be the one that handled install or
+enable. Disabled, invalid, missing, and undecryptable records fail closed.
 
 ---
 
