@@ -208,6 +208,34 @@ pub enum ProviderEvent {
     ToolCallEnd {
         id: ToolCallId,
     },
+    /// A tool the provider runs itself (web search, code execution) has started. Unlike
+    /// [`ProviderEvent::ToolCallStart`] the caller must not execute anything; this is progress
+    /// reporting for a side effect the provider already owns.
+    ServerToolStart {
+        id: Option<ToolCallId>,
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        queries: Vec<String>,
+    },
+    /// A fragment of a server tool's input, for providers that stream the search query
+    /// incrementally. Fragments concatenate into the tool's raw JSON input.
+    ServerToolQueryDelta {
+        id: Option<ToolCallId>,
+        name: String,
+        fragment: String,
+    },
+    /// The results a server tool produced, grouped into one event so the caller does not have to
+    /// correlate individual items.
+    ///
+    /// Queries belong to [`ProviderEvent::ServerToolStart`]. A provider that reports both together
+    /// (Gemini's grounding metadata) is mapped with one rule of each kind on the same event.
+    ServerToolResult {
+        id: Option<ToolCallId>,
+        name: String,
+        results: Vec<ServerToolResultItem>,
+    },
     Usage {
         usage: TokenUsage,
     },
@@ -222,6 +250,24 @@ pub enum ProviderEvent {
     Completed {
         finish_reason: Option<FinishReason>,
     },
+}
+
+/// One citation a provider-executed search returned.
+///
+/// Only the fields a manifest maps are populated, so provider-internal payloads (Anthropic's
+/// multi-kilobyte `encrypted_content`, for instance) never reach the caller.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerToolResultItem {
+    /// Falls back to `url` when the provider omits a title.
+    pub title: String,
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_age: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

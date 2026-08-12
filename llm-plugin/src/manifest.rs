@@ -191,23 +191,39 @@ pub enum BodyEncoding {
     None,
 }
 
+/// How one outbound header value is produced.
+///
+/// The variants wrap named structs so each one can `deny_unknown_fields`: an inline untagged
+/// variant would silently accept a misspelled `prefix` and send a bare credential instead.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum HeaderValueSpec {
     Text(String),
-    Literal {
-        literal: String,
-    },
-    Secret {
-        secret: String,
-        #[serde(default)]
-        prefix: String,
-        #[serde(default)]
-        suffix: String,
-    },
-    Mapping {
-        mapping: MappingExpression,
-    },
+    Literal(LiteralHeaderValue),
+    Secret(SecretHeaderValue),
+    Mapping(MappingHeaderValue),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LiteralHeaderValue {
+    pub literal: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SecretHeaderValue {
+    pub secret: String,
+    #[serde(default)]
+    pub prefix: String,
+    #[serde(default)]
+    pub suffix: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MappingHeaderValue {
+    pub mapping: MappingExpression,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -241,6 +257,7 @@ pub enum EventDataEncoding {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResponseRule {
     pub id: String,
+    /// Applies the rule once per entry of the pointed-to array, emitting one event per entry.
     #[serde(default)]
     pub for_each: Option<String>,
     #[serde(default)]
@@ -252,6 +269,13 @@ pub struct ResponseRule {
     pub fields: BTreeMap<String, String>,
     #[serde(default)]
     pub constants: BTreeMap<String, Value>,
+    /// Pointer to an array gathered into a *single* event, with each entry mapped through
+    /// [`ResponseRule::item_fields`]. The counterpart to `forEach`, which fans out instead.
+    #[serde(default)]
+    pub collect: Option<String>,
+    /// Field pointers resolved against each `collect` entry rather than the event root.
+    #[serde(default)]
+    pub item_fields: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -275,6 +299,11 @@ pub enum EventKind {
     ToolCallStart,
     ToolArgumentsDelta,
     ToolCallEnd,
+    /// A provider-executed tool began. Shares the index space of the client-tool kinds above so a
+    /// provider that interleaves both (Anthropic content blocks) can be mapped unambiguously.
+    ServerToolStart,
+    ServerToolQueryDelta,
+    ServerToolResult,
     Usage,
     ProviderEvent,
     Error,
@@ -442,6 +471,14 @@ impl ProviderManifestV1 {
 
         validate_mapping_definitions(&self.mappings)?;
 
+        // Compile the declared schema here rather than waiting for the first provider instance, so
+        // a broken `configurationSchema` is reported when the manifest is submitted.
+        if let Some(schema) = &self.configuration_schema {
+            jsonschema::validator_for(schema).map_err(|error| {
+                ProviderError::InvalidManifest(format!("configurationSchema is invalid: {error}"))
+            })?;
+        }
+
         validate_capability(
             "chat",
             self.capabilities.chat.is_some(),
@@ -457,10 +494,11 @@ impl ProviderManifestV1 {
             self.capabilities.image_generation,
             self.operations.image_generation.is_some(),
         )?;
+        // A static `models` list satisfies model listing just as well as a live endpoint does.
         validate_capability(
             "modelListing",
             self.capabilities.model_listing,
-            self.operations.list_models.is_some(),
+            self.operations.list_models.is_some() || !self.models.is_empty(),
         )?;
 
         if let Some(chat) = &self.capabilities.chat
@@ -627,11 +665,11 @@ fn validate_request(
             "operation path must be relative to baseUrl".to_string(),
         ));
     }
-    if request.path.contains(['\r', '\n', '\\'])
-        || request.path.split('/').any(|segment| segment == "..")
+    if request.path.contains(['\r', '\n', '\\', '#'])
+        || request.path.split('/').any(is_dot_dot_segment)
     {
         return Err(ProviderError::InvalidManifest(
-            "operation path must not contain control characters, backslashes, or '..' segments"
+            "operation path must not contain control characters, backslashes, fragments, or '..' segments"
                 .to_string(),
         ));
     }
@@ -662,15 +700,16 @@ fn validate_request(
     }
     for (name, value) in &request.headers {
         crate::security::validate_header_name(name)?;
-        if let HeaderValueSpec::Secret { secret, .. } = value
-            && !credentials.contains(secret.as_str())
+        if let HeaderValueSpec::Secret(value) = value
+            && !credentials.contains(value.secret.as_str())
         {
             return Err(ProviderError::InvalidManifest(format!(
-                "header {name} references undeclared credential {secret}"
+                "header {name} references undeclared credential {}",
+                value.secret
             )));
         }
-        if let HeaderValueSpec::Mapping { mapping } = value {
-            validate_mapping(mapping, definitions)?;
+        if let HeaderValueSpec::Mapping(value) = value {
+            validate_mapping(&value.mapping, definitions)?;
         }
     }
     for mapping in request.query.values() {
@@ -682,9 +721,61 @@ fn validate_request(
     Ok(())
 }
 
+/// Matches every spelling the URL standard treats as a parent-directory segment, so a manifest
+/// cannot smuggle traversal past this check by percent-encoding the dots.
+fn is_dot_dot_segment(segment: &str) -> bool {
+    matches!(
+        segment.to_ascii_lowercase().as_str(),
+        ".." | ".%2e" | "%2e." | "%2e%2e"
+    )
+}
+
 fn validate_rule(rule: &ResponseRule) -> Result<(), ProviderError> {
     if let Some(pointer) = &rule.for_each {
         validate_pointer(pointer)?;
+    }
+    if let Some(pointer) = &rule.collect {
+        validate_pointer(pointer)?;
+        if rule.for_each.is_some() {
+            return Err(ProviderError::InvalidManifest(format!(
+                "response rule {} cannot use both forEach and collect",
+                rule.id
+            )));
+        }
+        if rule.emit != EventKind::ServerToolResult {
+            return Err(ProviderError::InvalidManifest(format!(
+                "response rule {} may only use collect with emit serverToolResult",
+                rule.id
+            )));
+        }
+    }
+    if !rule.item_fields.is_empty() {
+        if rule.collect.is_none() {
+            return Err(ProviderError::InvalidManifest(format!(
+                "response rule {} declares itemFields without collect",
+                rule.id
+            )));
+        }
+        for pointer in rule.item_fields.values() {
+            validate_pointer(pointer)?;
+        }
+    }
+    if rule.emit == EventKind::ServerToolResult && rule.collect.is_none() {
+        return Err(ProviderError::InvalidManifest(format!(
+            "response rule {} must declare collect to gather serverToolResult items",
+            rule.id
+        )));
+    }
+    // Later server-tool events recover the name from the index recorded at start, so only the start
+    // rule has to name the tool outright.
+    if rule.emit == EventKind::ServerToolStart
+        && !rule.constants.contains_key("name")
+        && !rule.fields.contains_key("name")
+    {
+        return Err(ProviderError::InvalidManifest(format!(
+            "response rule {} must supply the server tool name",
+            rule.id
+        )));
     }
     if let Some(condition) = &rule.when {
         validate_pointer(&condition.pointer)?;

@@ -12,9 +12,20 @@ use crate::ProviderError;
 
 const MAX_MAPPING_DEPTH: usize = 64;
 
+/// A declarative payload expression.
+///
+/// Variant order is load-bearing for `untagged` deserialization and must not be rearranged:
+///
+/// * `ArrayValue` comes first because serde also derives struct-from-sequence for the operator
+///   variants below, so a bare JSON array like `[a, b]` would otherwise be read as
+///   `IfExpression { condition: a, then: b }`.
+/// * The `$`-prefixed operator structs come before `ObjectValue` so `{"$get": …}` is read as an
+///   operator instead of a one-key object literal.
+/// * `Scalar` comes last because [`Value`] accepts anything.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum MappingExpression {
+    ArrayValue(Vec<MappingExpression>),
     Literal(LiteralExpression),
     Get(GetExpression),
     OmitIfNull(OmitIfNullExpression),
@@ -24,10 +35,11 @@ pub enum MappingExpression {
     If(IfExpression),
     Switch(SwitchExpression),
     Merge(MergeExpression),
+    Concat(ConcatExpression),
+    Coalesce(CoalesceExpression),
     Object(ObjectExpression),
     Array(ArrayExpression),
     ObjectValue(BTreeMap<String, MappingExpression>),
-    ArrayValue(Vec<MappingExpression>),
     Scalar(Value),
 }
 
@@ -101,6 +113,29 @@ pub struct MergeExpression {
     pub values: Vec<MappingExpression>,
 }
 
+/// Flattens several arrays into one, the array counterpart of `$merge`.
+///
+/// Needed whenever a provider takes a single list that the runtime assembles from more than one
+/// source, such as `tools` holding both mapped client tools and a literal provider-native tool.
+/// Entries that evaluate to nothing are skipped, so an absent optional list contributes nothing.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConcatExpression {
+    #[serde(rename = "$concat")]
+    pub values: Vec<MappingExpression>,
+}
+
+/// Yields the first entry that resolves to a non-null value.
+///
+/// Needed wherever a provider requires a field the canonical request treats as optional, such as
+/// Anthropic's mandatory `max_tokens`, which otherwise fails the whole payload when unset.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoalesceExpression {
+    #[serde(rename = "$coalesce")]
+    pub values: Vec<MappingExpression>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ObjectExpression {
@@ -142,14 +177,6 @@ impl MappingContext {
 
     pub fn root(&self) -> &Value {
         &self.root
-    }
-
-    fn with_item(&self, item: Value) -> Self {
-        let mut root = self.root.clone();
-        if let Value::Object(object) = &mut root {
-            object.insert("item".to_string(), item);
-        }
-        Self { root }
     }
 }
 
@@ -235,6 +262,21 @@ fn validate_expression<'a>(
                 validate_expression(child, definitions, definition_stack, child_depth)?;
             }
         }
+        MappingExpression::Concat(value) => {
+            for child in &value.values {
+                validate_expression(child, definitions, definition_stack, child_depth)?;
+            }
+        }
+        MappingExpression::Coalesce(value) => {
+            if value.values.is_empty() {
+                return Err(ProviderError::InvalidManifest(
+                    "$coalesce requires at least one entry".to_string(),
+                ));
+            }
+            for child in &value.values {
+                validate_expression(child, definitions, definition_stack, child_depth)?;
+            }
+        }
         MappingExpression::Object(value) => {
             validate_object(&value.value, definitions, definition_stack, child_depth)?;
         }
@@ -302,11 +344,7 @@ fn validate_definition_name(name: &str) -> Result<(), ProviderError> {
 }
 
 fn validate_canonical_path(path: &str) -> Result<(), ProviderError> {
-    let root = path
-        .strip_prefix('/')
-        .and_then(|path| path.split('/').next())
-        .or_else(|| path.split('.').next())
-        .unwrap_or_default();
+    let (root, _) = split_canonical_path(path);
     if !matches!(root, "request" | "config" | "session" | "item") {
         return Err(ProviderError::InvalidManifest(format!(
             "mapping path must begin with request, config, session, or item: {path}"
@@ -315,12 +353,42 @@ fn validate_canonical_path(path: &str) -> Result<(), ProviderError> {
     Ok(())
 }
 
+/// Splits a canonical path into its root name and the remainder, keeping the remainder in the
+/// same notation as the input so [`resolve_path`] can continue from it.
+///
+/// `request.messages` -> `("request", "messages")`, `/request/messages` -> `("request", "/messages")`.
+fn split_canonical_path(path: &str) -> (&str, &str) {
+    if let Some(rest) = path.strip_prefix('/') {
+        let end = rest.find('/').unwrap_or(rest.len());
+        (&rest[..end], &path[1 + end..])
+    } else {
+        let end = path.find('.').unwrap_or(path.len());
+        (&path[..end], path.get(end + 1..).unwrap_or_default())
+    }
+}
+
+/// Resolves a canonical path against the request root, or against the current `$map` element when
+/// the path is rooted at `item`.
+fn resolve_in<'a>(root: &'a Value, item: Option<&'a Value>, path: &str) -> Option<&'a Value> {
+    if let Some(item) = item
+        && let ("item", rest) = split_canonical_path(path)
+    {
+        return resolve_path(item, rest);
+    }
+    resolve_path(root, path)
+}
+
 pub fn evaluate_mapping(
     mapping: &MappingExpression,
     context: &MappingContext,
     definitions: &BTreeMap<String, MappingExpression>,
 ) -> Result<Value, ProviderError> {
-    match evaluate(mapping, context, definitions, false, 0)? {
+    let scope = Scope {
+        root: context.root(),
+        item: None,
+        definitions,
+    };
+    match evaluate(mapping, scope, false, 0)? {
         Evaluation::Value(value) => Ok(value),
         Evaluation::Omit => Ok(Value::Null),
     }
@@ -331,10 +399,31 @@ enum Evaluation {
     Omit,
 }
 
+/// Borrowed evaluation scope. `item` is threaded rather than spliced into `root` so `$map` over a
+/// long message list does not deep-clone the whole request per element.
+#[derive(Clone, Copy)]
+struct Scope<'a> {
+    root: &'a Value,
+    item: Option<&'a Value>,
+    definitions: &'a BTreeMap<String, MappingExpression>,
+}
+
+impl<'a> Scope<'a> {
+    fn resolve(&self, path: &str) -> Option<&'a Value> {
+        resolve_in(self.root, self.item, path)
+    }
+
+    fn with_item(&self, item: &'a Value) -> Self {
+        Self {
+            item: Some(item),
+            ..*self
+        }
+    }
+}
+
 fn evaluate(
     mapping: &MappingExpression,
-    context: &MappingContext,
-    definitions: &BTreeMap<String, MappingExpression>,
+    scope: Scope<'_>,
     optional: bool,
     depth: usize,
 ) -> Result<Evaluation, ProviderError> {
@@ -346,7 +435,7 @@ fn evaluate(
     let child_depth = depth + 1;
     match mapping {
         MappingExpression::Literal(value) => Ok(Evaluation::Value(value.value.clone())),
-        MappingExpression::Get(get) => match resolve_path(context.root(), &get.path) {
+        MappingExpression::Get(get) => match scope.resolve(&get.path) {
             Some(value) => Ok(Evaluation::Value(value.clone())),
             None if optional => Ok(Evaluation::Omit),
             None => Err(ProviderError::PayloadMapping(format!(
@@ -355,32 +444,20 @@ fn evaluate(
             ))),
         },
         MappingExpression::OmitIfNull(value) => {
-            match evaluate(&value.value, context, definitions, true, child_depth)? {
+            match evaluate(&value.value, scope, true, child_depth)? {
                 Evaluation::Value(Value::Null) | Evaluation::Omit => Ok(Evaluation::Omit),
                 value => Ok(value),
             }
         }
         MappingExpression::JsonEncode(value) => {
-            let value = required_value(evaluate(
-                &value.value,
-                context,
-                definitions,
-                false,
-                child_depth,
-            )?)?;
+            let value = required_value(evaluate(&value.value, scope, false, child_depth)?)?;
             Ok(Evaluation::Value(Value::String(
                 serde_json::to_string(&value)
                     .map_err(|error| ProviderError::PayloadMapping(error.to_string()))?,
             )))
         }
         MappingExpression::Base64(value) => {
-            let value = required_value(evaluate(
-                &value.value,
-                context,
-                definitions,
-                false,
-                child_depth,
-            )?)?;
+            let value = required_value(evaluate(&value.value, scope, false, child_depth)?)?;
             let text = value.as_str().ok_or_else(|| {
                 ProviderError::PayloadMapping("$base64 requires a string value".to_string())
             })?;
@@ -389,7 +466,7 @@ fn evaluate(
             )))
         }
         MappingExpression::Map(map) => {
-            let Some(selected) = resolve_path(context.root(), &map.path) else {
+            let Some(selected) = scope.resolve(&map.path) else {
                 if optional {
                     return Ok(Evaluation::Omit);
                 }
@@ -401,14 +478,13 @@ fn evaluate(
             let items = selected.as_array().ok_or_else(|| {
                 ProviderError::PayloadMapping(format!("$map path is not an array: {}", map.path))
             })?;
-            let definition = definitions.get(&map.using).ok_or_else(|| {
+            let definition = scope.definitions.get(&map.using).ok_or_else(|| {
                 ProviderError::PayloadMapping(format!("unknown mapping definition: {}", map.using))
             })?;
             let mut output = Vec::with_capacity(items.len());
             for item in items {
-                let item_context = context.with_item(item.clone());
                 if let Evaluation::Value(value) =
-                    evaluate(definition, &item_context, definitions, false, child_depth)?
+                    evaluate(definition, scope.with_item(item), false, child_depth)?
                 {
                     output.push(value);
                 }
@@ -416,32 +492,20 @@ fn evaluate(
             Ok(Evaluation::Value(Value::Array(output)))
         }
         MappingExpression::If(value) => {
-            let condition = required_value(evaluate(
-                &value.condition,
-                context,
-                definitions,
-                false,
-                child_depth,
-            )?)?;
+            let condition = required_value(evaluate(&value.condition, scope, false, child_depth)?)?;
             let condition = condition.as_bool().ok_or_else(|| {
                 ProviderError::PayloadMapping("$if condition must evaluate to boolean".to_string())
             })?;
             if condition {
-                evaluate(&value.then, context, definitions, false, child_depth)
+                evaluate(&value.then, scope, false, child_depth)
             } else if let Some(else_branch) = &value.else_branch {
-                evaluate(else_branch, context, definitions, false, child_depth)
+                evaluate(else_branch, scope, false, child_depth)
             } else {
                 Ok(Evaluation::Omit)
             }
         }
         MappingExpression::Switch(value) => {
-            let selected = required_value(evaluate(
-                &value.value,
-                context,
-                definitions,
-                false,
-                child_depth,
-            )?)?;
+            let selected = required_value(evaluate(&value.value, scope, false, child_depth)?)?;
             let selected = match selected {
                 Value::String(value) => value,
                 Value::Bool(value) => value.to_string(),
@@ -453,18 +517,27 @@ fn evaluate(
                 }
             };
             if let Some(branch) = value.cases.get(&selected).or(value.default.as_deref()) {
-                evaluate(branch, context, definitions, false, child_depth)
+                evaluate(branch, scope, false, child_depth)
             } else {
+                // `$switch` is meant for enumerated fields (roles, content-part types), but a
+                // manifest can point it at free text, so bound what lands in the error and logs and
+                // name the declared cases to keep the failure diagnosable.
                 Err(ProviderError::PayloadMapping(format!(
-                    "$switch has no case for {selected}"
+                    "$switch has no case for {:?} and declares no default; cases are: {}",
+                    truncate(&selected, 48),
+                    value
+                        .cases
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )))
             }
         }
         MappingExpression::Merge(value) => {
             let mut merged = Map::new();
             for item in &value.values {
-                let value =
-                    required_value(evaluate(item, context, definitions, false, child_depth)?)?;
+                let value = required_value(evaluate(item, scope, false, child_depth)?)?;
                 let object = value.as_object().ok_or_else(|| {
                     ProviderError::PayloadMapping("$merge entries must be objects".to_string())
                 })?;
@@ -472,32 +545,57 @@ fn evaluate(
             }
             Ok(Evaluation::Value(Value::Object(merged)))
         }
-        MappingExpression::Object(value) => {
-            evaluate_object(&value.value, context, definitions, optional, child_depth)
+        MappingExpression::Concat(value) => {
+            let mut concatenated = Vec::new();
+            for item in &value.values {
+                // Each entry is optional so a `$map` over an absent list contributes nothing
+                // instead of failing the whole payload.
+                match evaluate(item, scope, true, child_depth)? {
+                    Evaluation::Omit => continue,
+                    Evaluation::Value(Value::Null) => continue,
+                    Evaluation::Value(Value::Array(values)) => concatenated.extend(values),
+                    Evaluation::Value(_) => {
+                        return Err(ProviderError::PayloadMapping(
+                            "$concat entries must be arrays".to_string(),
+                        ));
+                    }
+                }
+            }
+            if concatenated.is_empty() && optional {
+                return Ok(Evaluation::Omit);
+            }
+            Ok(Evaluation::Value(Value::Array(concatenated)))
         }
-        MappingExpression::ObjectValue(value) => {
-            evaluate_object(value, context, definitions, optional, child_depth)
+        MappingExpression::Coalesce(value) => {
+            for item in &value.values {
+                match evaluate(item, scope, true, child_depth)? {
+                    Evaluation::Omit | Evaluation::Value(Value::Null) => continue,
+                    found => return Ok(found),
+                }
+            }
+            if optional {
+                return Ok(Evaluation::Omit);
+            }
+            Err(ProviderError::PayloadMapping(
+                "$coalesce produced no value".to_string(),
+            ))
         }
-        MappingExpression::Array(value) => {
-            evaluate_array(&value.value, context, definitions, child_depth)
-        }
-        MappingExpression::ArrayValue(value) => {
-            evaluate_array(value, context, definitions, child_depth)
-        }
+        MappingExpression::Object(value) => evaluate_object(&value.value, scope, child_depth),
+        MappingExpression::ObjectValue(value) => evaluate_object(value, scope, child_depth),
+        MappingExpression::Array(value) => evaluate_array(&value.value, scope, child_depth),
+        MappingExpression::ArrayValue(value) => evaluate_array(value, scope, child_depth),
         MappingExpression::Scalar(value) => Ok(Evaluation::Value(value.clone())),
     }
 }
 
 fn evaluate_object(
     object: &BTreeMap<String, MappingExpression>,
-    context: &MappingContext,
-    definitions: &BTreeMap<String, MappingExpression>,
-    _optional: bool,
+    scope: Scope<'_>,
     depth: usize,
 ) -> Result<Evaluation, ProviderError> {
     let mut output = Map::new();
     for (key, child) in object {
-        if let Evaluation::Value(value) = evaluate(child, context, definitions, false, depth)? {
+        if let Evaluation::Value(value) = evaluate(child, scope, false, depth)? {
             output.insert(key.clone(), value);
         }
     }
@@ -506,13 +604,12 @@ fn evaluate_object(
 
 fn evaluate_array(
     items: &[MappingExpression],
-    context: &MappingContext,
-    definitions: &BTreeMap<String, MappingExpression>,
+    scope: Scope<'_>,
     depth: usize,
 ) -> Result<Evaluation, ProviderError> {
     let mut output = Vec::with_capacity(items.len());
     for item in items {
-        if let Evaluation::Value(value) = evaluate(item, context, definitions, false, depth)? {
+        if let Evaluation::Value(value) = evaluate(item, scope, false, depth)? {
             output.push(value);
         }
     }
@@ -525,6 +622,14 @@ fn required_value(evaluation: Evaluation) -> Result<Value, ProviderError> {
         Evaluation::Omit => Err(ProviderError::PayloadMapping(
             "an omitted value is not valid in this position".to_string(),
         )),
+    }
+}
+
+/// Shortens a value for inclusion in an error message, respecting char boundaries.
+fn truncate(value: &str, limit: usize) -> String {
+    match value.char_indices().nth(limit) {
+        Some((end, _)) => format!("{}…", &value[..end]),
+        None => value.to_string(),
     }
 }
 
@@ -645,6 +750,214 @@ mod tests {
             expression(json!({"$map": "item.children", "using": "recursive"})),
         )]);
         assert!(validate_mapping_definitions(&definitions).is_err());
+    }
+
+    #[test]
+    fn nested_maps_scope_item_to_the_innermost_element() {
+        let context = MappingContext::new(json!({
+            "request": {"messages": [
+                {"role": "user", "content": [{"text": "a"}, {"text": "b"}]},
+                {"role": "assistant", "content": [{"text": "c"}]}
+            ]}
+        }));
+        let definitions = BTreeMap::from([
+            (
+                "message".to_string(),
+                expression(json!({
+                    "who": {"$get": "item.role"},
+                    "parts": {"$map": "item.content", "using": "part"}
+                })),
+            ),
+            (
+                "part".to_string(),
+                // Pointer notation must resolve against the element too, and an inner `$map` must
+                // not be able to see the outer element.
+                expression(json!({"body": {"$get": "/item/text"}})),
+            ),
+        ]);
+        let mapping =
+            expression(json!({"turns": {"$map": "request.messages", "using": "message"}}));
+        validate_mapping_definitions(&definitions).unwrap();
+        validate_mapping(&mapping, &definitions).unwrap();
+        let payload = evaluate_mapping(&mapping, &context, &definitions).unwrap();
+        assert_eq!(
+            payload["turns"],
+            json!([
+                {"who": "user", "parts": [{"body": "a"}, {"body": "b"}]},
+                {"who": "assistant", "parts": [{"body": "c"}]}
+            ])
+        );
+    }
+
+    #[test]
+    fn reads_bare_arrays_of_every_length_as_array_literals() {
+        // serde derives struct-from-sequence for the operator variants, so an array of 1, 2 or 3
+        // elements used to be swallowed by `$literal`, `$map` and `$if` respectively.
+        let context = MappingContext::new(json!({"request": {"messages": ["m"]}}));
+        for length in 0..5 {
+            let items = (0..length)
+                .map(|index| json!({"$literal": index}))
+                .collect::<Vec<_>>();
+            let expected = (0..length).collect::<Vec<_>>();
+            let mapping = expression(json!({"stop": items}));
+            validate_mapping(&mapping, &BTreeMap::new()).unwrap();
+            assert_eq!(
+                evaluate_mapping(&mapping, &context, &BTreeMap::new()).unwrap()["stop"],
+                json!(expected),
+                "array of {length} element(s)"
+            );
+        }
+        // Two bare strings are a two-element array, not `{"$map": …, "using": …}`.
+        let mapping = expression(json!({"stop": ["request.messages", "message"]}));
+        assert_eq!(
+            evaluate_mapping(&mapping, &context, &BTreeMap::new()).unwrap()["stop"],
+            json!(["request.messages", "message"])
+        );
+        // The explicit `$array` form keeps working.
+        assert_eq!(
+            evaluate_mapping(
+                &expression(json!({"$array": [{"$get": "request.messages"}]})),
+                &context,
+                &BTreeMap::new()
+            )
+            .unwrap(),
+            json!([["m"]])
+        );
+    }
+
+    #[test]
+    fn omit_if_null_drops_object_keys_but_not_array_elements() {
+        let context = MappingContext::new(json!({"request": {"present": 1}}));
+        let mapping = expression(json!({
+            "kept": {"$omitIfNull": {"$get": "request.present"}},
+            "dropped": {"$omitIfNull": {"$get": "request.absent"}},
+            "list": [{"$omitIfNull": {"$get": "request.absent"}}, {"$literal": 2}]
+        }));
+        let payload = evaluate_mapping(&mapping, &context, &BTreeMap::new()).unwrap();
+        assert_eq!(payload["kept"], 1);
+        assert!(payload.get("dropped").is_none());
+        assert_eq!(payload["list"], json!([2]));
+    }
+
+    #[test]
+    fn maps_missing_optional_collections_to_nothing_instead_of_failing() {
+        let context = MappingContext::new(json!({"request": {}}));
+        let definitions = BTreeMap::from([(
+            "tool".to_string(),
+            expression(json!({"n": {"$get": "item"}})),
+        )]);
+        // `$map` over an absent path is only tolerated inside `$omitIfNull`; on its own it is an
+        // error so a typo cannot silently produce an empty tool list.
+        assert_eq!(
+            evaluate_mapping(
+                &expression(
+                    json!({"tools": {"$omitIfNull": {"$map": "request.tools", "using": "tool"}}})
+                ),
+                &context,
+                &definitions
+            )
+            .unwrap(),
+            json!({})
+        );
+        assert!(
+            evaluate_mapping(
+                &expression(json!({"tools": {"$map": "request.tools", "using": "tool"}})),
+                &context,
+                &definitions
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn applies_the_remaining_operators_and_rejects_wrong_types() {
+        let context = MappingContext::new(json!({
+            "request": {"flag": true, "text": "hi", "payload": {"a": 1}, "number": 4}
+        }));
+        let payload = evaluate_mapping(
+            &expression(json!({
+                "encoded": {"$jsonEncode": {"$get": "request.payload"}},
+                "based": {"$base64": {"$get": "request.text"}},
+                "chosen": {"$if": {"$get": "request.flag"}, "then": {"$literal": "yes"}, "else": {"$literal": "no"}},
+                "fallback": {"$switch": {"$get": "request.number"}, "cases": {}, "default": {"$literal": "other"}},
+                "merged": {"$merge": [{"$get": "request.payload"}, {"$object": {"b": {"$literal": 2}}}]}
+            })),
+            &context,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(payload["encoded"], r#"{"a":1}"#);
+        assert_eq!(payload["based"], "aGk=");
+        assert_eq!(payload["chosen"], "yes");
+        assert_eq!(payload["fallback"], "other");
+        assert_eq!(payload["merged"], json!({"a": 1, "b": 2}));
+
+        for invalid in [
+            json!({"$base64": {"$get": "request.payload"}}),
+            json!({"$if": {"$get": "request.text"}, "then": {"$literal": 1}}),
+            json!({"$merge": [{"$get": "request.text"}]}),
+            json!({"$switch": {"$get": "request.payload"}, "cases": {}}),
+            json!({"$switch": {"$get": "request.text"}, "cases": {}}),
+        ] {
+            assert!(
+                evaluate_mapping(&expression(invalid.clone()), &context, &BTreeMap::new()).is_err(),
+                "{invalid} should not evaluate"
+            );
+        }
+    }
+
+    #[test]
+    fn concat_flattens_client_and_native_tool_lists() {
+        let definitions = BTreeMap::from([(
+            "tool".to_string(),
+            expression(json!({"name": {"$get": "item.name"}})),
+        )]);
+        let mapping = expression(json!({
+            "tools": {"$omitIfNull": {"$concat": [
+                {"$map": "request.tools", "using": "tool"},
+                {"$omitIfNull": {"$get": "request.options.nativeTools"}}
+            ]}}
+        }));
+        validate_mapping(&mapping, &definitions).unwrap();
+
+        // Both sources present: one flat array, in order.
+        let context = MappingContext::new(json!({
+            "request": {
+                "tools": [{"name": "mcp__a__x__1"}],
+                "options": {"nativeTools": [{"type": "web_search_20250305"}]}
+            }
+        }));
+        assert_eq!(
+            evaluate_mapping(&mapping, &context, &definitions).unwrap()["tools"],
+            json!([{"name": "mcp__a__x__1"}, {"type": "web_search_20250305"}])
+        );
+
+        // Only native tools: the absent client list contributes nothing rather than failing.
+        let context = MappingContext::new(json!({
+            "request": {"options": {"nativeTools": [{"type": "web_search_20250305"}]}}
+        }));
+        assert_eq!(
+            evaluate_mapping(&mapping, &context, &definitions).unwrap()["tools"],
+            json!([{"type": "web_search_20250305"}])
+        );
+
+        // Neither source: the whole key is omitted so no empty `tools` array is sent.
+        let context = MappingContext::new(json!({"request": {}}));
+        assert_eq!(
+            evaluate_mapping(&mapping, &context, &definitions).unwrap(),
+            json!({})
+        );
+
+        // A non-array entry is a manifest mistake, not silently wrapped.
+        let context = MappingContext::new(json!({"request": {"options": {"nativeTools": "web"}}}));
+        assert!(
+            evaluate_mapping(
+                &expression(json!({"$concat": [{"$get": "request.options.nativeTools"}]})),
+                &context,
+                &BTreeMap::new()
+            )
+            .is_err()
+        );
     }
 
     #[test]

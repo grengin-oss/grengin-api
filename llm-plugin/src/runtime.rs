@@ -6,7 +6,7 @@ use std::{collections::BTreeMap, fmt, net::IpAddr, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{
     Client, Method, RequestBuilder, Response, StatusCode,
     header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
@@ -19,13 +19,13 @@ use url::Url;
 
 use crate::{
     BodyEncoding, ChatMessage, ChatOperation, ChatProvider, ChatRequest, ChatRole, ChatSession,
-    CredentialType, EmbeddingOperation, EmbeddingProvider, EmbeddingRequest, EmbeddingResult,
-    GeneratedImage, HeaderValueSpec, HttpMethod, ImageBodyEncoding, ImageOperation, ImageProvider,
-    ImageRequest, ImageResult, ManifestCapabilities, MappingContext, ModelId, ModelListOperation,
-    ModelProvider, ProviderCapabilities, ProviderDescriptor, ProviderError, ProviderEvent,
-    ProviderEventStream, ProviderManifestV1, ProviderModel, ProviderPlugin, RequestSpec,
-    SseDecoder, SseEventMapper, StructuredBodyEncoding, TokenUsage, ToolCall, ToolCallId,
-    ToolResult, UsageMapping, capture_values, evaluate_mapping, resolve_path,
+    ContentPart, CredentialType, EmbeddingOperation, EmbeddingProvider, EmbeddingRequest,
+    EmbeddingResult, GeneratedImage, HeaderValueSpec, HttpMethod, ImageBodyEncoding,
+    ImageOperation, ImageProvider, ImageRequest, ImageResult, ManifestCapabilities, MappingContext,
+    ModelId, ModelListOperation, ModelProvider, ProviderCapabilities, ProviderDescriptor,
+    ProviderError, ProviderEvent, ProviderEventStream, ProviderManifestV1, ProviderModel,
+    ProviderPlugin, RequestSpec, SseDecoder, SseEventMapper, StructuredBodyEncoding, TokenUsage,
+    ToolCall, ToolCallId, ToolResult, UsageMapping, capture_values, evaluate_mapping, resolve_path,
     security::{validate_destination_ip, validate_header_name, validate_provider_url},
 };
 
@@ -34,6 +34,14 @@ const DEFAULT_MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 const MAX_SSE_EVENT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CONFIGURATION_BYTES: usize = 1024 * 1024;
+
+/// Percent-encodes everything except the RFC 3986 unreserved set, so a templated value can never
+/// introduce URL structure while ordinary model ids such as `gpt-4.1-mini` survive intact.
+const PATH_VALUE: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
 
 #[derive(Clone)]
 pub struct ProviderRuntimeConfig {
@@ -90,7 +98,17 @@ pub struct DeclarativeProvider {
     descriptor: ProviderDescriptor,
     base_url: Url,
     client: Client,
+    stream_client: Client,
     runtime: Arc<ProviderRuntimeConfig>,
+}
+
+/// Chooses how an operation's `timeoutMs` is enforced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestMode {
+    /// Total deadline for the whole exchange; correct for responses read into memory.
+    Buffered,
+    /// Inactivity deadline only, so a long-running stream is not truncated mid-answer.
+    Streaming,
 }
 
 impl DeclarativeProvider {
@@ -122,6 +140,22 @@ impl DeclarativeProvider {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(ProviderError::from)?;
+        // A chat stream stays open for as long as the model keeps talking, so its timeout has to
+        // bound silence between chunks instead of the total exchange.
+        let stream_timeout = Duration::from_millis(clamp_timeout(
+            manifest
+                .operations
+                .chat_stream
+                .as_ref()
+                .and_then(|operation| operation.request.timeout_ms),
+            runtime.default_timeout_ms,
+        ));
+        let stream_client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(stream_timeout)
+            .read_timeout(stream_timeout)
+            .build()
+            .map_err(ProviderError::from)?;
         let descriptor = manifest.descriptor();
 
         Ok(Self {
@@ -129,6 +163,7 @@ impl DeclarativeProvider {
             descriptor,
             base_url,
             client,
+            stream_client,
             runtime: Arc::new(runtime),
         })
     }
@@ -137,11 +172,30 @@ impl DeclarativeProvider {
         &self.manifest
     }
 
+    /// Resolves an operation's timeout, treating the operator's runtime setting as a **ceiling**
+    /// rather than a default. A provider manifest is operator-supplied but not necessarily
+    /// operator-audited, so it may ask for a shorter deadline and never a longer one.
+    fn timeout_for(&self, spec: &RequestSpec) -> Duration {
+        Duration::from_millis(clamp_timeout(
+            spec.timeout_ms,
+            self.runtime.default_timeout_ms,
+        ))
+    }
+
+    /// Resolves an operation's response cap, again bounded by the operator's setting so a manifest
+    /// cannot raise its own memory budget.
+    fn response_limit_for(&self, spec: &RequestSpec) -> usize {
+        spec.max_response_bytes
+            .unwrap_or(self.runtime.max_response_bytes)
+            .min(self.runtime.max_response_bytes)
+    }
+
     async fn prepare_request<T: Serialize>(
         &self,
         spec: &RequestSpec,
         request: &T,
         session: &Value,
+        mode: RequestMode,
     ) -> Result<RequestBuilder, ProviderError> {
         let context = MappingContext::for_request(request, &self.runtime.configuration, session)?;
         let path = render_template(&spec.path, &context)?;
@@ -151,7 +205,7 @@ impl DeclarativeProvider {
             .map_err(|error| {
                 ProviderError::UrlNotAllowed(format!("invalid operation path: {error}"))
             })?;
-        ensure_same_origin(&self.base_url, &url)?;
+        ensure_within_base(&self.base_url, &url)?;
 
         let mut mapped_query = Vec::new();
         for (name, mapping) in &spec.query {
@@ -172,14 +226,13 @@ impl DeclarativeProvider {
             HttpMethod::Put => Method::PUT,
             HttpMethod::Patch => Method::PATCH,
         };
-        let timeout_ms = spec
-            .timeout_ms
-            .unwrap_or(self.runtime.default_timeout_ms)
-            .max(1);
-        let mut builder = self
-            .client
-            .request(method, url)
-            .timeout(Duration::from_millis(timeout_ms));
+        let mut builder = match mode {
+            RequestMode::Buffered => self
+                .client
+                .request(method, url)
+                .timeout(self.timeout_for(spec)),
+            RequestMode::Streaming => self.stream_client.request(method, url),
+        };
 
         for (name, value) in &spec.headers {
             validate_header_name(name)?;
@@ -209,23 +262,18 @@ impl DeclarativeProvider {
         context: &MappingContext,
     ) -> Result<String, ProviderError> {
         match spec {
-            HeaderValueSpec::Text(value) | HeaderValueSpec::Literal { literal: value } => {
-                Ok(value.clone())
-            }
-            HeaderValueSpec::Secret {
-                secret,
-                prefix,
-                suffix,
-            } => {
+            HeaderValueSpec::Text(value) => Ok(value.clone()),
+            HeaderValueSpec::Literal(spec) => Ok(spec.literal.clone()),
+            HeaderValueSpec::Secret(spec) => {
                 let value = self
                     .runtime
                     .credentials
-                    .get(secret)
-                    .ok_or_else(|| ProviderError::MissingCredential(secret.clone()))?;
-                Ok(format!("{prefix}{value}{suffix}"))
+                    .get(&spec.secret)
+                    .ok_or_else(|| ProviderError::MissingCredential(spec.secret.clone()))?;
+                Ok(format!("{}{value}{}", spec.prefix, spec.suffix))
             }
-            HeaderValueSpec::Mapping { mapping } => {
-                let value = evaluate_mapping(mapping, context, &self.manifest.mappings)?;
+            HeaderValueSpec::Mapping(spec) => {
+                let value = evaluate_mapping(&spec.mapping, context, &self.manifest.mappings)?;
                 scalar_to_string(&value, "header mapping")
             }
         }
@@ -269,16 +317,13 @@ impl DeclarativeProvider {
         session: &Value,
     ) -> Result<(HeaderMap, Vec<u8>), ProviderError> {
         let response = self
-            .prepare_request(spec, request, session)
+            .prepare_request(spec, request, session, RequestMode::Buffered)
             .await?
             .send()
             .await?;
         let response = ensure_success(response).await?;
         let headers = response.headers().clone();
-        let limit = spec
-            .max_response_bytes
-            .unwrap_or(self.runtime.max_response_bytes);
-        let bytes = read_limited(response, limit).await?;
+        let bytes = read_limited(response, self.response_limit_for(spec)).await?;
         Ok((headers, bytes))
     }
 
@@ -290,7 +335,12 @@ impl DeclarativeProvider {
         observed: Arc<Mutex<ObservedToolCalls>>,
     ) -> Result<ProviderEventStream, ProviderError> {
         let response = self
-            .prepare_request(&operation.request, &request, &session)
+            .prepare_request(
+                &operation.request,
+                &request,
+                &session,
+                RequestMode::Streaming,
+            )
             .await?
             .send()
             .await?;
@@ -309,47 +359,44 @@ impl DeclarativeProvider {
             )));
         }
 
-        let response_limit = operation
-            .request
-            .max_response_bytes
-            .unwrap_or(self.runtime.max_response_bytes);
+        let response_limit = self.response_limit_for(&operation.request);
         let mut mapper = SseEventMapper::new(operation.response.clone());
         let captures = operation.continuation.captures.clone();
         let stream = async_stream::try_stream! {
             let mut body = response.bytes_stream();
             let mut decoder = SseDecoder::new(MAX_SSE_EVENT_BYTES.min(response_limit));
             let mut total = 0usize;
-            let mut completed = false;
-            while let Some(chunk) = body.next().await {
-                let chunk = chunk.map_err(ProviderError::from)?;
-                total = total.saturating_add(chunk.len());
-                if total > response_limit {
-                    Err(ProviderError::ResponseTooLarge)?;
-                }
-                for event in decoder.push(&chunk)? {
+            let mut drained = false;
+            while !drained {
+                let events = match body.next().await {
+                    Some(chunk) => {
+                        let chunk = chunk.map_err(ProviderError::from)?;
+                        total = total.saturating_add(chunk.len());
+                        if total > response_limit {
+                            Err(ProviderError::ResponseTooLarge)?;
+                        }
+                        decoder.push(&chunk)?
+                    }
+                    None => {
+                        drained = true;
+                        decoder.finish()?
+                    }
+                };
+                for event in events {
+                    // Trailing events are still decoded after completion: the mapper decides which
+                    // kinds remain meaningful (usage arrives last on OpenAI-compatible providers)
+                    // and drops the rest.
                     if operation.response.done_data.as_deref() != Some(event.data.trim()) {
                         let data = mapper.decode_data(&event)?;
                         observed.lock().await.captures.extend(capture_values(&captures, &data));
                     }
                     for mapped in mapper.map(&event)? {
                         observed.lock().await.record(&mapped)?;
-                        completed |= matches!(mapped, ProviderEvent::Completed { .. });
                         yield mapped;
                     }
                 }
             }
-            for event in decoder.finish()? {
-                if operation.response.done_data.as_deref() != Some(event.data.trim()) {
-                    let data = mapper.decode_data(&event)?;
-                    observed.lock().await.captures.extend(capture_values(&captures, &data));
-                }
-                for mapped in mapper.map(&event)? {
-                    observed.lock().await.record(&mapped)?;
-                    completed |= matches!(mapped, ProviderEvent::Completed { .. });
-                    yield mapped;
-                }
-            }
-            if !completed {
+            if !mapper.is_completed() {
                 Err(ProviderError::StreamEnded)?;
             }
         };
@@ -440,16 +487,26 @@ impl ChatSession for DeclarativeChatSession {
                 operation.continuation.max_tool_rounds
             )));
         }
-        let calls = self.observed.lock().await.take_calls()?;
+        let (calls, text) = {
+            let mut observed = self.observed.lock().await;
+            (observed.take_calls()?, observed.take_text())
+        };
         if calls.is_empty() && !results.is_empty() {
             return Err(ProviderError::ResponseMapping(
                 "tool results were supplied before the provider emitted tool calls".to_string(),
             ));
         }
         if !calls.is_empty() {
+            // The assistant's own words belong in the replayed turn: providers that validate
+            // history (Anthropic in particular) reject a turn whose content was silently dropped,
+            // and models that narrate before calling a tool otherwise lose that context.
             self.request.messages.push(ChatMessage {
                 role: ChatRole::Assistant,
-                content: Vec::new(),
+                content: if text.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![ContentPart::Text { text }]
+                },
                 tool_calls: calls,
                 tool_result: None,
             });
@@ -497,6 +554,8 @@ impl DeclarativeChatSession {
 struct ObservedToolCalls {
     calls: BTreeMap<ToolCallId, PartialToolCall>,
     captures: BTreeMap<String, Value>,
+    /// Assistant text seen in the current round, replayed with the tool calls it accompanied.
+    text: String,
 }
 
 #[derive(Default)]
@@ -510,6 +569,7 @@ struct PartialToolCall {
 impl ObservedToolCalls {
     fn record(&mut self, event: &ProviderEvent) -> Result<(), ProviderError> {
         match event {
+            ProviderEvent::TextDelta { text } => self.text.push_str(text),
             ProviderEvent::ToolCallStart { id, name, index } => {
                 if self.calls.contains_key(id) {
                     return Err(ProviderError::ResponseMapping(format!(
@@ -555,6 +615,10 @@ impl ObservedToolCalls {
             _ => {}
         }
         Ok(())
+    }
+
+    fn take_text(&mut self) -> String {
+        std::mem::take(&mut self.text)
     }
 
     fn take_calls(&mut self) -> Result<Vec<ToolCall>, ProviderError> {
@@ -625,6 +689,11 @@ impl ImageProvider for DeclarativeProvider {
             .image_generation
             .as_ref()
             .ok_or(ProviderError::UnsupportedCapability("image_generation"))?;
+        if request.count == 0 {
+            return Err(ProviderError::Configuration(
+                "image request must ask for at least one image".to_string(),
+            ));
+        }
         let (headers, bytes) = self
             .send_buffered(&operation.request, &request, &Value::Null)
             .await?;
@@ -709,9 +778,14 @@ impl DeclarativeProvider {
                     ));
                 }
                 self.validate_destination(&url).await?;
-                let response = ensure_success(self.client.get(url).send().await?).await?;
+                let request = self
+                    .client
+                    .get(url)
+                    .timeout(self.timeout_for(&operation.request));
+                let response = ensure_success(request.send().await?).await?;
                 let headers = response.headers().clone();
-                let bytes = read_limited(response, self.runtime.max_response_bytes).await?;
+                let bytes =
+                    read_limited(response, self.response_limit_for(&operation.request)).await?;
                 let media_type = headers
                     .get(CONTENT_TYPE)
                     .and_then(|value| value.to_str().ok())
@@ -794,6 +868,16 @@ fn validate_credentials(
             )));
         }
     }
+    // Credentials only ever leave the process inside a header, and a value carrying a line break
+    // would be a header-injection vector. Reject it here, naming the slot, so an operator who
+    // pasted a wrapped key gets a diagnosable error instead of a per-request header failure.
+    for (slot, value) in &runtime.credentials {
+        if HeaderValue::from_str(value).is_err() {
+            return Err(ProviderError::Configuration(format!(
+                "credential {slot} contains characters that cannot be sent in an HTTP header, such as a line break"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -837,13 +921,24 @@ fn manifest_capabilities(capabilities: &ManifestCapabilities) -> ProviderCapabil
     }
 }
 
-fn ensure_same_origin(base: &Url, operation: &Url) -> Result<(), ProviderError> {
+/// Confirms a joined operation URL is still inside the configured base URL.
+///
+/// The path prefix is checked on the *normalised* URL rather than on the manifest template, because
+/// the URL standard resolves percent-encoded dot segments (`%2e%2e`) as well as literal ones, and a
+/// templated value such as a caller-supplied model id can contain either.
+/// Clamps a manifest-declared timeout to the operator's ceiling, never below 1ms.
+fn clamp_timeout(declared: Option<u64>, ceiling: u64) -> u64 {
+    declared.unwrap_or(ceiling).min(ceiling).max(1)
+}
+
+fn ensure_within_base(base: &Url, operation: &Url) -> Result<(), ProviderError> {
     if base.scheme() != operation.scheme()
         || base.host_str() != operation.host_str()
         || base.port_or_known_default() != operation.port_or_known_default()
+        || !operation.path().starts_with(base.path())
     {
         return Err(ProviderError::UrlNotAllowed(
-            "operation path escaped the provider base origin".to_string(),
+            "operation path escaped the provider base URL".to_string(),
         ));
     }
     Ok(())
@@ -863,7 +958,7 @@ fn render_template(template: &str, context: &MappingContext) -> Result<String, P
             ProviderError::PayloadMapping(format!("template path does not exist: {path}"))
         })?;
         let value = scalar_to_string(value, "path template")?;
-        output.push_str(&utf8_percent_encode(&value, NON_ALPHANUMERIC).to_string());
+        output.push_str(&utf8_percent_encode(&value, PATH_VALUE).to_string());
         remainder = &expression[end + 1..];
     }
     output.push_str(remainder);
@@ -990,7 +1085,9 @@ async fn ensure_success(response: Response) -> Result<Response, ProviderError> {
         return Ok(response);
     }
     let status = response.status();
-    let _ = read_limited(response, MAX_ERROR_BODY_BYTES).await?;
+    // Drain a bounded prefix of the error body so the connection can be reused, but never let a
+    // read failure or an oversized body replace the status callers key their backoff off.
+    let _ = read_limited(response, MAX_ERROR_BODY_BYTES).await;
     if status == StatusCode::PAYMENT_REQUIRED {
         return Err(ProviderError::PaymentRequired);
     }
@@ -1163,6 +1260,9 @@ fn decode_models(
         .collect()
 }
 
+/// TODO: `StructuredBodyEncoding::TextJson` is accepted by the manifest schema but is decoded
+/// exactly like `Json` today, because `serde_json` already ignores the declared content type. Give
+/// the variant distinct behaviour or drop it from the schema before manifests start relying on it.
 fn decode_structured(
     _encoding: StructuredBodyEncoding,
     bytes: &[u8],
@@ -1204,12 +1304,7 @@ fn map_usage(root: &Value, mapping: &UsageMapping) -> TokenUsage {
 fn mapped_u32(root: &Value, pointer: Option<&str>) -> Option<u32> {
     pointer
         .and_then(|pointer| select(root, pointer))
-        .and_then(|value| {
-            value
-                .as_u64()
-                .and_then(|value| u32::try_from(value).ok())
-                .or_else(|| value.as_str()?.parse().ok())
-        })
+        .and_then(crate::sse::value_to_u32)
 }
 
 #[cfg(test)]
@@ -1221,9 +1316,11 @@ mod tests {
         mapping::MappingContext,
     };
 
+    use url::Url;
+
     use super::{
         DeclarativeProvider, ObservedToolCalls, ProviderRuntimeConfig, decode_embeddings,
-        render_template, validate_image_media_type,
+        ensure_within_base, render_template, validate_image_media_type,
     };
 
     fn embedding_operation() -> EmbeddingOperation {
@@ -1318,6 +1415,130 @@ mod tests {
             render_template("chat/${request.model}", &context).unwrap(),
             "chat/team%2Fmodel%20one"
         );
+    }
+
+    #[test]
+    fn path_templates_keep_unreserved_characters_intact() {
+        let context = MappingContext::new(json!({"request": {"model": "gpt-4.1-mini_v2~beta"}}));
+        // Encoding the unreserved set would send `gpt%2D4%2E1%2Dmini`, which providers 404 on.
+        assert_eq!(
+            render_template("models/${request.model}:stream", &context).unwrap(),
+            "models/gpt-4.1-mini_v2~beta:stream"
+        );
+    }
+
+    #[test]
+    fn rejects_operation_urls_that_climb_out_of_the_base_path() {
+        let base = Url::parse("https://api.example.com/v1/").unwrap();
+        for path in ["chat", "chat/completions", ""] {
+            let joined = base.join(path).unwrap();
+            ensure_within_base(&base, &joined).unwrap();
+        }
+        // The URL standard resolves `%2e%2e` as a parent segment just like `..`, so both spellings
+        // have to be caught after normalisation rather than in the manifest template alone.
+        for path in [
+            "../admin",
+            "%2e%2e/admin",
+            "%2E%2E/%2e%2e/admin",
+            ".%2e/admin",
+        ] {
+            let joined = base.join(path).unwrap();
+            assert!(
+                ensure_within_base(&base, &joined).is_err(),
+                "{path} joined to {joined} should be rejected"
+            );
+        }
+        assert!(
+            ensure_within_base(
+                &base,
+                &Url::parse("https://evil.example.com/v1/chat").unwrap()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_embedding_vectors_that_are_not_finite_numbers() {
+        let operation = embedding_operation();
+        for vector in [json!(["1.0"]), json!([[1.0]]), json!([1e40]), json!([])] {
+            let body =
+                serde_json::to_vec(&json!({"data": [{"index": 0, "embedding": vector}]})).unwrap();
+            assert!(
+                decode_embeddings(&operation, &embedding_request(1, None), &body).is_err(),
+                "{vector} should not decode"
+            );
+        }
+        // f64 values outside the f32 range collapse to infinity and must not reach the caller.
+        let body =
+            serde_json::to_vec(&json!({"data": [{"index": 0, "embedding": [1.5, -2.5]}]})).unwrap();
+        assert_eq!(
+            decode_embeddings(&operation, &embedding_request(1, None), &body)
+                .unwrap()
+                .vectors,
+            vec![vec![1.5_f32, -2.5_f32]]
+        );
+    }
+
+    #[test]
+    fn rejects_embedding_indices_outside_the_requested_range() {
+        let operation = embedding_operation();
+        let body = serde_json::to_vec(&json!({
+            "data": [
+                {"index": 0, "embedding": [1.0]},
+                {"index": 7, "embedding": [2.0]}
+            ]
+        }))
+        .unwrap();
+        assert!(decode_embeddings(&operation, &embedding_request(2, None), &body).is_err());
+    }
+
+    #[test]
+    fn rejects_embedding_dimensions_that_disagree_with_the_request() {
+        let operation = embedding_operation();
+        let body =
+            serde_json::to_vec(&json!({"data": [{"index": 0, "embedding": [1.0, 2.0]}]})).unwrap();
+        assert!(decode_embeddings(&operation, &embedding_request(1, Some(3)), &body).is_err());
+        assert!(decode_embeddings(&operation, &embedding_request(1, Some(2)), &body).is_ok());
+    }
+
+    #[test]
+    fn rejects_credentials_that_cannot_be_sent_as_a_header() {
+        let manifest = crate::ProviderManifestV1::from_json(
+            &serde_json::to_vec(&json!({
+                "manifestVersion": "1.0",
+                "id": "keyed",
+                "version": "1.0.0",
+                "name": "Keyed",
+                "baseUrl": "https://api.example.com/v1/",
+                "credentials": [{"id": "api_key", "type": "secret", "required": true}],
+                "capabilities": {},
+                "operations": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let with_key = |key: &str| {
+            DeclarativeProvider::new(
+                manifest.clone(),
+                ProviderRuntimeConfig {
+                    credentials: std::collections::BTreeMap::from([(
+                        "api_key".to_string(),
+                        key.to_string(),
+                    )]),
+                    ..Default::default()
+                },
+            )
+        };
+        assert!(with_key("sk-proj-abc123").is_ok());
+        // A key pasted with line wrapping is a header-injection vector, and the failure has to name
+        // the slot instead of surfacing as an opaque per-request header error.
+        let error = match with_key("sk-proj-abc\n123") {
+            Ok(_) => panic!("a line-wrapped credential must be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("api_key"), "{error}");
+        assert!(!error.contains("sk-proj"), "credential leaked: {error}");
+        assert!(with_key("sk-proj-abc\r\nHost: evil").is_err());
     }
 
     #[test]

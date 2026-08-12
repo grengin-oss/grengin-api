@@ -94,7 +94,14 @@
         "messages": { "$map": "request.messages", "using": "message" },
         "temperature": { "$omitIfNull": { "$get": "request.temperature" } },
         "max_completion_tokens": { "$omitIfNull": { "$get": "request.maxTokens" } },
-        "tools": { "$omitIfNull": { "$map": "request.tools", "using": "tool" } },
+        "tools": {
+          "$omitIfNull": {
+            "$concat": [
+              { "$map": "request.tools", "using": "tool" },
+              { "$omitIfNull": { "$get": "request.options.nativeTools" } }
+            ]
+          }
+        },
         "stream": { "$literal": true },
         "stream_options": { "$literal": { "include_usage": true } }
       },
@@ -111,14 +118,14 @@
           },
           {
             "id": "text",
-            "when": { "pointer": "/choices/0/delta/content", "exists": true },
+            "when": { "pointer": "/choices/0/delta/content", "notNull": true },
             "emit": "textDelta",
             "value": "/choices/0/delta/content"
           },
           {
             "id": "tool_start",
             "forEach": "/choices/0/delta/tool_calls",
-            "when": { "pointer": "/id", "exists": true },
+            "when": { "pointer": "/id", "notNull": true },
             "emit": "toolCallStart",
             "fields": {
               "id": "/id",
@@ -129,11 +136,25 @@
           {
             "id": "tool_arguments",
             "forEach": "/choices/0/delta/tool_calls",
-            "when": { "pointer": "/function/arguments", "exists": true },
+            "when": { "pointer": "/function/arguments", "notNull": true },
             "emit": "toolArgumentsDelta",
             "fields": {
               "index": "/index",
               "fragment": "/function/arguments"
+            }
+          },
+          {
+            "id": "search_results",
+            "when": {
+              "pointer": "/choices/0/delta/annotations",
+              "notNull": true
+            },
+            "emit": "serverToolResult",
+            "constants": { "name": "web_search" },
+            "collect": "/choices/0/delta/annotations",
+            "itemFields": {
+              "title": "/url_citation/title",
+              "url": "/url_citation/url"
             }
           },
           {

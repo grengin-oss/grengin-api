@@ -15,8 +15,8 @@ use serde_json::Value;
 
 use crate::{
     handlers::llm::{
-        StreamErrorKind, StreamParseResult, StreamParser, ToolCall, ToolInput,
-        build_tool_input_delta,
+        StreamErrorKind, StreamParseResult, StreamParser, StreamWebSearchResult, ToolCall,
+        ToolInput, build_tool_input_delta,
     },
     llm::prompt::Prompt,
     models::messages::ChatRole,
@@ -266,6 +266,44 @@ impl PluginStreamParser {
                     raw: None,
                     web_search: None,
                 })
+            }
+            ProviderEvent::ServerToolStart {
+                id,
+                name,
+                query,
+                queries,
+            } => StreamParseResult::WebSearchAction {
+                tool_name: name,
+                tool_id: id.map(|id| id.to_string()),
+                query,
+                queries: (!queries.is_empty()).then_some(queries),
+            },
+            // The provider streams its search query in fragments; forward them the same way client
+            // tool input is forwarded so the UI can show the query as it forms.
+            ProviderEvent::ServerToolQueryDelta { id, name, fragment } => {
+                StreamParseResult::ToolInput(build_tool_input_delta(
+                    fragment,
+                    None,
+                    Some(name),
+                    id.map(|id| id.to_string()),
+                    None,
+                ))
+            }
+            ProviderEvent::ServerToolResult { id, name, results } => {
+                StreamParseResult::WebSearchResult {
+                    tool_name: name,
+                    tool_id: id.map(|id| id.to_string()),
+                    results: results
+                        .into_iter()
+                        .map(|result| StreamWebSearchResult {
+                            title: result.title,
+                            url: result.url,
+                            source: result.source,
+                            page_age: result.page_age,
+                            snippet: result.snippet,
+                        })
+                        .collect(),
+                }
             }
             ProviderEvent::Usage { usage } => usage_result(usage),
             ProviderEvent::ProviderEvent { kind, data } => StreamParseResult::EventLog {

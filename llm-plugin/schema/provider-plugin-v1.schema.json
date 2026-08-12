@@ -223,6 +223,38 @@
         "rules"
       ]
     },
+    "CoalesceExpression": {
+      "description": "Yields the first entry that resolves to a non-null value.\n\nNeeded wherever a provider requires a field the canonical request treats as optional, such as\nAnthropic's mandatory `max_tokens`, which otherwise fails the whole payload when unset.",
+      "type": "object",
+      "properties": {
+        "$coalesce": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$coalesce"
+      ]
+    },
+    "ConcatExpression": {
+      "description": "Flattens several arrays into one, the array counterpart of `$merge`.\n\nNeeded whenever a provider takes a single list that the runtime assembles from more than one\nsource, such as `tools` holding both mapped client tools and a literal provider-native tool.\nEntries that evaluate to nothing are skipped, so an absent optional list contributes nothing.",
+      "type": "object",
+      "properties": {
+        "$concat": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$concat"
+      ]
+    },
     "ContinuationMode": {
       "type": "string",
       "enum": [
@@ -406,18 +438,29 @@
       ]
     },
     "EventKind": {
-      "type": "string",
-      "enum": [
-        "messageStart",
-        "textDelta",
-        "reasoningDelta",
-        "toolCallStart",
-        "toolArgumentsDelta",
-        "toolCallEnd",
-        "usage",
-        "providerEvent",
-        "error",
-        "completed"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "messageStart",
+            "textDelta",
+            "reasoningDelta",
+            "toolCallStart",
+            "toolArgumentsDelta",
+            "toolCallEnd",
+            "serverToolQueryDelta",
+            "serverToolResult",
+            "usage",
+            "providerEvent",
+            "error",
+            "completed"
+          ]
+        },
+        {
+          "description": "A provider-executed tool began. Shares the index space of the client-tool kinds above so a\nprovider that interleaves both (Anthropic content blocks) can be mapped unambiguously.",
+          "type": "string",
+          "const": "serverToolStart"
+        }
       ]
     },
     "GetExpression": {
@@ -433,50 +476,19 @@
       ]
     },
     "HeaderValueSpec": {
+      "description": "How one outbound header value is produced.\n\nThe variants wrap named structs so each one can `deny_unknown_fields`: an inline untagged\nvariant would silently accept a misspelled `prefix` and send a bare credential instead.",
       "anyOf": [
         {
           "type": "string"
         },
         {
-          "type": "object",
-          "properties": {
-            "literal": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "literal"
-          ]
+          "$ref": "#/$defs/LiteralHeaderValue"
         },
         {
-          "type": "object",
-          "properties": {
-            "prefix": {
-              "type": "string",
-              "default": ""
-            },
-            "secret": {
-              "type": "string"
-            },
-            "suffix": {
-              "type": "string",
-              "default": ""
-            }
-          },
-          "required": [
-            "secret"
-          ]
+          "$ref": "#/$defs/SecretHeaderValue"
         },
         {
-          "type": "object",
-          "properties": {
-            "mapping": {
-              "$ref": "#/$defs/MappingExpression"
-            }
-          },
-          "required": [
-            "mapping"
-          ]
+          "$ref": "#/$defs/MappingHeaderValue"
         }
       ]
     },
@@ -668,6 +680,18 @@
         "$literal"
       ]
     },
+    "LiteralHeaderValue": {
+      "type": "object",
+      "properties": {
+        "literal": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "literal"
+      ]
+    },
     "ManifestCapabilities": {
       "type": "object",
       "properties": {
@@ -764,7 +788,14 @@
       ]
     },
     "MappingExpression": {
+      "description": "A declarative payload expression.\n\nVariant order is load-bearing for `untagged` deserialization and must not be rearranged:\n\n* `ArrayValue` comes first because serde also derives struct-from-sequence for the operator\n  variants below, so a bare JSON array like `[a, b]` would otherwise be read as\n  `IfExpression { condition: a, then: b }`.\n* The `$`-prefixed operator structs come before `ObjectValue` so `{\"$get\": …}` is read as an\n  operator instead of a one-key object literal.\n* `Scalar` comes last because [`Value`] accepts anything.",
       "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        },
         {
           "$ref": "#/$defs/LiteralExpression"
         },
@@ -793,6 +824,12 @@
           "$ref": "#/$defs/MergeExpression"
         },
         {
+          "$ref": "#/$defs/ConcatExpression"
+        },
+        {
+          "$ref": "#/$defs/CoalesceExpression"
+        },
+        {
           "$ref": "#/$defs/ObjectExpression"
         },
         {
@@ -804,13 +841,19 @@
             "$ref": "#/$defs/MappingExpression"
           }
         },
-        {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/MappingExpression"
-          }
-        },
         true
+      ]
+    },
+    "MappingHeaderValue": {
+      "type": "object",
+      "properties": {
+        "mapping": {
+          "$ref": "#/$defs/MappingExpression"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "mapping"
       ]
     },
     "MatchCondition": {
@@ -1031,6 +1074,14 @@
     "ResponseRule": {
       "type": "object",
       "properties": {
+        "collect": {
+          "description": "Pointer to an array gathered into a *single* event, with each entry mapped through\n[`ResponseRule::item_fields`]. The counterpart to `forEach`, which fans out instead.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "constants": {
           "type": "object",
           "additionalProperties": true,
@@ -1047,6 +1098,7 @@
           "default": {}
         },
         "forEach": {
+          "description": "Applies the rule once per entry of the pointed-to array, emitting one event per entry.",
           "type": [
             "string",
             "null"
@@ -1055,6 +1107,14 @@
         },
         "id": {
           "type": "string"
+        },
+        "itemFields": {
+          "description": "Field pointers resolved against each `collect` entry rather than the event root.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
         },
         "value": {
           "type": [
@@ -1079,6 +1139,26 @@
       "required": [
         "id",
         "emit"
+      ]
+    },
+    "SecretHeaderValue": {
+      "type": "object",
+      "properties": {
+        "prefix": {
+          "type": "string",
+          "default": ""
+        },
+        "secret": {
+          "type": "string"
+        },
+        "suffix": {
+          "type": "string",
+          "default": ""
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "secret"
       ]
     },
     "StructuredBodyEncoding": {
