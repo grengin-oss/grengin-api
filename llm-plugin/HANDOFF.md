@@ -12,8 +12,8 @@ an error-handling review. Written for whoever picks this up next.
 generation and model listing, with request payloads and response events described declaratively so a
 new provider needs no Rust.
 
-**Branch:** `feat/llm-plugin` · **Tests:** 90 plugin + 4 API-boundary offline, 13 live
-(`#[ignore]`d) · clippy clean
+**Branch:** `feat/llm-plugin` · **Tests:** 90 plugin + 27 API offline, 13 live
+(`#[ignore]`d) · `llm-plugin` and the new native adapter are clippy clean
 
 ---
 
@@ -22,6 +22,10 @@ new provider needs no Rust.
 ```bash
 # Offline suite — no network, no node required for most of it
 cargo test -p llm-plugin -j 2
+
+# Repeat the maintained plugin + API + clippy matrix. Add --docker for the slow image gate.
+llm-plugin/tests/verify.sh
+llm-plugin/tests/verify.sh --docker
 
 # Regenerate the checked-in JSON schema after ANY manifest type change.
 # `tests/manifests.rs::checked_in_json_schema_is_current` fails until you do.
@@ -262,12 +266,12 @@ Roughly by value:
 1. **Reasoning/thinking replay.** `ReasoningDelta` is never captured into the replayed assistant
    turn. Anthropic requires thinking blocks replayed verbatim *with signatures* for tool use, so
    extended thinking + tools will not work. Needs a domain change, not just a mapping one.
-2. **`tool_choice` is unmapped.** It exists on `ChatRequest` but neither reference manifest maps it,
-   so a tool cannot be forced. `ToolChoice::Named` also serializes as `{"named": "..."}`, which is
-   awkward to map — consider flattening it.
-3. **Anthropic `system` role.** Still mapped into `messages`; Anthropic wants a top-level `system`
-   parameter. Pre-existing, not introduced here. Needs either a manifest-level "extract role" concept
-   or a dedicated field.
+2. **`tool_choice` is unmapped in declarative manifests.** It exists on `ChatRequest`, and the native
+   adapters honor a named choice, but neither reference manifest maps it. `ToolChoice::Named`
+   serializes as `{"named": "..."}`, which is awkward to map — consider flattening it.
+3. **Declarative Anthropic `system` role.** The native adapter extracts it into Anthropic's top-level
+   `system` parameter, but the reference manifest still maps it into `messages`. This needs either a
+   manifest-level "extract role" concept or a dedicated canonical field.
 4. **`StructuredBodyEncoding::TextJson`** is accepted by the schema but decoded identically to
    `Json`. There is a `TODO` on `decode_structured`. Either give it distinct behaviour or drop the
    variant before manifests rely on it — a product decision, deliberately left alone.
@@ -289,7 +293,27 @@ untested edge before; the new reading is consistent with `exists: false`.
 
 ---
 
-## 8. Environment gotchas
+## 8. API integration boundary
+
+`src/handlers/chat_stream.rs` now has one provider-neutral path. It builds a canonical `ChatRequest`,
+starts a `ChatSession`, consumes canonical `ProviderEvent`s through `PluginStreamParser`, and uses
+`continue_with_tools` for MCP results. It must not regain direct OpenAI, Anthropic, Mistral, or Gemini
+request/parser branches; `services::provider_chat::tests::chat_handler_has_one_provider_neutral_execution_path`
+guards that boundary.
+
+`src/services/native_provider.rs` adapts the four built-in providers to the same typed traits while
+preserving their native wire protocols: OpenAI Responses, Anthropic Messages, Mistral Conversations
+or Chat Completions, and Gemini `streamGenerateContent`. Custom runtime manifests still come from the
+provider registry. Native tool fragments retain a stable call ID/index, cumulative JSON deltas are
+de-duplicated, and unfinished parallel calls close in stream-index order.
+
+`src/services/provider_chat.rs` owns canonical request construction, event parsing, and generic title
+generation. The Docker dependency-cache stage must copy `llm-plugin/Cargo.toml` and create its dummy
+`src/lib.rs` before `cargo fetch`; the real crate is copied for the build stage.
+
+---
+
+## 9. Environment gotchas
 
 - **`OPENAI_API_KEY` in `/home/anurag/work/secrets/grengin.sh` is wrapped across 4 lines** (3 embedded
   newlines). The runtime correctly refuses it — a credential with a line break is a header-injection

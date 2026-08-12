@@ -5,12 +5,10 @@ use std::{collections::HashMap, pin::Pin};
 
 use futures_util::{Stream, StreamExt};
 use llm_plugin::{
-    ChatMessage, ChatRequest, ContentPart, ModelId, ProviderError, ProviderEvent,
-    ProviderEventErrorKind, ProviderEventStream, TokenUsage, ToolCallId, ToolChoice,
-    ToolDefinition,
+    ChatMessage, ChatRequest, ChatRole as PluginChatRole, ContentPart, ModelId, ProviderError,
+    ProviderEvent, ProviderEventErrorKind, ProviderEventStream, ProviderPlugin, TokenUsage,
+    ToolCallId, ToolChoice, ToolDefinition,
 };
-use reqwest::{Response, StatusCode};
-use reqwest_eventsource::{Event as ReqwestEvent, EventSource};
 use serde_json::Value;
 
 use crate::{
@@ -30,40 +28,11 @@ pub enum LlmStreamEvent {
 
 pub enum LlmStreamError {
     Ended,
-    InvalidStatus(StatusCode, Response),
     Provider(ProviderError),
-    Connection,
 }
 
 pub type LlmEventStream =
     Pin<Box<dyn Stream<Item = Result<LlmStreamEvent, LlmStreamError>> + Send>>;
-
-pub fn native_event_stream(mut source: EventSource) -> LlmEventStream {
-    Box::pin(async_stream::stream! {
-        while let Some(event) = source.next().await {
-            match event {
-                Ok(ReqwestEvent::Open) => yield Ok(LlmStreamEvent::Open),
-                Ok(ReqwestEvent::Message(message)) => yield Ok(LlmStreamEvent::Message {
-                    event: message.event,
-                    data: message.data,
-                }),
-                Err(reqwest_eventsource::Error::StreamEnded) => {
-                    yield Err(LlmStreamError::Ended);
-                    return;
-                }
-                Err(reqwest_eventsource::Error::InvalidStatusCode(status, response)) => {
-                    yield Err(LlmStreamError::InvalidStatus(status, response));
-                    return;
-                }
-                Err(_) => {
-                    yield Err(LlmStreamError::Connection);
-                    return;
-                }
-            }
-        }
-        yield Err(LlmStreamError::Ended);
-    })
-}
 
 pub fn plugin_event_stream(mut source: ProviderEventStream) -> LlmEventStream {
     Box::pin(async_stream::stream! {
@@ -143,26 +112,105 @@ pub fn build_plugin_chat_request(
     }
 }
 
+pub async fn generate_provider_title(
+    provider: &dyn ProviderPlugin,
+    model: impl Into<String>,
+    prompt: String,
+) -> Result<crate::llm::prompt::PromptTitleResponse, ProviderError> {
+    let chat = provider
+        .chat()
+        .ok_or(ProviderError::UnsupportedCapability("chat"))?;
+    let request = ChatRequest {
+        model: ModelId::new(model),
+        messages: vec![
+            ChatMessage {
+                role: PluginChatRole::System,
+                content: vec![ContentPart::Text {
+                    text: "Write a short conversation title. Return only the title.".to_string(),
+                }],
+                tool_calls: Vec::new(),
+                tool_result: None,
+            },
+            ChatMessage {
+                role: PluginChatRole::User,
+                content: vec![ContentPart::Text { text: prompt }],
+                tool_calls: Vec::new(),
+                tool_result: None,
+            },
+        ],
+        temperature: None,
+        max_tokens: Some(32),
+        tools: Vec::new(),
+        tool_choice: None,
+        web_search: false,
+        options: Value::Null,
+    };
+    let mut session = chat.start(request).await?;
+    let mut stream = session.stream().await?;
+    let mut title = String::new();
+    let mut input_tokens = 0;
+    let mut output_tokens = 0;
+    while let Some(event) = stream.next().await {
+        match event? {
+            ProviderEvent::TextDelta { text } => title.push_str(&text),
+            ProviderEvent::Usage { usage } => {
+                input_tokens = usage.input_tokens.unwrap_or(input_tokens);
+                output_tokens = usage.output_tokens.unwrap_or(output_tokens);
+            }
+            ProviderEvent::Error { kind, message } => {
+                return Err(match kind {
+                    ProviderEventErrorKind::QuotaExhausted => ProviderError::QuotaExhausted,
+                    ProviderEventErrorKind::Provider => ProviderError::Transport(message),
+                });
+            }
+            _ => {}
+        }
+    }
+    let title = title
+        .trim()
+        .trim_matches(['"', '\'', '`'])
+        .chars()
+        .take(120)
+        .collect::<String>();
+    if title.is_empty() {
+        return Err(ProviderError::ResponseMapping(
+            "title generation returned no text".to_string(),
+        ));
+    }
+    Ok(crate::llm::prompt::PromptTitleResponse {
+        title,
+        input_tokens: i32::try_from(input_tokens).unwrap_or(i32::MAX),
+        output_tokens: i32::try_from(output_tokens).unwrap_or(i32::MAX),
+    })
+}
+
 fn prompt_to_message(prompt: Prompt) -> ChatMessage {
     let mut content = Vec::with_capacity(prompt.files.len() + 1);
     if !prompt.text.is_empty() {
         content.push(ContentPart::Text { text: prompt.text });
     }
     for file in prompt.files {
-        let Some(data) = file.base64 else {
-            continue;
-        };
-        if file.content_type.starts_with("image/") {
-            content.push(ContentPart::ImageBase64 {
-                data,
-                media_type: file.content_type,
-            });
-        } else {
-            content.push(ContentPart::File {
-                name: file.name,
-                data,
-                media_type: file.content_type,
-            });
+        match file.base64 {
+            Some(data) if file.content_type.starts_with("image/") => {
+                content.push(ContentPart::ImageBase64 {
+                    data,
+                    media_type: file.content_type,
+                });
+            }
+            Some(data) => {
+                content.push(ContentPart::File {
+                    name: file.name,
+                    data,
+                    media_type: file.content_type,
+                });
+            }
+            None => {
+                content.push(ContentPart::FileReference {
+                    id: file.id.to_string(),
+                    name: file.name,
+                    media_type: file.content_type,
+                });
+            }
         }
     }
     ChatMessage {
@@ -419,9 +467,100 @@ fn provider_parse_error(message: &str) -> StreamParseResult {
 
 #[cfg(test)]
 mod tests {
-    use llm_plugin::{ProviderEvent, ServerToolResultItem, ToolCallId};
+    use async_trait::async_trait;
+    use futures_util::stream;
+    use llm_plugin::{
+        ChatCapabilities, ChatProvider, ChatSession, ProviderCapabilities, ProviderDescriptor,
+        ProviderEvent, ProviderEventStream, ProviderId, ServerToolResultItem, ToolCallId,
+        ToolResult,
+    };
 
     use super::*;
+
+    struct TitleProvider {
+        descriptor: ProviderDescriptor,
+    }
+
+    impl TitleProvider {
+        fn new() -> Self {
+            Self {
+                descriptor: ProviderDescriptor {
+                    id: ProviderId::new("title-test"),
+                    version: "1".to_string(),
+                    name: "Title Test".to_string(),
+                    capabilities: ProviderCapabilities {
+                        chat: Some(ChatCapabilities {
+                            streaming: true,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                },
+            }
+        }
+    }
+
+    impl ProviderPlugin for TitleProvider {
+        fn descriptor(&self) -> &ProviderDescriptor {
+            &self.descriptor
+        }
+
+        fn chat(&self) -> Option<&dyn ChatProvider> {
+            Some(self)
+        }
+
+        fn embeddings(&self) -> Option<&dyn llm_plugin::EmbeddingProvider> {
+            None
+        }
+
+        fn images(&self) -> Option<&dyn llm_plugin::ImageProvider> {
+            None
+        }
+
+        fn models(&self) -> Option<&dyn llm_plugin::ModelProvider> {
+            None
+        }
+    }
+
+    #[async_trait]
+    impl ChatProvider for TitleProvider {
+        async fn start(&self, request: ChatRequest) -> Result<Box<dyn ChatSession>, ProviderError> {
+            assert_eq!(request.max_tokens, Some(32));
+            assert!(!request.web_search);
+            assert!(request.tools.is_empty());
+            Ok(Box::new(TitleSession))
+        }
+    }
+
+    struct TitleSession;
+
+    #[async_trait]
+    impl ChatSession for TitleSession {
+        async fn stream(&mut self) -> Result<ProviderEventStream, ProviderError> {
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderEvent::TextDelta {
+                    text: "`Provider-neutral title`".to_string(),
+                }),
+                Ok(ProviderEvent::Usage {
+                    usage: TokenUsage {
+                        input_tokens: Some(9),
+                        output_tokens: Some(3),
+                        ..Default::default()
+                    },
+                }),
+                Ok(ProviderEvent::Completed {
+                    finish_reason: None,
+                }),
+            ])))
+        }
+
+        async fn continue_with_tools(
+            &mut self,
+            _results: Vec<ToolResult>,
+        ) -> Result<ProviderEventStream, ProviderError> {
+            Err(ProviderError::UnsupportedCapability("tools"))
+        }
+    }
 
     #[test]
     fn plugin_tool_deltas_become_one_typed_call() {
@@ -456,6 +595,17 @@ mod tests {
             call.input.and_then(|input| input.as_json().cloned()),
             Some(serde_json::json!({"city": "Paris"}))
         );
+    }
+
+    #[tokio::test]
+    async fn title_generation_uses_the_canonical_chat_capability() {
+        let provider = TitleProvider::new();
+        let response = generate_provider_title(&provider, "model", "Explain Rust".to_string())
+            .await
+            .expect("title response");
+        assert_eq!(response.title, "Provider-neutral title");
+        assert_eq!(response.input_tokens, 9);
+        assert_eq!(response.output_tokens, 3);
     }
 
     #[test]
@@ -541,5 +691,33 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn chat_handler_has_one_provider_neutral_execution_path() {
+        let source = include_str!("../handlers/chat_stream.rs");
+        assert!(source.contains("resolve_provider("));
+        assert!(source.contains("session.continue_with_tools(results)"));
+        for provider_specific_api in [
+            "LlmProviderConfig",
+            "OpenaiStreamParser",
+            "AnthropicStreamParser",
+            "MistralStreamParser",
+            "GeminiStreamParser",
+            ".openai_chat_stream(",
+            ".anthropic_chat_stream(",
+            ".mistral_chat_stream(",
+            ".gemini_chat_stream(",
+            "get_title_generation_model",
+            ".openai_get_title(",
+            ".anthropic_get_title(",
+            ".mistral_get_title(",
+            ".gemini_get_title(",
+        ] {
+            assert!(
+                !source.contains(provider_specific_api),
+                "chat handler contains provider-specific integration: {provider_specific_api}"
+            );
+        }
     }
 }

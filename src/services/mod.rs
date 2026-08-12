@@ -12,6 +12,7 @@ pub mod department_helpers;
 pub mod mcp_service;
 pub mod embedders_cache;
 pub mod models_cache;
+pub mod native_provider;
 pub mod oidc_proxy;
 pub mod oidc_service;
 pub mod me_helpers;

@@ -137,6 +137,14 @@ pub enum ContentPart {
         data: String,
         media_type: String,
     },
+    /// A Grengin-owned file that a native adapter may resolve at request time.
+    /// Declarative providers should reject or ignore this part unless they have
+    /// an explicit mapping for file references.
+    FileReference {
+        id: String,
+        name: String,
+        media_type: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
