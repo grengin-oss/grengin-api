@@ -28,6 +28,15 @@ fn reference_anthropic_manifest_is_valid() {
             .unwrap();
     assert_eq!(manifest.id, "anthropic");
     assert!(manifest.capabilities.chat.unwrap().streaming);
+    let model = manifest
+        .models
+        .iter()
+        .find(|model| model.id.as_str() == "claude-haiku-4-5-20251001")
+        .expect("reference Anthropic model is missing");
+    assert_eq!(model.metadata["inputTokenRate"], 1.0);
+    assert_eq!(model.metadata["cachedInputTokenRate"], 0.1);
+    assert_eq!(model.metadata["cacheCreationTokenRate"], 1.25);
+    assert_eq!(model.metadata["outputTokenRate"], 5.0);
 }
 
 #[test]

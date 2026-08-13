@@ -128,6 +128,9 @@
         // serverToolQueryDelta, serverToolResult, usage, providerEvent,
         // error, and completed. forEach emits one event per array item;
         // collect gathers citation items into one safe serverToolResult.
+        // Usage rules may set inputTokensIncludeCached and
+        // inputTokensIncludeCacheCreation false when a provider reports those
+        // buckets separately. Canonical inputTokens always includes both.
         "rules": [
           { "id": "text_delta", "when": { "pointer": "/type", "equals": "text_delta" }, "emit": "textDelta", "value": "/delta/text" },
           { "id": "completed", "when": { "pointer": "/type", "equals": "completed" }, "emit": "completed", "fields": { "finishReason": "/finish_reason" } }
@@ -137,7 +140,7 @@
       "continuation": { "mode": "replay_messages", "maxToolRounds": 4, "captures": { "requestId": "/request_id" } }
     },
 
-    // Full request mappings and all usage pointers are in example.json.
+    // Full request mappings, usage pointers, and cache-accounting flags are in example.json.
     "embeddings": {
       "method": "POST",
       "path": "embeddings/${request.model}",

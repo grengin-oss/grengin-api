@@ -269,21 +269,18 @@ Roughly by value:
 2. **`tool_choice` is unmapped in declarative manifests.** It exists on `ChatRequest`, and the native
    adapters honor a named choice, but neither reference manifest maps it. `ToolChoice::Named`
    serializes as `{"named": "..."}`, which is awkward to map — consider flattening it.
-3. **Declarative Anthropic `system` role.** The native adapter extracts it into Anthropic's top-level
-   `system` parameter, but the reference manifest still maps it into `messages`. This needs either a
-   manifest-level "extract role" concept or a dedicated canonical field.
-4. **`StructuredBodyEncoding::TextJson`** is accepted by the schema but decoded identically to
+3. **`StructuredBodyEncoding::TextJson`** is accepted by the schema but decoded identically to
    `Json`. There is a `TODO` on `decode_structured`. Either give it distinct behaviour or drop the
    variant before manifests rely on it — a product decision, deliberately left alone.
-5. **Validation errors carry no JSON path.** A 200-line manifest reports
+4. **Validation errors carry no JSON path.** A 200-line manifest reports
    `JSON pointer must be empty or start with '/'` with no location. `serde` errors do include
    line/column; the semantic checks do not. Threading a path through `validate_*` would help
    operators a lot.
-6. **`jsonschema` validator is recompiled per `DeclarativeProvider::new`.** Fine if providers are
+5. **`jsonschema` validator is recompiled per `DeclarativeProvider::new`.** Fine if providers are
    cached in the registry; wasteful if constructed per request. Worth checking how `state.rs` uses it.
-7. **DNS-rebinding TOCTOU** remains between `validate_destination` and reqwest's own resolution.
+6. **DNS-rebinding TOCTOU** remains between `validate_destination` and reqwest's own resolution.
    Closing it needs a custom resolver.
-8. **Mock server keys scenarios on prompt substrings**, so a prompt containing "search" or "weather"
+7. **Mock server keys scenarios on prompt substrings**, so a prompt containing "search" or "weather"
    silently changes behaviour. An explicit `x-mock-scenario` header would be more robust.
 
 ### Behaviour change to be aware of
@@ -311,17 +308,28 @@ de-duplicated, and unfinished parallel calls close in stream-index order.
 generation. The Docker dependency-cache stage must copy `llm-plugin/Cargo.toml` and create its dummy
 `src/lib.rs` before `cargo fetch`; the real crate is copied for the build stage.
 
+Canonical `TokenUsage.input_tokens` includes cache-read and cache-creation tokens. Usage mappings
+default to OpenAI-style inclusive counters; providers with separate buckets set
+`inputTokensIncludeCached` and/or `inputTokensIncludeCacheCreation` to `false`. The mapper adds those
+buckets before the backend persists totals and prices regular input, cache reads, cache writes, and
+output independently. Anthropic's reference manifest uses the exclusive mode. The deterministic
+coverage is in `tests/usage_accounting.rs`, the Anthropic mock stream, and the backend cost tests.
+It also enables Anthropic's five-minute automatic prompt cache and carries reviewed Haiku 4.5 rates
+for regular input, cache reads, cache writes, and output. Cache counters are persisted in message
+metadata and exposed in conversation usage for billing audits.
+
 The provider registry is process-local. `resolve_provider` therefore treats it as a cache: when a
 custom key is absent, it loads only an `enabled` persisted plugin, decrypts and compiles it through
 `services::provider_plugins::build_provider`, then registers it locally. This is required on
 multi-replica deployments where the replica serving chat may not be the one that handled install or
 enable. Disabled, invalid, missing, and undecryptable records fail closed.
 
-`llm-plugin/tests/staging_chat.sh` verifies this boundary against staging without polling. It checks
-the installed provider, plain delta streaming, provider error mapping, native web search, and the
-read-only `db_status` MCP tool, then deletes only the conversations it created. By default it reads
-`API_URL` and `API_KEY` from the repository-local `.grengin_auth`; every setting can be overridden
-with the `GRENGIN_STAGING_*` environment variables documented at the top of the script.
+`llm-plugin/tests/staging_chat.sh` verifies this boundary against a running local or staging API
+without polling. It checks the installed provider, plain delta streaming, provider error mapping,
+native web search, and the read-only `db_status` MCP tool, then deletes only the conversations it
+created. It accepts exported `API_URL`/`API_KEY` values or reads them from the repository-local
+`.grengin_auth`; settings use `GRENGIN_PROVIDER_*`, with `GRENGIN_STAGING_*` retained as compatible
+aliases.
 
 ---
 
@@ -332,9 +340,11 @@ with the `GRENGIN_STAGING_*` environment variables documented at the top of the 
   vector. Put the value on one line; the key itself is valid (verified 200 via curl with newlines
   stripped). This is the only "failure" in the live suite that is actually actionable.
 - DeepSeek and Cerebras return **402** — no credit on those accounts.
-- `GEMINI_API_KEY` has an `AQ.Ab8R` prefix, not a standard `AIza…` key, and the OpenAI-compat endpoint
-  returns 404. Fixture or credential issue, not a runtime one.
+- The Gemini OpenAI-compatible endpoint and `GEMINI_API_KEY` are valid. `gemini-2.0-flash` is
+  retired, while `gemini-2.5-flash` is unavailable to new users despite appearing in model lists;
+  the live fixture uses the available explicit model `gemini-3.1-flash-lite`.
 - The default shell here is **fish**, so `source secrets.sh` fails. Use
   `bash -c 'set -a; source …; set +a; …'`.
-- Live results at time of writing: `live_tooling` 5/5 pass; `live_providers` 4/8 (Groq, Mistral,
-  Anthropic, OpenRouter pass).
+- Individually verified live provider tests include Mistral, Gemini, Anthropic, Groq, and
+  OpenRouter. The chat smoke test requires positive input, output, and total token usage in addition
+  to text and completion events.

@@ -58,14 +58,24 @@ async fn smoke(provider: LiveProvider) {
         .unwrap()
         .start(ChatRequest {
             model: ModelId::new(model),
-            messages: vec![ChatMessage {
-                role: ChatRole::User,
-                content: vec![ContentPart::Text {
-                    text: "Reply with OK.".to_string(),
-                }],
-                tool_calls: Vec::new(),
-                tool_result: None,
-            }],
+            messages: vec![
+                ChatMessage {
+                    role: ChatRole::System,
+                    content: vec![ContentPart::Text {
+                        text: "Be concise.".to_string(),
+                    }],
+                    tool_calls: Vec::new(),
+                    tool_result: None,
+                },
+                ChatMessage {
+                    role: ChatRole::User,
+                    content: vec![ContentPart::Text {
+                        text: "Reply with OK.".to_string(),
+                    }],
+                    tool_calls: Vec::new(),
+                    tool_result: None,
+                },
+            ],
             temperature: Some(0.0),
             max_tokens: Some(16),
             tools: Vec::new(),
@@ -90,6 +100,9 @@ async fn smoke(provider: LiveProvider) {
     });
     let mut received_text = false;
     let mut completed = false;
+    let mut input_tokens = None;
+    let mut output_tokens = None;
+    let mut total_tokens = None;
     while let Some(event) = stream.next().await {
         let event = event.unwrap_or_else(|error| {
             panic!(
@@ -100,6 +113,11 @@ async fn smoke(provider: LiveProvider) {
         });
         received_text |= matches!(event, ProviderEvent::TextDelta { .. });
         completed |= matches!(event, ProviderEvent::Completed { .. });
+        if let ProviderEvent::Usage { usage } = event {
+            input_tokens = usage.input_tokens.or(input_tokens);
+            output_tokens = usage.output_tokens.or(output_tokens);
+            total_tokens = usage.total_tokens.or(total_tokens);
+        }
     }
     assert!(
         received_text,
@@ -109,6 +127,23 @@ async fn smoke(provider: LiveProvider) {
     assert!(
         completed,
         "{} emitted no completion",
+        provider.descriptor().id
+    );
+    assert!(
+        input_tokens.is_some_and(|tokens| tokens > 0),
+        "{} emitted no positive input token usage",
+        provider.descriptor().id
+    );
+    assert!(
+        output_tokens.is_some_and(|tokens| tokens > 0),
+        "{} emitted no positive output token usage",
+        provider.descriptor().id
+    );
+    assert!(
+        total_tokens.is_some_and(|tokens| {
+            tokens >= input_tokens.unwrap_or(0) + output_tokens.unwrap_or(0)
+        }),
+        "{} emitted invalid total token usage",
         provider.descriptor().id
     );
 }
@@ -203,7 +238,7 @@ live_test!(
     "Gemini",
     "GEMINI_API_KEY",
     "https://generativelanguage.googleapis.com/v1beta/openai/",
-    "gemini-2.0-flash",
+    "gemini-3.1-flash-lite",
     OPENAI_COMPATIBLE
 );
 live_test!(

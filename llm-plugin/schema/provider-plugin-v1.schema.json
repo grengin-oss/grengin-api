@@ -1108,6 +1108,16 @@
         "id": {
           "type": "string"
         },
+        "inputTokensIncludeCacheCreation": {
+          "description": "Whether the provider's input token counter already contains cache-write tokens.",
+          "type": "boolean",
+          "default": true
+        },
+        "inputTokensIncludeCached": {
+          "description": "Whether the provider's input token counter already contains cache-read tokens.",
+          "type": "boolean",
+          "default": true
+        },
         "itemFields": {
           "description": "Field pointers resolved against each `collect` entry rather than the event root.",
           "type": "object",
@@ -1221,6 +1231,16 @@
             "null"
           ],
           "default": null
+        },
+        "inputTokensIncludeCacheCreation": {
+          "description": "Whether the provider's input token counter already contains cache-write tokens.",
+          "type": "boolean",
+          "default": true
+        },
+        "inputTokensIncludeCached": {
+          "description": "Whether the provider's input token counter already contains cache-read tokens.",
+          "type": "boolean",
+          "default": true
         },
         "outputTokens": {
           "type": [

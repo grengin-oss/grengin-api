@@ -324,13 +324,17 @@ impl MapperState {
                 }]
             }
             EventKind::Usage => vec![ProviderEvent::Usage {
-                usage: TokenUsage {
-                    input_tokens: optional_u32(rule, value, "inputTokens")?,
-                    output_tokens: optional_u32(rule, value, "outputTokens")?,
-                    total_tokens: optional_u32(rule, value, "totalTokens")?,
-                    cached_input_tokens: optional_u32(rule, value, "cachedInputTokens")?,
-                    cache_creation_tokens: optional_u32(rule, value, "cacheCreationTokens")?,
-                },
+                usage: normalize_token_usage(
+                    TokenUsage {
+                        input_tokens: optional_u32(rule, value, "inputTokens")?,
+                        output_tokens: optional_u32(rule, value, "outputTokens")?,
+                        total_tokens: optional_u32(rule, value, "totalTokens")?,
+                        cached_input_tokens: optional_u32(rule, value, "cachedInputTokens")?,
+                        cache_creation_tokens: optional_u32(rule, value, "cacheCreationTokens")?,
+                    },
+                    rule.input_tokens_include_cached,
+                    rule.input_tokens_include_cache_creation,
+                )?,
             }],
             EventKind::ProviderEvent => vec![ProviderEvent::ProviderEvent {
                 kind: required_string(rule, value, "kind")?,
@@ -621,6 +625,62 @@ pub(crate) fn value_to_u32(value: &Value) -> Option<u32> {
     u32::try_from(integer).ok()
 }
 
+/// Converts provider-specific cache accounting into the canonical usage contract.
+/// Canonical input and total counters include both cache-read and cache-write tokens.
+pub(crate) fn normalize_token_usage(
+    mut usage: TokenUsage,
+    input_tokens_include_cached: bool,
+    input_tokens_include_cache_creation: bool,
+) -> Result<TokenUsage, ProviderError> {
+    let mut excluded = 0u32;
+    if !input_tokens_include_cached {
+        excluded = excluded
+            .checked_add(usage.cached_input_tokens.unwrap_or(0))
+            .ok_or_else(token_usage_overflow)?;
+    }
+    if !input_tokens_include_cache_creation {
+        excluded = excluded
+            .checked_add(usage.cache_creation_tokens.unwrap_or(0))
+            .ok_or_else(token_usage_overflow)?;
+    }
+    if excluded > 0
+        && let Some(input_tokens) = usage.input_tokens
+    {
+        usage.input_tokens = Some(
+            input_tokens
+                .checked_add(excluded)
+                .ok_or_else(token_usage_overflow)?,
+        );
+    }
+    if excluded > 0
+        && let Some(total_tokens) = usage.total_tokens
+    {
+        usage.total_tokens = Some(
+            total_tokens
+                .checked_add(excluded)
+                .ok_or_else(token_usage_overflow)?,
+        );
+    }
+    let cache_tokens = usage
+        .cached_input_tokens
+        .unwrap_or(0)
+        .checked_add(usage.cache_creation_tokens.unwrap_or(0))
+        .ok_or_else(token_usage_overflow)?;
+    if usage
+        .input_tokens
+        .is_some_and(|input_tokens| cache_tokens > input_tokens)
+    {
+        return Err(ProviderError::ResponseMapping(
+            "cache token usage exceeds total input token usage".to_string(),
+        ));
+    }
+    Ok(usage)
+}
+
+fn token_usage_overflow() -> ProviderError {
+    ProviderError::ResponseMapping("token usage exceeds the supported range".to_string())
+}
+
 fn missing_field(rule: &ResponseRule, field: &str) -> ProviderError {
     ProviderError::ResponseMapping(format!(
         "response rule {} did not produce required field {field}",
@@ -713,6 +773,8 @@ mod tests {
                     emit: EventKind::TextDelta,
                     value: Some("/text".to_string()),
                     fields: BTreeMap::new(),
+                    input_tokens_include_cached: true,
+                    input_tokens_include_cache_creation: true,
                     constants: BTreeMap::new(),
                     collect: None,
                     item_fields: BTreeMap::new(),
@@ -732,6 +794,8 @@ mod tests {
                         ("inputTokens".to_string(), "/input".to_string()),
                         ("outputTokens".to_string(), "/output".to_string()),
                     ]),
+                    input_tokens_include_cached: true,
+                    input_tokens_include_cache_creation: true,
                     constants: BTreeMap::new(),
                     collect: None,
                     item_fields: BTreeMap::new(),

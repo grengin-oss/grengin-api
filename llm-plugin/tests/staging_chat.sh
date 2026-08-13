@@ -5,18 +5,22 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-AUTH_FILE=${GRENGIN_STAGING_AUTH_FILE:-"${ROOT_DIR}/.grengin_auth"}
-PROVIDER=${GRENGIN_STAGING_PROVIDER:-staging-anthropic-plugin}
-MODEL=${GRENGIN_STAGING_MODEL:-claude-haiku-4-5-20251001}
-MCP_SERVER_ID=${GRENGIN_STAGING_MCP_SERVER_ID:-f7960384-19b7-4c35-a0bb-dc478e731f9f}
+AUTH_FILE=${GRENGIN_PROVIDER_AUTH_FILE:-${GRENGIN_STAGING_AUTH_FILE:-"${ROOT_DIR}/.grengin_auth"}}
+PROVIDER=${GRENGIN_PROVIDER:-${GRENGIN_STAGING_PROVIDER:-staging-anthropic-plugin}}
+MODEL=${GRENGIN_PROVIDER_MODEL:-${GRENGIN_STAGING_MODEL:-claude-haiku-4-5-20251001}}
+MCP_SERVER_ID=${GRENGIN_PROVIDER_MCP_SERVER_ID:-${GRENGIN_STAGING_MCP_SERVER_ID:-f7960384-19b7-4c35-a0bb-dc478e731f9f}}
+EXPECT_NONZERO_COST=${GRENGIN_PROVIDER_EXPECT_NONZERO_COST:-true}
+EXPECT_CACHE_USAGE=${GRENGIN_PROVIDER_EXPECT_CACHE_USAGE:-true}
 
-if [[ ! -r "$AUTH_FILE" ]]; then
-  printf 'Missing staging credentials file: %s\n' "$AUTH_FILE" >&2
-  exit 2
+if [[ -z "${API_URL:-}" || -z "${API_KEY:-}" ]]; then
+  if [[ ! -r "$AUTH_FILE" ]]; then
+    printf 'Missing API credentials file: %s\n' "$AUTH_FILE" >&2
+    exit 2
+  fi
+
+  # shellcheck disable=SC1090
+  source "$AUTH_FILE"
 fi
-
-# shellcheck disable=SC1090
-source "$AUTH_FILE"
 : "${API_URL:?API_URL must be set by the staging credentials file}"
 : "${API_KEY:?API_KEY must be set by the staging credentials file}"
 
@@ -27,6 +31,7 @@ WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/grengin-staging-provider.XXXXXX")
 CREATED_CHATS=()
 HTTP_STATUS=""
 BODY_FILE=""
+LAST_CHAT_ID=""
 
 cleanup() {
   local chat_id
@@ -84,6 +89,7 @@ remember_conversation() {
     | head -1 || true)
   if [[ "$chat_id" =~ ^[0-9a-fA-F-]{36}$ ]]; then
     CREATED_CHATS+=("$chat_id")
+    LAST_CHAT_ID=$chat_id
   fi
 }
 
@@ -146,6 +152,42 @@ plain_text=$(sed -n 's/^data:[[:space:]]*//p' "$BODY_FILE" \
 [[ "$plain_text" == *STAGING_PLUGIN_OK* ]] \
   || fail "plain stream did not contain its expected marker"
 pass "delta text reached the API client"
+message_end=$(sed -n 's/^data:[[:space:]]*//p' "$BODY_FILE" \
+  | jq -sc 'map(select(.input_tokens != null and .output_tokens != null and .cost != null)) | last')
+jq -e '.input_tokens > 0 and .output_tokens > 0' <<<"$message_end" >/dev/null \
+  || fail "plain stream did not report positive input and output token counts"
+if [[ "$EXPECT_NONZERO_COST" == "true" ]]; then
+  jq -e '.cost > 0' <<<"$message_end" >/dev/null \
+    || fail "plain stream reported zero cost for a priced provider model"
+fi
+pass "stream token counts and cost are populated"
+
+request GET "/chat/${LAST_CHAT_ID}"
+[[ "$HTTP_STATUS" == "200" ]] || fail "persisted chat lookup returned HTTP ${HTTP_STATUS}"
+jq -e --arg model "$MODEL" '
+  .messages
+  | map(select(.role == "assistant" and .model == $model))
+  | last
+  | .usage.input_tokens > 0
+    and .usage.output_tokens > 0
+    and (.usage.cached_input_tokens | type) == "number"
+    and (.usage.cache_creation_tokens | type) == "number"
+' "$BODY_FILE" >/dev/null || fail "persisted usage is missing token or cache-token counters"
+if [[ "$EXPECT_NONZERO_COST" == "true" ]]; then
+  jq -e --arg model "$MODEL" '
+    .total_cost > 0
+    and (.messages | map(select(.role == "assistant" and .model == $model)) | last | .cost > 0)
+  ' "$BODY_FILE" >/dev/null || fail "persisted message or conversation cost is zero"
+fi
+if [[ "$EXPECT_CACHE_USAGE" == "true" ]]; then
+  jq -e --arg model "$MODEL" '
+    .messages
+    | map(select(.role == "assistant" and .model == $model))
+    | last
+    | (.usage.cached_input_tokens + .usage.cache_creation_tokens) > 0
+  ' "$BODY_FILE" >/dev/null || fail "provider did not report a cache read or cache creation"
+fi
+pass "persisted token, cache-token, and cost accounting"
 
 error_payload=$(jq -n --arg provider "$PROVIDER" '{
   messages: [{content: "Reply with one word", files: [], role: "user"}],
@@ -185,4 +227,4 @@ mcp_payload=$(jq -n \
 stream "MCP db_status" "$mcp_payload"
 require_successful_stream "MCP db_status" conversation tool_call tool_result message_end done
 
-printf 'All staging provider checks passed. Created conversations will now be removed.\n'
+printf 'All provider API checks passed. Created conversations will now be removed.\n'

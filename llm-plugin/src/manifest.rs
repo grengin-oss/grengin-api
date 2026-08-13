@@ -267,6 +267,12 @@ pub struct ResponseRule {
     pub value: Option<String>,
     #[serde(default)]
     pub fields: BTreeMap<String, String>,
+    /// Whether the provider's input token counter already contains cache-read tokens.
+    #[serde(default = "default_true")]
+    pub input_tokens_include_cached: bool,
+    /// Whether the provider's input token counter already contains cache-write tokens.
+    #[serde(default = "default_true")]
+    pub input_tokens_include_cache_creation: bool,
     #[serde(default)]
     pub constants: BTreeMap<String, Value>,
     /// Pointer to an array gathered into a *single* event, with each entry mapped through
@@ -401,7 +407,7 @@ pub struct ModelListResponseSpec {
     pub name_pointer: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UsageMapping {
     #[serde(default)]
@@ -414,6 +420,30 @@ pub struct UsageMapping {
     pub cached_input_tokens: Option<String>,
     #[serde(default)]
     pub cache_creation_tokens: Option<String>,
+    /// Whether the provider's input token counter already contains cache-read tokens.
+    #[serde(default = "default_true")]
+    pub input_tokens_include_cached: bool,
+    /// Whether the provider's input token counter already contains cache-write tokens.
+    #[serde(default = "default_true")]
+    pub input_tokens_include_cache_creation: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for UsageMapping {
+    fn default() -> Self {
+        Self {
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            cached_input_tokens: None,
+            cache_creation_tokens: None,
+            input_tokens_include_cached: true,
+            input_tokens_include_cache_creation: true,
+        }
+    }
 }
 
 impl ProviderManifestV1 {

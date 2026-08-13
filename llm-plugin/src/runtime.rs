@@ -817,7 +817,8 @@ impl DeclarativeProvider {
                 .response
                 .usage
                 .as_ref()
-                .map(|usage| map_usage(&root, usage)),
+                .map(|usage| map_usage(&root, usage))
+                .transpose()?,
         })
     }
 }
@@ -1211,7 +1212,8 @@ fn decode_embeddings(
             .response
             .usage
             .as_ref()
-            .map(|usage| map_usage(&root, usage)),
+            .map(|usage| map_usage(&root, usage))
+            .transpose()?,
     })
 }
 
@@ -1291,14 +1293,18 @@ fn select_array<'a>(
         .ok_or_else(|| ProviderError::ResponseMapping(format!("{label} pointer is not an array")))
 }
 
-fn map_usage(root: &Value, mapping: &UsageMapping) -> TokenUsage {
-    TokenUsage {
-        input_tokens: mapped_u32(root, mapping.input_tokens.as_deref()),
-        output_tokens: mapped_u32(root, mapping.output_tokens.as_deref()),
-        total_tokens: mapped_u32(root, mapping.total_tokens.as_deref()),
-        cached_input_tokens: mapped_u32(root, mapping.cached_input_tokens.as_deref()),
-        cache_creation_tokens: mapped_u32(root, mapping.cache_creation_tokens.as_deref()),
-    }
+fn map_usage(root: &Value, mapping: &UsageMapping) -> Result<TokenUsage, ProviderError> {
+    crate::sse::normalize_token_usage(
+        TokenUsage {
+            input_tokens: mapped_u32(root, mapping.input_tokens.as_deref()),
+            output_tokens: mapped_u32(root, mapping.output_tokens.as_deref()),
+            total_tokens: mapped_u32(root, mapping.total_tokens.as_deref()),
+            cached_input_tokens: mapped_u32(root, mapping.cached_input_tokens.as_deref()),
+            cache_creation_tokens: mapped_u32(root, mapping.cache_creation_tokens.as_deref()),
+        },
+        mapping.input_tokens_include_cached,
+        mapping.input_tokens_include_cache_creation,
+    )
 }
 
 fn mapped_u32(root: &Value, pointer: Option<&str>) -> Option<u32> {

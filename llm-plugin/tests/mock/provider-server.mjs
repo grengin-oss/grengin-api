@@ -133,7 +133,16 @@ function openaiWebSearchFrames() {
 const anthropicOpen = () => [
   data({
     type: 'message_start',
-    message: { id: 'msg_mock', role: 'assistant', usage: { input_tokens: 12, output_tokens: 0 } },
+    message: {
+      id: 'msg_mock',
+      role: 'assistant',
+      usage: {
+        input_tokens: 12,
+        output_tokens: 0,
+        cache_read_input_tokens: 5,
+        cache_creation_input_tokens: 3,
+      },
+    },
   }),
   'event: ping\ndata: {"type":"ping"}\n\n',
 ];

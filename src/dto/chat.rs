@@ -102,4 +102,6 @@ pub struct TokenUsage {
     pub input_tokens: i32,
     pub output_tokens: i32,
     pub total_tokens: i32,
+    pub cached_input_tokens: i32,
+    pub cache_creation_tokens: i32,
 }

@@ -335,7 +335,9 @@
               "totalTokens": "/usage/total_tokens",
               "cachedInputTokens": "/usage/cached_input_tokens",
               "cacheCreationTokens": "/usage/cache_creation_tokens"
-            }
+            },
+            "inputTokensIncludeCached": true,
+            "inputTokensIncludeCacheCreation": true
           },
           {
             "id": "provider_event",
@@ -391,7 +393,9 @@
           "outputTokens": "/usage/output_tokens",
           "totalTokens": "/usage/total_tokens",
           "cachedInputTokens": "/usage/cached_input_tokens",
-          "cacheCreationTokens": "/usage/cache_creation_tokens"
+          "cacheCreationTokens": "/usage/cache_creation_tokens",
+          "inputTokensIncludeCached": true,
+          "inputTokensIncludeCacheCreation": true
         }
       }
     },
@@ -424,7 +428,9 @@
         "usage": {
           "inputTokens": "/usage/input_tokens",
           "outputTokens": "/usage/output_tokens",
-          "totalTokens": "/usage/total_tokens"
+          "totalTokens": "/usage/total_tokens",
+          "inputTokensIncludeCached": true,
+          "inputTokensIncludeCacheCreation": true
         }
       }
     },

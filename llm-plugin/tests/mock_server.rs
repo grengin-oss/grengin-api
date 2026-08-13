@@ -253,11 +253,72 @@ async fn anthropic_manifest_streams_chat_text() {
         1,
         "{events:?}"
     );
+    let usage = events
+        .iter()
+        .find_map(|event| match event {
+            ProviderEvent::Usage { usage } if usage.input_tokens.is_some() => Some(usage),
+            _ => None,
+        })
+        .expect("no Anthropic input usage event");
+    assert_eq!(usage.input_tokens, Some(20));
+    assert_eq!(usage.cached_input_tokens, Some(5));
+    assert_eq!(usage.cache_creation_tokens, Some(3));
 
     let sent = &server.requests().await[0]["body"];
     // `max_tokens` is mandatory for Anthropic; `$coalesce` supplies it from the request.
     assert_eq!(sent["max_tokens"], 512);
     assert_eq!(sent["stream"], true);
+    assert_eq!(sent["cache_control"], json!({"type": "ephemeral"}));
+}
+
+#[tokio::test]
+async fn anthropic_manifest_places_system_messages_outside_conversation_messages() {
+    let server = mock_server!();
+    let provider = server.provider(ANTHROPIC, |_| {});
+    let mut chat = request("mock-model", "hello there", Vec::new());
+    chat.max_tokens = None;
+    chat.messages.splice(
+        0..0,
+        [
+            ChatMessage {
+                role: ChatRole::System,
+                content: vec![ContentPart::Text {
+                    text: "First system instruction".to_string(),
+                }],
+                tool_calls: Vec::new(),
+                tool_result: None,
+            },
+            ChatMessage {
+                role: ChatRole::System,
+                content: vec![ContentPart::Text {
+                    text: "Second system instruction".to_string(),
+                }],
+                tool_calls: Vec::new(),
+                tool_result: None,
+            },
+        ],
+    );
+
+    let mut session = provider.chat().unwrap().start(chat).await.unwrap();
+    drain(&mut session.stream().await.unwrap()).await;
+
+    let sent = &server.requests().await[0]["body"];
+    assert_eq!(
+        sent["system"],
+        json!([
+            {"type": "text", "text": "First system instruction"},
+            {"type": "text", "text": "Second system instruction"}
+        ])
+    );
+    assert_eq!(sent["max_tokens"], 4096);
+    assert!(
+        sent["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message["role"] != "system"),
+        "system role leaked into Anthropic messages: {sent}"
+    );
 }
 
 // ---------------------------------------------------------------------------

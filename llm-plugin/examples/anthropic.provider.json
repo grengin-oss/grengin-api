@@ -14,6 +14,7 @@
     }
   ],
   "capabilities": {
+    "modelListing": true,
     "chat": {
       "streaming": true,
       "tools": true,
@@ -23,34 +24,52 @@
   },
   "mappings": {
     "message": {
-      "$switch": { "$get": "item.role" },
-      "cases": {
-        "assistant": {
-          "role": { "$literal": "assistant" },
-          "content": {
-            "$concat": [
-              { "$map": "item.content", "using": "content_part" },
-              { "$map": "item.toolCalls", "using": "tool_use_block" }
-            ]
+      "$if": {
+        "$switch": { "$get": "item.role" },
+        "cases": { "system": { "$literal": false } },
+        "default": { "$literal": true }
+      },
+      "then": {
+        "$switch": { "$get": "item.role" },
+        "cases": {
+          "assistant": {
+            "role": { "$literal": "assistant" },
+            "content": {
+              "$concat": [
+                { "$map": "item.content", "using": "content_part" },
+                { "$map": "item.toolCalls", "using": "tool_use_block" }
+              ]
+            }
+          },
+          "tool": {
+            "role": { "$literal": "user" },
+            "content": {
+              "$array": [
+                {
+                  "type": { "$literal": "tool_result" },
+                  "tool_use_id": { "$get": "item.toolResult.callId" },
+                  "content": { "$jsonEncode": { "$get": "item.toolResult.output" } },
+                  "is_error": { "$get": "item.toolResult.isError" }
+                }
+              ]
+            }
           }
         },
-        "tool": {
-          "role": { "$literal": "user" },
-          "content": {
-            "$array": [
-              {
-                "type": { "$literal": "tool_result" },
-                "tool_use_id": { "$get": "item.toolResult.callId" },
-                "content": { "$jsonEncode": { "$get": "item.toolResult.output" } },
-                "is_error": { "$get": "item.toolResult.isError" }
-              }
-            ]
-          }
+        "default": {
+          "role": { "$get": "item.role" },
+          "content": { "$map": "item.content", "using": "content_part" }
         }
+      }
+    },
+    "system_message": {
+      "$if": {
+        "$switch": { "$get": "item.role" },
+        "cases": { "system": { "$literal": true } },
+        "default": { "$literal": false }
       },
-      "default": {
-        "role": { "$get": "item.role" },
-        "content": { "$map": "item.content", "using": "content_part" }
+      "then": {
+        "type": { "$literal": "text" },
+        "text": { "$get": "/item/content/0/text" }
       }
     },
     "content_part": {
@@ -74,6 +93,28 @@
       "input_schema": { "$get": "item.parameters" }
     }
   },
+  "models": [
+    {
+      "id": "claude-haiku-4-5-20251001",
+      "name": "Claude Haiku 4.5",
+      "capabilities": {
+        "chat": {
+          "streaming": true,
+          "tools": true,
+          "vision": false,
+          "reasoning": true
+        }
+      },
+      "metadata": {
+        "inputTokenRate": 1.0,
+        "outputTokenRate": 5.0,
+        "cachedInputTokenRate": 0.1,
+        "cacheCreationTokenRate": 1.25,
+        "maxOutputTokens": 64000,
+        "contextWindow": 200000
+      }
+    }
+  ],
   "operations": {
     "chatStream": {
       "method": "POST",
@@ -85,11 +126,19 @@
       "bodyEncoding": "json",
       "body": {
         "model": { "$get": "request.model" },
+        "system": {
+          "$omitIfNull": {
+            "$concat": [
+              { "$map": "request.messages", "using": "system_message" }
+            ]
+          }
+        },
         "messages": { "$map": "request.messages", "using": "message" },
         "max_tokens": {
           "$coalesce": [{ "$get": "request.maxTokens" }, { "$literal": 4096 }]
         },
         "temperature": { "$omitIfNull": { "$get": "request.temperature" } },
+        "cache_control": { "$literal": { "type": "ephemeral" } },
         "tools": {
           "$omitIfNull": {
             "$concat": [
@@ -126,7 +175,13 @@
             "id": "input_usage",
             "when": { "pointer": "/type", "equals": "message_start" },
             "emit": "usage",
-            "fields": { "inputTokens": "/message/usage/input_tokens" }
+            "fields": {
+              "inputTokens": "/message/usage/input_tokens",
+              "cachedInputTokens": "/message/usage/cache_read_input_tokens",
+              "cacheCreationTokens": "/message/usage/cache_creation_input_tokens"
+            },
+            "inputTokensIncludeCached": false,
+            "inputTokensIncludeCacheCreation": false
           },
           {
             "id": "text",

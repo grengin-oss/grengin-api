@@ -399,6 +399,16 @@ pub async fn get_chat_by_id(
                 input_tokens: message_model.request_tokens,
                 output_tokens: message_model.response_tokens,
                 total_tokens: message_model.total_tokens,
+                cached_input_tokens: metadata
+                    .and_then(|value| value.get("cachedInputTokens"))
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(|value| i32::try_from(value).ok())
+                    .unwrap_or(0),
+                cache_creation_tokens: metadata
+                    .and_then(|value| value.get("cacheCreationTokens"))
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(|value| i32::try_from(value).ok())
+                    .unwrap_or(0),
             },
         };
         conversation_response

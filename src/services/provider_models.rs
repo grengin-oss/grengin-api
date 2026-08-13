@@ -128,4 +128,30 @@ mod tests {
         };
         assert_eq!(model_type(&model), ModelType::ImageGenerator);
     }
+
+    #[test]
+    fn plugin_model_pricing_maps_every_token_bucket() {
+        let model = ProviderModel {
+            id: ModelId::new("priced-model"),
+            name: "Priced model".to_string(),
+            capabilities: ProviderCapabilities {
+                chat: Some(Default::default()),
+                ..Default::default()
+            },
+            metadata: serde_json::json!({
+                "inputTokenRate": 1.0,
+                "outputTokenRate": 5.0,
+                "cachedInputTokenRate": 0.1,
+                "cacheCreationTokenRate": 1.25,
+                "maxOutputTokens": 64000
+            }),
+        };
+
+        let info = to_model_info("custom-provider", model);
+        assert_eq!(info.input_token_rate, Some(1.0));
+        assert_eq!(info.output_token_rate, Some(5.0));
+        assert_eq!(info.cached_input_token_rate, Some(0.1));
+        assert_eq!(info.cache_creation_token_rate, Some(1.25));
+        assert_eq!(info.max_output_tokens, Some(64000));
+    }
 }

@@ -781,7 +781,13 @@ async fn decodes_and_orders_embedding_vectors() {
             {"index": 1, "embedding": [3.0, 4.0]},
             {"index": 0, "embedding": [1.0, 2.0]}
         ],
-        "usage": {"total_tokens": 9}
+        "usage": {
+            "input_tokens": 12,
+            "output_tokens": 7,
+            "total_tokens": 19,
+            "cached_input_tokens": 5,
+            "cache_creation_tokens": 3
+        }
     });
     let (base_url, _) = serve(vec![MockResponse::json("200 OK", &response)]).await;
     let provider = provider(
@@ -801,7 +807,15 @@ async fn decodes_and_orders_embedding_vectors() {
                     "itemsPointer": "/data",
                     "vectorPointer": "/embedding",
                     "indexPointer": "/index",
-                    "usage": {"totalTokens": "/usage/total_tokens"}
+                    "usage": {
+                        "inputTokens": "/usage/input_tokens",
+                        "outputTokens": "/usage/output_tokens",
+                        "totalTokens": "/usage/total_tokens",
+                        "cachedInputTokens": "/usage/cached_input_tokens",
+                        "cacheCreationTokens": "/usage/cache_creation_tokens",
+                        "inputTokensIncludeCached": false,
+                        "inputTokensIncludeCacheCreation": false
+                    }
                 }
             }
         }),
@@ -817,7 +831,12 @@ async fn decodes_and_orders_embedding_vectors() {
         .await
         .unwrap();
     assert_eq!(result.vectors, vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
-    assert_eq!(result.usage.unwrap().total_tokens, Some(9));
+    let usage = result.usage.unwrap();
+    assert_eq!(usage.input_tokens, Some(20));
+    assert_eq!(usage.output_tokens, Some(7));
+    assert_eq!(usage.total_tokens, Some(27));
+    assert_eq!(usage.cached_input_tokens, Some(5));
+    assert_eq!(usage.cache_creation_tokens, Some(3));
 }
 
 #[tokio::test]

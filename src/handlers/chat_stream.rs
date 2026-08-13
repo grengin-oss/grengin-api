@@ -567,7 +567,7 @@ pub async fn handle_chat_stream(
             model.image_output_token_rate,
             model.cached_input_token_rate,
             model.cache_creation_token_rate,
-            model.max_output_tokens.unwrap_or(128000),
+            model.max_output_tokens,
             model.model_type == ModelType::ImageGenerator,
             model.supports_multiple_images,
         ),
@@ -579,7 +579,7 @@ pub async fn handle_chat_stream(
                 None,
                 None,
                 None,
-                128000,
+                None,
                 plugin_is_image_only,
                 false,
             ),
@@ -591,7 +591,7 @@ pub async fn handle_chat_stream(
                     model.image_output_token_rate,
                     model.cached_input_token_rate,
                     model.cache_creation_token_rate,
-                    model.max_output_tokens.unwrap_or(128000),
+                    model.max_output_tokens,
                     model.model_type == ModelType::ImageGenerator,
                     model.supports_multiple_images,
                 )
@@ -607,7 +607,7 @@ pub async fn handle_chat_stream(
                     None,
                     None,
                     None,
-                    128000,
+                    None,
                     plugin_is_image_only,
                     false,
                 ),
@@ -619,7 +619,7 @@ pub async fn handle_chat_stream(
                         model.image_output_token_rate,
                         model.cached_input_token_rate,
                         model.cache_creation_token_rate,
-                        model.max_output_tokens.unwrap_or(128000),
+                        model.max_output_tokens,
                         model.model_type == ModelType::ImageGenerator,
                         model.supports_multiple_images,
                     )
@@ -1081,20 +1081,12 @@ pub async fn handle_chat_stream(
             },
         );
     }
-    let (event_source, provider_session): (
-        Option<crate::services::provider_chat::LlmEventStream>,
-        Option<Box<dyn llm_plugin::ChatSession>>,
-    ) = if !is_image_gen {
-        let chat = provider_config
-            .chat()
-            .ok_or_else(|| AppError::LlmProviderNotConfigured {
-                provider: provider.clone(),
-            })?;
+    let provider_request = if !is_image_gen {
         let mut provider_request = build_plugin_chat_request(
             model_name.clone(),
             previous_prompts,
             req.temperature,
-            u32::try_from(max_output_tokens).ok(),
+            max_output_tokens.and_then(|value| u32::try_from(value).ok()),
             &mcp_tool_lookup,
             web_search,
             req.config.clone().unwrap_or(Value::Null),
@@ -1105,27 +1097,9 @@ pub async fn handle_chat_stream(
         {
             provider_request.tool_choice = Some(llm_plugin::ToolChoice::Named(tool_name.clone()));
         }
-        let mut session = chat.start(provider_request).await.map_err(|error| {
-            eprintln!(
-                "provider chat start failed: {}",
-                provider_error_class(&error)
-            );
-            AppError::LlmProviderNotConfigured {
-                provider: provider.clone(),
-            }
-        })?;
-        let source = session.stream().await.map_err(|error| {
-            eprintln!(
-                "provider stream start failed: {}",
-                provider_error_class(&error)
-            );
-            AppError::LlmProviderNotConfigured {
-                provider: provider.clone(),
-            }
-        })?;
-        (Some(plugin_event_stream(source)), Some(session))
+        Some(provider_request)
     } else {
-        (None, None)
+        None
     };
     let stream_parser: Option<Box<dyn StreamParser>> = if !is_image_gen {
         Some(Box::new(PluginStreamParser::new()))
@@ -1154,7 +1128,6 @@ pub async fn handle_chat_stream(
        let mut oauth_required_seen = false;
        let mut last_web_search_call_id: Option<String> = None;
        let mcp_tooling_enabled = supports_mcp_tools && !mcp_tool_lookup.is_empty();
-       let mut provider_session = provider_session;
        let mut next_tool_results: Option<Vec<llm_plugin::ToolResult>> = None;
        let mut tool_round: usize = 0;
        let max_tool_rounds: usize = 3;
@@ -1306,8 +1279,58 @@ pub async fn handle_chat_stream(
             return;
         }
 
-        // Unwrap is safe — both are Some when !is_image_gen
+        // Unwrap is safe — these are present when !is_image_gen.
         let stream_parser = stream_parser.expect("stream_parser is None only for image gen");
+        let chat = provider_config
+            .chat()
+            .expect("chat capability is present for non-image providers");
+        let mut provider_session = match chat
+            .start(provider_request.expect("provider request is present for chat"))
+            .await
+        {
+            Ok(session) => session,
+            Err(error) => {
+                eprintln!("provider chat start failed: {}", provider_error_class(&error));
+                let stream_err = ChatStreamError::ProviderError {
+                    provider: provider.clone(),
+                    message: format!(
+                        "provider plugin request failed ({})",
+                        provider_error_class(&error)
+                    ),
+                };
+                let data = serde_json::to_string(&stream_err.to_response())
+                    .unwrap_or_else(|_| "{}".to_string());
+                yield Event::default()
+                    .event(ChatStreamEvents::AiError.to_string())
+                    .data(data);
+                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                return;
+            }
+        };
+        let mut event_source = match provider_session.stream().await {
+            Ok(source) => plugin_event_stream(source),
+            Err(error) => {
+                eprintln!("provider stream start failed: {}", provider_error_class(&error));
+                let stream_err = if matches!(&error, llm_plugin::ProviderError::QuotaExhausted) {
+                    ChatStreamError::ApiQuotaExhausted { provider: provider.clone() }
+                } else {
+                    ChatStreamError::ProviderError {
+                        provider: provider.clone(),
+                        message: format!(
+                            "provider plugin request failed ({})",
+                            provider_error_class(&error)
+                        ),
+                    }
+                };
+                let data = serde_json::to_string(&stream_err.to_response())
+                    .unwrap_or_else(|_| "{}".to_string());
+                yield Event::default()
+                    .event(ChatStreamEvents::AiError.to_string())
+                    .data(data);
+                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                return;
+            }
+        };
 
         let new_message_id = Uuid::new_v4();
         let assistant_created_at = Utc::now();
@@ -1340,7 +1363,6 @@ pub async fn handle_chat_stream(
 
        let cancel_handle = app_state.register_stream_cancel(new_message_id).await;
 
-       let mut event_source = event_source.expect("event_source is None only for image gen");
        let mut final_message_cost = Decimal::from(0);
        loop {
            let mut stream_should_continue = false;
@@ -1367,6 +1389,8 @@ pub async fn handle_chat_stream(
                    new_llm_message.metadata = Set(Some(json!({
                        "webSearch": req.web_search,
                        "cancelled": true,
+                       "cachedInputTokens": cached_input_tokens_acc,
+                       "cacheCreationTokens": cache_creation_tokens_acc,
                    })));
                    new_llm_message
                        .clone()
@@ -1530,6 +1554,11 @@ pub async fn handle_chat_stream(
                           new_llm_message.response_tokens = Set(response_tokens);
                           new_llm_message.total_tokens = Set(request_tokens + response_tokens);
                           new_llm_message.cost = Set(cost);
+                          new_llm_message.metadata = Set(Some(json!({
+                              "webSearch": req.web_search,
+                              "cachedInputTokens": cached_input_tokens_acc,
+                              "cacheCreationTokens": cache_creation_tokens_acc,
+                          })));
                           new_llm_message
                             .clone()
                             .update(&app_state.database)
@@ -1612,6 +1641,11 @@ pub async fn handle_chat_stream(
                               cache_creation_rate,
                               output_rate,
                           ));
+                          new_llm_message.metadata = Set(Some(json!({
+                              "webSearch": req.web_search,
+                              "cachedInputTokens": cached_input_tokens_acc,
+                              "cacheCreationTokens": cache_creation_tokens_acc,
+                          })));
                           new_llm_message
                             .clone()
                             .update(&app_state.database)
@@ -2296,9 +2330,9 @@ pub async fn handle_chat_stream(
            }
            if stream_should_continue {
                    let results = next_tool_results.take();
-                   match (provider_session.as_mut(), results) {
-                       (Some(session), Some(results)) => {
-                           match session.continue_with_tools(results).await {
+                   match results {
+                       Some(results) => {
+                           match provider_session.continue_with_tools(results).await {
                                Ok(stream) => {
                                    event_source = plugin_event_stream(stream);
                                    continue;
@@ -2320,7 +2354,7 @@ pub async fn handle_chat_stream(
                                }
                            }
                        }
-                       _ => stream_finished = true,
+                       None => stream_finished = true,
                    }
            }
 
@@ -2525,6 +2559,8 @@ pub async fn handle_chat_stream(
                        new_llm_message.metadata = Set(Some(json!({
                            "webSearch": req.web_search,
                            "artifacts": saved_artifacts,
+                           "cachedInputTokens": cached_input_tokens_acc,
+                           "cacheCreationTokens": cache_creation_tokens_acc,
                        })));
                        new_llm_message.updated_at = Set(Utc::now());
                        let _ = new_llm_message.clone().update(&app_state.database).await;
