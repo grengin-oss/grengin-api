@@ -11,6 +11,7 @@ MODEL=${GRENGIN_PROVIDER_MODEL:-${GRENGIN_STAGING_MODEL:-claude-haiku-4-5-202510
 MCP_SERVER_ID=${GRENGIN_PROVIDER_MCP_SERVER_ID:-${GRENGIN_STAGING_MCP_SERVER_ID:-f7960384-19b7-4c35-a0bb-dc478e731f9f}}
 EXPECT_NONZERO_COST=${GRENGIN_PROVIDER_EXPECT_NONZERO_COST:-true}
 EXPECT_CACHE_USAGE=${GRENGIN_PROVIDER_EXPECT_CACHE_USAGE:-true}
+REQUIRE_CUSTOM_PROVIDER=${GRENGIN_PROVIDER_REQUIRE_CUSTOM:-true}
 
 if [[ -z "${API_URL:-}" || -z "${API_KEY:-}" ]]; then
   if [[ ! -r "$AUTH_FILE" ]]; then
@@ -125,13 +126,18 @@ require_successful_stream() {
   pass "$name"
 }
 
-request GET "/admin/provider-plugins/${PROVIDER}"
+request GET "/admin/ai-engines/${PROVIDER}"
 [[ "$HTTP_STATUS" == "200" ]] || fail "provider lookup returned HTTP ${HTTP_STATUS}"
-jq -e '.status == "enabled"' "$BODY_FILE" >/dev/null \
-  || fail "provider ${PROVIDER} is not enabled"
-pass "custom provider is installed and enabled"
+if [[ "$REQUIRE_CUSTOM_PROVIDER" == "true" ]]; then
+  jq -e '.is_enabled == true and .plugin_config != null' "$BODY_FILE" >/dev/null \
+    || fail "custom provider ${PROVIDER} is not installed and enabled"
+else
+  jq -e '.is_enabled == true' "$BODY_FILE" >/dev/null \
+    || fail "provider ${PROVIDER} is not enabled"
+fi
+pass "provider is installed and enabled"
 
-request POST "/admin/provider-plugins/${PROVIDER}/test" '{}'
+request POST "/admin/ai-engines/${PROVIDER}/test" '{}'
 [[ "$HTTP_STATUS" == "200" ]] || fail "provider connection test returned HTTP ${HTTP_STATUS}"
 jq -e '.valid == true' "$BODY_FILE" >/dev/null \
   || fail "provider connection test did not validate"
@@ -211,6 +217,15 @@ web_payload=$(jq -n --arg provider "$PROVIDER" --arg model "$MODEL" '{
 }')
 stream "web search" "$web_payload"
 require_successful_stream "web search" conversation tool_call tool_result message_end done
+web_result=$(sed -n 's/^data:[[:space:]]*//p' "$BODY_FILE" \
+  | jq -sc 'map(select(.tool_result.web_search != null)) | last')
+jq -e '
+  .tool_result.status == "success"
+    and (.tool_result.web_search.results | length) > 0
+    and any(.tool_result.web_search.results[]; .url | startswith("http"))
+' <<<"$web_result" >/dev/null \
+  || fail "web search did not return a successful result with a citation URL"
+pass "web search returned a citation URL"
 
 mcp_payload=$(jq -n \
   --arg provider "$PROVIDER" \
@@ -226,5 +241,31 @@ mcp_payload=$(jq -n \
   }')
 stream "MCP db_status" "$mcp_payload"
 require_successful_stream "MCP db_status" conversation tool_call tool_result message_end done
+mcp_result=$(sed -n 's/^data:[[:space:]]*//p' "$BODY_FILE" \
+  | jq -sc 'map(select(.tool_result != null)) | last')
+jq -e '
+  def db_status:
+    .tool_result.output as $output
+    | if $output.database_type? != null then
+        $output
+      elif $output.structuredContent? != null then
+        $output.structuredContent
+      elif ($output.content? | type) == "array" then
+        ([
+          $output.content[]?
+          | select(.type == "text")
+          | .text
+          | fromjson?
+        ] | map(select(. != null)) | first // {})
+      else
+        {}
+      end;
+  .tool_result.status == "success"
+    and ((.tool_result.tool_name // "") | contains("__db_status__"))
+    and (db_status.database_type == "PostgreSQL")
+    and (db_status.read_only == true)
+' <<<"$mcp_result" >/dev/null \
+  || fail "MCP db_status did not return a successful read-only PostgreSQL status"
+pass "MCP db_status returned read-only PostgreSQL status"
 
 printf 'All provider API checks passed. Created conversations will now be removed.\n'

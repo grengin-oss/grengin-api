@@ -1,18 +1,35 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::models::ai_engines::ApiKeyStatus;
+use crate::models::ai_engines::{ApiKeyStatus, PluginConfig};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 #[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AIEngineCreate {
+    pub display_name: Option<String>,
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub is_enabled: bool,
+    #[serde(default)]
+    pub whitelisted_models: Vec<String>,
+    pub default_model: Option<String>,
+    pub default_image_gen_model: Option<String>,
+    pub plugin_config: PluginConfig,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AIEngineUpdate {
+    pub display_name: Option<String>,
     pub is_enabled: Option<bool>,
     pub api_key: Option<String>,
     pub whitelisted_models: Option<Vec<String>>,
     pub default_model: Option<String>,
     pub default_image_gen_model: Option<String>,
+    pub plugin_config: Option<PluginConfig>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -30,8 +47,39 @@ pub struct AIEngineDetail {
     pub default_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_image_gen_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_config: Option<PluginConfig>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AIEnginePluginValidationRequest {
+    pub plugin_config: PluginConfig,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AIEnginePluginValidationResponse {
+    pub valid: bool,
+    pub engine_key: Option<String>,
+    pub version: Option<String>,
+    pub name: Option<String>,
+    pub destination: Option<String>,
+    #[schema(value_type = Object)]
+    pub capabilities: Option<serde_json::Value>,
+    pub credential_required: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AIEngineConnectionTest {
+    pub valid: bool,
+    pub mode: String,
+    pub models_available: Option<usize>,
+    pub error_class: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]

@@ -6,6 +6,25 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginConfig {
+    #[schema(value_type = Object)]
+    pub manifest: Json,
+    #[schema(value_type = Object)]
+    #[serde(default = "empty_json_object")]
+    pub configuration: Json,
+    pub base_url_override: Option<String>,
+    #[serde(default)]
+    pub allow_insecure_http: bool,
+    #[serde(default)]
+    pub allow_private_network: bool,
+}
+
+fn empty_json_object() -> Json {
+    Json::Object(Default::default())
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize, ToSchema,
 )]
@@ -37,6 +56,7 @@ pub struct Model {
     pub whitelist_models: Vec<String>,
     pub default_model: String,
     pub default_image_gen_model: Option<String>,
+    pub plugin_config: Option<Json>,
     pub api_key_validated_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

@@ -32,7 +32,6 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
-
 #[utoipa::path(
     get,
     path = "/chat",
@@ -87,7 +86,9 @@ pub async fn get_chats(
             let mut row_map: std::collections::HashMap<_, _> =
                 rows.into_iter().map(|r| (r.id, r)).collect();
             for conversation_id in &lex_page.conversation_ids {
-                let Some(c) = row_map.remove(conversation_id) else { continue };
+                let Some(c) = row_map.remove(conversation_id) else {
+                    continue;
+                };
                 response.push(ConversationResponse {
                     id: c.id,
                     title: c.title,
@@ -107,13 +108,16 @@ pub async fn get_chats(
                     search_snippet: lex_page.snippets.get(conversation_id).cloned(),
                 });
             }
-            return Ok((StatusCode::OK, Json(PaginatedConversations {
-                total: lex_page.total,
-                limit,
-                offset,
-                conversations: response,
-                semantic_results: None,
-            })));
+            return Ok((
+                StatusCode::OK,
+                Json(PaginatedConversations {
+                    total: lex_page.total,
+                    limit,
+                    offset,
+                    conversations: response,
+                    semantic_results: None,
+                }),
+            ));
         }
 
         // Lexical found nothing — fall back to semantic if available.
@@ -138,7 +142,9 @@ pub async fn get_chats(
                 let mut row_map: std::collections::HashMap<_, _> =
                     rows.into_iter().map(|r| (r.id, r)).collect();
                 for conversation_id in &sem_page.conversation_ids {
-                    let Some(c) = row_map.remove(conversation_id) else { continue };
+                    let Some(c) = row_map.remove(conversation_id) else {
+                        continue;
+                    };
                     let snippet = sem_page.snippets.get(conversation_id);
                     response.push(ConversationResponse {
                         id: c.id,
@@ -160,28 +166,44 @@ pub async fn get_chats(
                     });
                 }
                 let semantic_results = Some(
-                    sem_page.snippets
+                    sem_page
+                        .snippets
                         .into_iter()
-                        .map(|(id, s)| (id, SemanticResult { message_id: s.message_id, snippet: s.snippet, distance: s.distance }))
+                        .map(|(id, s)| {
+                            (
+                                id,
+                                SemanticResult {
+                                    message_id: s.message_id,
+                                    snippet: s.snippet,
+                                    distance: s.distance,
+                                },
+                            )
+                        })
                         .collect(),
                 );
-                return Ok((StatusCode::OK, Json(PaginatedConversations {
-                    total: sem_page.total,
-                    limit,
-                    offset,
-                    conversations: response,
-                    semantic_results,
-                })));
+                return Ok((
+                    StatusCode::OK,
+                    Json(PaginatedConversations {
+                        total: sem_page.total,
+                        limit,
+                        offset,
+                        conversations: response,
+                        semantic_results,
+                    }),
+                ));
             }
         }
 
-        return Ok((StatusCode::OK, Json(PaginatedConversations {
-            total: 0,
-            limit,
-            offset,
-            conversations: vec![],
-            semantic_results: None,
-        })));
+        return Ok((
+            StatusCode::OK,
+            Json(PaginatedConversations {
+                total: 0,
+                limit,
+                offset,
+                conversations: vec![],
+                semantic_results: None,
+            }),
+        ));
     }
 
     let mut count_query =

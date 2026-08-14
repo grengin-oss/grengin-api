@@ -20,7 +20,11 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default("pending"),
                     )
-                    .add_column(ColumnDef::new(ProjectSources::ProcessingError).text().null())
+                    .add_column(
+                        ColumnDef::new(ProjectSources::ProcessingError)
+                            .text()
+                            .null(),
+                    )
                     .to_owned(),
             )
             .await

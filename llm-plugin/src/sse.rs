@@ -6,8 +6,9 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use crate::{
-    ChatResponseSpec, EventDataEncoding, EventKind, FinishReason, ProviderError, ProviderEvent,
-    ProviderEventErrorKind, RequestId, ResponseRule, ServerToolResultItem, TokenUsage, ToolCallId,
+    ChatResponseSpec, EventDataEncoding, EventKind, FinishReason, JsonValueType, ProviderError,
+    ProviderEvent, ProviderEventErrorKind, RequestId, ResponseRule, ServerToolResultItem,
+    TokenUsage, ToolCallId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,22 +312,21 @@ impl MapperState {
                 let Resolved::Found((id, name)) = self.resolve_server_tool(rule, value)? else {
                     return Ok(Vec::new());
                 };
-                let pointer = rule.collect.as_deref().ok_or_else(|| {
-                    ProviderError::ResponseMapping(format!(
-                        "response rule {} requires collect to gather results",
-                        rule.id
-                    ))
-                })?;
                 vec![ProviderEvent::ServerToolResult {
                     id,
                     name,
-                    results: collect_results(rule, value, pointer)?,
+                    results: match rule.collect.as_deref() {
+                        Some(pointer) => collect_results(rule, value, pointer)?,
+                        None => map_result_item(rule, value).into_iter().collect(),
+                    },
                 }]
             }
             EventKind::Usage => vec![ProviderEvent::Usage {
                 usage: normalize_token_usage(
                     TokenUsage {
                         input_tokens: optional_u32(rule, value, "inputTokens")?,
+                        text_input_tokens: optional_u32(rule, value, "textInputTokens")?,
+                        image_input_tokens: optional_u32(rule, value, "imageInputTokens")?,
                         output_tokens: optional_u32(rule, value, "outputTokens")?,
                         total_tokens: optional_u32(rule, value, "totalTokens")?,
                         cached_input_tokens: optional_u32(rule, value, "cachedInputTokens")?,
@@ -470,7 +470,24 @@ fn rule_matches(rule: &ResponseRule, value: &Value) -> bool {
     {
         return false;
     }
+    if let Some(value_type) = condition.value_type
+        && !selected.is_some_and(|selected| json_type_matches(selected, value_type))
+    {
+        return false;
+    }
     true
+}
+
+fn json_type_matches(value: &Value, expected: JsonValueType) -> bool {
+    matches!(
+        (value, expected),
+        (Value::Null, JsonValueType::Null)
+            | (Value::Bool(_), JsonValueType::Boolean)
+            | (Value::Number(_), JsonValueType::Number)
+            | (Value::String(_), JsonValueType::String)
+            | (Value::Array(_), JsonValueType::Array)
+            | (Value::Object(_), JsonValueType::Object)
+    )
 }
 
 fn required_rule_string(
@@ -506,6 +523,17 @@ fn optional_string(
             .as_str()
             .map(|value| Some(value.to_string()))
             .ok_or_else(|| missing_field(rule, field));
+    }
+    if let Some(pointer) = rule.json_fields.get(field) {
+        return value
+            .pointer(pointer)
+            .filter(|selected| !selected.is_null())
+            .map(|selected| {
+                serde_json::to_string(selected)
+                    .map(Some)
+                    .map_err(|_| missing_field(rule, field))
+            })
+            .unwrap_or(Ok(None));
     }
     let Some(pointer) = rule.fields.get(field) else {
         return Ok(None);
@@ -569,26 +597,28 @@ fn collect_results(
             rule.id
         ))
     })?;
-    let item_string = |item: &Value, field: &str| {
+    Ok(items
+        .iter()
+        .filter_map(|item| map_result_item(rule, item))
+        .collect())
+}
+
+fn map_result_item(rule: &ResponseRule, item: &Value) -> Option<ServerToolResultItem> {
+    let item_string = |field: &str| {
         rule.item_fields
             .get(field)
             .and_then(|pointer| item.pointer(pointer))
             .and_then(Value::as_str)
             .map(str::to_string)
     };
-    Ok(items
-        .iter()
-        .filter_map(|item| {
-            let url = item_string(item, "url")?;
-            Some(ServerToolResultItem {
-                title: item_string(item, "title").unwrap_or_else(|| url.clone()),
-                url,
-                source: item_string(item, "source"),
-                page_age: item_string(item, "pageAge"),
-                snippet: item_string(item, "snippet"),
-            })
-        })
-        .collect())
+    let url = item_string("url")?;
+    Some(ServerToolResultItem {
+        title: item_string("title").unwrap_or_else(|| url.clone()),
+        url,
+        source: item_string("source"),
+        page_age: item_string("pageAge"),
+        snippet: item_string("snippet"),
+    })
 }
 
 fn optional_u32(
@@ -769,10 +799,12 @@ mod tests {
                         equals: Some(json!("delta")),
                         exists: None,
                         not_null: None,
+                        value_type: None,
                     }),
                     emit: EventKind::TextDelta,
                     value: Some("/text".to_string()),
                     fields: BTreeMap::new(),
+                    json_fields: BTreeMap::new(),
                     input_tokens_include_cached: true,
                     input_tokens_include_cache_creation: true,
                     constants: BTreeMap::new(),
@@ -787,6 +819,7 @@ mod tests {
                         equals: Some(json!("usage")),
                         exists: None,
                         not_null: None,
+                        value_type: None,
                     }),
                     emit: EventKind::Usage,
                     value: None,
@@ -794,6 +827,7 @@ mod tests {
                         ("inputTokens".to_string(), "/input".to_string()),
                         ("outputTokens".to_string(), "/output".to_string()),
                     ]),
+                    json_fields: BTreeMap::new(),
                     input_tokens_include_cached: true,
                     input_tokens_include_cache_creation: true,
                     constants: BTreeMap::new(),
@@ -1368,6 +1402,75 @@ mod tests {
                 ProviderEvent::ToolCallEnd { .. },
                 ProviderEvent::Completed { .. }
             ]
+        ));
+    }
+
+    #[test]
+    fn maps_tool_arguments_by_id_when_provider_omits_index() {
+        let response: ChatResponseSpec = serde_json::from_value(json!({
+            "bodyEncoding": "sse",
+            "eventDataEncoding": "json",
+            "doneData": "[DONE]",
+            "rules": [
+                {
+                    "id": "tool_start",
+                    "forEach": "/choices/0/delta/tool_calls",
+                    "when": {"pointer": "/id", "exists": true},
+                    "emit": "toolCallStart",
+                    "fields": {"id": "/id", "name": "/function/name", "index": "/index"}
+                },
+                {
+                    "id": "tool_args",
+                    "forEach": "/choices/0/delta/tool_calls",
+                    "when": {"pointer": "/function/arguments", "exists": true},
+                    "emit": "toolArgumentsDelta",
+                    "fields": {"id": "/id", "index": "/index"},
+                    "jsonFields": {"fragment": "/function/arguments"}
+                }
+            ]
+        }))
+        .unwrap();
+        let mut mapper = SseEventMapper::new(response);
+        let events = mapper
+            .map(&event(
+                r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"db_status","arguments":{}}}]}}]}"#,
+            ))
+            .unwrap();
+
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ProviderEvent::ToolCallStart { id, name, index: 0 },
+                ProviderEvent::ToolArgumentsDelta { id: argument_id, fragment }
+            ] if id.as_str() == "call_1"
+                && argument_id.as_str() == "call_1"
+                && name == "db_status"
+                && fragment == "{}"
+        ));
+    }
+
+    #[test]
+    fn conditions_can_match_json_value_type() {
+        let response: ChatResponseSpec = serde_json::from_value(json!({
+            "rules": [{
+                "id": "text",
+                "when": {"pointer": "/content", "valueType": "string"},
+                "emit": "textDelta",
+                "value": "/content"
+            }]
+        }))
+        .unwrap();
+        let mut mapper = SseEventMapper::new(response);
+
+        assert!(
+            mapper
+                .map(&event(r#"{"content":{"type":"citation"}}"#))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            mapper.map(&event(r#"{"content":"hello"}"#)).unwrap().as_slice(),
+            [ProviderEvent::TextDelta { text }] if text == "hello"
         ));
     }
 }

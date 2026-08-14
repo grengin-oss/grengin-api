@@ -34,7 +34,6 @@ use crate::{
         McpUserConnection, McpUserConnections, PaginatedMcpServers, PaginatedMcpToolExecutions,
     },
     error::AppError,
-    llm::tooling::sanitize_tool_name,
     models::{
         mcp_access_policies,
         mcp_access_policies::McpAccessTarget,
@@ -56,9 +55,9 @@ use crate::{
     services::mcp_service::{
         build_oauth_callback_response, map_mcp_access_error, resolve_server_connected,
     },
+    services::mcp_tools::sanitize_tool_name,
     state::SharedState,
 };
-
 
 #[utoipa::path(
     get,
@@ -1439,7 +1438,6 @@ pub async fn mcp_oauth_callback(
     ))
 }
 
-
 #[utoipa::path(
     post,
     path = "/mcp/connections/{server_id}/disconnect",
@@ -1581,5 +1579,3 @@ pub async fn get_mcp_effective_access(
         servers: servers_out,
     }))
 }
-
-

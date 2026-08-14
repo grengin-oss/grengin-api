@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 const OPENAI_COMPATIBLE: &[u8] = include_bytes!("../examples/openai-compatible.provider.json");
 const ANTHROPIC: &[u8] = include_bytes!("../examples/anthropic.provider.json");
 
-/// A tool name in the shape `crate::llm::tooling::mcp_openai_tool_name` produces, so the probe
+/// A tool name in the shape `services::mcp_tools::mcp_tool_name` produces, so the probe
 /// exercises the real prefixing and length rules rather than a friendly name.
 const MCP_TOOL: &str = "mcp__ab12cd34__get_weather__9f3c1d02";
 
@@ -89,10 +89,7 @@ fn weather_tool() -> ToolDefinition {
 }
 
 /// Collects a whole stream, panicking with the error class on failure.
-async fn drain(
-    stream: &mut llm_plugin::ProviderEventStream,
-    label: &str,
-) -> Vec<ProviderEvent> {
+async fn drain(stream: &mut llm_plugin::ProviderEventStream, label: &str) -> Vec<ProviderEvent> {
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
         events.push(event.unwrap_or_else(|error| panic!("{label} stream failed: {error}")));

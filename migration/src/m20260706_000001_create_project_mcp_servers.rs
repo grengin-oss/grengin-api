@@ -20,8 +20,16 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(ProjectMcpServers::ProjectId).uuid().not_null())
-                    .col(ColumnDef::new(ProjectMcpServers::ServerId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(ProjectMcpServers::ProjectId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ProjectMcpServers::ServerId)
+                            .uuid()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(ProjectMcpServers::CreatedAt)
                             .timestamp_with_time_zone()

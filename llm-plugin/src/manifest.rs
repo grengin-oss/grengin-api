@@ -106,6 +106,8 @@ pub struct ProviderOperations {
     #[serde(default)]
     pub image_generation: Option<ImageOperation>,
     #[serde(default)]
+    pub image_edit: Option<ImageOperation>,
+    #[serde(default)]
     pub list_models: Option<ModelListOperation>,
 }
 
@@ -267,6 +269,9 @@ pub struct ResponseRule {
     pub value: Option<String>,
     #[serde(default)]
     pub fields: BTreeMap<String, String>,
+    /// Field pointers whose selected JSON values are serialized before emission.
+    #[serde(default)]
+    pub json_fields: BTreeMap<String, String>,
     /// Whether the provider's input token counter already contains cache-read tokens.
     #[serde(default = "default_true")]
     pub input_tokens_include_cached: bool,
@@ -294,6 +299,19 @@ pub struct MatchCondition {
     pub exists: Option<bool>,
     #[serde(default)]
     pub not_null: Option<bool>,
+    #[serde(default)]
+    pub value_type: Option<JsonValueType>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JsonValueType {
+    Null,
+    Boolean,
+    Number,
+    String,
+    Array,
+    Object,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -413,6 +431,10 @@ pub struct UsageMapping {
     #[serde(default)]
     pub input_tokens: Option<String>,
     #[serde(default)]
+    pub text_input_tokens: Option<String>,
+    #[serde(default)]
+    pub image_input_tokens: Option<String>,
+    #[serde(default)]
     pub output_tokens: Option<String>,
     #[serde(default)]
     pub total_tokens: Option<String>,
@@ -436,6 +458,8 @@ impl Default for UsageMapping {
     fn default() -> Self {
         Self {
             input_tokens: None,
+            text_input_tokens: None,
+            image_input_tokens: None,
             output_tokens: None,
             total_tokens: None,
             cached_input_tokens: None,
@@ -522,7 +546,7 @@ impl ProviderManifestV1 {
         validate_capability(
             "imageGeneration",
             self.capabilities.image_generation,
-            self.operations.image_generation.is_some(),
+            self.operations.image_generation.is_some() || self.operations.image_edit.is_some(),
         )?;
         // A static `models` list satisfies model listing just as well as a live endpoint does.
         validate_capability(
@@ -581,47 +605,14 @@ impl ProviderManifestV1 {
             validate_usage_mapping(embedding.response.usage.as_ref())?;
         }
 
-        if let Some(image) = &self.operations.image_generation {
-            match image.response.body_encoding {
-                ImageBodyEncoding::Json => {
-                    let images_pointer =
-                        image.response.images_pointer.as_deref().ok_or_else(|| {
-                            ProviderError::InvalidManifest(
-                                "JSON image responses require imagesPointer".to_string(),
-                            )
-                        })?;
-                    validate_pointer(images_pointer)?;
-                    if image.response.base64_pointer.is_none()
-                        && image.response.url_pointer.is_none()
-                    {
-                        return Err(ProviderError::InvalidManifest(
-                            "JSON image responses require base64Pointer or urlPointer".to_string(),
-                        ));
-                    }
-                    for pointer in [
-                        image.response.base64_pointer.as_deref(),
-                        image.response.url_pointer.as_deref(),
-                        image.response.media_type_pointer.as_deref(),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    {
-                        validate_pointer(pointer)?;
-                    }
-                }
-                ImageBodyEncoding::Binary => {
-                    if image.response.images_pointer.is_some()
-                        || image.response.base64_pointer.is_some()
-                        || image.response.url_pointer.is_some()
-                        || image.response.media_type_pointer.is_some()
-                    {
-                        return Err(ProviderError::InvalidManifest(
-                            "binary image responses must not declare JSON pointers".to_string(),
-                        ));
-                    }
-                }
-            }
-            validate_usage_mapping(image.response.usage.as_ref())?;
+        for image in [
+            self.operations.image_generation.as_ref(),
+            self.operations.image_edit.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            validate_image_operation(image)?;
         }
 
         if let Some(models) = &self.operations.list_models {
@@ -673,11 +664,54 @@ impl ProviderManifestV1 {
         if let Some(operation) = &self.operations.image_generation {
             requests.push(&operation.request);
         }
+        if let Some(operation) = &self.operations.image_edit {
+            requests.push(&operation.request);
+        }
         if let Some(operation) = &self.operations.list_models {
             requests.push(&operation.request);
         }
         requests
     }
+}
+
+fn validate_image_operation(image: &ImageOperation) -> Result<(), ProviderError> {
+    match image.response.body_encoding {
+        ImageBodyEncoding::Json => {
+            let images_pointer = image.response.images_pointer.as_deref().ok_or_else(|| {
+                ProviderError::InvalidManifest(
+                    "JSON image responses require imagesPointer".to_string(),
+                )
+            })?;
+            validate_pointer(images_pointer)?;
+            if image.response.base64_pointer.is_none() && image.response.url_pointer.is_none() {
+                return Err(ProviderError::InvalidManifest(
+                    "JSON image responses require base64Pointer or urlPointer".to_string(),
+                ));
+            }
+            for pointer in [
+                image.response.base64_pointer.as_deref(),
+                image.response.url_pointer.as_deref(),
+                image.response.media_type_pointer.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                validate_pointer(pointer)?;
+            }
+        }
+        ImageBodyEncoding::Binary => {
+            if image.response.images_pointer.is_some()
+                || image.response.base64_pointer.is_some()
+                || image.response.url_pointer.is_some()
+                || image.response.media_type_pointer.is_some()
+            {
+                return Err(ProviderError::InvalidManifest(
+                    "binary image responses must not declare JSON pointers".to_string(),
+                ));
+            }
+        }
+    }
+    validate_usage_mapping(image.response.usage.as_ref())
 }
 
 fn validate_request(
@@ -780,19 +814,13 @@ fn validate_rule(rule: &ResponseRule) -> Result<(), ProviderError> {
         }
     }
     if !rule.item_fields.is_empty() {
-        if rule.collect.is_none() {
-            return Err(ProviderError::InvalidManifest(format!(
-                "response rule {} declares itemFields without collect",
-                rule.id
-            )));
-        }
         for pointer in rule.item_fields.values() {
             validate_pointer(pointer)?;
         }
     }
-    if rule.emit == EventKind::ServerToolResult && rule.collect.is_none() {
+    if rule.emit == EventKind::ServerToolResult && rule.item_fields.is_empty() {
         return Err(ProviderError::InvalidManifest(format!(
-            "response rule {} must declare collect to gather serverToolResult items",
+            "response rule {} must declare itemFields for serverToolResult items",
             rule.id
         )));
     }
@@ -801,6 +829,7 @@ fn validate_rule(rule: &ResponseRule) -> Result<(), ProviderError> {
     if rule.emit == EventKind::ServerToolStart
         && !rule.constants.contains_key("name")
         && !rule.fields.contains_key("name")
+        && !rule.json_fields.contains_key("name")
     {
         return Err(ProviderError::InvalidManifest(format!(
             "response rule {} must supply the server tool name",
@@ -809,10 +838,13 @@ fn validate_rule(rule: &ResponseRule) -> Result<(), ProviderError> {
     }
     if let Some(condition) = &rule.when {
         validate_pointer(&condition.pointer)?;
-        if condition.equals.is_none() && condition.exists.is_none() && condition.not_null.is_none()
+        if condition.equals.is_none()
+            && condition.exists.is_none()
+            && condition.not_null.is_none()
+            && condition.value_type.is_none()
         {
             return Err(ProviderError::InvalidManifest(format!(
-                "response rule {} condition requires equals, exists, or notNull",
+                "response rule {} condition requires equals, exists, notNull, or valueType",
                 rule.id
             )));
         }
@@ -821,6 +853,9 @@ fn validate_rule(rule: &ResponseRule) -> Result<(), ProviderError> {
         validate_pointer(pointer)?;
     }
     for pointer in rule.fields.values() {
+        validate_pointer(pointer)?;
+    }
+    for pointer in rule.json_fields.values() {
         validate_pointer(pointer)?;
     }
     Ok(())
@@ -832,6 +867,8 @@ fn validate_usage_mapping(mapping: Option<&UsageMapping>) -> Result<(), Provider
     };
     for pointer in [
         mapping.input_tokens.as_deref(),
+        mapping.text_input_tokens.as_deref(),
+        mapping.image_input_tokens.as_deref(),
         mapping.output_tokens.as_deref(),
         mapping.total_tokens.as_deref(),
         mapping.cached_input_tokens.as_deref(),

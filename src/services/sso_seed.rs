@@ -12,8 +12,8 @@ use crate::{
     state::SharedState,
 };
 use chrono::Utc;
-use sea_orm::{ActiveModelTrait, EntityTrait, IntoActiveModel};
 use sea_orm::ActiveValue::Set;
+use sea_orm::{ActiveModelTrait, EntityTrait, IntoActiveModel};
 use uuid::Uuid;
 
 pub const EMPTY_VALUE: &str = "<empty>";
@@ -54,7 +54,12 @@ pub fn env_seed_for_template(template: SsoProviderTemplate) -> SsoProviderSeed {
         })
         .unwrap_or(false);
     let proxy_jit = std::env::var("GRENGIN_PROXY_JIT_PROVISIONING")
-        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off"))
+        .map(|v| {
+            !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "false" | "0" | "no" | "off"
+            )
+        })
         .unwrap_or(false);
     let proxy_allowed_domains: Vec<String> = std::env::var("GRENGIN_PROXY_ALLOWED_DOMAINS")
         .unwrap_or_default()
@@ -248,13 +253,14 @@ pub async fn ensure_sso_providers_from_env(
                 active_model.allowed_domains = Set(seed.allowed_domains.clone());
                 active_model.jit_provisioning = Set(seed.jit_provisioning);
                 active_model.updated_at = Set(Utc::now());
-                let updated_model = active_model
-                    .update(&app_state.database)
-                    .await
-                    .map_err(|e| {
-                        eprintln!("DB update sso provider from env error {:?}", e);
-                        AuthError::DbTimeout
-                    })?;
+                let updated_model =
+                    active_model
+                        .update(&app_state.database)
+                        .await
+                        .map_err(|e| {
+                            eprintln!("DB update sso provider from env error {:?}", e);
+                            AuthError::DbTimeout
+                        })?;
                 models[index] = updated_model;
                 load_seed_in_state(app_state, &seed).await;
                 changed = true;

@@ -28,9 +28,7 @@ pub async fn get_artifact_owned(
     };
 
     let file = files::Entity::find_by_id(artifact.file_id).one(db).await?;
-    let content = file.and_then(|f| {
-        std::fs::read_to_string(&f.local_path).ok()
-    });
+    let content = file.and_then(|f| std::fs::read_to_string(&f.local_path).ok());
 
     Ok(Some(ArtifactWithContent { artifact, content }))
 }
@@ -82,7 +80,9 @@ pub async fn delete_artifact_owned(
         files::Entity::delete_by_id(f.id).exec(db).await?;
     }
 
-    artifacts::Entity::delete_by_id(artifact.id).exec(db).await?;
+    artifacts::Entity::delete_by_id(artifact.id)
+        .exec(db)
+        .await?;
 
     Ok(Some(artifact))
 }

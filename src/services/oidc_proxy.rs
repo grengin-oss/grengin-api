@@ -55,7 +55,10 @@ fn select_assertion_jwk<'a>(jwks: &'a JwkSet, kid: Option<&str>) -> Option<&'a J
             return Some(found);
         }
     }
-    jwks.keys.iter().find(|key| key.common.key_id.is_some()).or_else(|| jwks.keys.first())
+    jwks.keys
+        .iter()
+        .find(|key| key.common.key_id.is_some())
+        .or_else(|| jwks.keys.first())
 }
 
 pub async fn verify_proxy_assertion(

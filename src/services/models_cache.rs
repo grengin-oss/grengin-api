@@ -88,10 +88,8 @@ fn build_providers_cache(data: FetchedData) -> ProvidersCache {
 }
 
 async fn fetch_all(req_client: &reqwest::Client) -> Result<FetchedData, Error> {
-    let (providers, title_model_by_engine) = tokio::join!(
-        fetch_providers(req_client),
-        fetch_title_models(req_client),
-    );
+    let (providers, title_model_by_engine) =
+        tokio::join!(fetch_providers(req_client), fetch_title_models(req_client),);
     Ok(FetchedData {
         providers: providers?,
         title_model_by_engine: title_model_by_engine.unwrap_or_default(),
@@ -266,10 +264,19 @@ fn parse_image_model(value: &Value) -> Result<ModelInfo, Error> {
     let engine = get_str(value, "engine")?;
     let pricing = value.get("pricingPer1M");
     let input_token_rate = pricing.and_then(|p| p.get("input")).and_then(Value::as_f64);
-    let output_token_rate = pricing.and_then(|p| p.get("output")).and_then(Value::as_f64);
-    let image_input_token_rate = pricing.and_then(|p| p.get("image_input")).and_then(Value::as_f64);
-    let image_output_token_rate = pricing.and_then(|p| p.get("image_output")).and_then(Value::as_f64);
-    let supports_multiple_images = value.get("supportsMultipleImages").and_then(Value::as_bool).unwrap_or(false);
+    let output_token_rate = pricing
+        .and_then(|p| p.get("output"))
+        .and_then(Value::as_f64);
+    let image_input_token_rate = pricing
+        .and_then(|p| p.get("image_input"))
+        .and_then(Value::as_f64);
+    let image_output_token_rate = pricing
+        .and_then(|p| p.get("image_output"))
+        .and_then(Value::as_f64);
+    let supports_multiple_images = value
+        .get("supportsMultipleImages")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     Ok(ModelInfo {
         key,

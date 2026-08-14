@@ -1,0 +1,208 @@
+{
+  "$schema": "../schema/provider-plugin-v1.schema.json",
+  "manifestVersion": "1.0",
+  "id": "mistral",
+  "version": "1.0.0",
+  "name": "Mistral AI",
+  "description": "Mistral Conversations API chat, functions, and provider-native web search.",
+  "baseUrl": "https://api.mistral.ai/v1/",
+  "credentials": [
+    { "id": "api_key", "type": "secret", "required": true, "label": "API key" }
+  ],
+  "capabilities": {
+    "chat": { "streaming": true, "tools": true, "vision": false, "reasoning": false }
+  },
+  "mappings": {
+    "mistral_input_entries": {
+      "$switch": { "$get": "item.role" },
+      "cases": {
+        "system": { "$literal": [] },
+        "assistant": {
+          "$concat": [
+            {
+              "$array": [
+                {
+                  "object": { "$literal": "entry" },
+                  "type": { "$literal": "message.input" },
+                  "role": { "$literal": "assistant" },
+                  "content": {
+                    "$coalesce": [
+                      { "$get": "/item/content/0/text" },
+                      { "$literal": "" }
+                    ]
+                  }
+                }
+              ]
+            },
+            { "$map": "item.toolCalls", "using": "mistral_function_call" }
+          ]
+        },
+        "tool": {
+          "$array": [
+            {
+              "object": { "$literal": "entry" },
+              "type": { "$literal": "function.result" },
+              "tool_call_id": { "$get": "item.toolResult.callId" },
+              "result": { "$jsonEncode": { "$get": "item.toolResult.output" } }
+            }
+          ]
+        }
+      },
+      "default": {
+        "$array": [
+          {
+            "object": { "$literal": "entry" },
+            "type": { "$literal": "message.input" },
+            "role": { "$get": "item.role" },
+            "content": { "$get": "/item/content/0/text" }
+          }
+        ]
+      }
+    },
+    "mistral_function_call": {
+      "object": { "$literal": "entry" },
+      "type": { "$literal": "function.call" },
+      "name": { "$get": "item.name" },
+      "tool_call_id": { "$get": "item.id" },
+      "arguments": { "$jsonEncode": { "$get": "item.arguments" } }
+    },
+    "mistral_tool": {
+      "type": { "$literal": "function" },
+      "function": {
+        "name": { "$get": "item.name" },
+        "description": { "$omitIfNull": { "$get": "item.description" } },
+        "parameters": { "$get": "item.parameters" }
+      }
+    }
+  },
+  "operations": {
+    "chatStream": {
+      "method": "POST",
+      "path": "conversations",
+      "headers": {
+        "Authorization": { "secret": "api_key", "prefix": "Bearer " }
+      },
+      "bodyEncoding": "json",
+      "body": {
+        "inputs": { "$flatMap": "request.messages", "using": "mistral_input_entries" },
+        "tools": {
+          "$omitIfNull": {
+            "$concat": [
+              {
+                "$if": { "$get": "request.webSearch" },
+                "then": { "$array": [{ "type": { "$literal": "web_search" } }] }
+              },
+              { "$omitIfNull": { "$map": "request.tools", "using": "mistral_tool" } }
+            ]
+          }
+        },
+        "completion_args": {
+          "$omitIfNull": {
+            "$object": {
+              "temperature": { "$omitIfNull": { "$get": "request.temperature" } }
+            }
+          }
+        },
+        "model": { "$get": "request.model" },
+        "instructions": {
+          "$omitIfNull": {
+            "$if": {
+              "$switch": { "$get": "/request/messages/0/role" },
+              "cases": { "system": { "$literal": true } },
+              "default": { "$literal": false }
+            },
+            "then": { "$get": "/request/messages/0/content/0/text" }
+          }
+        },
+        "stream": { "$literal": true }
+      },
+      "response": {
+        "bodyEncoding": "sse",
+        "eventDataEncoding": "json",
+        "rules": [
+          {
+            "id": "message_start",
+            "when": { "pointer": "/type", "equals": "conversation.response.started" },
+            "emit": "messageStart",
+            "fields": { "requestId": "/conversation_id" }
+          },
+          {
+            "id": "text_delta",
+            "when": { "pointer": "/content", "valueType": "string" },
+            "emit": "textDelta",
+            "value": "/content"
+          },
+          {
+            "id": "tool_start",
+            "when": { "pointer": "/type", "equals": "function.call.delta" },
+            "emit": "toolCallStart",
+            "fields": {
+              "id": "/tool_call_id",
+              "name": "/name",
+              "index": "/output_index"
+            }
+          },
+          {
+            "id": "tool_arguments",
+            "when": { "pointer": "/type", "equals": "function.call.delta" },
+            "emit": "toolArgumentsDelta",
+            "fields": { "id": "/tool_call_id", "fragment": "/arguments" }
+          },
+          {
+            "id": "search_start",
+            "when": { "pointer": "/type", "equals": "tool.execution.started" },
+            "emit": "serverToolStart",
+            "fields": { "id": "/id", "index": "/output_index" },
+            "constants": { "name": "web_search" }
+          },
+          {
+            "id": "search_query_start",
+            "when": { "pointer": "/type", "equals": "tool.execution.started" },
+            "emit": "serverToolQueryDelta",
+            "fields": { "index": "/output_index", "fragment": "/arguments" }
+          },
+          {
+            "id": "search_query_delta",
+            "when": { "pointer": "/type", "equals": "tool.execution.delta" },
+            "emit": "serverToolQueryDelta",
+            "fields": { "index": "/output_index", "fragment": "/arguments" }
+          },
+          {
+            "id": "search_result",
+            "when": { "pointer": "/content/type", "equals": "tool_reference" },
+            "emit": "serverToolResult",
+            "constants": { "name": "web_search" },
+            "itemFields": {
+              "title": "/content/title",
+              "url": "/content/url",
+              "source": "/content/tool",
+              "snippet": "/content/description"
+            }
+          },
+          {
+            "id": "usage",
+            "when": { "pointer": "/type", "equals": "conversation.response.done" },
+            "emit": "usage",
+            "fields": {
+              "inputTokens": "/usage/prompt_tokens",
+              "outputTokens": "/usage/completion_tokens",
+              "totalTokens": "/usage/total_tokens"
+            }
+          },
+          {
+            "id": "error",
+            "when": { "pointer": "/type", "equals": "conversation.response.error" },
+            "emit": "error",
+            "fields": { "message": "/message", "kind": "/code" }
+          },
+          {
+            "id": "completed",
+            "when": { "pointer": "/type", "equals": "conversation.response.done" },
+            "emit": "completed"
+          }
+        ]
+      },
+      "continuation": { "mode": "replay_messages", "maxToolRounds": 3 }
+    }
+  }
+}

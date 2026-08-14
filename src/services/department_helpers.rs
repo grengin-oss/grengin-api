@@ -23,8 +23,9 @@ use chrono::Utc;
 use migration::{Alias, BinOper, Func};
 use rust_decimal::Decimal;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
-    QuerySelect,
+    ActiveModelTrait,
+    ActiveValue::Set,
+    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect,
     sea_query::Expr,
     sqlx::postgres::types::{PgLTree, PgLTreeLabel},
 };

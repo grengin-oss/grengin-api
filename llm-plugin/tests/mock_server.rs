@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 
 const OPENAI_COMPATIBLE: &[u8] = include_bytes!("../examples/openai-compatible.provider.json");
 const ANTHROPIC: &[u8] = include_bytes!("../examples/anthropic.provider.json");
+const GEMINI_IMAGE: &[u8] = include_bytes!("../examples/gemini-image.provider.json");
 const MCP_TOOL: &str = "mcp__ab12cd34__get_weather__9f3c1d02";
 
 struct MockServer {
@@ -626,6 +627,9 @@ async fn openai_compatible_manifest_handles_buffered_operations() {
     assert_eq!(images.images.len(), 2);
     assert_eq!(images.images[0].bytes, b"mock-png");
     assert_eq!(images.images[0].media_type, "image/png");
+    let usage = images.usage.unwrap();
+    assert_eq!(usage.input_tokens, Some(9));
+    assert_eq!(usage.output_tokens, Some(21));
 
     let models = provider.models().unwrap().list_models().await.unwrap();
     assert_eq!(
@@ -641,6 +645,51 @@ async fn openai_compatible_manifest_handles_buffered_operations() {
         ]
     );
     assert_eq!(models[0].metadata["display_name"], "Mock Model");
+}
+
+#[tokio::test]
+async fn gemini_image_manifest_maps_request_response_and_usage() {
+    let server = mock_server!();
+    let provider = server.provider(GEMINI_IMAGE, |_| {});
+    let images = provider
+        .images()
+        .unwrap()
+        .generate(ImageRequest {
+            model: ModelId::new("mock-gemini-image"),
+            prompt: "turn this into a diagram".to_string(),
+            input_images: vec![llm_plugin::InputImage {
+                data: "aW5wdXQtaW1hZ2U=".to_string(),
+                media_type: "image/png".to_string(),
+                filename: Some("input.png".to_string()),
+            }],
+            count: 1,
+            size: None,
+            quality: None,
+            options: Value::Null,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(images.images[0].bytes, b"mock-gemini-png");
+    assert_eq!(images.images[0].media_type, "image/png");
+    let usage = images.usage.unwrap();
+    assert_eq!(usage.input_tokens, Some(12));
+    assert_eq!(usage.output_tokens, Some(34));
+    assert_eq!(usage.total_tokens, Some(46));
+
+    let sent = &server.requests().await[0];
+    assert_eq!(sent["headers"]["x-goog-api-key"], "mock-key");
+    assert_eq!(
+        sent["body"]["contents"][0]["parts"],
+        json!([
+            {"inlineData": {"mimeType": "image/png", "data": "aW5wdXQtaW1hZ2U="}},
+            {"text": "turn this into a diagram"}
+        ])
+    );
+    assert_eq!(
+        sent["body"]["generationConfig"]["responseModalities"],
+        json!(["TEXT", "IMAGE"])
+    );
 }
 
 /// Points the embeddings operation at one of the mock's failure routes.

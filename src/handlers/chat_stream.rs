@@ -4,6 +4,7 @@
 use crate::{
     auth::{claims::Claims, error::Error},
     dto::models::ModelType,
+    dto::prompt::Prompt,
     dto::skills::SkillToolsConfig,
     dto::{
         chat_stream::{
@@ -14,12 +15,6 @@ use crate::{
         files::File,
     },
     error::{AppError, ChatStreamError, ErrorResponse},
-    handlers::llm::{
-        StreamParseResult, StreamParser, StreamWebSearchAction as ParsedWebSearchAction,
-        StreamWebSearchState, ToolCall, ToolInput, parse_web_search_action,
-        update_web_search_action_state, update_web_search_results_state,
-    },
-    llm::prompt::Prompt,
     models::{
         conversation_projects, conversations,
         departments::ActionOnExceed,
@@ -28,6 +23,11 @@ use crate::{
         mcp_servers::McpTransportType,
         messages::{self, ChatRole},
         projects, users,
+    },
+    services::provider_stream::{
+        StreamParseResult, StreamParser, StreamWebSearchAction as ParsedWebSearchAction,
+        StreamWebSearchState, ToolCall, ToolInput, parse_web_search_action,
+        update_web_search_action_state, update_web_search_results_state,
     },
     services::{
         artifacts::{
@@ -40,13 +40,13 @@ use crate::{
             McpOauthErrorPayload, McpOauthPrompt, McpOauthRequiredEvent, build_mcp_oauth_prompt,
             build_mcp_server_context, resolve_mcp_oauth_token, resolve_mcp_tool_descriptor,
         },
-        mcp_tools::load_openai_mcp_tools as load_mcp_tools,
-        native_provider::{ResolveProviderError, resolve_provider},
+        mcp_tools::load_mcp_tools,
         notifications::emit_budget_alerts,
         provider_chat::{
             LlmStreamError, LlmStreamEvent, PluginStreamParser, build_plugin_chat_request,
             generate_provider_title, plugin_event_stream, provider_error_class,
         },
+        provider_resolver::{ResolveProviderError, resolve_provider},
         rag::{
             EmbeddingTarget, assemble_prompts_with_budget, build_project_retrieval_prompt,
             build_retrieval_prompt, embed_messages, load_recent_prompts, load_summary,
@@ -82,6 +82,21 @@ use serde_json::{Value, json};
 use std::{collections::HashMap, convert::Infallible};
 use tokio::time::Instant;
 use uuid::Uuid;
+
+fn hydrate_prompt_files(prompts: &mut [Prompt], user_id: Uuid) -> Result<(), AppError> {
+    for file in prompts.iter_mut().flat_map(|prompt| &mut prompt.files) {
+        if file.base64.is_some() {
+            continue;
+        }
+        let attachment = crate::handlers::file::get_file_binary(file, &user_id)
+            .map_err(|_| AppError::ResourceNotFound)?;
+        file.base64 = attachment.get_base64();
+        if file.base64.is_none() {
+            return Err(AppError::ResourceNotFound);
+        }
+    }
+    Ok(())
+}
 
 #[utoipa::path(
     post,
@@ -454,7 +469,7 @@ pub async fn handle_chat_stream(
     let transient_skill_ids = req.selected_skills.clone().unwrap_or_default();
     let web_search = req.web_search;
     let provider_key = provider.to_lowercase();
-    let provider_config = resolve_provider(&app_state, &provider_key, claims.user_id)
+    let provider_config = resolve_provider(&app_state, &provider_key)
         .await
         .map_err(|error| match error {
             ResolveProviderError::NotConfigured => AppError::LlmProviderNotConfigured {
@@ -1054,7 +1069,7 @@ pub async fn handle_chat_stream(
         .chat
         .as_ref()
         .is_some_and(|chat| chat.tools);
-    let (_, mcp_tool_lookup, mcp_server_summaries) = if supports_mcp_tools {
+    let (mcp_tool_lookup, mcp_server_summaries) = if supports_mcp_tools {
         load_mcp_tools(
             &app_state,
             claims.user_id,
@@ -1063,7 +1078,7 @@ pub async fn handle_chat_stream(
         )
         .await?
     } else {
-        (Vec::new(), HashMap::new(), Vec::new())
+        (HashMap::new(), Vec::new())
     };
     if supports_mcp_tools
         && let Some(context) = build_mcp_server_context(&mcp_server_summaries, &mcp_tool_lookup)
@@ -1080,6 +1095,9 @@ pub async fn handle_chat_stream(
                 files: Vec::new(),
             },
         );
+    }
+    if !is_image_gen {
+        hydrate_prompt_files(&mut previous_prompts, claims.user_id)?;
     }
     let provider_request = if !is_image_gen {
         let mut provider_request = build_plugin_chat_request(
@@ -1177,7 +1195,7 @@ pub async fn handle_chat_stream(
             let img_message_id = Uuid::new_v4();
             let now = Utc::now();
             let count = if supports_multiple_images { req.image_count.unwrap_or(1).max(1) } else { 1 };
-            match generate_and_save(&app_state, claims.user_id, &provider, &model_name, &image_prompt, &input_image_file_ids, count).await {
+            match generate_and_save(&app_state, claims.user_id, provider_config.as_ref(), &provider, &model_name, &image_prompt, &input_image_file_ids, count).await {
                 Ok(generated) => {
                     let files_meta: Vec<serde_json::Value> = generated.iter().map(|(file_id, content_type, _, _, _)| {
                         let ext = if content_type == "image/png" { "png" } else { "webp" };

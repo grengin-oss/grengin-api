@@ -5,7 +5,7 @@ use crate::{
     dto::chat_stream::{
         ChatStreamToolInput, ChatStreamWebSearchResult, ChatStreamWebSearchResultItem,
     },
-    handlers::llm::{StreamWebSearchState, ToolInput},
+    services::provider_stream::{StreamWebSearchState, ToolInput},
 };
 use rust_decimal::prelude::{Decimal, FromPrimitive};
 use serde::Deserialize;

@@ -463,6 +463,22 @@
         }
       ]
     },
+    "FlatMapExpression": {
+      "type": "object",
+      "properties": {
+        "$flatMap": {
+          "type": "string"
+        },
+        "using": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$flatMap",
+        "using"
+      ]
+    },
     "GetExpression": {
       "type": "object",
       "properties": {
@@ -670,6 +686,17 @@
         "$jsonEncode"
       ]
     },
+    "JsonValueType": {
+      "type": "string",
+      "enum": [
+        "null",
+        "boolean",
+        "number",
+        "string",
+        "array",
+        "object"
+      ]
+    },
     "LiteralExpression": {
       "type": "object",
       "properties": {
@@ -815,6 +842,9 @@
           "$ref": "#/$defs/MapExpression"
         },
         {
+          "$ref": "#/$defs/FlatMapExpression"
+        },
+        {
           "$ref": "#/$defs/IfExpression"
         },
         {
@@ -825,6 +855,9 @@
         },
         {
           "$ref": "#/$defs/ConcatExpression"
+        },
+        {
+          "$ref": "#/$defs/StringConcatExpression"
         },
         {
           "$ref": "#/$defs/CoalesceExpression"
@@ -878,6 +911,17 @@
         },
         "pointer": {
           "type": "string"
+        },
+        "valueType": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValueType"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "additionalProperties": false,
@@ -1046,6 +1090,17 @@
           ],
           "default": null
         },
+        "imageEdit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImageOperation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "imageGeneration": {
           "anyOf": [
             {
@@ -1126,6 +1181,14 @@
           },
           "default": {}
         },
+        "jsonFields": {
+          "description": "Field pointers whose selected JSON values are serialized before emission.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
         "value": {
           "type": [
             "string",
@@ -1169,6 +1232,21 @@
       "additionalProperties": false,
       "required": [
         "secret"
+      ]
+    },
+    "StringConcatExpression": {
+      "type": "object",
+      "properties": {
+        "$stringConcat": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$stringConcat"
       ]
     },
     "StructuredBodyEncoding": {
@@ -1225,6 +1303,13 @@
           ],
           "default": null
         },
+        "imageInputTokens": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "inputTokens": {
           "type": [
             "string",
@@ -1243,6 +1328,13 @@
           "default": true
         },
         "outputTokens": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "textInputTokens": {
           "type": [
             "string",
             "null"

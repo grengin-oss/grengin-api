@@ -65,7 +65,7 @@ mod m20260717_000001_create_skill_knowledge;
 mod m20260721_000001_rename_skill_system_role_to_instructions;
 mod m20260721_000002_add_image_gen_model_to_ai_engines;
 mod m20260724_000001_add_fts_indexes;
-mod m20260810_000001_create_provider_plugins;
+mod m20260810_000001_add_plugin_config_to_ai_engines;
 
 pub struct Migrator;
 
@@ -135,7 +135,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260721_000001_rename_skill_system_role_to_instructions::Migration),
             Box::new(m20260721_000002_add_image_gen_model_to_ai_engines::Migration),
             Box::new(m20260724_000001_add_fts_indexes::Migration),
-            Box::new(m20260810_000001_create_provider_plugins::Migration),
+            Box::new(m20260810_000001_add_plugin_config_to_ai_engines::Migration),
         ]
     }
 }

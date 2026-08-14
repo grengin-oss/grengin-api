@@ -6,10 +6,8 @@ use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, QueryOrder};
 use uuid::Uuid;
 
 use crate::{
-    auth::error::AuthError,
-    dto::admin_embedding::EmbeddingConfigResponse,
-    models::embedding_configs,
-    state::SharedState,
+    auth::error::AuthError, dto::admin_embedding::EmbeddingConfigResponse,
+    models::embedding_configs, state::SharedState,
 };
 
 const DEFAULT_PROVIDER: &str = "openai";

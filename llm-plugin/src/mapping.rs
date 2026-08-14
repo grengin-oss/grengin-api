@@ -32,10 +32,12 @@ pub enum MappingExpression {
     JsonEncode(JsonEncodeExpression),
     Base64(Base64Expression),
     Map(MapExpression),
+    FlatMap(FlatMapExpression),
     If(IfExpression),
     Switch(SwitchExpression),
     Merge(MergeExpression),
     Concat(ConcatExpression),
+    StringConcat(StringConcatExpression),
     Coalesce(CoalesceExpression),
     Object(ObjectExpression),
     Array(ArrayExpression),
@@ -88,6 +90,14 @@ pub struct MapExpression {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct FlatMapExpression {
+    #[serde(rename = "$flatMap")]
+    pub path: String,
+    pub using: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct IfExpression {
     #[serde(rename = "$if")]
     pub condition: Box<MappingExpression>,
@@ -122,6 +132,13 @@ pub struct MergeExpression {
 #[serde(deny_unknown_fields)]
 pub struct ConcatExpression {
     #[serde(rename = "$concat")]
+    pub values: Vec<MappingExpression>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StringConcatExpression {
+    #[serde(rename = "$stringConcat")]
     pub values: Vec<MappingExpression>,
 }
 
@@ -241,6 +258,25 @@ fn validate_expression<'a>(
             validate_expression(definition, definitions, definition_stack, child_depth)?;
             definition_stack.pop();
         }
+        MappingExpression::FlatMap(map) => {
+            validate_canonical_path(&map.path)?;
+            validate_definition_name(&map.using)?;
+            let definition = definitions.get(&map.using).ok_or_else(|| {
+                ProviderError::InvalidManifest(format!(
+                    "mapping references unknown definition {}",
+                    map.using
+                ))
+            })?;
+            if definition_stack.contains(&map.using.as_str()) {
+                return Err(ProviderError::InvalidManifest(format!(
+                    "mapping definition cycle includes {}",
+                    map.using
+                )));
+            }
+            definition_stack.push(&map.using);
+            validate_expression(definition, definitions, definition_stack, child_depth)?;
+            definition_stack.pop();
+        }
         MappingExpression::If(value) => {
             validate_expression(&value.condition, definitions, definition_stack, child_depth)?;
             validate_expression(&value.then, definitions, definition_stack, child_depth)?;
@@ -263,6 +299,16 @@ fn validate_expression<'a>(
             }
         }
         MappingExpression::Concat(value) => {
+            for child in &value.values {
+                validate_expression(child, definitions, definition_stack, child_depth)?;
+            }
+        }
+        MappingExpression::StringConcat(value) => {
+            if value.values.is_empty() {
+                return Err(ProviderError::InvalidManifest(
+                    "$stringConcat requires at least one entry".to_string(),
+                ));
+            }
             for child in &value.values {
                 validate_expression(child, definitions, definition_stack, child_depth)?;
             }
@@ -491,6 +537,43 @@ fn evaluate(
             }
             Ok(Evaluation::Value(Value::Array(output)))
         }
+        MappingExpression::FlatMap(map) => {
+            let Some(selected) = scope.resolve(&map.path) else {
+                if optional {
+                    return Ok(Evaluation::Omit);
+                }
+                return Err(ProviderError::PayloadMapping(format!(
+                    "$flatMap path does not exist: {}",
+                    map.path
+                )));
+            };
+            let items = selected.as_array().ok_or_else(|| {
+                ProviderError::PayloadMapping(format!(
+                    "$flatMap path is not an array: {}",
+                    map.path
+                ))
+            })?;
+            let definition = scope.definitions.get(&map.using).ok_or_else(|| {
+                ProviderError::PayloadMapping(format!("unknown mapping definition: {}", map.using))
+            })?;
+            let mut output = Vec::new();
+            for item in items {
+                let value = required_value(evaluate(
+                    definition,
+                    scope.with_item(item),
+                    false,
+                    child_depth,
+                )?)?;
+                let values = value.as_array().ok_or_else(|| {
+                    ProviderError::PayloadMapping(format!(
+                        "$flatMap definition {} must produce an array",
+                        map.using
+                    ))
+                })?;
+                output.extend(values.iter().cloned());
+            }
+            Ok(Evaluation::Value(Value::Array(output)))
+        }
         MappingExpression::If(value) => {
             let condition = required_value(evaluate(&value.condition, scope, false, child_depth)?)?;
             let condition = condition.as_bool().ok_or_else(|| {
@@ -565,6 +648,24 @@ fn evaluate(
                 return Ok(Evaluation::Omit);
             }
             Ok(Evaluation::Value(Value::Array(concatenated)))
+        }
+        MappingExpression::StringConcat(value) => {
+            let mut output = String::new();
+            for item in &value.values {
+                let value = required_value(evaluate(item, scope, false, child_depth)?)?;
+                match value {
+                    Value::String(value) => output.push_str(&value),
+                    Value::Bool(value) => output.push_str(if value { "true" } else { "false" }),
+                    Value::Number(value) => output.push_str(&value.to_string()),
+                    _ => {
+                        return Err(ProviderError::PayloadMapping(
+                            "$stringConcat entries must be strings, numbers, or booleans"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+            Ok(Evaluation::Value(Value::String(output)))
         }
         MappingExpression::Coalesce(value) => {
             for item in &value.values {
@@ -880,7 +981,15 @@ mod tests {
                 "based": {"$base64": {"$get": "request.text"}},
                 "chosen": {"$if": {"$get": "request.flag"}, "then": {"$literal": "yes"}, "else": {"$literal": "no"}},
                 "fallback": {"$switch": {"$get": "request.number"}, "cases": {}, "default": {"$literal": "other"}},
-                "merged": {"$merge": [{"$get": "request.payload"}, {"$object": {"b": {"$literal": 2}}}]}
+                "merged": {"$merge": [{"$get": "request.payload"}, {"$object": {"b": {"$literal": 2}}}]},
+                "joined": {"$stringConcat": [
+                    {"$literal": "data:"},
+                    {"$get": "request.text"},
+                    {"$literal": ";count="},
+                    {"$get": "request.number"},
+                    {"$literal": ";enabled="},
+                    {"$get": "request.flag"}
+                ]}
             })),
             &context,
             &BTreeMap::new(),
@@ -891,6 +1000,7 @@ mod tests {
         assert_eq!(payload["chosen"], "yes");
         assert_eq!(payload["fallback"], "other");
         assert_eq!(payload["merged"], json!({"a": 1, "b": 2}));
+        assert_eq!(payload["joined"], "data:hi;count=4;enabled=true");
 
         for invalid in [
             json!({"$base64": {"$get": "request.payload"}}),
@@ -898,6 +1008,7 @@ mod tests {
             json!({"$merge": [{"$get": "request.text"}]}),
             json!({"$switch": {"$get": "request.payload"}, "cases": {}}),
             json!({"$switch": {"$get": "request.text"}, "cases": {}}),
+            json!({"$stringConcat": [{"$get": "request.payload"}]}),
         ] {
             assert!(
                 evaluate_mapping(&expression(invalid.clone()), &context, &BTreeMap::new()).is_err(),

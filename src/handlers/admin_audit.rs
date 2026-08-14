@@ -23,8 +23,8 @@ use crate::{
     models::audit_logs,
     services::{
         audit_logs::{
-            AuditLogFilters, EXPORT_BATCH_LIMIT, export_max_rows, list_audit_logs,
-            parse_end_date, parse_start_date, redact_user_logs, render_csv, to_entry,
+            AuditLogFilters, EXPORT_BATCH_LIMIT, export_max_rows, list_audit_logs, parse_end_date,
+            parse_start_date, redact_user_logs, render_csv, to_entry,
         },
         authorization::{AuthorizationService, PermissionScopeMode},
     },

@@ -12,13 +12,13 @@ use llm_plugin::{
 use serde_json::Value;
 
 use crate::{
-    handlers::llm::{
+    dto::prompt::{Prompt, PromptTextResponse, PromptTitleResponse},
+    models::messages::ChatRole,
+    services::mcp_tools::McpToolDescriptor,
+    services::provider_stream::{
         StreamErrorKind, StreamParseResult, StreamParser, StreamWebSearchResult, ToolCall,
         ToolInput, build_tool_input_delta, parse_web_search_action,
     },
-    llm::prompt::Prompt,
-    models::messages::ChatRole,
-    services::mcp_tools::McpToolDescriptor,
 };
 
 pub enum LlmStreamEvent {
@@ -116,43 +116,84 @@ pub async fn generate_provider_title(
     provider: &dyn ProviderPlugin,
     model: impl Into<String>,
     prompt: String,
-) -> Result<crate::llm::prompt::PromptTitleResponse, ProviderError> {
-    let chat = provider
-        .chat()
-        .ok_or(ProviderError::UnsupportedCapability("chat"))?;
+) -> Result<PromptTitleResponse, ProviderError> {
+    let response = generate_provider_text(
+        provider,
+        model,
+        Some("Write a short conversation title. Return only the title.".to_string()),
+        prompt,
+        Some(32),
+    )
+    .await?;
+    let title = response
+        .text
+        .trim()
+        .trim_matches(['"', '\'', '`'])
+        .chars()
+        .take(120)
+        .collect::<String>();
+    if title.is_empty() {
+        return Err(ProviderError::ResponseMapping(
+            "title generation returned no text".to_string(),
+        ));
+    }
+    Ok(PromptTitleResponse {
+        title,
+        input_tokens: response.input_tokens,
+        output_tokens: response.output_tokens,
+    })
+}
+
+pub async fn generate_provider_text(
+    provider: &dyn ProviderPlugin,
+    model: impl Into<String>,
+    system: Option<String>,
+    prompt: String,
+    max_tokens: Option<u32>,
+) -> Result<PromptTextResponse, ProviderError> {
+    let mut messages = Vec::with_capacity(2);
+    if let Some(system) = system.filter(|value| !value.trim().is_empty()) {
+        messages.push(ChatMessage {
+            role: PluginChatRole::System,
+            content: vec![ContentPart::Text { text: system }],
+            tool_calls: Vec::new(),
+            tool_result: None,
+        });
+    }
+    messages.push(ChatMessage {
+        role: PluginChatRole::User,
+        content: vec![ContentPart::Text { text: prompt }],
+        tool_calls: Vec::new(),
+        tool_result: None,
+    });
     let request = ChatRequest {
         model: ModelId::new(model),
-        messages: vec![
-            ChatMessage {
-                role: PluginChatRole::System,
-                content: vec![ContentPart::Text {
-                    text: "Write a short conversation title. Return only the title.".to_string(),
-                }],
-                tool_calls: Vec::new(),
-                tool_result: None,
-            },
-            ChatMessage {
-                role: PluginChatRole::User,
-                content: vec![ContentPart::Text { text: prompt }],
-                tool_calls: Vec::new(),
-                tool_result: None,
-            },
-        ],
+        messages,
         temperature: None,
-        max_tokens: Some(32),
+        max_tokens,
         tools: Vec::new(),
         tool_choice: None,
         web_search: false,
         options: Value::Null,
     };
+    generate_provider_response(provider, request).await
+}
+
+pub async fn generate_provider_response(
+    provider: &dyn ProviderPlugin,
+    request: ChatRequest,
+) -> Result<PromptTextResponse, ProviderError> {
+    let chat = provider
+        .chat()
+        .ok_or(ProviderError::UnsupportedCapability("chat"))?;
     let mut session = chat.start(request).await?;
     let mut stream = session.stream().await?;
-    let mut title = String::new();
+    let mut text = String::new();
     let mut input_tokens = 0;
     let mut output_tokens = 0;
     while let Some(event) = stream.next().await {
         match event? {
-            ProviderEvent::TextDelta { text } => title.push_str(&text),
+            ProviderEvent::TextDelta { text: delta } => text.push_str(&delta),
             ProviderEvent::Usage { usage } => {
                 input_tokens = usage.input_tokens.unwrap_or(input_tokens);
                 output_tokens = usage.output_tokens.unwrap_or(output_tokens);
@@ -166,19 +207,13 @@ pub async fn generate_provider_title(
             _ => {}
         }
     }
-    let title = title
-        .trim()
-        .trim_matches(['"', '\'', '`'])
-        .chars()
-        .take(120)
-        .collect::<String>();
-    if title.is_empty() {
+    if text.trim().is_empty() {
         return Err(ProviderError::ResponseMapping(
-            "title generation returned no text".to_string(),
+            "text generation returned no text".to_string(),
         ));
     }
-    Ok(crate::llm::prompt::PromptTitleResponse {
-        title,
+    Ok(PromptTextResponse {
+        text,
         input_tokens: i32::try_from(input_tokens).unwrap_or(i32::MAX),
         output_tokens: i32::try_from(output_tokens).unwrap_or(i32::MAX),
     })
@@ -275,7 +310,7 @@ impl PendingServerTools {
         &mut self,
         id: &str,
         fragment: &str,
-    ) -> Option<crate::handlers::llm::StreamWebSearchAction> {
+    ) -> Option<crate::services::provider_stream::StreamWebSearchAction> {
         let buffer = self.query_buffers.entry(id.to_string()).or_default();
         buffer.push_str(fragment);
         serde_json::from_str::<Value>(buffer)

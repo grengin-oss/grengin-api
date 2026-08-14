@@ -48,7 +48,10 @@ pub fn skill_to_response_with_knowledge(
     }
 }
 
-pub async fn get_skill_or_404(id: Uuid, db: &DatabaseConnection) -> Result<skills::Model, AuthError> {
+pub async fn get_skill_or_404(
+    id: Uuid,
+    db: &DatabaseConnection,
+) -> Result<skills::Model, AuthError> {
     skills::Entity::find_by_id(id)
         .one(db)
         .await
@@ -91,10 +94,15 @@ pub async fn list_skills_query(
         eprintln!("db skill count error: {e}");
         AuthError::DbTimeout
     })?;
-    let rows = select.offset(offset).limit(limit).all(db).await.map_err(|e| {
-        eprintln!("db skill list error: {e}");
-        AuthError::DbTimeout
-    })?;
+    let rows = select
+        .offset(offset)
+        .limit(limit)
+        .all(db)
+        .await
+        .map_err(|e| {
+            eprintln!("db skill list error: {e}");
+            AuthError::DbTimeout
+        })?;
 
     Ok((rows, total))
 }
@@ -208,12 +216,16 @@ pub async fn process_skill_knowledge(
     user_id: Uuid,
     attachment: KnowledgeAttachment,
 ) -> Result<Vec<SkillKnowledgeInfo>, AuthError> {
-    let bytes = BASE64_STANDARD.decode(attachment.data.trim()).map_err(|_| {
-        AuthError::InvalidRequest { field: "knowledge_attachment.data" }
-    })?;
+    let bytes = BASE64_STANDARD
+        .decode(attachment.data.trim())
+        .map_err(|_| AuthError::InvalidRequest {
+            field: "knowledge_attachment.data",
+        })?;
 
     let extracted = extract_knowledge_text(&bytes, &attachment.content_type, &attachment.file_name)
-        .map_err(|_| AuthError::InvalidRequest { field: "knowledge_attachment" })?;
+        .map_err(|_| AuthError::InvalidRequest {
+            field: "knowledge_attachment",
+        })?;
 
     // Persist the raw upload to disk and record it in the files table.
     let file_id = save_knowledge_file_to_disk(db, user_id, &bytes, &attachment).await;
@@ -340,11 +352,7 @@ fn extract_zip_markdown(bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
         let text = buf.trim().to_string();
         if !text.is_empty() {
             // Use only the filename component, not the full path inside the zip.
-            let short_name = name
-                .rsplit('/')
-                .next()
-                .unwrap_or(&name)
-                .to_string();
+            let short_name = name.rsplit('/').next().unwrap_or(&name).to_string();
             results.push((short_name, text));
         }
     }

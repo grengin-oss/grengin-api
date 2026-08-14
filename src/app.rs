@@ -7,10 +7,9 @@ use crate::{
     routes::{
         admin::admin_routes, artifacts::artifacts_routes, auth::auth_routes,
         branding::branding_routes, chat::chat_routes, file::files_routes, mcp::mcp_routes,
-        me::me_routes, me_skills::me_skills_routes, message::message_routes,
-        models::models_routes, oidc::oidc_routes,
-        open_error::errors_routes, projects::projects_routes, skills::skills_routes,
-        swagger_ui::swagger_ui_routes,
+        me::me_routes, me_skills::me_skills_routes, message::message_routes, models::models_routes,
+        oidc::oidc_routes, open_error::errors_routes, projects::projects_routes,
+        skills::skills_routes, swagger_ui::swagger_ui_routes,
     },
     services::{
         analytics_cache::spawn_analytics_cache_refresh,
@@ -19,12 +18,12 @@ use crate::{
     state::AppState,
 };
 use anyhow::Error;
+use axum::http::HeaderValue;
 use axum::{Json, Router, extract::DefaultBodyLimit, middleware::from_fn_with_state, routing::get};
 use migration::MigratorTrait;
 use reqwest::StatusCode;
 use serde_json::json;
-use axum::http::HeaderValue;
-use tower_http::cors::{Any, AllowOrigin, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 async fn sample_root() -> (StatusCode, Json<serde_json::Value>) {
     (
@@ -60,7 +59,11 @@ pub async fn init_app() -> Result<(), Error> {
                 .map(|s| s.trim().trim_end_matches('/').to_owned())
                 .filter_map(|s| s.parse::<HeaderValue>().ok())
                 .collect();
-            if origins.is_empty() { None } else { Some(AllowOrigin::list(origins)) }
+            if origins.is_empty() {
+                None
+            } else {
+                Some(AllowOrigin::list(origins))
+            }
         })
         .unwrap_or_else(|| AllowOrigin::any());
     let cors = CorsLayer::new()

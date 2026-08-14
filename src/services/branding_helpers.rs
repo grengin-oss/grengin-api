@@ -6,10 +6,7 @@ use sea_orm::{ActiveModelTrait, EntityTrait, IntoActiveModel};
 use uuid::Uuid;
 
 use crate::{
-    auth::error::AuthError,
-    dto::branding::Branding,
-    models::branding,
-    state::SharedState,
+    auth::error::AuthError, dto::branding::Branding, models::branding, state::SharedState,
 };
 
 pub fn create_default_branding() -> branding::Model {

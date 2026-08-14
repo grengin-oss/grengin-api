@@ -12,17 +12,15 @@ use crate::{
     dto::{
         admin_department::{
             ChildCountRow, Department, DepartmentCreate, DepartmentListQuery,
-            DepartmentMembersResponse, DepartmentMemeberListQuery,
-            DepartmentMove, DepartmentRow, DepartmentSortRule, DepartmentTree, DepartmentTreeNode,
-            DepartmentTreeQuery, DepartmentTreeRow, DepartmentUpdate, DepartmentsListResponse,
-            DeptCountRow,
+            DepartmentMembersResponse, DepartmentMemeberListQuery, DepartmentMove, DepartmentRow,
+            DepartmentSortRule, DepartmentTree, DepartmentTreeNode, DepartmentTreeQuery,
+            DepartmentTreeRow, DepartmentUpdate, DepartmentsListResponse, DeptCountRow,
         },
         admin_user::User,
         common::SortRule,
     },
     models::{
-        departments,
-        user_role_assignments,
+        departments, user_role_assignments,
         users::{self, UserStatus},
     },
     services::{
@@ -53,16 +51,15 @@ use migration::{Alias, BinOper, Func, SimpleExpr, extension::postgres::PgExpr};
 use reqwest::StatusCode;
 use rust_decimal::Decimal;
 use sea_orm::{
-    Condition, EntityName as _, JoinType,
-    Order, PaginatorTrait, QueryOrder, QuerySelect, RelationTrait,
-    sea_query::{Expr, PostgresQueryBuilder, Query as SqlQuery},
+    ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait as _, QueryFilter, Statement,
 };
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait as _, QueryFilter, Statement,
+    Condition, EntityName as _, JoinType, Order, PaginatorTrait, QueryOrder, QuerySelect,
+    RelationTrait,
+    sea_query::{Expr, PostgresQueryBuilder, Query as SqlQuery},
 };
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
-
 
 #[utoipa::path(
     post,

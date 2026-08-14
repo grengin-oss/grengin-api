@@ -11,8 +11,7 @@ use crate::{
     dto::models::{ModelInfo, ModelType, ModelsResponse, ProviderInfo},
     models::users,
     services::{
-        department_policies::effective_allowed_models,
-        models_cache::load_providers_cached,
+        department_policies::effective_allowed_models, models_cache::load_providers_cached,
     },
     state::SharedState,
 };

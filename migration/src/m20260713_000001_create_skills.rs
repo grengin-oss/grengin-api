@@ -130,7 +130,10 @@ impl MigrationTrait for Migration {
             .create_foreign_key(
                 ForeignKey::create()
                     .name("fk-conversation-skills-conversation-id")
-                    .from(ConversationSkills::Table, ConversationSkills::ConversationId)
+                    .from(
+                        ConversationSkills::Table,
+                        ConversationSkills::ConversationId,
+                    )
                     .to(Conversations::Table, Conversations::Id)
                     .on_delete(ForeignKeyAction::Cascade)
                     .on_update(ForeignKeyAction::Restrict)

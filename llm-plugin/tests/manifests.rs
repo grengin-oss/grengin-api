@@ -40,6 +40,30 @@ fn reference_anthropic_manifest_is_valid() {
 }
 
 #[test]
+fn reference_gemini_image_manifest_is_valid() {
+    let manifest =
+        ProviderManifestV1::from_json(include_bytes!("../examples/gemini-image.provider.json"))
+            .unwrap();
+    assert_eq!(manifest.id, "gemini-image");
+    assert!(manifest.capabilities.image_generation);
+    assert!(manifest.capabilities.model_listing);
+    assert!(manifest.operations.image_generation.is_some());
+}
+
+#[test]
+fn builtin_chat_manifests_are_valid() {
+    for bytes in [
+        include_bytes!("../examples/openai.provider.json").as_slice(),
+        include_bytes!("../examples/mistral.provider.json").as_slice(),
+        include_bytes!("../examples/gemini.provider.json").as_slice(),
+    ] {
+        let manifest = ProviderManifestV1::from_json(bytes).unwrap();
+        assert!(manifest.operations.chat_stream.is_some());
+        assert!(manifest.capabilities.chat.unwrap().tools);
+    }
+}
+
+#[test]
 fn checked_in_json_schema_is_current() {
     let generated = serde_json::to_value(schemars::schema_for!(ProviderManifestV1)).unwrap();
     let checked_in: serde_json::Value =

@@ -13,7 +13,9 @@ use crate::{
         BinariesUpdateRequest, BinariesUpdateResponse, DomainReconfigureRequest,
         DomainReconfigureResponse, ReconfigureAvailableResponse,
     },
-    services::reconfigure::{self, build_script_availability, ensure_system_maintainer, DEFAULT_RELEASE_BASE_URL},
+    services::reconfigure::{
+        self, DEFAULT_RELEASE_BASE_URL, build_script_availability, ensure_system_maintainer,
+    },
     state::SharedState,
 };
 

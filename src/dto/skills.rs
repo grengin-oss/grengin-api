@@ -16,7 +16,10 @@ pub struct SkillToolsConfig {
 
 impl Default for SkillToolsConfig {
     fn default() -> Self {
-        Self { web_search: false, mcp_server_ids: Vec::new() }
+        Self {
+            web_search: false,
+            mcp_server_ids: Vec::new(),
+        }
     }
 }
 

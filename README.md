@@ -202,8 +202,8 @@ grengin-api/
 |   |-- services/          # Domain and integration services
 |   |-- models/            # SeaORM entities
 |   |-- dto/               # API request and response types
-|   |-- llm/               # AI provider integrations
 |   `-- docs/              # OpenAPI definitions
+|-- llm-plugin/            # Declarative provider runtime and manifests
 |-- migration/             # Versioned database migrations
 |-- sqlx-mcp/              # Read-only PostgreSQL MCP server
 |-- swagger-overrides/     # Branded Swagger UI assets

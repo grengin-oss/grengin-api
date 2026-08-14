@@ -1084,6 +1084,62 @@ async fn decodes_base64_images_and_enforces_the_requested_count() {
 }
 
 #[tokio::test]
+async fn ignores_non_image_parts_in_mixed_provider_responses() {
+    let response = json!({
+        "candidates": [{
+            "content": {
+                "parts": [
+                    {"text": "Here is the generated image."},
+                    {"inlineData": {"data": "AQID", "mimeType": "image/png"}}
+                ]
+            }
+        }],
+        "usageMetadata": {
+            "promptTokenCount": 7,
+            "candidatesTokenCount": 11,
+            "totalTokenCount": 18
+        }
+    });
+    let (base_url, _) = serve(vec![MockResponse::json("200 OK", &response)]).await;
+    let provider = provider(
+        base_url,
+        json!({"imageGeneration": true}),
+        json!({
+            "imageGeneration": {
+                "method": "POST",
+                "path": "models/${request.model}:generateContent",
+                "bodyEncoding": "json",
+                "body": {"prompt": {"$get": "request.prompt"}},
+                "response": {
+                    "bodyEncoding": "json",
+                    "imagesPointer": "/candidates/0/content/parts",
+                    "base64Pointer": "/inlineData/data",
+                    "mediaTypePointer": "/inlineData/mimeType",
+                    "usage": {
+                        "inputTokens": "/usageMetadata/promptTokenCount",
+                        "outputTokens": "/usageMetadata/candidatesTokenCount",
+                        "totalTokens": "/usageMetadata/totalTokenCount"
+                    }
+                }
+            }
+        }),
+    );
+
+    let result = provider
+        .images()
+        .unwrap()
+        .generate(image_request(1))
+        .await
+        .unwrap();
+    assert_eq!(result.images[0].bytes, vec![1, 2, 3]);
+    assert_eq!(result.images[0].media_type, "image/png");
+    let usage = result.usage.unwrap();
+    assert_eq!(usage.input_tokens, Some(7));
+    assert_eq!(usage.output_tokens, Some(11));
+    assert_eq!(usage.total_tokens, Some(18));
+}
+
+#[tokio::test]
 async fn rejects_image_counts_the_provider_did_not_honour() {
     let response = json!({"data": [{"b64_json": "AQID"}]});
     let (base_url, _) = serve(vec![MockResponse::json("200 OK", &response)]).await;
@@ -1176,6 +1232,75 @@ async fn uploads_multipart_bodies_with_decoded_file_parts() {
         "decoded image bytes missing from {text}"
     );
     assert!(!text.contains("AQID"), "{text}");
+}
+
+#[tokio::test]
+async fn selects_image_edit_and_repeats_multipart_file_fields() {
+    let (base_url, requests) = serve_once("200 OK", "image/png", vec![9, 8, 7]).await;
+    let provider = provider(
+        base_url,
+        json!({"imageGeneration": true}),
+        json!({
+            "imageGeneration": {
+                "method": "POST",
+                "path": "must-not-run",
+                "bodyEncoding": "json",
+                "body": {"prompt": {"$get": "request.prompt"}},
+                "response": {"bodyEncoding": "binary"}
+            },
+            "imageEdit": {
+                "method": "POST",
+                "path": "images/edits",
+                "bodyEncoding": "multipart",
+                "body": {
+                    "n": {"$get": "request.count"},
+                    "image[]": [
+                        {
+                            "data": {"$get": "/request/inputImages/0/data"},
+                            "filename": {"$literal": "first.png"},
+                            "mediaType": {"$literal": "image/png"}
+                        },
+                        {
+                            "data": {"$get": "/request/inputImages/1/data"},
+                            "filename": {"$literal": "second.webp"},
+                            "mediaType": {"$literal": "image/webp"}
+                        }
+                    ]
+                },
+                "response": {"bodyEncoding": "binary"}
+            }
+        }),
+    );
+
+    let result = provider
+        .images()
+        .unwrap()
+        .generate(ImageRequest {
+            input_images: vec![
+                llm_plugin::InputImage {
+                    data: "AQID".to_string(),
+                    media_type: "image/png".to_string(),
+                    filename: Some("first.png".to_string()),
+                },
+                llm_plugin::InputImage {
+                    data: "BAUG".to_string(),
+                    media_type: "image/webp".to_string(),
+                    filename: Some("second.webp".to_string()),
+                },
+            ],
+            ..image_request(1)
+        })
+        .await
+        .unwrap();
+    assert_eq!(result.images[0].bytes, vec![9, 8, 7]);
+
+    let requests = requests.lock().await;
+    assert!(requests[0].head.starts_with("POST /v1/images/edits "));
+    let body = String::from_utf8_lossy(&requests[0].body);
+    assert_eq!(body.matches("name=\"image[]\"").count(), 2, "{body}");
+    assert!(body.contains("filename=\"first.png\""), "{body}");
+    assert!(body.contains("filename=\"second.webp\""), "{body}");
+    assert!(body.contains("name=\"n\""), "{body}");
 }
 
 #[tokio::test]

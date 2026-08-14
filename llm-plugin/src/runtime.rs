@@ -426,11 +426,9 @@ impl ProviderPlugin for DeclarativeProvider {
     }
 
     fn images(&self) -> Option<&dyn ImageProvider> {
-        self.manifest
-            .operations
-            .image_generation
-            .as_ref()
-            .map(|_| self as _)
+        (self.manifest.operations.image_generation.is_some()
+            || self.manifest.operations.image_edit.is_some())
+        .then_some(self as _)
     }
 
     fn models(&self) -> Option<&dyn ModelProvider> {
@@ -683,12 +681,18 @@ impl EmbeddingProvider for DeclarativeProvider {
 #[async_trait]
 impl ImageProvider for DeclarativeProvider {
     async fn generate(&self, request: ImageRequest) -> Result<ImageResult, ProviderError> {
-        let operation = self
-            .manifest
-            .operations
-            .image_generation
-            .as_ref()
-            .ok_or(ProviderError::UnsupportedCapability("image_generation"))?;
+        let operation = if request.input_images.is_empty() {
+            self.manifest.operations.image_generation.as_ref().ok_or(
+                ProviderError::UnsupportedCapability("text_to_image_generation"),
+            )?
+        } else {
+            self.manifest
+                .operations
+                .image_edit
+                .as_ref()
+                .or(self.manifest.operations.image_generation.as_ref())
+                .ok_or(ProviderError::UnsupportedCapability("image_edit"))?
+        };
         if request.count == 0 {
             return Err(ProviderError::Configuration(
                 "image request must ask for at least one image".to_string(),
@@ -796,9 +800,9 @@ impl DeclarativeProvider {
                 images.push(GeneratedImage { bytes, media_type });
                 continue;
             }
-            return Err(ProviderError::ResponseMapping(
-                "image item did not contain configured base64 or URL data".to_string(),
-            ));
+            // Some providers return text and image parts in the same array (Gemini's
+            // generateContent response is one example). Non-image parts are not malformed image
+            // data, so ignore them and let the final count check catch missing output images.
         }
         if images.is_empty() {
             return Err(ProviderError::ResponseMapping(
@@ -1045,40 +1049,49 @@ fn build_multipart(body: Value) -> Result<Form, ProviderError> {
     })?;
     let mut form = Form::new();
     for (name, value) in object {
-        let part = if let Some(value) = value.as_str() {
-            Part::text(value.to_string())
+        if let Some(values) = value.as_array() {
+            for value in values {
+                form = form.part(name.clone(), multipart_part(name, value)?);
+            }
         } else {
-            let object = value.as_object().ok_or_else(|| {
-                ProviderError::PayloadMapping(format!(
-                    "multipart field {name} must be a string or file object"
-                ))
-            })?;
-            let encoded = object.get("data").and_then(Value::as_str).ok_or_else(|| {
-                ProviderError::PayloadMapping(format!(
-                    "multipart file field {name} requires base64 data"
-                ))
-            })?;
-            let bytes = STANDARD.decode(encoded).map_err(|error| {
-                ProviderError::PayloadMapping(format!(
-                    "multipart field {name} is not valid base64: {error}"
-                ))
-            })?;
-            let mut part = Part::bytes(bytes);
-            if let Some(filename) = object.get("filename").and_then(Value::as_str) {
-                part = part.file_name(filename.to_string());
-            }
-            if let Some(media_type) = object.get("mediaType").and_then(Value::as_str) {
-                part = part.mime_str(media_type).map_err(|error| {
-                    ProviderError::PayloadMapping(format!(
-                        "multipart field {name} has invalid media type: {error}"
-                    ))
-                })?;
-            }
-            part
-        };
-        form = form.part(name.clone(), part);
+            form = form.part(name.clone(), multipart_part(name, value)?);
+        }
     }
     Ok(form)
+}
+
+fn multipart_part(name: &str, value: &Value) -> Result<Part, ProviderError> {
+    if let Some(value) = value.as_str() {
+        return Ok(Part::text(value.to_string()));
+    }
+    if value.is_number() || value.is_boolean() {
+        return Ok(Part::text(scalar_to_string(value, "multipart field")?));
+    }
+    let object = value.as_object().ok_or_else(|| {
+        ProviderError::PayloadMapping(format!(
+            "multipart field {name} must be a string, file object, or array of those values"
+        ))
+    })?;
+    let encoded = object.get("data").and_then(Value::as_str).ok_or_else(|| {
+        ProviderError::PayloadMapping(format!("multipart file field {name} requires base64 data"))
+    })?;
+    let bytes = STANDARD.decode(encoded).map_err(|error| {
+        ProviderError::PayloadMapping(format!(
+            "multipart field {name} is not valid base64: {error}"
+        ))
+    })?;
+    let mut part = Part::bytes(bytes);
+    if let Some(filename) = object.get("filename").and_then(Value::as_str) {
+        part = part.file_name(filename.to_string());
+    }
+    if let Some(media_type) = object.get("mediaType").and_then(Value::as_str) {
+        part = part.mime_str(media_type).map_err(|error| {
+            ProviderError::PayloadMapping(format!(
+                "multipart field {name} has invalid media type: {error}"
+            ))
+        })?;
+    }
+    Ok(part)
 }
 
 async fn ensure_success(response: Response) -> Result<Response, ProviderError> {
@@ -1297,6 +1310,8 @@ fn map_usage(root: &Value, mapping: &UsageMapping) -> Result<TokenUsage, Provide
     crate::sse::normalize_token_usage(
         TokenUsage {
             input_tokens: mapped_u32(root, mapping.input_tokens.as_deref()),
+            text_input_tokens: mapped_u32(root, mapping.text_input_tokens.as_deref()),
+            image_input_tokens: mapped_u32(root, mapping.image_input_tokens.as_deref()),
             output_tokens: mapped_u32(root, mapping.output_tokens.as_deref()),
             total_tokens: mapped_u32(root, mapping.total_tokens.as_deref()),
             cached_input_tokens: mapped_u32(root, mapping.cached_input_tokens.as_deref()),

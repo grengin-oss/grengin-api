@@ -188,6 +188,10 @@ pub struct ToolResult {
 #[serde(rename_all = "camelCase")]
 pub struct TokenUsage {
     pub input_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_input_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_input_tokens: Option<u32>,
     pub output_tokens: Option<u32>,
     pub total_tokens: Option<u32>,
     pub cached_input_tokens: Option<u32>,

@@ -18,7 +18,7 @@
     "chat": {
       "streaming": true,
       "tools": true,
-      "vision": false,
+      "vision": true,
       "reasoning": false
     },
     "embeddings": true,
@@ -57,6 +57,37 @@
         "text": {
           "type": { "$literal": "text" },
           "text": { "$get": "item.text" }
+        },
+        "image_url": {
+          "type": { "$literal": "image_url" },
+          "image_url": { "url": { "$get": "item.url" } }
+        },
+        "image_base64": {
+          "type": { "$literal": "image_url" },
+          "image_url": {
+            "url": {
+              "$stringConcat": [
+                { "$literal": "data:" },
+                { "$get": "item.mediaType" },
+                { "$literal": ";base64," },
+                { "$get": "item.data" }
+              ]
+            }
+          }
+        },
+        "file": {
+          "type": { "$literal": "file" },
+          "file": {
+            "filename": { "$get": "item.name" },
+            "file_data": {
+              "$stringConcat": [
+                { "$literal": "data:" },
+                { "$get": "item.mediaType" },
+                { "$literal": ";base64," },
+                { "$get": "item.data" }
+              ]
+            }
+          }
         }
       }
     },
@@ -75,6 +106,16 @@
         "name": { "$get": "item.name" },
         "arguments": { "$jsonEncode": { "$get": "item.arguments" } }
       }
+    },
+    "input_image": {
+      "data": { "$get": "item.data" },
+      "filename": {
+        "$coalesce": [
+          { "$get": "item.filename" },
+          { "$literal": "image.png" }
+        ]
+      },
+      "mediaType": { "$get": "item.mediaType" }
     }
   },
   "models": [],
@@ -96,6 +137,12 @@
         "max_completion_tokens": { "$omitIfNull": { "$get": "request.maxTokens" } },
         "tools": {
           "$omitIfNull": { "$map": "request.tools", "using": "tool" }
+        },
+        "web_search_options": {
+          "$omitIfNull": {
+            "$if": { "$get": "request.webSearch" },
+            "then": { "$literal": {} }
+          }
         },
         "stream": { "$literal": true },
         "stream_options": { "$literal": { "include_usage": true } }
@@ -134,6 +181,7 @@
             "when": { "pointer": "/function/arguments", "notNull": true },
             "emit": "toolArgumentsDelta",
             "fields": {
+              "id": "/id",
               "index": "/index",
               "fragment": "/function/arguments"
             }
@@ -224,14 +272,50 @@
         "prompt": { "$get": "request.prompt" },
         "n": { "$get": "request.count" },
         "size": { "$omitIfNull": { "$get": "request.size" } },
-        "quality": { "$omitIfNull": { "$get": "request.quality" } },
-        "response_format": { "$literal": "b64_json" }
+        "quality": { "$omitIfNull": { "$get": "request.quality" } }
       },
       "response": {
         "bodyEncoding": "json",
         "imagesPointer": "/data",
         "base64Pointer": "/b64_json",
-        "defaultMediaType": "image/png"
+        "defaultMediaType": "image/png",
+        "usage": {
+          "inputTokens": "/usage/input_tokens",
+          "textInputTokens": "/usage/input_tokens_details/text_tokens",
+          "imageInputTokens": "/usage/input_tokens_details/image_tokens",
+          "outputTokens": "/usage/output_tokens"
+        }
+      }
+    },
+    "imageEdit": {
+      "method": "POST",
+      "path": "images/edits",
+      "headers": {
+        "Authorization": {
+          "secret": "api_key",
+          "prefix": "Bearer "
+        }
+      },
+      "bodyEncoding": "multipart",
+      "body": {
+        "model": { "$get": "request.model" },
+        "prompt": { "$get": "request.prompt" },
+        "n": { "$get": "request.count" },
+        "size": { "$omitIfNull": { "$get": "request.size" } },
+        "quality": { "$omitIfNull": { "$get": "request.quality" } },
+        "image[]": { "$map": "request.inputImages", "using": "input_image" }
+      },
+      "response": {
+        "bodyEncoding": "json",
+        "imagesPointer": "/data",
+        "base64Pointer": "/b64_json",
+        "defaultMediaType": "image/png",
+        "usage": {
+          "inputTokens": "/usage/input_tokens",
+          "textInputTokens": "/usage/input_tokens_details/text_tokens",
+          "imageInputTokens": "/usage/input_tokens_details/image_tokens",
+          "outputTokens": "/usage/output_tokens"
+        }
       }
     },
     "listModels": {

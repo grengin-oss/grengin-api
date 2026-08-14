@@ -190,7 +190,10 @@ impl MigrationTrait for Migration {
             .create_foreign_key(
                 ForeignKey::create()
                     .name("fk-conversation-projects-conversation-id")
-                    .from(ConversationProjects::Table, ConversationProjects::ConversationId)
+                    .from(
+                        ConversationProjects::Table,
+                        ConversationProjects::ConversationId,
+                    )
                     .to(Conversations::Table, Conversations::Id)
                     .on_delete(ForeignKeyAction::Cascade)
                     .to_owned(),
@@ -255,7 +258,11 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(ProjectSources::ProjectId).uuid().not_null())
                     .col(ColumnDef::new(ProjectSources::FileName).string().not_null())
                     .col(ColumnDef::new(ProjectSources::FileType).string().not_null())
-                    .col(ColumnDef::new(ProjectSources::FileSize).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(ProjectSources::FileSize)
+                            .big_integer()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(ProjectSources::Origin)
                             .string_len(10)
@@ -298,10 +305,20 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         // project_sources
         manager
-            .drop_index(Index::drop().name("idx-project-sources-project-id").table(ProjectSources::Table).to_owned())
+            .drop_index(
+                Index::drop()
+                    .name("idx-project-sources-project-id")
+                    .table(ProjectSources::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
-            .drop_foreign_key(ForeignKey::drop().name("fk-project-sources-project-id").table(ProjectSources::Table).to_owned())
+            .drop_foreign_key(
+                ForeignKey::drop()
+                    .name("fk-project-sources-project-id")
+                    .table(ProjectSources::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
             .drop_table(Table::drop().table(ProjectSources::Table).to_owned())
@@ -309,19 +326,44 @@ impl MigrationTrait for Migration {
 
         // conversation_projects
         manager
-            .drop_index(Index::drop().name("idx-conversation-projects-conversation-id").table(ConversationProjects::Table).to_owned())
+            .drop_index(
+                Index::drop()
+                    .name("idx-conversation-projects-conversation-id")
+                    .table(ConversationProjects::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
-            .drop_index(Index::drop().name("idx-conversation-projects-project-id").table(ConversationProjects::Table).to_owned())
+            .drop_index(
+                Index::drop()
+                    .name("idx-conversation-projects-project-id")
+                    .table(ConversationProjects::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
-            .drop_index(Index::drop().name("uq-conversation-projects-conv-proj").table(ConversationProjects::Table).to_owned())
+            .drop_index(
+                Index::drop()
+                    .name("uq-conversation-projects-conv-proj")
+                    .table(ConversationProjects::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
-            .drop_foreign_key(ForeignKey::drop().name("fk-conversation-projects-project-id").table(ConversationProjects::Table).to_owned())
+            .drop_foreign_key(
+                ForeignKey::drop()
+                    .name("fk-conversation-projects-project-id")
+                    .table(ConversationProjects::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
-            .drop_foreign_key(ForeignKey::drop().name("fk-conversation-projects-conversation-id").table(ConversationProjects::Table).to_owned())
+            .drop_foreign_key(
+                ForeignKey::drop()
+                    .name("fk-conversation-projects-conversation-id")
+                    .table(ConversationProjects::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
             .drop_table(Table::drop().table(ConversationProjects::Table).to_owned())
@@ -329,16 +371,36 @@ impl MigrationTrait for Migration {
 
         // project_members
         manager
-            .drop_index(Index::drop().name("idx-project-members-user-id").table(ProjectMembers::Table).to_owned())
+            .drop_index(
+                Index::drop()
+                    .name("idx-project-members-user-id")
+                    .table(ProjectMembers::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
-            .drop_index(Index::drop().name("uq-project-members-project-user").table(ProjectMembers::Table).to_owned())
+            .drop_index(
+                Index::drop()
+                    .name("uq-project-members-project-user")
+                    .table(ProjectMembers::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
-            .drop_foreign_key(ForeignKey::drop().name("fk-project-members-user-id").table(ProjectMembers::Table).to_owned())
+            .drop_foreign_key(
+                ForeignKey::drop()
+                    .name("fk-project-members-user-id")
+                    .table(ProjectMembers::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
-            .drop_foreign_key(ForeignKey::drop().name("fk-project-members-project-id").table(ProjectMembers::Table).to_owned())
+            .drop_foreign_key(
+                ForeignKey::drop()
+                    .name("fk-project-members-project-id")
+                    .table(ProjectMembers::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
             .drop_table(Table::drop().table(ProjectMembers::Table).to_owned())
@@ -346,13 +408,28 @@ impl MigrationTrait for Migration {
 
         // projects
         manager
-            .drop_index(Index::drop().name("idx-projects-visibility").table(Projects::Table).to_owned())
+            .drop_index(
+                Index::drop()
+                    .name("idx-projects-visibility")
+                    .table(Projects::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
-            .drop_index(Index::drop().name("idx-projects-owner-id").table(Projects::Table).to_owned())
+            .drop_index(
+                Index::drop()
+                    .name("idx-projects-owner-id")
+                    .table(Projects::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
-            .drop_foreign_key(ForeignKey::drop().name("fk-projects-owner-id").table(Projects::Table).to_owned())
+            .drop_foreign_key(
+                ForeignKey::drop()
+                    .name("fk-projects-owner-id")
+                    .table(Projects::Table)
+                    .to_owned(),
+            )
             .await?;
         manager
             .drop_table(Table::drop().table(Projects::Table).to_owned())

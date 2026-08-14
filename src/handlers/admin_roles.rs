@@ -26,7 +26,7 @@ use crate::{
     dto::admin_roles::{
         PermissionDto, PermissionsResponse, RoleAssignmentPayload, RoleCreatedPayload,
         RoleDeletedPayload, RoleDto, RolePermissionRow, RoleRequest, RoleUpdateRequest,
-        RoleUpdatedPayload, RolesResponse, RoleUserCountRow, UserRoleAssignmentDto,
+        RoleUpdatedPayload, RoleUserCountRow, RolesResponse, UserRoleAssignmentDto,
         UserRoleAssignmentInput, UserRoleAssignmentsResponse,
     },
     models::{permissions, role_permissions, roles, user_role_assignments, users},

@@ -91,8 +91,7 @@ impl MigrationTrait for Migration {
                     Query::delete()
                         .from_table(RolePermissions::Table)
                         .and_where(
-                            Expr::col(RolePermissions::PermissionId)
-                                .is_in(permission_ids.clone()),
+                            Expr::col(RolePermissions::PermissionId).is_in(permission_ids.clone()),
                         )
                         .to_owned(),
                 )

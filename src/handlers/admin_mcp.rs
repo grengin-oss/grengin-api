@@ -731,4 +731,3 @@ pub async fn delete_mcp_access_rule(
 
     Ok(StatusCode::NO_CONTENT)
 }
-

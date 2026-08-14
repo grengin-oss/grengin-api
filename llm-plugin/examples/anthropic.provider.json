@@ -18,7 +18,7 @@
     "chat": {
       "streaming": true,
       "tools": true,
-      "vision": false,
+      "vision": true,
       "reasoning": false
     }
   },
@@ -78,6 +78,29 @@
         "text": {
           "type": { "$literal": "text" },
           "text": { "$get": "item.text" }
+        },
+        "image_url": {
+          "type": { "$literal": "image" },
+          "source": {
+            "type": { "$literal": "url" },
+            "url": { "$get": "item.url" }
+          }
+        },
+        "image_base64": {
+          "type": { "$literal": "image" },
+          "source": {
+            "type": { "$literal": "base64" },
+            "media_type": { "$get": "item.mediaType" },
+            "data": { "$get": "item.data" }
+          }
+        },
+        "file": {
+          "type": { "$literal": "document" },
+          "source": {
+            "type": { "$literal": "base64" },
+            "media_type": { "$get": "item.mediaType" },
+            "data": { "$get": "item.data" }
+          }
         }
       }
     },

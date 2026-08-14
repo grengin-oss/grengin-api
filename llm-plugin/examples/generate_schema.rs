@@ -6,9 +6,10 @@ use std::{env, fs, path::PathBuf};
 use llm_plugin::ProviderManifestV1;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let output = env::args_os().nth(1).map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from("llm-plugin/schema/provider-plugin-v1.schema.json")
-    });
+    let output = env::args_os()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("llm-plugin/schema/provider-plugin-v1.schema.json"));
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)?;
     }

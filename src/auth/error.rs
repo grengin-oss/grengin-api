@@ -803,13 +803,11 @@ impl AuthError {
 
                 let description_key =
                     "error.auth.sso.jit_provisioning_disabled.description".to_string();
-                let solution_key =
-                    "error.auth.sso.jit_provisioning_disabled.solution".to_string();
+                let solution_key = "error.auth.sso.jit_provisioning_disabled.solution".to_string();
 
                 let description_tpl =
                     "Self-registration via `{provider}` SSO is disabled by an administrator.";
-                let solution_tpl =
-                    "Contact your administrator to create an account for you.";
+                let solution_tpl = "Contact your administrator to create an account for you.";
 
                 (
                     StatusCode::FORBIDDEN,

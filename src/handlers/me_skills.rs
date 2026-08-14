@@ -10,10 +10,15 @@ use uuid::Uuid;
 
 use crate::{
     auth::{claims::Claims, error::AuthError},
-    dto::skills::{SkillListResponse, SkillResponse, UserSkillCreateRequest, UserSkillListQuery, UserSkillUpdateRequest},
+    dto::skills::{
+        SkillListResponse, SkillResponse, UserSkillCreateRequest, UserSkillListQuery,
+        UserSkillUpdateRequest,
+    },
     services::{
         me_skills_helpers::*,
-        skills_helpers::{get_skill_knowledge_info, process_skill_knowledge, skill_to_response_with_knowledge},
+        skills_helpers::{
+            get_skill_knowledge_info, process_skill_knowledge, skill_to_response_with_knowledge,
+        },
     },
     state::SharedState,
 };
@@ -50,7 +55,15 @@ pub async fn list_my_skills(
     .await?;
 
     let skills = rows.into_iter().map(user_skill_to_response).collect();
-    Ok((StatusCode::OK, Json(SkillListResponse { skills, total, limit, offset })))
+    Ok((
+        StatusCode::OK,
+        Json(SkillListResponse {
+            skills,
+            total,
+            limit,
+            offset,
+        }),
+    ))
 }
 
 #[utoipa::path(
@@ -71,7 +84,10 @@ pub async fn get_my_skill(
 ) -> Result<(StatusCode, Json<SkillResponse>), AuthError> {
     let skill = get_user_skill_or_404(id, claims.user_id, &app_state.database).await?;
     let knowledge_files = get_skill_knowledge_info(&app_state.database, skill.id).await;
-    Ok((StatusCode::OK, Json(skill_to_response_with_knowledge(skill, knowledge_files))))
+    Ok((
+        StatusCode::OK,
+        Json(skill_to_response_with_knowledge(skill, knowledge_files)),
+    ))
 }
 
 #[utoipa::path(
@@ -99,7 +115,10 @@ pub async fn create_my_skill(
     } else {
         vec![]
     };
-    Ok((StatusCode::CREATED, Json(skill_to_response_with_knowledge(skill, knowledge_files))))
+    Ok((
+        StatusCode::CREATED,
+        Json(skill_to_response_with_knowledge(skill, knowledge_files)),
+    ))
 }
 
 #[utoipa::path(
@@ -129,7 +148,10 @@ pub async fn update_my_skill(
     } else {
         get_skill_knowledge_info(&app_state.database, skill.id).await
     };
-    Ok((StatusCode::OK, Json(skill_to_response_with_knowledge(skill, knowledge_files))))
+    Ok((
+        StatusCode::OK,
+        Json(skill_to_response_with_knowledge(skill, knowledge_files)),
+    ))
 }
 
 #[utoipa::path(

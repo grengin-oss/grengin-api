@@ -16,20 +16,17 @@ use crate::{
         oauth_sessions, roles, user_role_assignments,
         users::{self, UserStatus},
     },
-    services::{
-        authorization::AuthorizationService,
-        oidc_proxy::verify_proxy_assertion,
-    },
+    services::{authorization::AuthorizationService, oidc_proxy::verify_proxy_assertion},
     state::SharedState,
     utils::uri::{is_azure_mobile_redirect_uri, origin_from_url},
 };
 use axum::{Json, http::StatusCode};
 use chrono::Utc;
-use openidconnect::{OAuth2TokenResponse, TokenResponse as OidcTokenResponse};
 use openidconnect::{
     AuthorizationCode, ClaimsVerificationError, Nonce, PkceCodeVerifier, RedirectUrl,
     core::CoreUserInfoClaims,
 };
+use openidconnect::{OAuth2TokenResponse, TokenResponse as OidcTokenResponse};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, TryIntoModel,
@@ -173,10 +170,7 @@ pub async fn oidc_oauth_callback(
         } {
             Ok(c) => c,
             Err(e) => {
-                let should_refresh = matches!(
-                    e,
-                    ClaimsVerificationError::SignatureVerification(_)
-                );
+                let should_refresh = matches!(e, ClaimsVerificationError::SignatureVerification(_));
                 if !should_refresh {
                     eprintln!("id_token claims verification failed (non-refreshable): {e:?}");
                     return Err(AuthError::InvalidToken);
@@ -218,7 +212,9 @@ pub async fn oidc_oauth_callback(
             .website()
             .and_then(|website_claim| website_claim.get(None))
             .map(|url| url.as_str().to_owned());
-        let mut display_name = claims.name().and_then(|n| n.get(None).map(|s| s.to_string()));
+        let mut display_name = claims
+            .name()
+            .and_then(|n| n.get(None).map(|s| s.to_string()));
         if email.is_none() {
             let info: CoreUserInfoClaims = oidc_client
                 .user_info(token_resp.access_token().to_owned(), None)

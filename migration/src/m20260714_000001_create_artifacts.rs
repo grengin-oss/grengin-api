@@ -14,7 +14,12 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Artifacts::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(Artifacts::Id).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(Artifacts::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(Artifacts::FileId).uuid().not_null())
                     .col(ColumnDef::new(Artifacts::MessageId).uuid().not_null())
                     .col(ColumnDef::new(Artifacts::ConversationId).uuid().not_null())
@@ -85,7 +90,11 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .drop_index(Index::drop().name("idx_artifacts_conversation_id").to_owned())
+            .drop_index(
+                Index::drop()
+                    .name("idx_artifacts_conversation_id")
+                    .to_owned(),
+            )
             .await?;
         manager
             .drop_index(Index::drop().name("idx_artifacts_message_id").to_owned())

@@ -8,15 +8,6 @@ use crate::{
     state::SharedState,
 };
 
-pub fn normalize_bearer_token(raw: &str) -> String {
-    let trimmed = raw.trim();
-    let without_prefix = trimmed
-        .strip_prefix("Bearer ")
-        .or_else(|| trimmed.strip_prefix("bearer "))
-        .unwrap_or(trimmed);
-    without_prefix.trim().to_string()
-}
-
 pub async fn load_models_response(app_state: &SharedState) -> Result<ModelsResponse, AuthError> {
     let providers = load_providers_cached(&app_state.req_client)
         .await
