@@ -34,6 +34,7 @@ with pgvector.
 ## Capabilities
 
 - **Multi-provider AI**: OpenAI, Anthropic, Mistral, and Gemini chat and image models
+- **LLM provider plugins**: declarative JSON integrations for hosted and self-hosted providers without recompiling Grengin
 - **Streaming chat**: server-sent events, tool execution, attachments, and artifacts
 - **Authentication and SSO**: JWT sessions, Google OAuth, and Microsoft Entra ID
 - **Authorization**: roles, permissions, departments, scoped assignments, and model policies
@@ -43,6 +44,22 @@ with pgvector.
 - **Analytics and audit**: usage accounting, exports, retention, and administrative audit logs
 - **OpenAPI**: generated API schema and a bundled Swagger UI
 - **Database lifecycle**: versioned SeaORM migrations applied automatically at API startup
+
+## LLM Provider Plugins
+
+Grengin's provider runtime is driven by versioned JSON manifests. A plugin can
+describe chat streaming, MCP tool calling, provider-native web search,
+embeddings, image generation, model discovery, headers, payloads, and response
+mapping without adding provider-specific branches to the API.
+
+Built-in OpenAI, Anthropic, Mistral, and Gemini integrations use the same
+declarative runtime available to custom hosted and self-hosted providers.
+Credentials are supplied separately and encrypted; they are never embedded in
+the plugin manifest.
+
+See the [LLM provider plugin authoring guide](llm-plugin/README.md) for the v1
+format, examples, validation, testing, installation, versioning, and security
+rules.
 
 ## Grengin Releases
 
@@ -70,7 +87,7 @@ Grengin web application
 Grengin API (Rust + Axum)
         |
         +-- PostgreSQL + pgvector
-        +-- OpenAI / Anthropic / Mistral / Gemini
+        +-- Declarative LLM provider plugins
         +-- Google / Microsoft Entra ID
         +-- MCP servers and tools
         `-- SQLx MCP read-only database tools
