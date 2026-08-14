@@ -480,3 +480,34 @@ use utoipa::OpenApi;
     )
 )]
 pub struct ApiDoc;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_plugin_schemas_use_snake_case() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI JSON");
+        let schemas = &document["components"]["schemas"];
+
+        let validation_request = &schemas["AIEnginePluginValidationRequest"]["properties"];
+        assert!(validation_request.get("plugin_config").is_some());
+        assert!(validation_request.get("pluginConfig").is_none());
+
+        let create_request = &schemas["AIEngineCreate"]["properties"];
+        assert!(create_request.get("plugin_config").is_some());
+        assert!(create_request.get("is_enabled").is_some());
+        assert!(create_request.get("pluginConfig").is_none());
+
+        let plugin_config = &schemas["PluginConfig"]["properties"];
+        assert!(plugin_config.get("baseUrlOverride").is_some());
+        assert!(plugin_config.get("allowInsecureHttp").is_some());
+        assert!(plugin_config.get("allowPrivateNetwork").is_some());
+        assert!(plugin_config.get("base_url_override").is_none());
+
+        let validation_response = &schemas["AIEnginePluginValidationResponse"]["properties"];
+        assert!(validation_response.get("engine_key").is_some());
+        assert!(validation_response.get("credential_required").is_some());
+        assert!(validation_response.get("engineKey").is_none());
+    }
+}
