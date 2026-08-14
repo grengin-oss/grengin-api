@@ -2,7 +2,7 @@
   "$schema": "../schema/provider-plugin-v1.schema.json",
   "manifestVersion": "1.0",
   "id": "openai-compatible",
-  "version": "1.0.0",
+  "version": "1.0",
   "name": "OpenAI-compatible",
   "description": "Reference manifest for hosted or self-hosted OpenAI-compatible HTTP/SSE APIs.",
   "baseUrl": "https://api.openai.com/v1/",

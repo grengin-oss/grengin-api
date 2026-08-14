@@ -2,7 +2,7 @@
   "$schema": "../schema/provider-plugin-v1.schema.json",
   "manifestVersion": "1.0",
   "id": "anthropic",
-  "version": "1.0.0",
+  "version": "1.0",
   "name": "Anthropic",
   "baseUrl": "https://api.anthropic.com/v1/",
   "credentials": [

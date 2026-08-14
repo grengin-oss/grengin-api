@@ -2,7 +2,7 @@
   "$schema": "../schema/provider-plugin-v1.schema.json",
   "manifestVersion": "1.0",
   "id": "gemini",
-  "version": "1.0.0",
+  "version": "1.0",
   "name": "Google Gemini",
   "description": "Gemini native streaming chat, functions, and Google Search grounding.",
   "baseUrl": "https://generativelanguage.googleapis.com/v1beta/",

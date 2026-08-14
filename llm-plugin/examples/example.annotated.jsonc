@@ -7,7 +7,7 @@
 
   // id is the stable machine identity. version changes when this manifest changes.
   "id": "complete-example",
-  "version": "1.0.0",
+  "version": "1.0",
   "name": "Complete provider example",
   "description": "Copy example.json and replace the fictional protocol paths and pointers.",
   "baseUrl": "https://api.example.invalid/v1/",

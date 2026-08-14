@@ -2,7 +2,7 @@
   "$schema": "../schema/provider-plugin-v1.schema.json",
   "manifestVersion": "1.0",
   "id": "gemini-image",
-  "version": "1.0.0",
+  "version": "1.0",
   "name": "Gemini Image",
   "description": "Reference manifest for Gemini text-to-image and image-to-image generation.",
   "baseUrl": "https://generativelanguage.googleapis.com/v1beta/",

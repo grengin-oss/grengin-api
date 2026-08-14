@@ -32,7 +32,7 @@ use crate::{
         provider_chat::provider_error_class,
         provider_runtime::{
             ProviderLoadError, build_provider, compile_provider, parse_manifest,
-            unregister_provider,
+            provider_plugin_version, unregister_provider,
         },
     },
     state::SharedState,
@@ -377,6 +377,7 @@ fn engine_detail(state: &SharedState, engine: ai_engines::Model) -> AIEngineDeta
     AIEngineDetail {
         icon: None,
         icon_dark: None,
+        plugin_version: provider_plugin_version(&engine),
         engine_key: engine.engine_key,
         display_name: engine.display_name,
         is_enabled: engine.is_enabled,

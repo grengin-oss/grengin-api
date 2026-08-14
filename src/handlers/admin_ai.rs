@@ -21,7 +21,7 @@ use crate::{
         authorization::{AuthorizationService, PermissionScopeMode},
         provider_runtime::{
             ProviderLoadError, build_provider, compile_provider, parse_manifest,
-            parse_plugin_config, unregister_provider,
+            parse_plugin_config, provider_plugin_version, unregister_provider,
         },
     },
     state::SharedState,
@@ -159,6 +159,7 @@ pub async fn get_ai_engines(
             AIEngineDetail {
                 icon: ai_models.get_icons(&model.engine_key).0,
                 icon_dark: ai_models.get_icons(&model.engine_key).1,
+                plugin_version: provider_plugin_version(&model),
                 engine_key: model.engine_key,
                 display_name: model.display_name,
                 is_enabled: model.is_enabled,
@@ -225,6 +226,7 @@ pub async fn get_ai_engines_by_key(
     let response = AIEngineDetail {
         icon: ai_models.get_icons(&model.engine_key).0,
         icon_dark: ai_models.get_icons(&model.engine_key).1,
+        plugin_version: provider_plugin_version(&model),
         engine_key: model.engine_key,
         display_name: model.display_name,
         is_enabled: model.is_enabled,
@@ -510,6 +512,7 @@ pub async fn update_ai_engines_by_key(
     let response = AIEngineDetail {
         icon: ai_models.get_icons(&model.engine_key).0,
         icon_dark: ai_models.get_icons(&model.engine_key).1,
+        plugin_version: provider_plugin_version(&model),
         engine_key: model.engine_key,
         display_name: model.display_name,
         is_enabled: model.is_enabled,
@@ -605,6 +608,7 @@ pub async fn delete_ai_engines_api_key_key(
     let response = AIEngineDetail {
         icon: ai_models.get_icons(&model.engine_key).0,
         icon_dark: ai_models.get_icons(&model.engine_key).1,
+        plugin_version: provider_plugin_version(&model),
         engine_key: model.engine_key,
         display_name: model.display_name,
         is_enabled: model.is_enabled,

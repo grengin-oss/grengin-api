@@ -191,6 +191,16 @@ pub fn build_provider(
     compile_provider(config, &engine.engine_key, api_key)
 }
 
+pub fn provider_plugin_version(engine: &ai_engines::Model) -> Option<String> {
+    let config = match engine.plugin_config.as_ref() {
+        Some(value) => parse_plugin_config(value).ok()?,
+        None => builtin_plugin_config(&engine.engine_key).ok()?,
+    };
+    parse_manifest(&config)
+        .ok()
+        .map(|manifest| manifest.version)
+}
+
 pub async fn register_provider(
     state: &AppState,
     engine: &ai_engines::Model,
@@ -236,21 +246,65 @@ fn error_class(error: &ProviderLoadError) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use llm_plugin::{ProviderError, ProviderPlugin};
+    use uuid::Uuid;
 
     use super::*;
+
+    fn test_engine(
+        engine_key: &str,
+        plugin_config: Option<serde_json::Value>,
+    ) -> ai_engines::Model {
+        let now = Utc::now();
+        ai_engines::Model {
+            id: Uuid::new_v4(),
+            display_name: engine_key.to_string(),
+            is_enabled: true,
+            engine_key: engine_key.to_string(),
+            api_key_status: ai_engines::ApiKeyStatus::NotValidated,
+            api_key: None,
+            whitelist_models: Vec::new(),
+            default_model: "<empty>".to_string(),
+            default_image_gen_model: None,
+            plugin_config,
+            api_key_validated_at: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
 
     #[test]
     fn all_embedded_providers_compile_through_the_declarative_runtime() {
         for engine_key in ["openai", "anthropic", "mistral", "gemini"] {
-            let provider = compile_provider(
-                builtin_plugin_config(engine_key).expect("embedded manifest"),
-                engine_key,
-                Some("test-key".to_string()),
-            )
-            .expect("compiled provider");
+            let config = builtin_plugin_config(engine_key).expect("embedded manifest");
+            let manifest = parse_manifest(&config).expect("embedded manifest parses");
+            assert_eq!(manifest.version, "1.0");
+            let provider = compile_provider(config, engine_key, Some("test-key".to_string()))
+                .expect("compiled provider");
             assert_eq!(provider.descriptor().id.as_str(), engine_key);
+            assert_eq!(provider.descriptor().version, "1.0");
         }
+    }
+
+    #[test]
+    fn resolves_active_versions_for_builtin_and_custom_engines() {
+        for engine_key in ["openai", "anthropic", "mistral", "gemini"] {
+            assert_eq!(
+                provider_plugin_version(&test_engine(engine_key, None)).as_deref(),
+                Some("1.0")
+            );
+        }
+
+        let mut config = builtin_plugin_config("openai").expect("embedded manifest");
+        config.manifest["id"] = serde_json::json!("custom-provider");
+        config.manifest["version"] = serde_json::json!("2.1");
+        let stored_config = serde_json::to_value(config).expect("serializable plugin config");
+        assert_eq!(
+            provider_plugin_version(&test_engine("custom-provider", Some(stored_config)))
+                .as_deref(),
+            Some("2.1")
+        );
     }
 
     #[test]

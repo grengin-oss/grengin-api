@@ -491,7 +491,7 @@ impl ProviderManifestV1 {
             )));
         }
         validate_identifier("provider id", &self.id)?;
-        validate_non_empty("provider version", &self.version)?;
+        validate_provider_version(&self.version)?;
         validate_non_empty("provider name", &self.name)?;
 
         let url = Url::parse(&self.base_url)
@@ -914,6 +914,22 @@ fn validate_non_empty(label: &str, value: &str) -> Result<(), ProviderError> {
     Ok(())
 }
 
+fn validate_provider_version(value: &str) -> Result<(), ProviderError> {
+    let parts = value.split('.').collect::<Vec<_>>();
+    if !(2..=3).contains(&parts.len())
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || !part.bytes().all(|byte| byte.is_ascii_digit())
+                || part.parse::<u32>().is_err()
+        })
+    {
+        return Err(ProviderError::InvalidManifest(
+            "provider version must use MAJOR.MINOR or MAJOR.MINOR.PATCH numeric format".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_capability(name: &str, capability: bool, operation: bool) -> Result<(), ProviderError> {
     if capability != operation {
         return Err(ProviderError::InvalidManifest(format!(
@@ -933,7 +949,7 @@ mod tests {
         json!({
             "manifestVersion": "1.0",
             "id": "example",
-            "version": "1.2.3",
+            "version": "1.2",
             "name": "Example",
             "baseUrl": "https://api.example.com/v1/",
             "credentials": [{"id": "api_key", "type": "secret", "required": true}],
@@ -963,6 +979,25 @@ mod tests {
     #[test]
     fn accepts_strict_versioned_manifest() {
         ProviderManifestV1::from_json(&serde_json::to_vec(&chat_manifest()).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn validates_provider_release_version_format() {
+        for version in ["1.0", "1.2.3"] {
+            let mut manifest = chat_manifest();
+            manifest["version"] = json!(version);
+            ProviderManifestV1::from_json(&serde_json::to_vec(&manifest).unwrap())
+                .expect("valid provider version");
+        }
+
+        for version in ["1", "1.x", "1.0-beta", "1.0.0.0"] {
+            let mut manifest = chat_manifest();
+            manifest["version"] = json!(version);
+            assert!(
+                ProviderManifestV1::from_json(&serde_json::to_vec(&manifest).unwrap()).is_err(),
+                "{version} should be rejected"
+            );
+        }
     }
 
     #[test]

@@ -1528,7 +1528,7 @@ mod tests {
             &serde_json::to_vec(&json!({
                 "manifestVersion": "1.0",
                 "id": "keyed",
-                "version": "1.0.0",
+                "version": "1.0",
                 "name": "Keyed",
                 "baseUrl": "https://api.example.com/v1/",
                 "credentials": [{"id": "api_key", "type": "secret", "required": true}],
@@ -1574,7 +1574,7 @@ mod tests {
             &serde_json::to_vec(&json!({
                 "manifestVersion": "1.0",
                 "id": "configured",
-                "version": "1.0.0",
+                "version": "1.0",
                 "name": "Configured",
                 "baseUrl": "https://api.example.com/",
                 "capabilities": {},

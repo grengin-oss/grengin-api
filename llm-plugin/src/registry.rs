@@ -99,16 +99,16 @@ mod tests {
     async fn replacement_keeps_existing_arc_alive() {
         let registry = ProviderRegistry::new();
         registry
-            .register(Arc::new(TestProvider::new("example", "1.0.0")))
+            .register(Arc::new(TestProvider::new("example", "1.0")))
             .await;
         let in_flight = registry.get_by_str("example").await.unwrap();
         let replaced = registry
-            .register(Arc::new(TestProvider::new("example", "2.0.0")))
+            .register(Arc::new(TestProvider::new("example", "2.0")))
             .await
             .unwrap();
 
-        assert_eq!(in_flight.descriptor().version, "1.0.0");
-        assert_eq!(replaced.descriptor().version, "1.0.0");
+        assert_eq!(in_flight.descriptor().version, "1.0");
+        assert_eq!(replaced.descriptor().version, "1.0");
         assert_eq!(
             registry
                 .get_by_str("example")
@@ -116,7 +116,7 @@ mod tests {
                 .unwrap()
                 .descriptor()
                 .version,
-            "2.0.0"
+            "2.0"
         );
     }
 }

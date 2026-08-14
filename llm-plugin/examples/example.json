@@ -2,7 +2,7 @@
   "$schema": "../schema/provider-plugin-v1.schema.json",
   "manifestVersion": "1.0",
   "id": "complete-example",
-  "version": "1.0.0",
+  "version": "1.0",
   "name": "Complete provider example",
   "description": "A schema-valid reference showing every Grengin LLM operation and stream lifecycle.",
   "baseUrl": "https://api.example.invalid/v1/",

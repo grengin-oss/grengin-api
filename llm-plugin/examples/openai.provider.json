@@ -2,7 +2,7 @@
   "$schema": "../schema/provider-plugin-v1.schema.json",
   "manifestVersion": "1.0",
   "id": "openai",
-  "version": "1.0.0",
+  "version": "1.0",
   "name": "OpenAI",
   "description": "OpenAI Responses API chat, tools, and provider-native web search.",
   "baseUrl": "https://api.openai.com/v1/",

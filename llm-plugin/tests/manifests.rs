@@ -10,6 +10,7 @@ fn reference_openai_compatible_manifest_is_valid() {
     ))
     .unwrap();
     assert_eq!(manifest.id, "openai-compatible");
+    assert_eq!(manifest.version, "1.0");
     assert!(manifest.capabilities.chat.unwrap().tools);
     assert!(manifest.capabilities.embeddings);
     assert!(manifest.capabilities.image_generation);
@@ -17,8 +18,9 @@ fn reference_openai_compatible_manifest_is_valid() {
 
 #[test]
 fn complete_example_manifest_is_valid() {
-    ProviderManifestV1::from_json(include_bytes!("../examples/example.json"))
+    let manifest = ProviderManifestV1::from_json(include_bytes!("../examples/example.json"))
         .expect("the complete example manifest must remain valid");
+    assert_eq!(manifest.version, "1.0");
 }
 
 #[test]
@@ -27,6 +29,7 @@ fn reference_anthropic_manifest_is_valid() {
         ProviderManifestV1::from_json(include_bytes!("../examples/anthropic.provider.json"))
             .unwrap();
     assert_eq!(manifest.id, "anthropic");
+    assert_eq!(manifest.version, "1.0");
     assert!(manifest.capabilities.chat.unwrap().streaming);
     let model = manifest
         .models
@@ -45,6 +48,7 @@ fn reference_gemini_image_manifest_is_valid() {
         ProviderManifestV1::from_json(include_bytes!("../examples/gemini-image.provider.json"))
             .unwrap();
     assert_eq!(manifest.id, "gemini-image");
+    assert_eq!(manifest.version, "1.0");
     assert!(manifest.capabilities.image_generation);
     assert!(manifest.capabilities.model_listing);
     assert!(manifest.operations.image_generation.is_some());
@@ -58,6 +62,7 @@ fn builtin_chat_manifests_are_valid() {
         include_bytes!("../examples/gemini.provider.json").as_slice(),
     ] {
         let manifest = ProviderManifestV1::from_json(bytes).unwrap();
+        assert_eq!(manifest.version, "1.0");
         assert!(manifest.operations.chat_stream.is_some());
         assert!(manifest.capabilities.chat.unwrap().tools);
     }

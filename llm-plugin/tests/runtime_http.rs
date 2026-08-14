@@ -146,7 +146,7 @@ fn manifest_value(base_url: &str, capabilities: Value, operations: Value) -> Val
     json!({
         "manifestVersion": "1.0",
         "id": "mock-provider",
-        "version": "1.0.0",
+        "version": "1.0",
         "name": "Mock provider",
         "baseUrl": base_url,
         "credentials": [{"id": "api_key", "type": "secret", "required": true}],
@@ -970,7 +970,7 @@ async fn rejects_a_manifest_whose_configuration_schema_is_itself_invalid() {
     let value = json!({
         "manifestVersion": "1.0",
         "id": "broken-schema",
-        "version": "1.0.0",
+        "version": "1.0",
         "name": "Broken schema",
         "baseUrl": "https://api.example.com/v1/",
         "capabilities": {},
@@ -1308,7 +1308,7 @@ async fn lists_models_from_a_static_manifest_without_an_endpoint() {
     let value = json!({
         "manifestVersion": "1.0",
         "id": "static-models",
-        "version": "1.0.0",
+        "version": "1.0",
         "name": "Static models",
         "baseUrl": "https://api.example.com/v1/",
         "capabilities": {"modelListing": true},

@@ -37,6 +37,7 @@ pub struct AIEngineDetail {
     pub icon: Option<String>,
     pub icon_dark: Option<String>,
     pub engine_key: String,
+    pub plugin_version: Option<String>,
     pub display_name: String,
     pub is_enabled: bool,
     pub api_key_configured: bool,
