@@ -498,6 +498,21 @@ mod tests {
         assert!(create_request.get("plugin_config").is_some());
         assert!(create_request.get("is_enabled").is_some());
         assert!(create_request.get("pluginConfig").is_none());
+        assert!(create_request.get("isEnabled").is_none());
+
+        let update_request = &schemas["AIEngineUpdate"]["properties"];
+        assert!(update_request.get("display_name").is_some());
+        assert!(update_request.get("api_key").is_some());
+        assert!(update_request.get("default_image_gen_model").is_some());
+        assert!(update_request.get("displayName").is_none());
+        assert!(update_request.get("apiKey").is_none());
+
+        let detail_response = &schemas["AIEngineDetail"]["properties"];
+        assert!(detail_response.get("engine_key").is_some());
+        assert!(detail_response.get("plugin_version").is_some());
+        assert!(detail_response.get("api_key_configured").is_some());
+        assert!(detail_response.get("engineKey").is_none());
+        assert!(detail_response.get("pluginVersion").is_none());
 
         let plugin_config = &schemas["PluginConfig"]["properties"];
         assert!(plugin_config.get("baseUrlOverride").is_some());
@@ -509,5 +524,17 @@ mod tests {
         assert!(validation_response.get("engine_key").is_some());
         assert!(validation_response.get("credential_required").is_some());
         assert!(validation_response.get("engineKey").is_none());
+
+        let connection_response = &schemas["AIEngineConnectionTest"]["properties"];
+        assert!(connection_response.get("models_available").is_some());
+        assert!(connection_response.get("error_class").is_some());
+        assert!(connection_response.get("modelsAvailable").is_none());
+        assert!(connection_response.get("errorClass").is_none());
+
+        let paths = &document["paths"];
+        assert!(paths.get("/admin/ai-engines/{engine_key}").is_some());
+        assert!(paths.get("/admin/ai-engines/{ai_engine_key}").is_none());
+        let parameters = &paths["/admin/ai-engines/{engine_key}"]["put"]["parameters"];
+        assert_eq!(parameters[0]["name"], "engine_key");
     }
 }

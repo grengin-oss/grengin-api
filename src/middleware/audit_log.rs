@@ -625,16 +625,10 @@ fn resolve_audit_action(method: &Method, route: &str) -> Option<AuditRouteAction
             resource_param: Some("engine_key"),
             snapshot_target: SnapshotTarget::AiEngineByKey,
         }),
-        ("PUT", "/admin/ai-engines/{engine-key}") => Some(AuditRouteAction {
-            action: "admin_ai_engine_updated",
-            resource_type: Some("ai_engine"),
-            resource_param: Some("engine-key"),
-            snapshot_target: SnapshotTarget::AiEngineByKey,
-        }),
-        ("DELETE", "/admin/ai-engines/{engine-key}/api-key") => Some(AuditRouteAction {
+        ("DELETE", "/admin/ai-engines/{engine_key}/api-key") => Some(AuditRouteAction {
             action: "admin_ai_engine_api_key_removed_or_rotated",
             resource_type: Some("ai_engine"),
-            resource_param: Some("engine-key"),
+            resource_param: Some("engine_key"),
             snapshot_target: SnapshotTarget::AiEngineByKey,
         }),
         ("PUT", "/admin/sso-providers/{provider_id}") => Some(AuditRouteAction {

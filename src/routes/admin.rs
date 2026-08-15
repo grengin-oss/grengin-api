@@ -95,15 +95,15 @@ pub fn admin_routes() -> Router<SharedState> {
             post(test_ai_engine_connection),
         )
         .route(
-            "/admin/ai-engines/{engine-key}/validate",
+            "/admin/ai-engines/{engine_key}/validate",
             post(validate_ai_engines_by_key),
         )
         .route(
-            "/admin/ai-engines/{engine-key}/api-key",
+            "/admin/ai-engines/{engine_key}/api-key",
             delete(delete_ai_engines_api_key_key),
         )
         .route(
-            "/admin/ai-engines/{engine-key}/models",
+            "/admin/ai-engines/{engine_key}/models",
             get(get_ai_engine_models_by_key),
         )
         .route("/admin/sso-providers", get(get_sso_providers))

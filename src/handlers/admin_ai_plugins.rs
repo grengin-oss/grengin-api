@@ -141,11 +141,11 @@ pub async fn create_ai_engine(
     ensure_manage(&claims, &state).await?;
     let manifest =
         parse_manifest(&request.plugin_config).map_err(|_| AuthError::InvalidRequest {
-            field: "pluginConfig",
+            field: "plugin_config",
         })?;
     if RESERVED_ENGINE_KEYS.contains(&manifest.id.as_str()) {
         return Err(AuthError::InvalidRequest {
-            field: "pluginConfig.manifest.id",
+            field: "plugin_config.manifest.id",
         });
     }
     if ai_engines::Entity::find()
@@ -163,7 +163,7 @@ pub async fn create_ai_engine(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     if manifest.credentials.is_empty() && api_key.is_some() {
-        return Err(AuthError::InvalidRequest { field: "apiKey" });
+        return Err(AuthError::InvalidRequest { field: "api_key" });
     }
     if request.is_enabled
         && manifest
@@ -172,7 +172,7 @@ pub async fn create_ai_engine(
             .is_some_and(|credential| credential.required)
         && api_key.is_none()
     {
-        return Err(AuthError::InvalidRequest { field: "apiKey" });
+        return Err(AuthError::InvalidRequest { field: "api_key" });
     }
     let compile_key = api_key.clone().or_else(|| {
         manifest
@@ -182,7 +182,7 @@ pub async fn create_ai_engine(
     });
     let provider = compile_provider(request.plugin_config.clone(), &manifest.id, compile_key)
         .map_err(|_| AuthError::InvalidRequest {
-            field: "pluginConfig",
+            field: "plugin_config",
         })?;
 
     let now = Utc::now();
@@ -206,7 +206,7 @@ pub async fn create_ai_engine(
         .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
     let plugin_config =
         serde_json::to_value(&request.plugin_config).map_err(|_| AuthError::InvalidRequest {
-            field: "pluginConfig",
+            field: "plugin_config",
         })?;
     let engine = ai_engines::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -270,7 +270,9 @@ pub async fn delete_ai_engine(
     ensure_manage(&claims, &state).await?;
     let engine = find_engine(&state, &engine_key).await?;
     if engine.plugin_config.is_none() {
-        return Err(AuthError::InvalidRequest { field: "engineKey" });
+        return Err(AuthError::InvalidRequest {
+            field: "engine_key",
+        });
     }
     ai_engines::Entity::delete_by_id(engine.id)
         .exec(&state.database)

@@ -5,8 +5,8 @@ use std::{collections::BTreeMap, env};
 
 use futures_util::StreamExt;
 use llm_plugin::{
-    ChatMessage, ChatRequest, ChatRole, ContentPart, DeclarativeProvider, ModelId, ProviderEvent,
-    ProviderManifestV1, ProviderPlugin, ProviderRuntimeConfig,
+    ChatMessage, ChatRequest, ChatRole, ContentPart, DeclarativeProvider, EmbeddingRequest,
+    ModelId, ProviderEvent, ProviderManifestV1, ProviderPlugin, ProviderRuntimeConfig,
 };
 use serde_json::Value;
 
@@ -23,6 +23,10 @@ const ANTHROPIC: &[u8] = include_bytes!("../examples/anthropic.provider.json");
 
 fn enabled() -> bool {
     env::var("GRENGIN_LIVE_PROVIDER_TESTS").as_deref() == Ok("1")
+}
+
+fn embeddings_enabled() -> bool {
+    env::var("GRENGIN_LIVE_EMBEDDING_TESTS").as_deref() == Ok("1")
 }
 
 async fn smoke(provider: LiveProvider) {
@@ -148,6 +152,86 @@ async fn smoke(provider: LiveProvider) {
     );
 }
 
+async fn embedding_smoke(provider: LiveProvider) {
+    if !embeddings_enabled() {
+        eprintln!(
+            "skipping {} embeddings: GRENGIN_LIVE_EMBEDDING_TESTS is not enabled",
+            provider.name
+        );
+        return;
+    }
+    let Some(api_key) = env::var(provider.key_env)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        eprintln!(
+            "skipping {} embeddings: {} is not configured",
+            provider.name, provider.key_env
+        );
+        return;
+    };
+    let model = provider.model;
+    let mut manifest = ProviderManifestV1::from_json(provider.manifest).unwrap();
+    manifest.base_url = provider.base_url.to_string();
+    let runtime = ProviderRuntimeConfig {
+        credentials: BTreeMap::from([("api_key".to_string(), api_key)]),
+        default_timeout_ms: 30_000,
+        max_response_bytes: 8 * 1024 * 1024,
+        ..Default::default()
+    };
+    let provider = DeclarativeProvider::new(manifest, runtime).unwrap();
+    let embedder = provider
+        .embeddings()
+        .expect("OpenAI-compatible manifest must provide embeddings");
+    let result = embedder
+        .embed(EmbeddingRequest {
+            model: ModelId::new(model),
+            inputs: vec![
+                "Grengin embedding provider smoke test".to_string(),
+                "A second input verifies batch ordering".to_string(),
+            ],
+            dimensions: None,
+            options: Value::Null,
+        })
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "{} embedding request failed: {}",
+                provider.descriptor().id,
+                error_class(&error)
+            )
+        });
+
+    assert_eq!(result.vectors.len(), 2, "embedding batch size changed");
+    let dimensions = result.vectors[0].len();
+    assert!(dimensions > 0, "provider returned an empty embedding");
+    assert!(
+        result
+            .vectors
+            .iter()
+            .all(|vector| vector.len() == dimensions),
+        "provider returned inconsistent embedding dimensions"
+    );
+    assert!(
+        result
+            .vectors
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite()),
+        "provider returned a non-finite embedding value"
+    );
+    assert!(
+        result.vectors.iter().flatten().any(|value| *value != 0.0),
+        "provider returned only zero values"
+    );
+    if let Some(usage) = result.usage {
+        assert!(
+            usage.total_tokens.map_or(true, |tokens| tokens > 0),
+            "provider returned invalid embedding token usage"
+        );
+    }
+}
+
 fn error_class(error: &llm_plugin::ProviderError) -> &'static str {
     match error {
         llm_plugin::ProviderError::InvalidManifest(_) => "invalid_manifest",
@@ -181,6 +265,23 @@ macro_rules! live_test {
                 manifest: $manifest,
             };
             smoke(provider).await;
+        }
+    };
+}
+
+macro_rules! live_embedding_test {
+    ($name:ident, $display:literal, $key:literal, $base:literal, $model:literal) => {
+        #[tokio::test]
+        #[ignore = "requires GRENGIN_LIVE_EMBEDDING_TESTS=1 and a provider credential"]
+        async fn $name() {
+            let provider = LiveProvider {
+                name: $display,
+                key_env: $key,
+                base_url: $base,
+                model: $model,
+                manifest: OPENAI_COMPATIBLE,
+            };
+            embedding_smoke(provider).await;
         }
     };
 }
@@ -248,4 +349,26 @@ live_test!(
     "https://api.anthropic.com/v1/",
     "claude-haiku-4-5-20251001",
     ANTHROPIC
+);
+
+live_embedding_test!(
+    openai_embedding_smoke,
+    "OpenAI",
+    "OPENAI_API_KEY",
+    "https://api.openai.com/v1/",
+    "text-embedding-3-small"
+);
+live_embedding_test!(
+    gemini_embedding_smoke,
+    "Gemini",
+    "GEMINI_API_KEY",
+    "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "gemini-embedding-001"
+);
+live_embedding_test!(
+    mistral_embedding_smoke,
+    "Mistral",
+    "MISTRAL_API_KEY",
+    "https://api.mistral.ai/v1/",
+    "mistral-embed"
 );

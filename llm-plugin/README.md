@@ -109,11 +109,11 @@ A manifest declares credential slots, never credential values:
 ```
 
 The current `ai_engines` integration supports at most one credential slot per
-custom plugin. Its value is submitted as `apiKey` and encrypted with Grengin's
+custom plugin. Its value is submitted as `api_key` and encrypted with Grengin's
 `APP_KEY`. Do not put keys, tokens, passwords, or private endpoints directly in
 a manifest.
 
-Administrator configuration is supplied separately in `pluginConfig` and is
+Administrator configuration is supplied separately in `plugin_config` and is
 validated against `configurationSchema`. JSON Schema defaults document intent,
 but Grengin does not automatically insert them.
 
@@ -296,7 +296,7 @@ manifest versions:
 
 ```bash
 jq -n --slurpfile manifest provider.json '{
-  pluginConfig: {
+  plugin_config: {
     manifest: $manifest[0],
     configuration: {},
     baseUrlOverride: null,
@@ -323,12 +323,12 @@ and enable it only after the connection succeeds:
 export PROVIDER_API_KEY='replace-with-provider-key'
 
 jq -n --slurpfile manifest provider.json '{
-  displayName: $manifest[0].name,
-  apiKey: env.PROVIDER_API_KEY,
-  isEnabled: false,
-  whitelistedModels: ($manifest[0].models | map(.id)),
-  defaultModel: ($manifest[0].models[0].id // null),
-  pluginConfig: {
+  display_name: $manifest[0].name,
+  api_key: env.PROVIDER_API_KEY,
+  is_enabled: false,
+  whitelisted_models: ($manifest[0].models | map(.id)),
+  default_model: ($manifest[0].models[0].id // null),
+  plugin_config: {
     manifest: $manifest[0],
     configuration: {},
     baseUrlOverride: null,
@@ -350,7 +350,7 @@ curl --fail-with-body -X POST \
 curl --fail-with-body -X PUT \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  --data-binary '{"isEnabled":true}' \
+  --data-binary '{"is_enabled":true}' \
   http://localhost:8080/admin/ai-engines/example-provider
 ```
 
@@ -377,6 +377,14 @@ The test layers are:
 New provider manifests should include deterministic request and response
 fixtures. Live credentials must never be committed or required by the default
 test suite.
+
+With `OPENAI_API_KEY`, `GEMINI_API_KEY`, and `MISTRAL_API_KEY` configured, run
+the live embedding smoke tests locally with:
+
+```bash
+GRENGIN_LIVE_EMBEDDING_TESTS=1 cargo test -p llm-plugin \
+  --test live_providers embedding_smoke -j 2 -- --ignored --test-threads=1
+```
 
 ## Security Rules
 

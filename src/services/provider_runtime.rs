@@ -27,14 +27,14 @@ pub enum ProviderLoadError {
 
 pub fn parse_plugin_config(value: &serde_json::Value) -> Result<PluginConfig, ProviderLoadError> {
     serde_json::from_value(value.clone()).map_err(|error| {
-        ProviderError::InvalidManifest(format!("pluginConfig is invalid: {error}")).into()
+        ProviderError::InvalidManifest(format!("plugin_config is invalid: {error}")).into()
     })
 }
 
 pub fn parse_manifest(config: &PluginConfig) -> Result<ProviderManifestV1, ProviderLoadError> {
     if !config.configuration.is_object() {
         return Err(ProviderError::InvalidManifest(
-            "pluginConfig.configuration must be an object".to_string(),
+            "plugin_config.configuration must be an object".to_string(),
         )
         .into());
     }

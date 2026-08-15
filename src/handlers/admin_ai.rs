@@ -181,10 +181,10 @@ pub async fn get_ai_engines(
 
 #[utoipa::path(
     get,
-    path = "/admin/ai-engines/{ai_engine_key}",
+    path = "/admin/ai-engines/{engine_key}",
     tag = "admin",
     params(
-        ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
+        ("engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
     ),
     responses(
        (status = 200, body = AIEngineDetail),
@@ -246,10 +246,10 @@ pub async fn get_ai_engines_by_key(
 
 #[utoipa::path(
     get,
-    path = "/admin/ai-engines/{ai_engine_key}/models",
+    path = "/admin/ai-engines/{engine_key}/models",
     tag = "admin",
     params(
-        ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
+        ("engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
     ),
     responses(
        (status = 200, body = AIEngineModels),
@@ -344,10 +344,10 @@ pub async fn get_ai_engine_models_by_key(
 
 #[utoipa::path(
     put,
-    path = "/admin/ai-engines/{ai_engine_key}",
+    path = "/admin/ai-engines/{engine_key}",
     tag = "admin",
     params(
-        ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
+        ("engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
     ),
     responses(
         (status = 200, body = AIEngineDetail),
@@ -407,21 +407,21 @@ pub async fn update_ai_engines_by_key(
     if let Some(plugin_config) = req.plugin_config {
         if ai_engine.plugin_config.is_none() {
             return Err(AuthError::InvalidRequest {
-                field: "pluginConfig",
+                field: "plugin_config",
             });
         }
         let manifest = parse_manifest(&plugin_config).map_err(|_| AuthError::InvalidRequest {
-            field: "pluginConfig",
+            field: "plugin_config",
         })?;
         if manifest.id != ai_engine_key {
             return Err(AuthError::InvalidRequest {
-                field: "pluginConfig.manifest.id",
+                field: "plugin_config.manifest.id",
             });
         }
         active_model.plugin_config =
             Set(Some(serde_json::to_value(plugin_config).map_err(|_| {
                 AuthError::InvalidRequest {
-                    field: "pluginConfig",
+                    field: "plugin_config",
                 }
             })?));
     }
@@ -448,16 +448,16 @@ pub async fn update_ai_engines_by_key(
         Some(
             build_provider(&app_state.settings.auth.app_key, &model).map_err(|_| {
                 AuthError::InvalidRequest {
-                    field: "pluginConfig",
+                    field: "plugin_config",
                 }
             })?,
         )
     } else if let Some(config_value) = model.plugin_config.as_ref() {
         let config = parse_plugin_config(config_value).map_err(|_| AuthError::InvalidRequest {
-            field: "pluginConfig",
+            field: "plugin_config",
         })?;
         let manifest = parse_manifest(&config).map_err(|_| AuthError::InvalidRequest {
-            field: "pluginConfig",
+            field: "plugin_config",
         })?;
         let compile_key = decrypted_api_key.clone().or_else(|| {
             (!model.is_enabled)
@@ -468,7 +468,7 @@ pub async fn update_ai_engines_by_key(
         Some(
             compile_provider(config, &model.engine_key, compile_key).map_err(|_| {
                 AuthError::InvalidRequest {
-                    field: "pluginConfig",
+                    field: "plugin_config",
                 }
             })?,
         )
@@ -532,10 +532,10 @@ pub async fn update_ai_engines_by_key(
 
 #[utoipa::path(
     delete,
-    path = "/admin/ai-engines/{ai_engine_key}/api-key",
+    path = "/admin/ai-engines/{engine_key}/api-key",
     tag = "admin",
     params(
-        ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
+        ("engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
     ),
     responses(
        (status = 200, body = AIEngineDetail),
@@ -628,10 +628,10 @@ pub async fn delete_ai_engines_api_key_key(
 
 #[utoipa::path(
     post,
-    path = "/admin/ai-engines/{ai_engine_key}/validate",
+    path = "/admin/ai-engines/{engine_key}/validate",
     tag = "admin",
     params(
-        ("ai_engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
+        ("engine_key" = String, Path, description = "Engine key example 'openai','anthropic'")
     ),
     responses(
         (status = 200, body = AIEngineValidation),

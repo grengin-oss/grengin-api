@@ -9,38 +9,26 @@ use utoipa::ToSchema;
 #[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct AIEngineCreate {
-    #[serde(alias = "displayName")]
     pub display_name: Option<String>,
-    #[serde(alias = "apiKey")]
     pub api_key: Option<String>,
-    #[serde(default, alias = "isEnabled")]
+    #[serde(default)]
     pub is_enabled: bool,
-    #[serde(default, alias = "whitelistedModels")]
+    #[serde(default)]
     pub whitelisted_models: Vec<String>,
-    #[serde(alias = "defaultModel")]
     pub default_model: Option<String>,
-    #[serde(alias = "defaultImageGenModel")]
     pub default_image_gen_model: Option<String>,
-    #[serde(alias = "pluginConfig")]
     pub plugin_config: PluginConfig,
 }
 
 #[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct AIEngineUpdate {
-    #[serde(alias = "displayName")]
     pub display_name: Option<String>,
-    #[serde(alias = "isEnabled")]
     pub is_enabled: Option<bool>,
-    #[serde(alias = "apiKey")]
     pub api_key: Option<String>,
-    #[serde(alias = "whitelistedModels")]
     pub whitelisted_models: Option<Vec<String>>,
-    #[serde(alias = "defaultModel")]
     pub default_model: Option<String>,
-    #[serde(alias = "defaultImageGenModel")]
     pub default_image_gen_model: Option<String>,
-    #[serde(alias = "pluginConfig")]
     pub plugin_config: Option<PluginConfig>,
 }
 
@@ -69,7 +57,6 @@ pub struct AIEngineDetail {
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct AIEnginePluginValidationRequest {
-    #[serde(alias = "pluginConfig")]
     pub plugin_config: PluginConfig,
 }
 
@@ -88,7 +75,7 @@ pub struct AIEnginePluginValidationResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct AIEngineConnectionTest {
     pub valid: bool,
     pub mode: String,
@@ -152,16 +139,47 @@ mod tests {
     }
 
     #[test]
-    fn plugin_validation_accepts_legacy_camel_case_envelope() {
-        let request: AIEnginePluginValidationRequest = serde_json::from_value(json!({
-            "pluginConfig": plugin_document()
+    fn ai_engine_create_and_update_accept_snake_case() {
+        let create: AIEngineCreate = serde_json::from_value(json!({
+            "display_name": "Example",
+            "api_key": "secret",
+            "is_enabled": false,
+            "whitelisted_models": ["example-chat"],
+            "default_model": "example-chat",
+            "default_image_gen_model": null,
+            "plugin_config": plugin_document()
         }))
-        .expect("legacy camelCase plugin validation request");
+        .expect("snake_case create request");
+        let update: AIEngineUpdate = serde_json::from_value(json!({
+            "display_name": "Example 2",
+            "is_enabled": true,
+            "whitelisted_models": ["example-chat"],
+            "default_model": "example-chat",
+            "plugin_config": plugin_document()
+        }))
+        .expect("snake_case update request");
 
-        assert_eq!(
-            request.plugin_config.base_url_override.as_deref(),
-            Some("https://example.com")
-        );
+        assert_eq!(create.display_name.as_deref(), Some("Example"));
+        assert_eq!(update.display_name.as_deref(), Some("Example 2"));
+        assert_eq!(update.is_enabled, Some(true));
+    }
+
+    #[test]
+    fn ai_engine_requests_reject_camel_case_envelopes() {
+        let validation = serde_json::from_value::<AIEnginePluginValidationRequest>(json!({
+            "pluginConfig": plugin_document()
+        }));
+        let create = serde_json::from_value::<AIEngineCreate>(json!({
+            "displayName": "Example",
+            "pluginConfig": plugin_document()
+        }));
+        let update = serde_json::from_value::<AIEngineUpdate>(json!({
+            "isEnabled": true
+        }));
+
+        assert!(validation.is_err());
+        assert!(create.is_err());
+        assert!(update.is_err());
     }
 
     #[test]
@@ -182,5 +200,21 @@ mod tests {
         assert!(value.get("credential_required").is_some());
         assert!(value.get("engineKey").is_none());
         assert!(value.get("credentialRequired").is_none());
+    }
+
+    #[test]
+    fn connection_test_response_serializes_as_snake_case() {
+        let response = AIEngineConnectionTest {
+            valid: true,
+            mode: "model_list".to_string(),
+            models_available: Some(3),
+            error_class: None,
+        };
+        let value = serde_json::to_value(response).expect("connection test response JSON");
+
+        assert_eq!(value["models_available"], 3);
+        assert!(value.get("error_class").is_some());
+        assert!(value.get("modelsAvailable").is_none());
+        assert!(value.get("errorClass").is_none());
     }
 }
