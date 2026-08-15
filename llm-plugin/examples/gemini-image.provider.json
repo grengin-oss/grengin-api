@@ -31,6 +31,7 @@
     {
       "id": "gemini-3.1-flash-lite-image",
       "name": "Gemini 3.1 Flash Lite Image",
+      "modelType": "image_generator",
       "capabilities": { "imageGeneration": true }
     }
   ],

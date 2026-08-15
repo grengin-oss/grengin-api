@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use llm_plugin::{ProviderError, ProviderModel, ProviderPlugin};
+use llm_plugin::{ProviderError, ProviderModel, ProviderModelType, ProviderPlugin};
 
 use crate::dto::models::{ModelInfo, ModelType};
 
@@ -20,23 +20,10 @@ pub async fn find_provider_model(
 }
 
 pub fn model_type(model: &ProviderModel) -> ModelType {
-    if let Some(model_type) = model
-        .metadata
-        .get("modelType")
-        .and_then(|value| value.as_str())
-    {
-        return match model_type {
-            "image_generator" => ModelType::ImageGenerator,
-            "text_embedder" => ModelType::TextEmbedder,
-            _ => ModelType::TextGenerator,
-        };
-    }
-    if model.capabilities.image_generation && model.capabilities.chat.is_none() {
-        ModelType::ImageGenerator
-    } else if model.capabilities.embeddings && model.capabilities.chat.is_none() {
-        ModelType::TextEmbedder
-    } else {
-        ModelType::TextGenerator
+    match model.model_type {
+        ProviderModelType::TextGenerator => ModelType::TextGenerator,
+        ProviderModelType::TextEmbedder => ModelType::TextEmbedder,
+        ProviderModelType::ImageGenerator => ModelType::ImageGenerator,
     }
 }
 
@@ -52,13 +39,17 @@ pub fn to_model_info(provider_key: &str, model: ProviderModel) -> ModelInfo {
         input_token_rate: metadata_f64(&model, "inputTokenRate"),
         output_token_rate: metadata_f64(&model, "outputTokenRate"),
         image_input_token_rate: metadata_f64(&model, "imageInputTokenRate"),
+        image_cached_input_token_rate: metadata_f64(&model, "imageCachedInputTokenRate"),
         image_output_token_rate: metadata_f64(&model, "imageOutputTokenRate"),
         cached_input_token_rate: metadata_f64(&model, "cachedInputTokenRate"),
         cache_creation_token_rate: metadata_f64(&model, "cacheCreationTokenRate"),
+        max_input_tokens: metadata_i32(&model, "maxInputTokens"),
         max_output_tokens: metadata_i32(&model, "maxOutputTokens"),
         supports_streaming: chat.is_some_and(|chat| chat.streaming),
         supports_tools: chat.is_some_and(|chat| chat.tools),
+        supports_reasoning: chat.is_some_and(|chat| chat.reasoning),
         supports_vision: chat.is_some_and(|chat| chat.vision),
+        supports_audio: metadata_bool(&model, "supportsAudio"),
         supports_pdf_native: metadata_bool(&model, "supportsPdfNative"),
         supports_web_search: metadata_bool(&model, "supportsWebSearch"),
         supports_multiple_images: metadata_bool(&model, "supportsMultipleImages"),
@@ -100,26 +91,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn explicit_model_type_wins_for_multi_capability_provider() {
+    fn canonical_model_type_wins_for_multi_capability_provider() {
         let model = ProviderModel {
             id: ModelId::new("image-1"),
             name: "Image 1".to_string(),
+            model_type: ProviderModelType::ImageGenerator,
             capabilities: ProviderCapabilities {
                 chat: Some(Default::default()),
                 embeddings: true,
                 image_generation: true,
                 model_listing: true,
             },
-            metadata: serde_json::json!({"modelType": "image_generator"}),
+            metadata: serde_json::Value::Null,
         };
         assert_eq!(model_type(&model), ModelType::ImageGenerator);
     }
 
     #[test]
-    fn image_only_capability_is_classified_without_metadata() {
+    fn image_generator_type_maps_without_metadata() {
         let model = ProviderModel {
             id: ModelId::new("image-1"),
             name: "Image 1".to_string(),
+            model_type: ProviderModelType::ImageGenerator,
             capabilities: ProviderCapabilities {
                 image_generation: true,
                 ..Default::default()
@@ -134,15 +127,25 @@ mod tests {
         let model = ProviderModel {
             id: ModelId::new("priced-model"),
             name: "Priced model".to_string(),
+            model_type: ProviderModelType::TextGenerator,
             capabilities: ProviderCapabilities {
-                chat: Some(Default::default()),
+                chat: Some(llm_plugin::ChatCapabilities {
+                    streaming: true,
+                    tools: true,
+                    vision: true,
+                    reasoning: true,
+                }),
                 ..Default::default()
             },
             metadata: serde_json::json!({
                 "inputTokenRate": 1.0,
                 "outputTokenRate": 5.0,
+                "imageInputTokenRate": 2.0,
+                "imageCachedInputTokenRate": 0.2,
+                "imageOutputTokenRate": 8.0,
                 "cachedInputTokenRate": 0.1,
                 "cacheCreationTokenRate": 1.25,
+                "maxInputTokens": 128000,
                 "maxOutputTokens": 64000
             }),
         };
@@ -152,6 +155,11 @@ mod tests {
         assert_eq!(info.output_token_rate, Some(5.0));
         assert_eq!(info.cached_input_token_rate, Some(0.1));
         assert_eq!(info.cache_creation_token_rate, Some(1.25));
+        assert_eq!(info.image_input_token_rate, Some(2.0));
+        assert_eq!(info.image_cached_input_token_rate, Some(0.2));
+        assert_eq!(info.image_output_token_rate, Some(8.0));
+        assert_eq!(info.max_input_tokens, Some(128000));
         assert_eq!(info.max_output_tokens, Some(64000));
+        assert!(info.supports_reasoning);
     }
 }

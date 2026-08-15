@@ -232,25 +232,48 @@ fn parse_text_model(value: &Value) -> Result<ModelInfo, Error> {
         .pointer("/contextWindow/output")
         .and_then(Value::as_i64)
         .map(|v| v as i32);
+    let max_input_tokens = value
+        .pointer("/contextWindow/input")
+        .and_then(Value::as_i64)
+        .map(|v| v as i32);
 
     Ok(ModelInfo {
         key,
         name,
         engine,
         model_type: ModelType::TextGenerator,
-        comment: None,
+        comment: value
+            .get("note")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         input_token_rate,
         output_token_rate,
         image_input_token_rate: None,
+        image_cached_input_token_rate: None,
         image_output_token_rate: None,
         cached_input_token_rate,
         cache_creation_token_rate,
+        max_input_tokens,
         max_output_tokens,
         supports_streaming: true,
         supports_tools: true,
-        supports_vision: true,
-        supports_pdf_native: true,
-        supports_web_search: false,
+        supports_reasoning: value
+            .get("reasoning")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        supports_vision: value
+            .get("vision")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        supports_audio: value.get("audio").and_then(Value::as_bool).unwrap_or(false),
+        supports_pdf_native: value
+            .get("pdfNative")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        supports_web_search: value
+            .get("webSearch")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         supports_multiple_images: false,
         max_images: None,
         dimensions: None,
@@ -273,6 +296,9 @@ fn parse_image_model(value: &Value) -> Result<ModelInfo, Error> {
     let image_output_token_rate = pricing
         .and_then(|p| p.get("image_output"))
         .and_then(Value::as_f64);
+    let image_cached_input_token_rate = pricing
+        .and_then(|p| p.get("image_cached_input"))
+        .and_then(Value::as_f64);
     let supports_multiple_images = value
         .get("supportsMultipleImages")
         .and_then(Value::as_bool)
@@ -283,17 +309,24 @@ fn parse_image_model(value: &Value) -> Result<ModelInfo, Error> {
         name,
         engine,
         model_type: ModelType::ImageGenerator,
-        comment: None,
+        comment: value
+            .get("note")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         input_token_rate,
         output_token_rate,
         image_input_token_rate,
+        image_cached_input_token_rate,
         image_output_token_rate,
         cached_input_token_rate: None,
         cache_creation_token_rate: None,
+        max_input_tokens: None,
         max_output_tokens: None,
         supports_streaming: false,
         supports_tools: false,
+        supports_reasoning: false,
         supports_vision: false,
+        supports_audio: false,
         supports_pdf_native: false,
         supports_web_search: false,
         supports_multiple_images,
@@ -316,23 +349,34 @@ fn parse_embed_model(value: &Value, provider_key: &str) -> Result<ModelInfo, Err
         .get("pricing")
         .and_then(|p| p.get("per_1M_tokens"))
         .and_then(Value::as_f64);
+    let max_input_tokens = value
+        .get("max_tokens")
+        .and_then(Value::as_i64)
+        .map(|value| value as i32);
 
     Ok(ModelInfo {
         key: id.to_string(),
         name: id.to_string(),
         engine: provider_key.to_string(),
         model_type: ModelType::TextEmbedder,
-        comment: None,
+        comment: value
+            .get("notes")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         input_token_rate: per_1m,
         output_token_rate: None,
         image_input_token_rate: None,
+        image_cached_input_token_rate: None,
         image_output_token_rate: None,
         cached_input_token_rate: None,
         cache_creation_token_rate: None,
+        max_input_tokens,
         max_output_tokens: None,
         supports_streaming: false,
         supports_tools: false,
+        supports_reasoning: false,
         supports_vision: false,
+        supports_audio: false,
         supports_pdf_native: false,
         supports_web_search: false,
         supports_multiple_images: false,
@@ -361,4 +405,76 @@ fn get_str(value: &Value, field: &str) -> Result<String, Error> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| anyhow!("missing or invalid field {field}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn parses_text_catalog_capabilities_limits_and_pricing() {
+        let model = parse_text_model(&json!({
+            "key": "chat-1",
+            "name": "Chat 1",
+            "engine": "example",
+            "note": "Reviewed model",
+            "pricingPer1M": {"input": 0.25, "output": 1.5, "cached_input": 0.05},
+            "vision": true,
+            "audio": true,
+            "webSearch": true,
+            "contextWindow": {"input": 128000, "output": 8192}
+        }))
+        .unwrap();
+
+        assert_eq!(model.model_type, ModelType::TextGenerator);
+        assert_eq!(model.input_token_rate, Some(0.25));
+        assert_eq!(model.cached_input_token_rate, Some(0.05));
+        assert_eq!(model.max_input_tokens, Some(128000));
+        assert_eq!(model.max_output_tokens, Some(8192));
+        assert!(model.supports_vision);
+        assert!(model.supports_audio);
+        assert!(model.supports_web_search);
+        assert_eq!(model.comment.as_deref(), Some("Reviewed model"));
+    }
+
+    #[test]
+    fn parses_embedding_and_image_catalog_costs() {
+        let embedding = parse_embed_model(
+            &json!({
+                "id": "embed-1",
+                "dimensions": 1536,
+                "max_tokens": 8192,
+                "pricing": {"per_1M_tokens": 0.02},
+                "notes": "Embedding model"
+            }),
+            "example",
+        )
+        .unwrap();
+        let image = parse_image_model(&json!({
+            "key": "image-1",
+            "name": "Image 1",
+            "engine": "example",
+            "pricingPer1M": {
+                "input": 2.0,
+                "output": 8.0,
+                "image_input": 2.5,
+                "image_cached_input": 0.25,
+                "image_output": 8.0
+            },
+            "supportsMultipleImages": true
+        }))
+        .unwrap();
+
+        assert_eq!(embedding.model_type, ModelType::TextEmbedder);
+        assert_eq!(embedding.dimensions, Some(1536));
+        assert_eq!(embedding.max_input_tokens, Some(8192));
+        assert_eq!(embedding.input_token_rate, Some(0.02));
+        assert_eq!(image.model_type, ModelType::ImageGenerator);
+        assert_eq!(image.image_input_token_rate, Some(2.5));
+        assert_eq!(image.image_cached_input_token_rate, Some(0.25));
+        assert_eq!(image.image_output_token_rate, Some(8.0));
+        assert!(image.supports_multiple_images);
+    }
 }

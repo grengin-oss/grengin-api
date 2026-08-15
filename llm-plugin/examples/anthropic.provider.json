@@ -19,7 +19,7 @@
       "streaming": true,
       "tools": true,
       "vision": true,
-      "reasoning": false
+      "reasoning": true
     }
   },
   "mappings": {
@@ -120,6 +120,7 @@
     {
       "id": "claude-haiku-4-5-20251001",
       "name": "Claude Haiku 4.5",
+      "modelType": "text_generator",
       "capabilities": {
         "chat": {
           "streaming": true,

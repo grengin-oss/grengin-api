@@ -331,7 +331,16 @@
       "response": {
         "bodyEncoding": "json",
         "modelsPointer": "/data",
-        "idPointer": "/id"
+        "idPointer": "/id",
+        "defaultModelType": "text_generator",
+        "defaultCapabilities": {
+          "chat": {
+            "streaming": true,
+            "tools": true,
+            "vision": true,
+            "reasoning": false
+          }
+        }
       }
     }
   }

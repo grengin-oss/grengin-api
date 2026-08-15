@@ -6,8 +6,8 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use futures_util::StreamExt;
 use llm_plugin::{
     ChatRequest, DeclarativeProvider, EmbeddingRequest, ImageRequest, ModelId, ProviderError,
-    ProviderEvent, ProviderEventStream, ProviderManifestV1, ProviderPlugin, ProviderRuntimeConfig,
-    ToolCallId, ToolResult,
+    ProviderEvent, ProviderEventStream, ProviderManifestV1, ProviderModelType, ProviderPlugin,
+    ProviderRuntimeConfig, ToolCallId, ToolResult,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -1313,8 +1313,8 @@ async fn lists_models_from_a_static_manifest_without_an_endpoint() {
         "baseUrl": "https://api.example.com/v1/",
         "capabilities": {"modelListing": true},
         "models": [
-            {"id": "model-a", "name": "Model A", "capabilities": {"embeddings": true}},
-            {"id": "model-b", "name": "Model B"}
+            {"id": "model-a", "name": "Model A", "modelType": "text_embedder"},
+            {"id": "model-b", "name": "Model B", "modelType": "text_generator"}
         ],
         "operations": {}
     });
@@ -1330,8 +1330,8 @@ async fn lists_models_from_a_static_manifest_without_an_endpoint() {
             .collect::<Vec<_>>(),
         vec!["model-a", "model-b"]
     );
-    assert!(models[0].capabilities.embeddings);
-    assert!(!models[1].capabilities.embeddings);
+    assert_eq!(models[0].model_type, ProviderModelType::TextEmbedder);
+    assert_eq!(models[1].model_type, ProviderModelType::TextGenerator);
 }
 
 #[tokio::test]
@@ -1347,7 +1347,13 @@ async fn decodes_model_listings_from_the_provider() {
                 "path": "models",
                 "headers": {"Authorization": {"secret": "api_key", "prefix": "Bearer "}},
                 "bodyEncoding": "none",
-                "response": {"modelsPointer": "/data", "idPointer": "/id", "namePointer": "/display"}
+                "response": {
+                    "modelsPointer": "/data",
+                    "idPointer": "/id",
+                    "namePointer": "/display",
+                    "defaultModelType": "text_generator",
+                    "defaultCapabilities": {}
+                }
             }
         }),
     );
@@ -1361,6 +1367,138 @@ async fn decodes_model_listings_from_the_provider() {
     let requests = requests.lock().await;
     assert!(requests[0].head.starts_with("GET /v1/models HTTP/1.1"));
     assert_eq!(requests[0].body, Vec::<u8>::new());
+}
+
+#[tokio::test]
+async fn maps_and_enriches_all_canonical_model_types() {
+    let response = json!({
+        "data": [
+            {
+                "id": "chat-1",
+                "display": "Provider chat name",
+                "kind": "text_generator",
+                "capabilities": {"chat": {"streaming": true, "tools": false, "vision": false, "reasoning": false}},
+                "metadata": {"inputTokenRate": 99.0, "providerField": "kept"}
+            },
+            {
+                "id": "embed-1",
+                "display": "Embedding 1",
+                "kind": "text_embedder",
+                "capabilities": {"embeddings": true},
+                "metadata": {"inputTokenRate": 0.02, "dimensions": 1536}
+            },
+            {
+                "id": "image-1",
+                "display": "Provider image name",
+                "kind": "image_generator",
+                "capabilities": {"imageGeneration": true},
+                "metadata": {"pricePerImage": 99.0}
+            }
+        ]
+    });
+    let (base_url, _) = serve(vec![MockResponse::json("200 OK", &response)]).await;
+    let mut value: Value = serde_json::from_slice(include_bytes!(
+        "../examples/openai-compatible.provider.json"
+    ))
+    .unwrap();
+    value["baseUrl"] = json!(&base_url);
+    value["capabilities"]["chat"]["reasoning"] = json!(true);
+    value["models"] = json!([
+        {
+            "id": "chat-1",
+            "name": "Catalog Chat",
+            "modelType": "text_generator",
+            "capabilities": {"chat": {"streaming": true, "tools": true, "vision": true, "reasoning": true}},
+            "metadata": {"inputTokenRate": 1.25, "outputTokenRate": 5.0, "maxInputTokens": 128000}
+        },
+        {
+            "id": "image-1",
+            "name": "Catalog Image",
+            "modelType": "image_generator",
+            "capabilities": {"imageGeneration": true},
+            "metadata": {"pricePerImage": 0.04, "supportsMultipleImages": true}
+        }
+    ]);
+    value["operations"]["listModels"]["response"]["modelMapping"] = json!({
+        "id": {"$get": "item.id"},
+        "name": {"$get": "item.display"},
+        "modelType": {"$get": "item.kind"},
+        "capabilities": {"$get": "item.capabilities"},
+        "metadata": {"$get": "item.metadata"}
+    });
+    let manifest = ProviderManifestV1::from_json(&serde_json::to_vec(&value).unwrap()).unwrap();
+    let provider = DeclarativeProvider::new(manifest, runtime(base_url)).unwrap();
+
+    let models = provider.models().unwrap().list_models().await.unwrap();
+    assert_eq!(models.len(), 3);
+    assert_eq!(models[0].model_type, ProviderModelType::TextGenerator);
+    assert_eq!(models[0].name, "Catalog Chat");
+    assert!(models[0].capabilities.chat.as_ref().unwrap().reasoning);
+    assert_eq!(models[0].metadata["inputTokenRate"], 1.25);
+    assert_eq!(models[0].metadata["providerField"], "kept");
+    assert_eq!(models[1].model_type, ProviderModelType::TextEmbedder);
+    assert!(models[1].capabilities.embeddings);
+    assert_eq!(models[1].metadata["dimensions"], 1536);
+    assert_eq!(models[2].model_type, ProviderModelType::ImageGenerator);
+    assert!(models[2].capabilities.image_generation);
+    assert_eq!(models[2].name, "Catalog Image");
+    assert_eq!(models[2].metadata["pricePerImage"], 0.04);
+}
+
+#[tokio::test]
+async fn rejects_duplicate_dynamic_model_ids() {
+    let response = json!({"data": [{"id": "duplicate"}, {"id": "duplicate"}]});
+    let (base_url, _) = serve(vec![MockResponse::json("200 OK", &response)]).await;
+    let provider = provider(
+        base_url,
+        json!({"modelListing": true}),
+        json!({
+            "listModels": {
+                "method": "GET",
+                "path": "models",
+                "bodyEncoding": "none",
+                "response": {
+                    "modelsPointer": "/data",
+                    "idPointer": "/id",
+                    "defaultModelType": "text_generator",
+                    "defaultCapabilities": {}
+                }
+            }
+        }),
+    );
+
+    let error = provider.models().unwrap().list_models().await.unwrap_err();
+    assert!(matches!(error, ProviderError::ResponseMapping(_)));
+}
+
+#[tokio::test]
+async fn rejects_mapped_model_capabilities_outside_provider_contract() {
+    let response = json!({"data": [{"id": "image-1"}]});
+    let (base_url, _) = serve(vec![MockResponse::json("200 OK", &response)]).await;
+    let provider = provider(
+        base_url,
+        json!({"modelListing": true}),
+        json!({
+            "listModels": {
+                "method": "GET",
+                "path": "models",
+                "bodyEncoding": "none",
+                "response": {
+                    "modelsPointer": "/data",
+                    "modelMapping": {
+                        "id": {"$get": "item.id"},
+                        "name": {"$get": "item.id"},
+                        "modelType": {"$literal": "image_generator"},
+                        "capabilities": {"$literal": {"imageGeneration": true}},
+                        "metadata": {"$literal": {}}
+                    }
+                }
+            }
+        }),
+    );
+
+    let error = provider.models().unwrap().list_models().await.unwrap_err();
+    assert!(matches!(error, ProviderError::ResponseMapping(_)));
 }
 
 async fn embedding_error(status: &str, body: &[u8]) -> ProviderError {

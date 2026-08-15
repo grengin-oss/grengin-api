@@ -531,6 +531,23 @@ mod tests {
         assert!(connection_response.get("modelsAvailable").is_none());
         assert!(connection_response.get("errorClass").is_none());
 
+        let model_response = &schemas["AiModel"]["properties"];
+        assert!(model_response.get("model_type").is_some());
+        assert!(model_response.get("input_token_rate").is_some());
+        assert!(
+            model_response
+                .get("image_cached_input_token_rate")
+                .is_some()
+        );
+        assert!(model_response.get("max_input_tokens").is_some());
+        assert!(model_response.get("modelType").is_none());
+        assert!(model_response.get("inputTokenRate").is_none());
+
+        let model_capabilities = &schemas["AiModelCapabilities"]["properties"];
+        assert!(model_capabilities.get("function_calling").is_some());
+        assert!(model_capabilities.get("image_generation").is_some());
+        assert!(model_capabilities.get("functionCalling").is_none());
+
         let paths = &document["paths"];
         assert!(paths.get("/admin/ai-engines/{engine_key}").is_some());
         assert!(paths.get("/admin/ai-engines/{ai_engine_key}").is_none());

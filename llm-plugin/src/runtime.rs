@@ -1,7 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::BTreeMap, fmt, net::IpAddr, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    net::IpAddr,
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -21,11 +27,12 @@ use crate::{
     BodyEncoding, ChatMessage, ChatOperation, ChatProvider, ChatRequest, ChatRole, ChatSession,
     ContentPart, CredentialType, EmbeddingOperation, EmbeddingProvider, EmbeddingRequest,
     EmbeddingResult, GeneratedImage, HeaderValueSpec, HttpMethod, ImageBodyEncoding,
-    ImageOperation, ImageProvider, ImageRequest, ImageResult, ManifestCapabilities, MappingContext,
-    ModelId, ModelListOperation, ModelProvider, ProviderCapabilities, ProviderDescriptor,
-    ProviderError, ProviderEvent, ProviderEventStream, ProviderManifestV1, ProviderModel,
-    ProviderPlugin, RequestSpec, SseDecoder, SseEventMapper, StructuredBodyEncoding, TokenUsage,
-    ToolCall, ToolCallId, ToolResult, UsageMapping, capture_values, evaluate_mapping, resolve_path,
+    ImageOperation, ImageProvider, ImageRequest, ImageResult, ManifestCapabilities, ManifestModel,
+    MappingContext, ModelId, ModelListOperation, ModelProvider, ProviderCapabilities,
+    ProviderDescriptor, ProviderError, ProviderEvent, ProviderEventStream, ProviderManifestV1,
+    ProviderModel, ProviderPlugin, RequestSpec, SseDecoder, SseEventMapper, StructuredBodyEncoding,
+    TokenUsage, ToolCall, ToolCallId, ToolResult, UsageMapping, capture_values, evaluate_mapping,
+    resolve_path,
     security::{validate_destination_ip, validate_header_name, validate_provider_url},
 };
 
@@ -834,18 +841,19 @@ impl ModelProvider for DeclarativeProvider {
             let (_, bytes) = self
                 .send_buffered(&operation.request, &Value::Null, &Value::Null)
                 .await?;
-            decode_models(self.descriptor.capabilities.clone(), operation, &bytes)
+            decode_models(
+                &self.descriptor.capabilities,
+                &self.manifest.models,
+                &self.manifest.mappings,
+                operation,
+                &bytes,
+            )
         } else {
             Ok(self
                 .manifest
                 .models
                 .iter()
-                .map(|model| ProviderModel {
-                    id: ModelId::new(model.id.clone()),
-                    name: model.name.clone(),
-                    capabilities: manifest_capabilities(&model.capabilities),
-                    metadata: model.metadata.clone(),
-                })
+                .map(provider_model_from_manifest)
                 .collect())
         }
     }
@@ -1240,7 +1248,9 @@ fn validate_image_media_type(media_type: &str) -> Result<(), ProviderError> {
 }
 
 fn decode_models(
-    capabilities: crate::ProviderCapabilities,
+    provider_capabilities: &ProviderCapabilities,
+    catalog: &[ManifestModel],
+    mappings: &BTreeMap<String, crate::MappingExpression>,
     operation: &ModelListOperation,
     bytes: &[u8],
 ) -> Result<Vec<ProviderModel>, ProviderError> {
@@ -1250,10 +1260,32 @@ fn decode_models(
         .ok_or_else(|| {
             ProviderError::ResponseMapping("model list pointer is not an array".to_string())
         })?;
-    items
+    let catalog = catalog
         .iter()
-        .map(|item| {
-            let id = select(item, &operation.response.id_pointer)
+        .map(|model| (model.id.as_str(), model))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = BTreeSet::new();
+    let mut models = Vec::with_capacity(items.len());
+    for item in items {
+        let mut model = if let Some(mapping) = &operation.response.model_mapping {
+            let value = evaluate_mapping(
+                mapping,
+                &MappingContext::new(json!({"item": item})),
+                mappings,
+            )?;
+            let mapped: ManifestModel = serde_json::from_value(value).map_err(|error| {
+                ProviderError::ResponseMapping(format!(
+                    "modelMapping did not produce a canonical model: {error}"
+                ))
+            })?;
+            provider_model_from_manifest(&mapped)
+        } else {
+            let id_pointer = operation.response.id_pointer.as_deref().ok_or_else(|| {
+                ProviderError::ResponseMapping(
+                    "pointer-based model listing has no idPointer".to_string(),
+                )
+            })?;
+            let id = select(item, id_pointer)
                 .and_then(Value::as_str)
                 .ok_or_else(|| {
                     ProviderError::ResponseMapping("model id is not a string".to_string())
@@ -1265,14 +1297,87 @@ fn decode_models(
                 .and_then(|pointer| select(item, pointer))
                 .and_then(Value::as_str)
                 .unwrap_or(id);
-            Ok(ProviderModel {
+            let model_type = operation.response.default_model_type.ok_or_else(|| {
+                ProviderError::ResponseMapping(
+                    "pointer-based model listing has no defaultModelType".to_string(),
+                )
+            })?;
+            let capabilities = operation
+                .response
+                .default_capabilities
+                .as_ref()
+                .ok_or_else(|| {
+                    ProviderError::ResponseMapping(
+                        "pointer-based model listing has no defaultCapabilities".to_string(),
+                    )
+                })?;
+            ProviderModel {
                 id: ModelId::new(id),
                 name: name.to_string(),
-                capabilities: capabilities.clone(),
+                model_type,
+                capabilities: manifest_capabilities(capabilities),
                 metadata: item.clone(),
-            })
-        })
-        .collect()
+            }
+        };
+        if let Some(enrichment) = catalog.get(model.id.as_str()) {
+            model.name = enrichment.name.clone();
+            model.model_type = enrichment.model_type;
+            model.capabilities = manifest_capabilities(&enrichment.capabilities);
+            model.metadata = merge_model_metadata(model.metadata, enrichment.metadata.clone());
+        }
+        if !model_capabilities_are_subset(&model.capabilities, provider_capabilities) {
+            return Err(ProviderError::ResponseMapping(format!(
+                "model {} declares a capability the provider does not support",
+                model.id
+            )));
+        }
+        if !seen.insert(model.id.to_string()) {
+            return Err(ProviderError::ResponseMapping(format!(
+                "provider returned duplicate model id {}",
+                model.id
+            )));
+        }
+        models.push(model);
+    }
+    Ok(models)
+}
+
+fn model_capabilities_are_subset(
+    model: &ProviderCapabilities,
+    provider: &ProviderCapabilities,
+) -> bool {
+    let chat_supported = match (&model.chat, &provider.chat) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(model), Some(provider)) => {
+            (!model.streaming || provider.streaming)
+                && (!model.tools || provider.tools)
+                && (!model.vision || provider.vision)
+                && (!model.reasoning || provider.reasoning)
+        }
+    };
+    chat_supported
+        && (!model.embeddings || provider.embeddings)
+        && (!model.image_generation || provider.image_generation)
+}
+
+fn provider_model_from_manifest(model: &ManifestModel) -> ProviderModel {
+    ProviderModel {
+        id: ModelId::new(model.id.clone()),
+        name: model.name.clone(),
+        model_type: model.model_type,
+        capabilities: manifest_capabilities(&model.capabilities),
+        metadata: model.metadata.clone(),
+    }
+}
+
+fn merge_model_metadata(dynamic: Value, catalog: Value) -> Value {
+    let Value::Object(catalog) = catalog else {
+        return dynamic;
+    };
+    let mut merged = dynamic.as_object().cloned().unwrap_or_default();
+    merged.extend(catalog);
+    Value::Object(merged)
 }
 
 /// TODO: `StructuredBodyEncoding::TextJson` is accepted by the manifest schema but is decoded

@@ -788,6 +788,9 @@
         "metadata": {
           "default": null
         },
+        "modelType": {
+          "$ref": "#/$defs/ProviderModelType"
+        },
         "name": {
           "type": "string"
         }
@@ -795,7 +798,8 @@
       "additionalProperties": false,
       "required": [
         "id",
-        "name"
+        "name",
+        "modelType"
       ]
     },
     "MapExpression": {
@@ -1018,8 +1022,45 @@
           "$ref": "#/$defs/StructuredBodyEncoding",
           "default": "json"
         },
+        "defaultCapabilities": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManifestCapabilities"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "defaultModelType": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderModelType"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "idPointer": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "modelMapping": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "modelsPointer": {
           "type": "string"
@@ -1034,8 +1075,7 @@
       },
       "additionalProperties": false,
       "required": [
-        "modelsPointer",
-        "idPointer"
+        "modelsPointer"
       ]
     },
     "ObjectExpression": {
@@ -1063,6 +1103,14 @@
       "additionalProperties": false,
       "required": [
         "$omitIfNull"
+      ]
+    },
+    "ProviderModelType": {
+      "type": "string",
+      "enum": [
+        "text_generator",
+        "text_embedder",
+        "image_generator"
       ]
     },
     "ProviderOperations": {

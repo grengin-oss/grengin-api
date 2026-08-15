@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use llm_plugin::ProviderManifestV1;
+use llm_plugin::{ProviderManifestV1, ProviderModelType};
 
 #[test]
 fn reference_openai_compatible_manifest_is_valid() {
@@ -21,6 +21,24 @@ fn complete_example_manifest_is_valid() {
     let manifest = ProviderManifestV1::from_json(include_bytes!("../examples/example.json"))
         .expect("the complete example manifest must remain valid");
     assert_eq!(manifest.version, "1.0");
+    assert!(
+        manifest
+            .models
+            .iter()
+            .any(|model| model.model_type == ProviderModelType::TextGenerator)
+    );
+    assert!(
+        manifest
+            .models
+            .iter()
+            .any(|model| model.model_type == ProviderModelType::TextEmbedder)
+    );
+    assert!(
+        manifest
+            .models
+            .iter()
+            .any(|model| model.model_type == ProviderModelType::ImageGenerator)
+    );
 }
 
 #[test]
@@ -40,6 +58,7 @@ fn reference_anthropic_manifest_is_valid() {
     assert_eq!(model.metadata["cachedInputTokenRate"], 0.1);
     assert_eq!(model.metadata["cacheCreationTokenRate"], 1.25);
     assert_eq!(model.metadata["outputTokenRate"], 5.0);
+    assert_eq!(model.model_type, ProviderModelType::TextGenerator);
 }
 
 #[test]

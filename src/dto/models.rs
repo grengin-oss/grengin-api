@@ -61,16 +61,22 @@ pub struct ModelInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_input_token_rate: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_cached_input_token_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub image_output_token_rate: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_input_token_rate: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_creation_token_rate: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<i32>,
     pub supports_streaming: bool,
     pub supports_tools: bool,
+    pub supports_reasoning: bool,
     pub supports_vision: bool,
+    pub supports_audio: bool,
     pub supports_pdf_native: bool,
     pub supports_web_search: bool,
     pub supports_multiple_images: bool,

@@ -10,7 +10,7 @@ use url::Url;
 
 use crate::{
     ChatCapabilities, MappingExpression, ProviderCapabilities, ProviderDescriptor, ProviderError,
-    ProviderId, validate_mapping, validate_mapping_definitions,
+    ProviderId, ProviderModelType, validate_mapping, validate_mapping_definitions,
 };
 
 pub const SUPPORTED_MANIFEST_VERSION: &str = "1.0";
@@ -90,6 +90,7 @@ pub struct ManifestChatCapabilities {
 pub struct ManifestModel {
     pub id: String,
     pub name: String,
+    pub model_type: ProviderModelType,
     #[serde(default)]
     pub capabilities: ManifestCapabilities,
     #[serde(default)]
@@ -420,9 +421,16 @@ pub struct ModelListResponseSpec {
     #[serde(default)]
     pub body_encoding: StructuredBodyEncoding,
     pub models_pointer: String,
-    pub id_pointer: String,
+    #[serde(default)]
+    pub id_pointer: Option<String>,
     #[serde(default)]
     pub name_pointer: Option<String>,
+    #[serde(default)]
+    pub model_mapping: Option<MappingExpression>,
+    #[serde(default)]
+    pub default_model_type: Option<ProviderModelType>,
+    #[serde(default)]
+    pub default_capabilities: Option<ManifestCapabilities>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -617,15 +625,66 @@ impl ProviderManifestV1 {
 
         if let Some(models) = &self.operations.list_models {
             validate_pointer(&models.response.models_pointer)?;
-            validate_pointer(&models.response.id_pointer)?;
+            if models.response.id_pointer.is_none() && models.response.model_mapping.is_none() {
+                return Err(ProviderError::InvalidManifest(
+                    "model listing requires idPointer or modelMapping".to_string(),
+                ));
+            }
+            if let Some(pointer) = &models.response.id_pointer {
+                validate_pointer(pointer)?;
+            }
             if let Some(pointer) = &models.response.name_pointer {
                 validate_pointer(pointer)?;
             }
+            if let Some(mapping) = &models.response.model_mapping {
+                validate_mapping(mapping, &self.mappings)?;
+            } else {
+                let model_type = models.response.default_model_type.ok_or_else(|| {
+                    ProviderError::InvalidManifest(
+                        "pointer-based model listing requires defaultModelType".to_string(),
+                    )
+                })?;
+                let capabilities =
+                    models
+                        .response
+                        .default_capabilities
+                        .as_ref()
+                        .ok_or_else(|| {
+                            ProviderError::InvalidManifest(
+                                "pointer-based model listing requires defaultCapabilities"
+                                    .to_string(),
+                            )
+                        })?;
+                validate_model_capabilities(
+                    &ManifestModel {
+                        id: "dynamic-default".to_string(),
+                        name: "Dynamic default".to_string(),
+                        model_type,
+                        capabilities: capabilities.clone(),
+                        metadata: Value::Null,
+                    },
+                    &self.capabilities,
+                )?;
+            }
         }
 
+        let mut model_ids = BTreeSet::new();
         for model in &self.models {
             validate_non_empty("model id", &model.id)?;
             validate_non_empty("model name", &model.name)?;
+            if !model_ids.insert(model.id.as_str()) {
+                return Err(ProviderError::InvalidManifest(format!(
+                    "duplicate model id {}",
+                    model.id
+                )));
+            }
+            validate_model_capabilities(model, &self.capabilities)?;
+            if !model.metadata.is_null() && !model.metadata.is_object() {
+                return Err(ProviderError::InvalidManifest(format!(
+                    "model {} metadata must be an object",
+                    model.id
+                )));
+            }
         }
         Ok(())
     }
@@ -672,6 +731,32 @@ impl ProviderManifestV1 {
         }
         requests
     }
+}
+
+fn validate_model_capabilities(
+    model: &ManifestModel,
+    provider: &ManifestCapabilities,
+) -> Result<(), ProviderError> {
+    let chat_unsupported = match (&model.capabilities.chat, &provider.chat) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(model), Some(provider)) => {
+            model.streaming && !provider.streaming
+                || model.tools && !provider.tools
+                || model.vision && !provider.vision
+                || model.reasoning && !provider.reasoning
+        }
+    };
+    if chat_unsupported
+        || model.capabilities.embeddings && !provider.embeddings
+        || model.capabilities.image_generation && !provider.image_generation
+    {
+        return Err(ProviderError::InvalidManifest(format!(
+            "model {} declares a capability the provider does not support",
+            model.id
+        )));
+    }
+    Ok(())
 }
 
 fn validate_image_operation(image: &ImageOperation) -> Result<(), ProviderError> {
@@ -1021,6 +1106,46 @@ mod tests {
         let mut manifest = chat_manifest();
         manifest["capabilities"]["chat"] = Value::Null;
         assert!(ProviderManifestV1::from_json(&serde_json::to_vec(&manifest).unwrap()).is_err());
+    }
+
+    #[test]
+    fn requires_typed_unique_static_models() {
+        let mut manifest = chat_manifest();
+        manifest["capabilities"]["modelListing"] = json!(true);
+        manifest["models"] = json!([{
+            "id": "chat-1",
+            "name": "Chat 1",
+            "capabilities": {"chat": {"streaming": true}}
+        }]);
+        assert!(ProviderManifestV1::from_json(&serde_json::to_vec(&manifest).unwrap()).is_err());
+
+        manifest["models"][0]["modelType"] = json!("text_generator");
+        let duplicate = manifest["models"][0].clone();
+        manifest["models"].as_array_mut().unwrap().push(duplicate);
+        assert!(ProviderManifestV1::from_json(&serde_json::to_vec(&manifest).unwrap()).is_err());
+    }
+
+    #[test]
+    fn pointer_model_listing_requires_explicit_defaults() {
+        let mut manifest = chat_manifest();
+        manifest["capabilities"]["modelListing"] = json!(true);
+        manifest["operations"]["listModels"] = json!({
+            "method": "GET",
+            "path": "models",
+            "bodyEncoding": "none",
+            "response": {
+                "modelsPointer": "/data",
+                "idPointer": "/id"
+            }
+        });
+        assert!(ProviderManifestV1::from_json(&serde_json::to_vec(&manifest).unwrap()).is_err());
+
+        manifest["operations"]["listModels"]["response"]["defaultModelType"] =
+            json!("text_generator");
+        manifest["operations"]["listModels"]["response"]["defaultCapabilities"] = json!({
+            "chat": {"streaming": true, "tools": true}
+        });
+        ProviderManifestV1::from_json(&serde_json::to_vec(&manifest).unwrap()).unwrap();
     }
 
     #[test]

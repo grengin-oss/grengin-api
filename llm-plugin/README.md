@@ -260,6 +260,7 @@ reviewed metadata such as capabilities and pricing:
     {
       "id": "example-chat",
       "name": "Example Chat",
+      "modelType": "text_generator",
       "capabilities": {
         "chat": { "streaming": true, "tools": true }
       },
@@ -271,6 +272,36 @@ reviewed metadata such as capabilities and pricing:
   ]
 }
 ```
+
+`modelType` is required and must be `text_generator`, `text_embedder`, or
+`image_generator`. Metadata uses normalized camelCase keys such as
+`inputTokenRate`, `outputTokenRate`, `cachedInputTokenRate`,
+`imageInputTokenRate`, `dimensions`, `maxInputTokens`, and `maxOutputTokens`.
+
+When `listModels` is also configured, the remote endpoint determines which
+models are available to the account and matching inline models enrich those
+results with reviewed names, capabilities, limits, and pricing. Rich provider
+responses can be normalized with a bounded `modelMapping` evaluated once per
+response item:
+
+```json
+{
+  "response": {
+    "modelsPointer": "/data",
+    "modelMapping": {
+      "id": { "$get": "item.id" },
+      "name": { "$get": "item.display_name" },
+      "modelType": { "$get": "item.model_type" },
+      "capabilities": { "$get": "item.capabilities" },
+      "metadata": { "$get": "item.metadata" }
+    }
+  }
+}
+```
+
+For simple ID-only endpoints, use `idPointer` plus an explicit
+`defaultModelType` and `defaultCapabilities`. Unknown models receive only those
+declared defaults; they do not inherit every provider capability.
 
 Token rates are USD per million tokens. Cache-read and cache-creation pricing
 can be declared separately. Review pricing whenever the provider changes its

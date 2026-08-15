@@ -4,6 +4,7 @@
 use std::{fmt, pin::Pin};
 
 use futures_core::Stream;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -67,6 +68,16 @@ pub struct ProviderCapabilities {
     pub embeddings: bool,
     pub image_generation: bool,
     pub model_listing: bool,
+}
+
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderModelType {
+    TextGenerator,
+    TextEmbedder,
+    ImageGenerator,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -368,6 +379,7 @@ pub struct ImageResult {
 pub struct ProviderModel {
     pub id: ModelId,
     pub name: String,
+    pub model_type: ProviderModelType,
     pub capabilities: ProviderCapabilities,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,

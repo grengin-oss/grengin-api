@@ -138,6 +138,7 @@
     {
       "id": "example-chat-1",
       "name": "Example Chat 1",
+      "modelType": "text_generator",
       "capabilities": {
         "chat": {
           "streaming": true,
@@ -154,12 +155,14 @@
     {
       "id": "example-embed-1",
       "name": "Example Embeddings 1",
+      "modelType": "text_embedder",
       "capabilities": { "embeddings": true },
       "metadata": { "dimensions": 1536 }
     },
     {
       "id": "example-image-1",
       "name": "Example Image 1",
+      "modelType": "image_generator",
       "capabilities": { "imageGeneration": true },
       "metadata": { "formats": ["png", "webp"] }
     }
@@ -448,7 +451,14 @@
         "bodyEncoding": "json",
         "modelsPointer": "/data",
         "idPointer": "/id",
-        "namePointer": "/name"
+        "namePointer": "/name",
+        "modelMapping": {
+          "id": { "$get": "item.id" },
+          "name": { "$get": "item.name" },
+          "modelType": { "$get": "item.model_type" },
+          "capabilities": { "$get": "item.capabilities" },
+          "metadata": { "$get": "item.metadata" }
+        }
       }
     }
   }

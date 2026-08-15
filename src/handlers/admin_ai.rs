@@ -13,12 +13,13 @@ use crate::{
             AIEngineDetail, AIEngineModels, AIEngineUpdate, AIEngineValidation, AiModel,
             AiModelCapabilities,
         },
-        models::ModelType,
+        models::{ModelInfo, ModelType},
     },
     models::ai_engines::{self, ApiKeyStatus},
     services::ai_engine_helpers::{load_models_response, load_models_response_refreshed},
     services::{
         authorization::{AuthorizationService, PermissionScopeMode},
+        provider_models::to_model_info,
         provider_runtime::{
             ProviderLoadError, build_provider, compile_provider, parse_manifest,
             parse_plugin_config, provider_plugin_version, unregister_provider,
@@ -297,22 +298,12 @@ pub async fn get_ai_engine_models_by_key(
             .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
         response.models = models
             .into_iter()
-            .filter(|model| !model.capabilities.embeddings || model.capabilities.chat.is_some())
             .map(|model| {
-                let chat = model.capabilities.chat.as_ref();
-                AiModel {
-                    is_whitelisted: ai_engine
-                        .whitelist_models
-                        .iter()
-                        .any(|model_id| model_id == model.id.as_str()),
-                    model_id: model.id.to_string(),
-                    display_name: model.name,
-                    capabilities: AiModelCapabilities {
-                        vision: chat.is_some_and(|capabilities| capabilities.vision),
-                        function_calling: chat.is_some_and(|capabilities| capabilities.tools),
-                        streaming: chat.is_some_and(|capabilities| capabilities.streaming),
-                    },
-                }
+                let is_whitelisted = ai_engine
+                    .whitelist_models
+                    .iter()
+                    .any(|model_id| model_id == model.id.as_str() || model_id == &model.name);
+                ai_model_from_info(to_model_info(&ai_engine.engine_key, model), is_whitelisted)
             })
             .collect();
         return Ok((StatusCode::OK, Json(response)));
@@ -322,24 +313,51 @@ pub async fn get_ai_engine_models_by_key(
         if provider.key != ai_engine_key {
             continue;
         }
-        for model in provider
-            .models
-            .into_iter()
-            .filter(|m| m.model_type != ModelType::TextEmbedder)
-        {
-            response.models.push(AiModel {
-                model_id: model.key.clone(),
-                display_name: model.name.clone(),
-                is_whitelisted: ai_engine.whitelist_models.contains(&model.key),
-                capabilities: AiModelCapabilities {
-                    vision: model.supports_vision,
-                    function_calling: model.supports_tools,
-                    streaming: model.supports_streaming,
-                },
-            })
+        for model in provider.models {
+            let is_whitelisted = ai_engine.whitelist_models.contains(&model.key)
+                || ai_engine.whitelist_models.contains(&model.name);
+            response
+                .models
+                .push(ai_model_from_info(model, is_whitelisted));
         }
     }
     Ok((StatusCode::OK, Json(response)))
+}
+
+fn ai_model_from_info(model: ModelInfo, is_whitelisted: bool) -> AiModel {
+    let embeddings = model.model_type == ModelType::TextEmbedder;
+    let image_generation = model.model_type == ModelType::ImageGenerator;
+    AiModel {
+        model_id: model.key,
+        display_name: model.name,
+        model_type: model.model_type,
+        is_whitelisted,
+        capabilities: AiModelCapabilities {
+            vision: model.supports_vision,
+            function_calling: model.supports_tools,
+            streaming: model.supports_streaming,
+            reasoning: model.supports_reasoning,
+            audio: model.supports_audio,
+            pdf_native: model.supports_pdf_native,
+            web_search: model.supports_web_search,
+            multiple_images: model.supports_multiple_images,
+            embeddings,
+            image_generation,
+        },
+        comment: model.comment,
+        input_token_rate: model.input_token_rate,
+        output_token_rate: model.output_token_rate,
+        image_input_token_rate: model.image_input_token_rate,
+        image_cached_input_token_rate: model.image_cached_input_token_rate,
+        image_output_token_rate: model.image_output_token_rate,
+        cached_input_token_rate: model.cached_input_token_rate,
+        cache_creation_token_rate: model.cache_creation_token_rate,
+        max_input_tokens: model.max_input_tokens,
+        max_output_tokens: model.max_output_tokens,
+        max_images: model.max_images,
+        dimensions: model.dimensions,
+        price_per_image: model.price_per_image,
+    }
 }
 
 #[utoipa::path(

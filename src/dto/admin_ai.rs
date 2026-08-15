@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::models::ai_engines::{ApiKeyStatus, PluginConfig};
+use crate::{
+    dto::models::ModelType,
+    models::ai_engines::{ApiKeyStatus, PluginConfig},
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -99,8 +102,22 @@ pub struct AIEngineModels {
 pub struct AiModel {
     pub model_id: String,
     pub display_name: String,
+    pub model_type: ModelType,
     pub is_whitelisted: bool,
     pub capabilities: AiModelCapabilities,
+    pub comment: Option<String>,
+    pub input_token_rate: Option<f64>,
+    pub output_token_rate: Option<f64>,
+    pub image_input_token_rate: Option<f64>,
+    pub image_cached_input_token_rate: Option<f64>,
+    pub image_output_token_rate: Option<f64>,
+    pub cached_input_token_rate: Option<f64>,
+    pub cache_creation_token_rate: Option<f64>,
+    pub max_input_tokens: Option<i32>,
+    pub max_output_tokens: Option<i32>,
+    pub max_images: Option<i32>,
+    pub dimensions: Option<i32>,
+    pub price_per_image: Option<f64>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -108,6 +125,13 @@ pub struct AiModelCapabilities {
     pub vision: bool,
     pub function_calling: bool,
     pub streaming: bool,
+    pub reasoning: bool,
+    pub audio: bool,
+    pub pdf_native: bool,
+    pub web_search: bool,
+    pub multiple_images: bool,
+    pub embeddings: bool,
+    pub image_generation: bool,
 }
 
 #[cfg(test)]

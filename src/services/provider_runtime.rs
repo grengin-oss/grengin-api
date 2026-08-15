@@ -87,7 +87,16 @@ pub fn builtin_plugin_config(engine_key: &str) -> Result<PluginConfig, ProviderL
     };
     if let Some(bytes) = chat_overlay {
         let overlay = ProviderManifestV1::from_json(bytes)?;
-        manifest.capabilities.chat = overlay.capabilities.chat;
+        let chat_capabilities = overlay.capabilities.chat;
+        manifest.capabilities.chat = chat_capabilities.clone();
+        if let Some(default_capabilities) = manifest
+            .operations
+            .list_models
+            .as_mut()
+            .and_then(|operation| operation.response.default_capabilities.as_mut())
+        {
+            default_capabilities.chat = chat_capabilities;
+        }
         manifest.mappings.extend(overlay.mappings);
         manifest.operations.chat_stream = overlay.operations.chat_stream;
     }

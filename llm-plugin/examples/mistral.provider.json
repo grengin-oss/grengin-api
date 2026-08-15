@@ -10,7 +10,7 @@
     { "id": "api_key", "type": "secret", "required": true, "label": "API key" }
   ],
   "capabilities": {
-    "chat": { "streaming": true, "tools": true, "vision": false, "reasoning": false }
+    "chat": { "streaming": true, "tools": true, "vision": true, "reasoning": false }
   },
   "mappings": {
     "mistral_input_entries": {
