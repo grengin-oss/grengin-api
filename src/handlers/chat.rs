@@ -63,6 +63,7 @@ pub async fn get_chats(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let archived = query.archived.unwrap_or(false);
+    let pinned = query.pinned.unwrap_or(false);
 
     if let Some(search_text) = search.as_ref() {
         let lex_page = search::lexical_conversation_search(
@@ -70,6 +71,7 @@ pub async fn get_chats(
             claims.user_id,
             search_text,
             archived,
+            pinned,
             limit,
             offset,
         )
@@ -80,6 +82,7 @@ pub async fn get_chats(
                 &app_state.database,
                 claims.user_id,
                 archived,
+                pinned,
                 &lex_page.conversation_ids,
             )
             .await?;
@@ -94,6 +97,7 @@ pub async fn get_chats(
                     title: c.title,
                     web_search_enabled: resolve_web_search_enabled(c.metadata.as_ref()),
                     archived: c.archived_at.is_some(),
+                    pinned: c.pinned,
                     archived_at: c.archived_at,
                     model: c.model_name,
                     total_tokens: c.total_tokens,
@@ -126,6 +130,7 @@ pub async fn get_chats(
             claims.user_id,
             search_text,
             archived,
+            pinned,
             limit,
             offset,
         )
@@ -136,6 +141,7 @@ pub async fn get_chats(
                     &app_state.database,
                     claims.user_id,
                     archived,
+                    pinned,
                     &sem_page.conversation_ids,
                 )
                 .await?;
@@ -151,6 +157,7 @@ pub async fn get_chats(
                         title: c.title,
                         web_search_enabled: resolve_web_search_enabled(c.metadata.as_ref()),
                         archived: c.archived_at.is_some(),
+                        pinned: c.pinned,
                         archived_at: c.archived_at,
                         model: c.model_name,
                         total_tokens: c.total_tokens,
@@ -213,6 +220,7 @@ pub async fn get_chats(
     } else {
         count_query = count_query.filter(conversations::Column::ArchivedAt.is_null());
     }
+    count_query = count_query.filter(conversations::Column::Pinned.eq(pinned));
     let total = count_query.count(&app_state.database).await.map_err(|e| {
         eprintln!("conversation count query error -> {e}");
         AppError::DbTimeout
@@ -230,6 +238,7 @@ pub async fn get_chats(
     } else {
         select = select.filter(conversations::Column::ArchivedAt.is_null());
     }
+    select = select.filter(conversations::Column::Pinned.eq(pinned));
 
     select = select
         .group_by(conversations::Column::Id)
@@ -262,6 +271,7 @@ pub async fn get_chats(
             title: conversation_with_count.title,
             web_search_enabled,
             archived: conversation_with_count.archived_at.is_some(),
+            pinned: conversation_with_count.pinned,
             archived_at: conversation_with_count.archived_at,
             model: conversation_with_count.model_name,
             total_tokens: conversation_with_count.total_tokens,
@@ -294,6 +304,7 @@ async fn fetch_conversations_by_ids(
     db: &sea_orm::DatabaseConnection,
     user_id: Uuid,
     archived: bool,
+    pinned: bool,
     ids: &[Uuid],
 ) -> Result<Vec<ConversationWithCount>, AppError> {
     let mut select = conversations::Entity::find()
@@ -308,6 +319,7 @@ async fn fetch_conversations_by_ids(
     } else {
         select = select.filter(conversations::Column::ArchivedAt.is_null());
     }
+    select = select.filter(conversations::Column::Pinned.eq(pinned));
     select
         .group_by(conversations::Column::Id)
         .into_model::<ConversationWithCount>()
@@ -363,6 +375,7 @@ pub async fn get_chat_by_id(
 
     let web_search_enabled = resolve_web_search_enabled(conversation_model.metadata.as_ref());
     let mut conversation_response = ConversationResponse {
+        pinned: conversation_model.pinned,
         id: conversation_model.id,
         title: conversation_model.title,
         web_search_enabled,
@@ -496,6 +509,7 @@ pub async fn update_chat_by_id(
         })?;
     let web_search_enabled = resolve_web_search_enabled(conversation_model.metadata.as_ref());
     let response = ConversationResponse {
+        pinned: conversation_model.pinned,
         id: conversation_model.id,
         title: conversation_model.title,
         web_search_enabled,

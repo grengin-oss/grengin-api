@@ -27,6 +27,7 @@ pub struct Model {
     pub total_cost: Decimal,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub metadata: Option<serde_json::Value>,
+    pub pinned: bool,
 }
 
 #[derive(Debug, FromQueryResult, Serialize, Deserialize)]
@@ -58,6 +59,8 @@ pub struct ConversationWithCount {
     pub total_cost: Decimal,
     #[sea_orm(from_alias = "metadata")]
     pub metadata: Option<serde_json::Value>,
+    #[sea_orm(from_alias = "pinned")]
+    pub pinned: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

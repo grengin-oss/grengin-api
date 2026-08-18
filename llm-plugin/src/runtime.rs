@@ -836,6 +836,14 @@ impl DeclarativeProvider {
 
 #[async_trait]
 impl ModelProvider for DeclarativeProvider {
+    fn static_models(&self) -> Vec<ProviderModel> {
+        self.manifest
+            .models
+            .iter()
+            .map(provider_model_from_manifest)
+            .collect()
+    }
+
     async fn list_models(&self) -> Result<Vec<ProviderModel>, ProviderError> {
         if let Some(operation) = self.manifest.operations.list_models.as_ref() {
             let (_, bytes) = self
@@ -849,12 +857,7 @@ impl ModelProvider for DeclarativeProvider {
                 &bytes,
             )
         } else {
-            Ok(self
-                .manifest
-                .models
-                .iter()
-                .map(provider_model_from_manifest)
-                .collect())
+            Ok(self.static_models())
         }
     }
 }

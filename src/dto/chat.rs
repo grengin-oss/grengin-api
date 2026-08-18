@@ -28,6 +28,7 @@ pub struct ConversationResponse {
     pub title: Option<String>,
     pub web_search_enabled: bool,
     pub archived: bool,
+    pub pinned: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<DateTime<Utc>>,
     pub model: String,

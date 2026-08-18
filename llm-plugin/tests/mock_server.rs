@@ -269,7 +269,8 @@ async fn anthropic_manifest_streams_chat_text() {
     // `max_tokens` is mandatory for Anthropic; `$coalesce` supplies it from the request.
     assert_eq!(sent["max_tokens"], 512);
     assert_eq!(sent["stream"], true);
-    assert_eq!(sent["cache_control"], json!({"type": "ephemeral"}));
+    // cache_control is now per-system-block, not top-level
+    assert_eq!(sent["cache_control"], json!(null));
 }
 
 #[tokio::test]
@@ -307,8 +308,8 @@ async fn anthropic_manifest_places_system_messages_outside_conversation_messages
     assert_eq!(
         sent["system"],
         json!([
-            {"type": "text", "text": "First system instruction"},
-            {"type": "text", "text": "Second system instruction"}
+            {"type": "text", "text": "First system instruction", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "Second system instruction", "cache_control": {"type": "ephemeral"}}
         ])
     );
     assert_eq!(sent["max_tokens"], 4096);

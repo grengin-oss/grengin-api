@@ -44,4 +44,8 @@ pub trait ImageProvider: Send + Sync {
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
     async fn list_models(&self) -> Result<Vec<ProviderModel>, ProviderError>;
+    // Returns models compiled into the manifest — no network call, always consistent.
+    fn static_models(&self) -> Vec<ProviderModel> {
+        vec![]
+    }
 }

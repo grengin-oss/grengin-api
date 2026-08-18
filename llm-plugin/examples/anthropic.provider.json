@@ -69,7 +69,8 @@
       },
       "then": {
         "type": { "$literal": "text" },
-        "text": { "$get": "/item/content/0/text" }
+        "text": { "$get": "/item/content/0/text" },
+        "cache_control": { "$literal": { "type": "ephemeral" } }
       }
     },
     "content_part": {
@@ -162,7 +163,6 @@
           "$coalesce": [{ "$get": "request.maxTokens" }, { "$literal": 4096 }]
         },
         "temperature": { "$omitIfNull": { "$get": "request.temperature" } },
-        "cache_control": { "$literal": { "type": "ephemeral" } },
         "tools": {
           "$omitIfNull": {
             "$concat": [

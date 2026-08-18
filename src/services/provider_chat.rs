@@ -192,19 +192,23 @@ pub async fn generate_provider_response(
     let mut input_tokens = 0;
     let mut output_tokens = 0;
     while let Some(event) = stream.next().await {
-        match event? {
-            ProviderEvent::TextDelta { text: delta } => text.push_str(&delta),
-            ProviderEvent::Usage { usage } => {
+        match event {
+            Ok(ProviderEvent::TextDelta { text: delta }) => text.push_str(&delta),
+            Ok(ProviderEvent::Usage { usage }) => {
                 input_tokens = usage.input_tokens.unwrap_or(input_tokens);
                 output_tokens = usage.output_tokens.unwrap_or(output_tokens);
             }
-            ProviderEvent::Error { kind, message } => {
+            Ok(ProviderEvent::Error { kind, message }) => {
                 return Err(match kind {
                     ProviderEventErrorKind::QuotaExhausted => ProviderError::QuotaExhausted,
                     ProviderEventErrorKind::Provider => ProviderError::Transport(message),
                 });
             }
-            _ => {}
+            // Stream ended before the mapper saw a completion marker (e.g. max_tokens hit
+            // before the provider sends its done event). Use whatever text was accumulated.
+            Err(ProviderError::StreamEnded) => break,
+            Err(e) => return Err(e),
+            Ok(_) => {}
         }
     }
     if text.trim().is_empty() {

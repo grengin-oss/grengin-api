@@ -797,7 +797,11 @@ pub async fn handle_chat_stream(
             )
             .await
             .map_err(|error| {
-                if !matches!(error, llm_plugin::ProviderError::QuotaExhausted) {
+                if !matches!(
+                    error,
+                    llm_plugin::ProviderError::QuotaExhausted
+                        | llm_plugin::ProviderError::ResponseMapping(_)
+                ) {
                     eprintln!("title generation failed: {}", provider_error_class(&error));
                 }
                 error
@@ -828,6 +832,7 @@ pub async fn handle_chat_stream(
             updated_at: Set(Utc::now()),
             last_message_at: Set(Some(Utc::now())),
             archived_at: Set(None),
+            pinned: Set(false),
             message_count: Set(req.messages.len() as i32),
             total_tokens: Set(0),
             total_cost: Set(Decimal::from(0)),
@@ -1169,6 +1174,10 @@ pub async fn handle_chat_stream(
           cost:None,
           event:None,
           tool_call:None,
+          cached_input_tokens:None,
+
+          cache_creation_tokens:None,
+
           tool_result:None,
         };
         yield Event::default().event(ChatStreamEvents::Conversation.to_string()).data(first_chat_stream.to_string());
@@ -1273,6 +1282,23 @@ pub async fn handle_chat_stream(
                                 .data(data);
                         }
                     }
+                    let finished = ChatStream {
+                        id: None,
+                        title: None,
+                        message_id: Some(img_message_id),
+                        is_new: None,
+                        content: None,
+                        input_tokens: Some(total_input_tokens),
+                        output_tokens: Some(total_output),
+                        cached_input_tokens: None,
+                        cache_creation_tokens: None,
+                        latency_ms: Some(latency),
+                        cost: image_gen_cost.to_f32(),
+                        event: None,
+                        tool_call: None,
+                        tool_result: None,
+                    };
+                    yield Event::default().event(ChatStreamEvents::StreamFinished.to_string()).data(finished.to_string());
                 }
                 Err(e) => {
                     eprintln!("image gen error: {e:#}");
@@ -1379,6 +1405,17 @@ pub async fn handle_chat_stream(
              .await
              .expect("failed to insert llm response in table messages");
 
+        // Emit before the event loop so message_start always arrives before any delta,
+        // regardless of provider (Gemini fires usageMetadata only on the last chunk).
+        yield Event::default()
+            .event(ChatStreamEvents::MessageStart.to_string())
+            .data(ChatStream {
+                id: None, title: None, message_id: Some(new_message_id),
+                is_new: None, content: None, input_tokens: None, output_tokens: None,
+                cached_input_tokens: None, cache_creation_tokens: None,
+                latency_ms: None, cost: None, event: None, tool_call: None, tool_result: None,
+            }.to_string());
+
        let cancel_handle = app_state.register_stream_cancel(new_message_id).await;
 
        let mut final_message_cost = Decimal::from(0);
@@ -1424,6 +1461,8 @@ pub async fn handle_chat_stream(
                        content: None,
                        input_tokens: Some(request_tokens),
                        output_tokens: Some(response_tokens),
+                       cached_input_tokens: None,
+                       cache_creation_tokens: None,
                        latency_ms: Some(latency),
                        cost: cancel_cost.to_f32(),
                        event: None,
@@ -1481,7 +1520,9 @@ pub async fn handle_chat_stream(
                                let chat_stream = ChatStream {
                                    id: None, title: None, message_id: None, is_new: None,
                                    content: Some(passthrough),
-                                   input_tokens: None, output_tokens: None, latency_ms: None, cost: None,
+                                   input_tokens: None, output_tokens: None,
+                                   cached_input_tokens: None, cache_creation_tokens: None,
+                                   latency_ms: None, cost: None,
                                    event: None, tool_call: None, tool_result: None,
                                };
                                yield Event::default().event(ChatStreamEvents::Delta.to_string()).data(chat_stream.to_string());
@@ -1582,21 +1623,6 @@ pub async fn handle_chat_stream(
                             .update(&app_state.database)
                             .await
                             .expect("failed to update in new llm response in table messages");
-                          let message_end = ChatStream {
-                               id: None,
-                               title:None,
-                               message_id:None,
-                               is_new:None,
-                               content:None,
-                               input_tokens:Some(request_tokens),
-                               output_tokens:Some(response_tokens),
-                               latency_ms:Some(latency),
-                               cost:cost.to_f32(),
-                               event:None,
-                               tool_call:None,
-                               tool_result:None,
-                         };
-                         yield Event::default().event(ChatStreamEvents::MessageEnd.to_string()).data(message_end.to_string());
                        }
                        StreamParseResult::MessageStart { request_id:req_id,input_tokens,output_tokens,cached_input_tokens,cache_creation_tokens} => {
                           let accumulate_tokens = mcp_tooling_enabled && tool_round > 0;
@@ -1628,21 +1654,6 @@ pub async fn handle_chat_stream(
                               cache_creation_tokens_acc = *tokens as i32;
                             }
                           }
-                          let message_start = ChatStream{
-                            id:None,
-                            title:None,
-                            message_id:Some(new_message_id),
-                            is_new:None,
-                            content:None,
-                            input_tokens:Some(request_tokens),
-                            output_tokens:None,
-                            latency_ms:None,
-                            cost:None,
-                            event:None,
-                            tool_call:None,
-                            tool_result:None,
-                          };
-                          yield Event::default().event(ChatStreamEvents::MessageStart.to_string()).data(message_start.to_string());
                           request_id = Some(req_id.clone());
                           new_llm_message.request_id = Set(request_id);
                           new_llm_message.updated_at = Set(Utc::now());
@@ -1731,6 +1742,10 @@ pub async fn handle_chat_stream(
                                cost:None,
                                event:None,
                                tool_call:Some(tool_call),
+                               cached_input_tokens:None,
+
+                               cache_creation_tokens:None,
+
                                tool_result:None,
                            };
                            yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(chat_stream.to_string());
@@ -1801,6 +1816,8 @@ pub async fn handle_chat_stream(
                                            content: None,
                                            input_tokens: None,
                                            output_tokens: None,
+                                           cached_input_tokens: None,
+                                           cache_creation_tokens: None,
                                            latency_ms: None,
                                            cost: None,
                                            event: None,
@@ -1832,6 +1849,10 @@ pub async fn handle_chat_stream(
                                cost:None,
                                event:Some(event),
                                tool_call:None,
+                               cached_input_tokens:None,
+
+                               cache_creation_tokens:None,
+
                                tool_result:None,
                            };
                            yield Event::default().event(ChatStreamEvents::Event.to_string()).data(chat_stream.to_string());
@@ -1899,6 +1920,10 @@ pub async fn handle_chat_stream(
                                cost:None,
                                event:None,
                                tool_call:Some(tool_call),
+                               cached_input_tokens:None,
+
+                               cache_creation_tokens:None,
+
                                tool_result:None,
                            };
                            yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(chat_stream.to_string());
@@ -1945,6 +1970,10 @@ pub async fn handle_chat_stream(
                                    cost:None,
                                    event:None,
                                    tool_call:Some(tool_call),
+                                   cached_input_tokens:None,
+
+                                   cache_creation_tokens:None,
+
                                    tool_result:None,
                                };
                                yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(chat_stream.to_string());
@@ -1987,6 +2016,10 @@ pub async fn handle_chat_stream(
                                    cost:None,
                                    event:None,
                                    tool_call:None,
+                                   cached_input_tokens:None,
+
+                                   cache_creation_tokens:None,
+
                                    tool_result:Some(tool_result),
                                };
                                yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(chat_stream.to_string());
@@ -2025,6 +2058,10 @@ pub async fn handle_chat_stream(
                                cost:None,
                                event:None,
                                tool_call:None,
+                               cached_input_tokens:None,
+
+                               cache_creation_tokens:None,
+
                                tool_result:Some(tool_result),
                            };
                            yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(chat_stream.to_string());
@@ -2072,6 +2109,19 @@ pub async fn handle_chat_stream(
                            .update(&app_state.database)
                            .await
                            .expect("failed to update llm response in table messages");
+                       yield Event::default()
+                           .event(ChatStreamEvents::MessageEnd.to_string())
+                           .data(ChatStream {
+                               id: None, title: None, message_id: Some(new_message_id),
+                               is_new: None, content: None,
+                               input_tokens: Some(request_tokens),
+                               output_tokens: Some(response_tokens),
+                               cached_input_tokens: (cached_input_tokens_acc > 0).then_some(cached_input_tokens_acc),
+                               cache_creation_tokens: (cache_creation_tokens_acc > 0).then_some(cache_creation_tokens_acc),
+                               latency_ms: Some(latency),
+                               cost: message_cost.to_f32(),
+                               event: None, tool_call: None, tool_result: None,
+                           }.to_string());
                        // remove cancel handle once stream ends
                        app_state.clear_stream_cancel(new_message_id).await;
                        if mcp_tooling_enabled
@@ -2294,6 +2344,10 @@ pub async fn handle_chat_stream(
                                    cost:None,
                                    event:None,
                                    tool_call:None,
+                                   cached_input_tokens:None,
+
+                                   cache_creation_tokens:None,
+
                                    tool_result:Some(tool_result),
                                };
                                yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(chat_stream.to_string());
@@ -2466,6 +2520,7 @@ pub async fn handle_chat_stream(
                        let chat_stream = ChatStream {
                            id: None, title: None, message_id: None, is_new: None,
                            content: None, input_tokens: None, output_tokens: None,
+                           cached_input_tokens: None, cache_creation_tokens: None,
                            latency_ms: None, cost: None, event: None, tool_call: None,
                            tool_result: Some(failed),
                        };
@@ -2481,7 +2536,9 @@ pub async fn handle_chat_stream(
                    let chat_stream = ChatStream {
                        content: Some(remaining),
                        id: None, title: None, message_id: None, is_new: None,
-                       input_tokens: None, output_tokens: None, latency_ms: None, cost: None,
+                       input_tokens: None, output_tokens: None,
+                       cached_input_tokens: None, cache_creation_tokens: None,
+                       latency_ms: None, cost: None,
                        event: None, tool_call: None, tool_result: None,
                    };
                    yield Event::default().event(ChatStreamEvents::Delta.to_string()).data(chat_stream.to_string());
@@ -2592,6 +2649,8 @@ pub async fn handle_chat_stream(
                    content: None,
                    input_tokens: Some(request_tokens),
                    output_tokens: Some(response_tokens),
+                   cached_input_tokens: (cached_input_tokens_acc > 0).then_some(cached_input_tokens_acc),
+                   cache_creation_tokens: (cache_creation_tokens_acc > 0).then_some(cache_creation_tokens_acc),
                    latency_ms: Some(latency),
                    cost: message_cost.to_f32(),
                    event: None,

@@ -12,6 +12,16 @@ pub async fn find_provider_model(
     let Some(models) = provider.models() else {
         return Ok(None);
     };
+    // Static manifest models carry catalog pricing without any network call. Try them first
+    // so rate lookups always work even when the live list-models API is unreachable or returns
+    // different IDs (e.g. OpenAI's /v1/models returns "gpt-4o", not our "gpt-5.6-sol" alias).
+    if let Some(model) = models
+        .static_models()
+        .into_iter()
+        .find(|m| m.id.as_str() == model_id || m.name == model_id)
+    {
+        return Ok(Some(model));
+    }
     Ok(models
         .list_models()
         .await?

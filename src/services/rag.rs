@@ -579,7 +579,11 @@ async fn insert_message_embedding(
         ))
         .await
         .map_err(|e| {
-            eprintln!("embedding insert error: {e}");
+            // FK violation (23503) means the message was deleted before this
+            // background task ran — expected race, not worth logging.
+            if !e.to_string().contains("foreign key") {
+                eprintln!("embedding insert error: {e}");
+            }
             AppError::DbTimeout
         })?;
     Ok(())

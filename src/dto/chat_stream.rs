@@ -89,6 +89,10 @@ pub struct ChatStream {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<f32>,

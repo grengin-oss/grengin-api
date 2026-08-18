@@ -71,6 +71,7 @@ pub async fn get_reconfigure_available(
     post,
     path = "/admin/reconfigure/domain",
     tag = "admin",
+    description = "Starts the domain reconfigure script in the background and returns immediately with a success message. The script runs asynchronously (900 second server-side timeout) and its output is logged by the API process; the response confirms the script was launched, not that it finished.",
     request_body = DomainReconfigureRequest,
     responses(
        (status = 200, body = DomainReconfigureResponse),
@@ -78,7 +79,7 @@ pub async fn get_reconfigure_available(
        (status = 403, content_type = "application/json", body = Error, description = "Forbidden - system:maintain permission required"),
        (status = 503, content_type = "application/json", body = Error, description = "Service unavailable"),
     )
-)]
+ )]
 pub async fn reconfigure_domain(
     claims: Claims,
     State(app_state): State<SharedState>,
@@ -144,6 +145,35 @@ pub async fn reconfigure_domain(
         ));
     }
 
+    if !reconfigure::script_exists(&script_path) {
+        return Ok((
+            StatusCode::OK,
+            Json(DomainReconfigureResponse {
+                success: false,
+                message: format!("Script not found at path: {script_path}"),
+                domain,
+                ssl_mode,
+                redirect_url: String::new(),
+                script_path,
+                output: vec![],
+            }),
+        ));
+    }
+    if !reconfigure::script_executable(&script_path) {
+        return Ok((
+            StatusCode::OK,
+            Json(DomainReconfigureResponse {
+                success: false,
+                message: format!("Script is not executable: {script_path}"),
+                domain,
+                ssl_mode,
+                redirect_url: String::new(),
+                script_path,
+                output: vec![],
+            }),
+        ));
+    }
+
     let use_sudo = match reconfigure::resolve_script_sudo_usage(
         reconfigure::domain_reconfigure_use_sudo(),
         "DOMAIN_RECONFIGURE",
@@ -185,44 +215,52 @@ pub async fn reconfigure_domain(
         script_args.push(days.to_string());
     }
 
-    let output = reconfigure::run_script_command(
-        &script_path,
-        &script_args,
-        use_sudo,
-        900,
-        "domain reconfigure script",
-    )
-    .await?;
+    let background_script_path = script_path.clone();
+    tokio::spawn(async move {
+        let result = reconfigure::run_script_command(
+            &background_script_path,
+            &script_args,
+            use_sudo,
+            900,
+            "domain reconfigure script",
+        )
+        .await;
+        match result {
+            Ok(output) => {
+                let lines = reconfigure::summarize_output(&output.stdout, &output.stderr);
+                if output.status.success() {
+                    eprintln!("domain reconfigure script completed successfully: {lines:?}");
+                } else {
+                    eprintln!(
+                        "domain reconfigure script failed with status {}: {lines:?}",
+                        output.status
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!("domain reconfigure script execution error: {error:?}");
+            }
+        }
+    });
 
-    let script_lines = reconfigure::summarize_output(&output.stdout, &output.stderr);
     let redirect_url = if ssl_mode == "none" {
         format!("http://{domain}")
     } else {
         format!("https://{domain}")
     };
 
-    let (success, message) = if output.status.success() {
-        (true, "Domain reconfigured successfully".to_string())
-    } else {
-        (
-            false,
-            format!(
-                "Domain reconfiguration script failed with status {}",
-                output.status
-            ),
-        )
-    };
-
     Ok((
         StatusCode::OK,
         Json(DomainReconfigureResponse {
-            success,
-            message,
+            success: true,
+            message: format!(
+                "Domain reconfiguration started for {domain}. The script is running in the background; check the API logs for progress."
+            ),
             domain,
             ssl_mode,
             redirect_url,
             script_path,
-            output: script_lines,
+            output: vec![],
         }),
     ))
 }
