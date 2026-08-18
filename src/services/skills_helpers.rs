@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::utils::zip::ZipArchive;
 use base64::prelude::*;
 use chrono::Utc;
 use sea_orm::{
@@ -8,7 +9,6 @@ use sea_orm::{
     PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
 };
 use std::collections::HashMap;
-use std::io::{Cursor, Read};
 use uuid::Uuid;
 
 use crate::{
@@ -337,12 +337,11 @@ fn extract_knowledge_text(
 }
 
 fn extract_zip_markdown(bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
-    let cursor = Cursor::new(bytes);
-    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
+    let archive = ZipArchive::new(bytes).map_err(|e| e.to_string())?;
     let mut results = Vec::new();
 
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        let entry = archive.by_index(i).map_err(|e| e.to_string())?;
         let name = entry.name().to_string();
         if entry.is_dir() || !name.ends_with(".md") {
             continue;

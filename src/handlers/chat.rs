@@ -8,7 +8,7 @@ use crate::{
             ArchiveChatRequest, ArtifactMeta, ConversationResponse, MessageParts, MessageResponse,
             PaginatedConversations, SearchMode, SemanticResult, TokenUsage,
         },
-        common::PaginationQuery,
+        common::{PaginationQuery, SortRule},
         files::File,
     },
     error::{AppError, ErrorResponse},
@@ -27,7 +27,7 @@ use chrono::Utc;
 use num_traits::cast::ToPrimitive;
 use reqwest::StatusCode;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, Iterable,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, Iterable, Order,
     PaginatorTrait as _, QueryFilter, QueryOrder, QuerySelect,
 };
 use uuid::Uuid;
@@ -42,6 +42,8 @@ use uuid::Uuid;
         ("offset" = Option<u64>, Query, description = "Number of items to skip (default: 0)"),
         ("archived" = Option<bool>, Query, description = "Filter by archived status. If not provided, returns only non-archived conversations"),
         ("search" = Option<String>, Query, description = "Search conversation titles and message content. Lexical full-text search runs first, followed automatically by semantic search when no lexical matches are found."),
+        ("sort" = Option<SortRule>, Query, description = "Sort by column example 'name','updated_at','created_at' (only applies when 'search' is not provided)"),
+        ("ascending" = Option<bool>, Query, description = "Order of conversations list, default false"),
     ),
     responses(
         (status = 200, body = PaginatedConversations),
@@ -240,9 +242,21 @@ pub async fn get_chats(
     }
     select = select.filter(conversations::Column::Pinned.eq(pinned));
 
+    let sort_type = if query.ascending.unwrap_or(false) {
+        Order::Asc
+    } else {
+        Order::Desc
+    };
+    select = match query.sort {
+        Some(SortRule::Name) => select.order_by(conversations::Column::Title, sort_type),
+        Some(SortRule::CreatedAt) => select.order_by(conversations::Column::CreatedAt, sort_type),
+        Some(SortRule::UpdatedAt) => select.order_by(conversations::Column::UpdatedAt, sort_type),
+        Some(SortRule::Size) => select.order_by(conversations::Column::TotalTokens, sort_type),
+        _ => select.order_by(conversations::Column::UpdatedAt, sort_type),
+    };
+
     select = select
         .group_by(conversations::Column::Id)
-        .order_by_desc(conversations::Column::UpdatedAt)
         .limit(limit)
         .offset(offset);
 
