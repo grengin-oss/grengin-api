@@ -29,10 +29,6 @@ pub struct Settings {
     pub google: RwLock<Option<GoogleSettings>>,
     pub azure: RwLock<Option<AzureSettings>>,
     pub server: ServerSettings,
-    pub openai: RwLock<Option<OpenaiSettings>>,
-    pub anthropic: RwLock<Option<AnthropicSettings>>,
-    pub mistral: RwLock<Option<MistralSettings>>,
-    pub gemini: RwLock<Option<GeminiSettings>>,
     pub ai_engines_cache: RwLock<HashMap<String, AiEngineStateCache>>,
     pub embedding: RwLock<Option<EmbeddingSettings>>,
     pub rag: RagSettings,
@@ -71,34 +67,6 @@ pub struct AzureSettings {
     pub allowed_domains: Vec<String>,
     pub use_grengin_proxy: bool,
     pub jit_provisioning: bool,
-}
-
-#[derive(Clone)]
-pub struct OpenaiSettings {
-    pub api_key: String,
-    pub org_id: Option<String>,
-    pub project_id: Option<String>,
-    pub timeout_ms: i32,
-    pub max_retries: i32,
-    pub is_enabled: bool,
-}
-
-#[derive(Clone)]
-pub struct AnthropicSettings {
-    pub api_key: String,
-    pub is_enabled: bool,
-}
-
-#[derive(Clone)]
-pub struct MistralSettings {
-    pub api_key: String,
-    pub is_enabled: bool,
-}
-
-#[derive(Clone)]
-pub struct GeminiSettings {
-    pub api_key: String,
-    pub is_enabled: bool,
 }
 
 #[derive(Clone)]
@@ -211,45 +179,12 @@ impl Settings {
     }
 
     pub async fn get_ai_engine_api_key<S: Into<String>>(&self, provider: S) -> Option<String> {
-        match provider.into().as_str() {
-            "openai" => {
-                let api_key = self
-                    .openai
-                    .read()
-                    .await
-                    .clone()
-                    .map(|openai| openai.api_key);
-                return api_key;
-            }
-            "anthropic" => {
-                let api_key = self
-                    .anthropic
-                    .read()
-                    .await
-                    .clone()
-                    .map(|anthropic| anthropic.api_key);
-                return api_key;
-            }
-            "mistral" => {
-                let api_key = self
-                    .mistral
-                    .read()
-                    .await
-                    .clone()
-                    .map(|mistral| mistral.api_key);
-                return api_key;
-            }
-            "gemini" => {
-                let api_key = self
-                    .gemini
-                    .read()
-                    .await
-                    .clone()
-                    .map(|gemini| gemini.api_key);
-                return api_key;
-            }
-            _ => return None,
-        }
+        let provider = provider.into().to_lowercase();
+        self.ai_engines_cache
+            .read()
+            .await
+            .get(&provider)
+            .and_then(|entry| entry.api_key.clone())
     }
 
     pub async fn load_ai_engine_in_state<S: Into<String>>(
@@ -271,57 +206,6 @@ impl Settings {
             whitelist_models,
         )
         .await;
-        match cache_key.as_str() {
-            "openai" => {
-                if is_enabled {
-                    println!("openai api key added successfully from ai_engines Table");
-                    *self.openai.write().await = Some(OpenaiSettings {
-                        api_key: api_key.clone().unwrap_or_default(),
-                        org_id: None,
-                        project_id: None,
-                        timeout_ms: 10_000,
-                        max_retries: 10,
-                        is_enabled,
-                    });
-                } else {
-                    *self.openai.write().await = None;
-                }
-            }
-            "anthropic" => {
-                if is_enabled {
-                    println!("anthropic api key added successfully from ai_engines Table");
-                    *self.anthropic.write().await = Some(AnthropicSettings {
-                        api_key: api_key.unwrap_or_default(),
-                        is_enabled,
-                    });
-                } else {
-                    *self.anthropic.write().await = None;
-                }
-            }
-            "mistral" => {
-                if is_enabled {
-                    println!("mistral api key added successfully from ai_engines Table");
-                    *self.mistral.write().await = Some(MistralSettings {
-                        api_key: api_key.unwrap_or_default(),
-                        is_enabled,
-                    });
-                } else {
-                    *self.mistral.write().await = None;
-                }
-            }
-            "gemini" => {
-                if is_enabled {
-                    println!("gemini api key added successfully from ai_engines Table");
-                    *self.gemini.write().await = Some(GeminiSettings {
-                        api_key: api_key.unwrap_or_default(),
-                        is_enabled,
-                    });
-                } else {
-                    *self.gemini.write().await = None;
-                }
-            }
-            _ => {}
-        }
         Ok(())
     }
 
@@ -341,6 +225,13 @@ impl Settings {
                 whitelist_models,
             },
         );
+    }
+
+    pub async fn remove_ai_engine_from_state(&self, engine_key: &str) {
+        self.ai_engines_cache
+            .write()
+            .await
+            .remove(&engine_key.to_lowercase());
     }
 
     pub async fn get_ai_engine_whitelist<S: AsRef<str>>(
@@ -448,10 +339,6 @@ impl Settings {
             google: RwLock::new(GoogleSettings::from_env().ok()),
             azure: RwLock::new(AzureSettings::from_env().ok()),
             server: ServerSettings::from_env()?,
-            openai: RwLock::new(OpenaiSettings::from_env().ok()),
-            anthropic: RwLock::new(AnthropicSettings::from_env().ok()),
-            mistral: RwLock::new(MistralSettings::from_env().ok()),
-            gemini: RwLock::new(GeminiSettings::from_env().ok()),
             ai_engines_cache: RwLock::new(HashMap::new()),
             embedding: RwLock::new(EmbeddingSettings::from_env()),
             rag: RagSettings::from_env(),
@@ -501,9 +388,8 @@ impl GoogleSettings {
         let google_client_secret_local = read_non_empty_env(&["GOOGLE_CLIENT_SECRET"]);
         let has_local_google_credentials =
             google_client_id_local.is_some() && google_client_secret_local.is_some();
-        let use_proxy =
-            env_flag_any(&["SSO_PROXY_AUTO_ENABLE", "SSO_PROXY_ENABLED"])
-                || !has_local_google_credentials;
+        let use_proxy = env_flag_any(&["SSO_PROXY_AUTO_ENABLE", "SSO_PROXY_ENABLED"])
+            || !has_local_google_credentials;
 
         let (client_id, client_secret, redirect_url, allowed_domains, use_grengin_proxy) =
             if use_proxy {
@@ -528,9 +414,10 @@ impl GoogleSettings {
                     true,
                 )
             } else {
-                let client_id = google_client_id_local.ok_or(ConfigError::Missing("GOOGLE_CLIENT_ID"))?;
-                let client_secret =
-                    google_client_secret_local.ok_or(ConfigError::Missing("GOOGLE_CLIENT_SECRET"))?;
+                let client_id =
+                    google_client_id_local.ok_or(ConfigError::Missing("GOOGLE_CLIENT_ID"))?;
+                let client_secret = google_client_secret_local
+                    .ok_or(ConfigError::Missing("GOOGLE_CLIENT_SECRET"))?;
                 let app_redirect_url = std::env::var("REDIRECT_URL")
                     .map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
                 (
@@ -560,21 +447,17 @@ impl AzureSettings {
         let azure_client_secret_local = read_non_empty_env(&["AZURE_CLIENT_SECRET"]);
         let has_local_azure_credentials =
             azure_client_id_local.is_some() && azure_client_secret_local.is_some();
-        let use_proxy =
-            env_flag_any(&["SSO_PROXY_AUTO_ENABLE", "SSO_PROXY_ENABLED"])
-                || !has_local_azure_credentials;
+        let use_proxy = env_flag_any(&["SSO_PROXY_AUTO_ENABLE", "SSO_PROXY_ENABLED"])
+            || !has_local_azure_credentials;
 
         let (client_id, client_secret, tenant_id, redirect_url, allowed_domains, use_grengin_proxy) =
             if use_proxy {
                 let app_redirect_url = std::env::var("REDIRECT_URL")
                     .map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
-                let client_id =
-                    read_non_empty_env(&["GRENGIN_PROXY_AZURE_CLIENT_ID"])
-                        .unwrap_or_else(|| "managed-by-grengin-proxy".to_string());
-                let client_secret = read_non_empty_env(&[
-                    "GRENGIN_PROXY_AZURE_CLIENT_SECRET",
-                ])
-                .unwrap_or_else(|| "managed-by-grengin-proxy".to_string());
+                let client_id = read_non_empty_env(&["GRENGIN_PROXY_AZURE_CLIENT_ID"])
+                    .unwrap_or_else(|| "managed-by-grengin-proxy".to_string());
+                let client_secret = read_non_empty_env(&["GRENGIN_PROXY_AZURE_CLIENT_SECRET"])
+                    .unwrap_or_else(|| "managed-by-grengin-proxy".to_string());
                 let tenant_id =
                     read_non_empty_env(&["GRENGIN_PROXY_AZURE_TENANT_ID", "AZURE_TENANT_ID"])
                         .unwrap_or_else(|| "common".to_string());
@@ -587,7 +470,8 @@ impl AzureSettings {
                     true,
                 )
             } else {
-                let client_id = azure_client_id_local.ok_or(ConfigError::Missing("AZURE_CLIENT_ID"))?;
+                let client_id =
+                    azure_client_id_local.ok_or(ConfigError::Missing("AZURE_CLIENT_ID"))?;
                 let client_secret =
                     azure_client_secret_local.ok_or(ConfigError::Missing("AZURE_CLIENT_SECRET"))?;
                 let tenant_id = std::env::var("AZURE_TENANT_ID")
@@ -613,72 +497,6 @@ impl AzureSettings {
             allowed_domains,
             use_grengin_proxy,
             jit_provisioning: true,
-        })
-    }
-}
-
-impl OpenaiSettings {
-    pub fn from_env() -> Result<Self, ConfigError> {
-        let api_key = std::env::var("OPENAI_API_KEY")
-            .map_err(|_| ConfigError::Missing("OPENAI_API_KEY"))?
-            .split_whitespace()
-            .collect::<String>();
-        let org_id = std::env::var("OPENAI_ORG_ID").ok();
-        let project_id = std::env::var("OPENAI_PROJECT_ID").ok();
-        let timeout_ms = std::env::var("OPENAI_TIMEOUT_MS")
-            .unwrap_or("60000".to_string())
-            .parse::<i32>()
-            .map_err(|_| ConfigError::ParseError("OPENAI_TIMEOUT_MS"))?;
-        let max_retries = std::env::var("OPENAI_MAX_TRIES")
-            .unwrap_or("1".to_string())
-            .parse::<i32>()
-            .map_err(|_| ConfigError::ParseError("OPENAI_MAX_RETRIES"))?;
-        Ok(Self {
-            api_key,
-            org_id,
-            project_id,
-            timeout_ms,
-            max_retries,
-            is_enabled: true,
-        })
-    }
-}
-
-impl AnthropicSettings {
-    pub fn from_env() -> Result<Self, ConfigError> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY")
-            .map_err(|_| ConfigError::Missing("ANTHROPIC_API_KEY"))?
-            .split_whitespace()
-            .collect::<String>();
-        Ok(Self {
-            api_key,
-            is_enabled: true,
-        })
-    }
-}
-
-impl MistralSettings {
-    pub fn from_env() -> Result<Self, ConfigError> {
-        let api_key = std::env::var("MISTRAL_API_KEY")
-            .map_err(|_| ConfigError::Missing("MISTRAL_API_KEY"))?
-            .split_whitespace()
-            .collect::<String>();
-        Ok(Self {
-            api_key,
-            is_enabled: true,
-        })
-    }
-}
-
-impl GeminiSettings {
-    pub fn from_env() -> Result<Self, ConfigError> {
-        let api_key = std::env::var("GEMINI_API_KEY")
-            .map_err(|_| ConfigError::Missing("GEMINI_API_KEY"))?
-            .split_whitespace()
-            .collect::<String>();
-        Ok(Self {
-            api_key,
-            is_enabled: true,
         })
     }
 }

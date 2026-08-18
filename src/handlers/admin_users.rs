@@ -8,7 +8,9 @@ use crate::{
         permissions::{PERMISSION_USERS_MANAGE, PERMISSION_USERS_VIEW},
     },
     dto::{
-        admin_user::{PaginatedUsers, User, UserCreate, UserDepartmentRow, UserPatchRequest, UserUpdate},
+        admin_user::{
+            PaginatedUsers, User, UserCreate, UserDepartmentRow, UserPatchRequest, UserUpdate,
+        },
         common::{PaginationQuery, SortRule},
     },
     models::{

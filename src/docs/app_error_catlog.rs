@@ -103,12 +103,16 @@ pub fn build_app_error_catalog() -> Vec<AppErrorCatalogItem> {
 
     // chat stream errors (one example per variant)
     for e in [
-        ChatStreamError::ApiQuotaExhausted { provider: "openai".to_string() },
+        ChatStreamError::ApiQuotaExhausted {
+            provider: "openai".to_string(),
+        },
         ChatStreamError::ProviderError {
             provider: "mistral".to_string(),
             message: "The model `mistral-small-latest` has been deprecated.".to_string(),
         },
-        ChatStreamError::ConnectionFailed { provider: "gemini".to_string() },
+        ChatStreamError::ConnectionFailed {
+            provider: "gemini".to_string(),
+        },
     ] {
         let (status, detail) = AppError::ChatStream(e).to_detail();
         items.push(AppErrorCatalogItem::from_detail(status, detail));

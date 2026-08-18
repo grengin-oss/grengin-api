@@ -17,7 +17,10 @@ use sea_orm::{
 use uuid::Uuid;
 
 use crate::{
-    auth::{claims::Claims, error::{AuthError, Error}},
+    auth::{
+        claims::Claims,
+        error::{AuthError, Error},
+    },
     dto::projects::{
         AddMcpServerRequest, AddMemberRequest, AddSourceRequest, ArtifactCreateRequest,
         ArtifactUpdateRequest, InstructionsUpdateRequest, LinkProjectRequest, MemberSearchQuery,
@@ -25,14 +28,16 @@ use crate::{
         ProjectMcpServerResponse, ProjectMemberResponse, ProjectResponse, ProjectSourceResponse,
         ProjectUpdateRequest, ShareProjectResponse, UserSearchItem, UserSearchResponse,
     },
+    models::project_sources::ProcessingStatus,
     models::{
         conversation_projects, conversations, mcp_servers, project_mcp_servers, project_members,
         project_sources, projects, projects::ProjectVisibility, users,
     },
-    models::project_sources::ProcessingStatus,
     services::{
         project_helpers::*,
-        project_source_processing::{delete_source_chunks, spawn_process_source, write_artifact_file},
+        project_source_processing::{
+            delete_source_chunks, spawn_process_source, write_artifact_file,
+        },
     },
     state::SharedState,
 };
@@ -69,8 +74,16 @@ pub async fn list_projects(
     if let Some(search) = query.search.as_deref().filter(|v| !v.is_empty()) {
         select = select.filter(
             Condition::any()
-                .add(projects::Column::Name.into_expr().ilike(format!("%{search}%")))
-                .add(projects::Column::Description.into_expr().ilike(format!("%{search}%"))),
+                .add(
+                    projects::Column::Name
+                        .into_expr()
+                        .ilike(format!("%{search}%")),
+                )
+                .add(
+                    projects::Column::Description
+                        .into_expr()
+                        .ilike(format!("%{search}%")),
+                ),
         );
     }
     if let Some(category) = query.category.as_deref().filter(|v| !v.is_empty()) {
@@ -82,14 +95,23 @@ pub async fn list_projects(
 
     select = select.order_by_desc(projects::Column::UpdatedAt);
 
-    let total = select.clone().count(&app_state.database).await.map_err(|e| {
-        eprintln!("db project count error: {e}");
-        AuthError::DbTimeout
-    })?;
-    let rows = select.offset(offset).limit(limit).all(&app_state.database).await.map_err(|e| {
-        eprintln!("db project list error: {e}");
-        AuthError::DbTimeout
-    })?;
+    let total = select
+        .clone()
+        .count(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db project count error: {e}");
+            AuthError::DbTimeout
+        })?;
+    let rows = select
+        .offset(offset)
+        .limit(limit)
+        .all(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db project list error: {e}");
+            AuthError::DbTimeout
+        })?;
 
     let project_ids: Vec<Uuid> = rows.iter().map(|p| p.id).collect();
     let (chat_counts, source_counts, member_counts) =
@@ -100,7 +122,15 @@ pub async fn list_projects(
         .map(|p| to_project_response(p, &chat_counts, &source_counts, &member_counts))
         .collect();
 
-    Ok((StatusCode::OK, Json(ProjectListResponse { projects, total, limit, offset })))
+    Ok((
+        StatusCode::OK,
+        Json(ProjectListResponse {
+            projects,
+            total,
+            limit,
+            offset,
+        }),
+    ))
 }
 
 #[utoipa::path(
@@ -124,7 +154,12 @@ pub async fn create_project(
         return Err(AuthError::InvalidRequest { field: "name" });
     }
 
-    let category = req.category.as_deref().unwrap_or("research").trim().to_ascii_lowercase();
+    let category = req
+        .category
+        .as_deref()
+        .unwrap_or("research")
+        .trim()
+        .to_ascii_lowercase();
     if !is_valid_category(&category) {
         return Err(AuthError::InvalidRequest { field: "category" });
     }
@@ -136,9 +171,14 @@ pub async fn create_project(
         id: Set(Uuid::new_v4()),
         name: Set(name),
         description: Set({
-            let d = req.description.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+            let d = req
+                .description
+                .map(|d| d.trim().to_string())
+                .filter(|d| !d.is_empty());
             if d.as_deref().map(|s| s.len() > 500).unwrap_or(false) {
-                return Err(AuthError::InvalidRequest { field: "description" });
+                return Err(AuthError::InvalidRequest {
+                    field: "description",
+                });
             }
             d
         }),
@@ -158,7 +198,10 @@ pub async fn create_project(
     })?;
 
     let empty: HashMap<Uuid, i64> = HashMap::new();
-    Ok((StatusCode::CREATED, Json(to_project_response(inserted, &empty, &empty, &empty))))
+    Ok((
+        StatusCode::CREATED,
+        Json(to_project_response(inserted, &empty, &empty, &empty)),
+    ))
 }
 
 #[utoipa::path(
@@ -182,7 +225,15 @@ pub async fn get_project(
     ensure_project_read_access(claims.user_id, &project, &app_state.database).await?;
     let (chat_counts, source_counts, member_counts) =
         fetch_counts(&[id], &app_state.database).await?;
-    Ok((StatusCode::OK, Json(to_project_response(project, &chat_counts, &source_counts, &member_counts))))
+    Ok((
+        StatusCode::OK,
+        Json(to_project_response(
+            project,
+            &chat_counts,
+            &source_counts,
+            &member_counts,
+        )),
+    ))
 }
 
 #[utoipa::path(
@@ -211,24 +262,27 @@ pub async fn get_project_detail(
     let chats = fetch_project_chats(id, &app_state.database).await?;
     let mcp_servers = fetch_project_mcp_servers(id, &app_state.database).await?;
 
-    Ok((StatusCode::OK, Json(ProjectDetailResponse {
-        id: project.id,
-        name: project.name,
-        description: project.description.unwrap_or_default(),
-        category: project.category,
-        visibility: project.visibility,
-        owner_id: project.owner_id,
-        instructions: project.instructions.unwrap_or_default(),
-        chat_count: *chat_counts.get(&id).unwrap_or(&0),
-        source_count: *source_counts.get(&id).unwrap_or(&0),
-        member_count: *member_counts.get(&id).unwrap_or(&0),
-        last_activity_at: project.last_activity_at,
-        created_at: project.created_at,
-        updated_at: project.updated_at,
-        sources,
-        chats,
-        mcp_servers,
-    })))
+    Ok((
+        StatusCode::OK,
+        Json(ProjectDetailResponse {
+            id: project.id,
+            name: project.name,
+            description: project.description.unwrap_or_default(),
+            category: project.category,
+            visibility: project.visibility,
+            owner_id: project.owner_id,
+            instructions: project.instructions.unwrap_or_default(),
+            chat_count: *chat_counts.get(&id).unwrap_or(&0),
+            source_count: *source_counts.get(&id).unwrap_or(&0),
+            member_count: *member_counts.get(&id).unwrap_or(&0),
+            last_activity_at: project.last_activity_at,
+            created_at: project.created_at,
+            updated_at: project.updated_at,
+            sources,
+            chats,
+            mcp_servers,
+        }),
+    ))
 }
 
 #[utoipa::path(
@@ -266,7 +320,9 @@ pub async fn update_project(
     if let Some(desc) = req.description {
         let desc = desc.trim().to_string();
         if desc.len() > 500 {
-            return Err(AuthError::InvalidRequest { field: "description" });
+            return Err(AuthError::InvalidRequest {
+                field: "description",
+            });
         }
         active.description = Set(if desc.is_empty() { None } else { Some(desc) });
     }
@@ -289,7 +345,15 @@ pub async fn update_project(
 
     let (chat_counts, source_counts, member_counts) =
         fetch_counts(&[id], &app_state.database).await?;
-    Ok((StatusCode::OK, Json(to_project_response(updated, &chat_counts, &source_counts, &member_counts))))
+    Ok((
+        StatusCode::OK,
+        Json(to_project_response(
+            updated,
+            &chat_counts,
+            &source_counts,
+            &member_counts,
+        )),
+    ))
 }
 
 #[utoipa::path(
@@ -360,7 +424,12 @@ pub async fn add_project_member(
         return Err(AuthError::DbConflict);
     }
 
-    let role = req.role.as_deref().unwrap_or("member").trim().to_ascii_lowercase();
+    let role = req
+        .role
+        .as_deref()
+        .unwrap_or("member")
+        .trim()
+        .to_ascii_lowercase();
     if !matches!(role.as_str(), "member" | "owner") {
         return Err(AuthError::InvalidRequest { field: "role" });
     }
@@ -460,7 +529,11 @@ pub async fn update_project_instructions(
 
     let instructions = req.instructions.trim().to_string();
     let mut active = project.into_active_model();
-    active.instructions = Set(if instructions.is_empty() { None } else { Some(instructions) });
+    active.instructions = Set(if instructions.is_empty() {
+        None
+    } else {
+        Some(instructions)
+    });
     active.updated_at = Set(Utc::now());
     active.update(&app_state.database).await.map_err(|e| {
         eprintln!("db instructions update error: {e}");
@@ -493,7 +566,12 @@ pub async fn add_project_source(
     let project = get_project_or_404(id, &app_state.database).await?;
     ensure_project_read_access(claims.user_id, &project, &app_state.database).await?;
 
-    let origin = req.origin.as_deref().unwrap_or("uploaded").trim().to_ascii_lowercase();
+    let origin = req
+        .origin
+        .as_deref()
+        .unwrap_or("uploaded")
+        .trim()
+        .to_ascii_lowercase();
     if !matches!(origin.as_str(), "uploaded" | "artifact") {
         return Err(AuthError::InvalidRequest { field: "origin" });
     }
@@ -590,8 +668,8 @@ pub async fn share_project(
     let project = get_project_or_404(id, &app_state.database).await?;
     ensure_project_owner(claims.user_id, &project)?;
 
-    let base_url = std::env::var("REDIRECT_URL")
-        .unwrap_or_else(|_| "http://localhost:3000".to_string());
+    let base_url =
+        std::env::var("REDIRECT_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
     let share_url = format!("{}/projects/{}", base_url.trim_end_matches('/'), id);
 
     Ok((StatusCode::OK, Json(ShareProjectResponse { share_url })))
@@ -798,7 +876,10 @@ pub async fn search_users_for_project(
 
     let q = query.q.as_deref().unwrap_or("").trim().to_string();
     if q.is_empty() {
-        return Ok((StatusCode::OK, Json(UserSearchResponse { users: Vec::new() })));
+        return Ok((
+            StatusCode::OK,
+            Json(UserSearchResponse { users: Vec::new() }),
+        ));
     }
 
     let limit = query.limit.unwrap_or(20).min(50);
@@ -839,7 +920,12 @@ pub async fn search_users_for_project(
 
     let result = found
         .into_iter()
-        .map(|u| UserSearchItem { id: u.id, name: u.name, email: u.email, picture: u.picture })
+        .map(|u| UserSearchItem {
+            id: u.id,
+            name: u.name,
+            email: u.email,
+            picture: u.picture,
+        })
         .collect();
 
     Ok((StatusCode::OK, Json(UserSearchResponse { users: result })))
@@ -916,12 +1002,22 @@ pub async fn add_project_artifact(
     let ext = match content_type.as_str() {
         "text/html" => "html",
         "text/markdown" => "md",
-        _ => return Err(AuthError::InvalidRequest { field: "contentType" }),
+        _ => {
+            return Err(AuthError::InvalidRequest {
+                field: "contentType",
+            });
+        }
     };
 
     let sanitized: String = title
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -1044,10 +1140,15 @@ pub async fn update_project_artifact(
     use sea_orm::IntoActiveModel;
     let mut active = artifact.clone().into_active_model();
 
-    let new_content_type = req.content_type.as_deref().map(|ct| ct.trim().to_ascii_lowercase());
+    let new_content_type = req
+        .content_type
+        .as_deref()
+        .map(|ct| ct.trim().to_ascii_lowercase());
     if let Some(ref ct) = new_content_type {
         if !matches!(ct.as_str(), "text/html" | "text/markdown") {
-            return Err(AuthError::InvalidRequest { field: "content_type" });
+            return Err(AuthError::InvalidRequest {
+                field: "content_type",
+            });
         }
         active.file_type = Set(ct.clone());
     }
@@ -1056,7 +1157,11 @@ pub async fn update_project_artifact(
         .as_deref()
         .unwrap_or(&artifact.file_type)
         .to_string();
-    let ext = if resolved_content_type == "text/html" { "html" } else { "md" };
+    let ext = if resolved_content_type == "text/html" {
+        "html"
+    } else {
+        "md"
+    };
 
     let new_title = req.title.as_deref().map(|t| t.trim().to_string());
     if let Some(ref title) = new_title {
@@ -1065,7 +1170,13 @@ pub async fn update_project_artifact(
         }
         let sanitized: String = title
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { ' ' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    ' '
+                }
+            })
             .collect::<String>()
             .split_whitespace()
             .collect::<Vec<_>>()
@@ -1141,7 +1252,9 @@ pub async fn delete_project_artifact(
         })?
         .ok_or(AuthError::ResourceNotFound)?;
 
-    delete_source_chunks(&app_state.database, artifact_id).await.map_err(|_| AuthError::DbTimeout)?;
+    delete_source_chunks(&app_state.database, artifact_id)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
 
     project_sources::Entity::delete_by_id(artifact_id)
         .exec(&app_state.database)
@@ -1164,7 +1277,6 @@ pub async fn delete_project_artifact(
 }
 
 // --- project MCP server helpers ---
-
 
 // --- project MCP server CRUD ---
 
@@ -1250,13 +1362,16 @@ pub async fn add_project_mcp_server(
         AuthError::DbTimeout
     })?;
 
-    Ok((StatusCode::CREATED, Json(ProjectMcpServerResponse {
-        id: inserted.id,
-        server_id: inserted.server_id,
-        name: server.name,
-        description: server.description,
-        added_at: inserted.created_at,
-    })))
+    Ok((
+        StatusCode::CREATED,
+        Json(ProjectMcpServerResponse {
+            id: inserted.id,
+            server_id: inserted.server_id,
+            name: server.name,
+            description: server.description,
+            added_at: inserted.created_at,
+        }),
+    ))
 }
 
 #[utoipa::path(

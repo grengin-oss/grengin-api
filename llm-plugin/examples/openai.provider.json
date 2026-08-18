@@ -1,0 +1,206 @@
+{
+  "$schema": "../schema/provider-plugin-v1.schema.json",
+  "manifestVersion": "1.0",
+  "id": "openai",
+  "version": "1.0",
+  "name": "OpenAI",
+  "description": "OpenAI Responses API chat, tools, and provider-native web search.",
+  "baseUrl": "https://api.openai.com/v1/",
+  "credentials": [
+    { "id": "api_key", "type": "secret", "required": true, "label": "API key" }
+  ],
+  "capabilities": {
+    "chat": { "streaming": true, "tools": true, "vision": true, "reasoning": true }
+  },
+  "mappings": {
+    "openai_input_item": {
+      "$switch": { "$get": "item.role" },
+      "cases": {
+        "assistant": {
+          "$concat": [
+            {
+              "$array": [
+                {
+                  "role": { "$literal": "assistant" },
+                  "content": { "$map": "item.content", "using": "openai_output_content" }
+                }
+              ]
+            },
+            { "$map": "item.toolCalls", "using": "openai_function_call" }
+          ]
+        },
+        "tool": {
+          "$array": [
+            {
+              "type": { "$literal": "function_call_output" },
+              "call_id": { "$get": "item.toolResult.callId" },
+              "output": { "$jsonEncode": { "$get": "item.toolResult.output" } }
+            }
+          ]
+        }
+      },
+      "default": {
+        "$array": [
+          {
+            "role": { "$get": "item.role" },
+            "content": { "$map": "item.content", "using": "openai_input_content" }
+          }
+        ]
+      }
+    },
+    "openai_input_content": {
+      "$switch": { "$get": "item.type" },
+      "cases": {
+        "text": {
+          "type": { "$literal": "input_text" },
+          "text": { "$get": "item.text" }
+        },
+        "image_url": {
+          "type": { "$literal": "input_image" },
+          "image_url": { "$get": "item.url" }
+        },
+        "image_base64": {
+          "type": { "$literal": "input_image" },
+          "image_url": {
+            "$stringConcat": [
+              { "$literal": "data:" },
+              { "$get": "item.mediaType" },
+              { "$literal": ";base64," },
+              { "$get": "item.data" }
+            ]
+          }
+        },
+        "file": {
+          "type": { "$literal": "input_file" },
+          "filename": { "$get": "item.name" },
+          "file_data": {
+            "$stringConcat": [
+              { "$literal": "data:" },
+              { "$get": "item.mediaType" },
+              { "$literal": ";base64," },
+              { "$get": "item.data" }
+            ]
+          }
+        }
+      }
+    },
+    "openai_output_content": {
+      "type": { "$literal": "output_text" },
+      "text": { "$get": "item.text" }
+    },
+    "openai_function_call": {
+      "type": { "$literal": "function_call" },
+      "call_id": { "$get": "item.id" },
+      "name": { "$get": "item.name" },
+      "arguments": { "$jsonEncode": { "$get": "item.arguments" } }
+    },
+    "openai_tool": {
+      "type": { "$literal": "function" },
+      "name": { "$get": "item.name" },
+      "description": { "$omitIfNull": { "$get": "item.description" } },
+      "parameters": { "$get": "item.parameters" }
+    }
+  },
+  "operations": {
+    "chatStream": {
+      "method": "POST",
+      "path": "responses",
+      "headers": {
+        "Authorization": { "secret": "api_key", "prefix": "Bearer " }
+      },
+      "bodyEncoding": "json",
+      "body": {
+        "model": { "$get": "request.model" },
+        "input": { "$flatMap": "request.messages", "using": "openai_input_item" },
+        "temperature": { "$omitIfNull": { "$get": "request.temperature" } },
+        "max_output_tokens": { "$omitIfNull": { "$get": "request.maxTokens" } },
+        "tools": {
+          "$omitIfNull": {
+            "$concat": [
+              {
+                "$if": { "$get": "request.webSearch" },
+                "then": { "$array": [{ "type": { "$literal": "web_search" } }] }
+              },
+              { "$omitIfNull": { "$map": "request.tools", "using": "openai_tool" } }
+            ]
+          }
+        },
+        "stream": { "$literal": true }
+      },
+      "response": {
+        "bodyEncoding": "sse",
+        "eventDataEncoding": "json",
+        "doneData": "[DONE]",
+        "rules": [
+          {
+            "id": "message_start",
+            "when": { "pointer": "/type", "equals": "response.created" },
+            "emit": "messageStart",
+            "fields": { "requestId": "/response/id" }
+          },
+          {
+            "id": "text_delta",
+            "when": { "pointer": "/type", "equals": "response.output_text.delta" },
+            "emit": "textDelta",
+            "value": "/delta"
+          },
+          {
+            "id": "tool_start",
+            "when": { "pointer": "/item/type", "equals": "function_call" },
+            "emit": "toolCallStart",
+            "fields": {
+              "id": "/item/call_id",
+              "name": "/item/name",
+              "index": "/output_index"
+            }
+          },
+          {
+            "id": "tool_arguments",
+            "when": { "pointer": "/type", "equals": "response.function_call_arguments.delta" },
+            "emit": "toolArgumentsDelta",
+            "fields": { "index": "/output_index", "fragment": "/delta" }
+          },
+          {
+            "id": "search_start",
+            "when": { "pointer": "/item/type", "equals": "web_search_call" },
+            "emit": "serverToolStart",
+            "fields": { "id": "/item/id", "index": "/output_index" },
+            "constants": { "name": "web_search" }
+          },
+          {
+            "id": "search_result",
+            "when": { "pointer": "/annotation/type", "equals": "url_citation" },
+            "emit": "serverToolResult",
+            "constants": { "name": "web_search" },
+            "itemFields": { "title": "/annotation/title", "url": "/annotation/url" }
+          },
+          {
+            "id": "usage",
+            "when": { "pointer": "/type", "equals": "response.completed" },
+            "emit": "usage",
+            "fields": {
+              "inputTokens": "/response/usage/input_tokens",
+              "outputTokens": "/response/usage/output_tokens",
+              "totalTokens": "/response/usage/total_tokens",
+              "cachedInputTokens": "/response/usage/input_tokens_details/cached_tokens",
+              "cacheCreationTokens": "/response/usage/input_tokens_details/cache_write_tokens"
+            }
+          },
+          {
+            "id": "error",
+            "when": { "pointer": "/type", "equals": "error" },
+            "emit": "error",
+            "fields": { "message": "/error/message", "kind": "/error/type" }
+          },
+          {
+            "id": "completed",
+            "when": { "pointer": "/type", "equals": "response.completed" },
+            "emit": "completed",
+            "fields": { "finishReason": "/response/status" }
+          }
+        ]
+      },
+      "continuation": { "mode": "replay_messages", "maxToolRounds": 3 }
+    }
+  }
+}

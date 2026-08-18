@@ -14,13 +14,26 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(SkillKnowledge::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(SkillKnowledge::Id).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(SkillKnowledge::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(SkillKnowledge::SkillId).uuid().not_null())
                     .col(ColumnDef::new(SkillKnowledge::FileId).uuid().null())
                     .col(ColumnDef::new(SkillKnowledge::FileName).text().not_null())
                     .col(ColumnDef::new(SkillKnowledge::Content).text().not_null())
-                    .col(ColumnDef::new(SkillKnowledge::CharCount).integer().not_null())
-                    .col(ColumnDef::new(SkillKnowledge::StorageMode).string_len(20).not_null())
+                    .col(
+                        ColumnDef::new(SkillKnowledge::CharCount)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(SkillKnowledge::StorageMode)
+                            .string_len(20)
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(SkillKnowledge::CreatedAt)
                             .timestamp_with_time_zone()

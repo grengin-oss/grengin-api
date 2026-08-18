@@ -2,13 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::auth::claims::Claims;
-use crate::dto::artifacts::{ArtifactListResponse, ArtifactResponse};
-use crate::handlers::artifacts;
 use crate::auth::error::{AuthError, AuthErrorCode, AuthErrorDetailVariant, Error};
 use crate::docs::{app_error_catlog::AppErrorCatalogItem, security::ApiSecurityAddon};
 use crate::dto::admin_ai::{
-    AIEngineDetail, AIEngineModels, AIEngineUpdate, AIEngineValidation, AiModel,
-    AiModelCapabilities,
+    AIEngineConnectionTest, AIEngineCreate, AIEngineDetail, AIEngineModels,
+    AIEnginePluginValidationRequest, AIEnginePluginValidationResponse, AIEngineUpdate,
+    AIEngineValidation, AiModel, AiModelCapabilities,
 };
 use crate::dto::admin_department::{
     Department, DepartmentCreate, DepartmentListQuery, DepartmentMembersResponse, DepartmentMove,
@@ -33,6 +32,7 @@ use crate::dto::analytics::{
     AnalyticsOverview, AnalyticsTimeSeries, DepartmentAnalytics, DepartmentAnalyticsQuery,
     ScopedUserAnalyticsQuery, UserAnalytics,
 };
+use crate::dto::artifacts::{ArtifactListResponse, ArtifactResponse};
 use crate::dto::audit_logs::{
     AuditLogAction, AuditLogEntry, AuditLogExportFormat, AuditLogRedactResponse,
     AuditLogsExportQuery, AuditLogsQuery, AuditLogsResponse,
@@ -62,16 +62,6 @@ use crate::dto::notifications::{
     NotificationDto, NotificationsListQuery, NotificationsListResponse,
 };
 use crate::dto::oauth::AuthCallback;
-use crate::dto::prompts::{
-    DepartmentPromptAssignmentCreate, DepartmentPromptAssignmentListQuery,
-    DepartmentPromptAssignmentResponse, DepartmentPromptAssignmentUpdate, PromptFeedbackRequest,
-    PromptMetricsQuery, PromptMetricsResponse, PromptSource, RolePromptCreate, RolePromptListQuery,
-    RolePromptResponse, RolePromptUpdate, SystemPromptResponse, UserPromptPreferenceRequest,
-};
-use crate::dto::system_metrics::{
-    ContainerMetrics, DatabaseMetrics, DiskMetrics, MachineMetrics, SystemMetricsResponse,
-};
-use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::dto::projects::{
     AddMcpServerRequest, AddMemberRequest, AddSourceRequest, ArtifactCreateRequest,
     ArtifactUpdateRequest, InstructionsUpdateRequest, LinkProjectRequest, ProjectCreateRequest,
@@ -79,16 +69,28 @@ use crate::dto::projects::{
     ProjectMemberResponse, ProjectResponse, ProjectSourceResponse, ProjectUpdateRequest,
     ShareProjectResponse, UserSearchItem, UserSearchResponse,
 };
+use crate::dto::prompts::{
+    DepartmentPromptAssignmentCreate, DepartmentPromptAssignmentListQuery,
+    DepartmentPromptAssignmentResponse, DepartmentPromptAssignmentUpdate, PromptFeedbackRequest,
+    PromptMetricsQuery, PromptMetricsResponse, PromptSource, RolePromptCreate, RolePromptListQuery,
+    RolePromptResponse, RolePromptUpdate, SystemPromptResponse, UserPromptPreferenceRequest,
+};
 use crate::dto::skills::{
     ConversationSkillResponse, LinkSkillRequest, SkillCreateRequest, SkillListQuery,
-    SkillListResponse, SkillResponse, SkillToolsConfig, SkillUpdateRequest,
-    UserSkillCreateRequest, UserSkillListQuery, UserSkillUpdateRequest,
+    SkillListResponse, SkillResponse, SkillToolsConfig, SkillUpdateRequest, UserSkillCreateRequest,
+    UserSkillListQuery, UserSkillUpdateRequest,
 };
+use crate::dto::system_metrics::{
+    ContainerMetrics, DatabaseMetrics, DiskMetrics, MachineMetrics, SystemMetricsResponse,
+};
+use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
+use crate::handlers::artifacts;
 use crate::handlers::{
-    admin_ai, admin_analytics, admin_audit, admin_department, admin_department_budgets,
-    admin_embedding, admin_mcp, admin_prompts, admin_reconfigure, admin_roles, admin_sso_provider,
-    admin_system, admin_users, auth, branding, chat, chat_stream, file, mcp, me, me_prompts,
-    me_skills, message, models, notifications, oidc, open_error, projects, skills,
+    admin_ai, admin_ai_plugins, admin_analytics, admin_audit, admin_department,
+    admin_department_budgets, admin_embedding, admin_mcp, admin_prompts, admin_reconfigure,
+    admin_roles, admin_sso_provider, admin_system, admin_users, auth, branding, chat, chat_stream,
+    file, mcp, me, me_prompts, me_skills, message, models, notifications, oidc, open_error,
+    projects, skills,
 };
 use crate::models::departments::{ActionOnExceed, BudgetPeriod};
 use crate::models::mcp_access_policies::{McpAccessType, McpPermission};
@@ -135,6 +137,11 @@ use utoipa::OpenApi;
         admin_ai::validate_ai_engines_by_key,
         admin_ai::delete_ai_engines_api_key_key,
         admin_ai::get_ai_engine_models_by_key,
+        admin_ai_plugins::get_ai_engine_plugin_schema,
+        admin_ai_plugins::validate_ai_engine_plugin,
+        admin_ai_plugins::create_ai_engine,
+        admin_ai_plugins::delete_ai_engine,
+        admin_ai_plugins::test_ai_engine_connection,
         admin_sso_provider::get_sso_providers,
         admin_sso_provider::get_sso_provider_by_id,
         admin_sso_provider::validate_sso_provider_by_id,
@@ -452,6 +459,10 @@ use utoipa::OpenApi;
             UserSkillCreateRequest,
             UserSkillUpdateRequest,
             UserSkillListQuery,
+            AIEngineCreate,
+            AIEnginePluginValidationRequest,
+            AIEnginePluginValidationResponse,
+            AIEngineConnectionTest,
         )
     ),
     tags(
@@ -469,3 +480,78 @@ use utoipa::OpenApi;
     )
 )]
 pub struct ApiDoc;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_plugin_schemas_use_snake_case() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI JSON");
+        let schemas = &document["components"]["schemas"];
+
+        let validation_request = &schemas["AIEnginePluginValidationRequest"]["properties"];
+        assert!(validation_request.get("plugin_config").is_some());
+        assert!(validation_request.get("pluginConfig").is_none());
+
+        let create_request = &schemas["AIEngineCreate"]["properties"];
+        assert!(create_request.get("plugin_config").is_some());
+        assert!(create_request.get("is_enabled").is_some());
+        assert!(create_request.get("pluginConfig").is_none());
+        assert!(create_request.get("isEnabled").is_none());
+
+        let update_request = &schemas["AIEngineUpdate"]["properties"];
+        assert!(update_request.get("display_name").is_some());
+        assert!(update_request.get("api_key").is_some());
+        assert!(update_request.get("default_image_gen_model").is_some());
+        assert!(update_request.get("displayName").is_none());
+        assert!(update_request.get("apiKey").is_none());
+
+        let detail_response = &schemas["AIEngineDetail"]["properties"];
+        assert!(detail_response.get("engine_key").is_some());
+        assert!(detail_response.get("plugin_version").is_some());
+        assert!(detail_response.get("api_key_configured").is_some());
+        assert!(detail_response.get("engineKey").is_none());
+        assert!(detail_response.get("pluginVersion").is_none());
+
+        let plugin_config = &schemas["PluginConfig"]["properties"];
+        assert!(plugin_config.get("baseUrlOverride").is_some());
+        assert!(plugin_config.get("allowInsecureHttp").is_some());
+        assert!(plugin_config.get("allowPrivateNetwork").is_some());
+        assert!(plugin_config.get("base_url_override").is_none());
+
+        let validation_response = &schemas["AIEnginePluginValidationResponse"]["properties"];
+        assert!(validation_response.get("engine_key").is_some());
+        assert!(validation_response.get("credential_required").is_some());
+        assert!(validation_response.get("engineKey").is_none());
+
+        let connection_response = &schemas["AIEngineConnectionTest"]["properties"];
+        assert!(connection_response.get("models_available").is_some());
+        assert!(connection_response.get("error_class").is_some());
+        assert!(connection_response.get("modelsAvailable").is_none());
+        assert!(connection_response.get("errorClass").is_none());
+
+        let model_response = &schemas["AiModel"]["properties"];
+        assert!(model_response.get("model_type").is_some());
+        assert!(model_response.get("input_token_rate").is_some());
+        assert!(
+            model_response
+                .get("image_cached_input_token_rate")
+                .is_some()
+        );
+        assert!(model_response.get("max_input_tokens").is_some());
+        assert!(model_response.get("modelType").is_none());
+        assert!(model_response.get("inputTokenRate").is_none());
+
+        let model_capabilities = &schemas["AiModelCapabilities"]["properties"];
+        assert!(model_capabilities.get("function_calling").is_some());
+        assert!(model_capabilities.get("image_generation").is_some());
+        assert!(model_capabilities.get("functionCalling").is_none());
+
+        let paths = &document["paths"];
+        assert!(paths.get("/admin/ai-engines/{engine_key}").is_some());
+        assert!(paths.get("/admin/ai-engines/{ai_engine_key}").is_none());
+        let parameters = &paths["/admin/ai-engines/{engine_key}"]["put"]["parameters"];
+        assert_eq!(parameters[0]["name"], "engine_key");
+    }
+}

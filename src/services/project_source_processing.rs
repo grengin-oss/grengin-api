@@ -12,14 +12,13 @@ use uuid::Uuid;
 
 use crate::{
     config::setting::EmbeddingSettings,
-    dto::llm::anthropic::{
-        AnthropicContentBlock, AnthropicDocSource, AnthropicImageSource, AnthropicMessage,
-        AnthropicRole,
-    },
     error::AppError,
-    llm::provider::AnthropicApis,
     models::{files, project_source_chunks, project_sources, project_sources::ProcessingStatus},
-    services::rag::{format_pgvector, generate_embeddings},
+    services::{
+        provider_chat::{generate_provider_response, provider_error_class},
+        provider_resolver::resolve_provider,
+        rag::{format_pgvector, generate_embeddings},
+    },
     state::SharedState,
 };
 
@@ -110,13 +109,18 @@ fn extract_spreadsheet_text(bytes: &[u8]) -> Result<String, String> {
     let mut all_text = Vec::new();
 
     for name in &sheet_names {
-        let Ok(range) = workbook.worksheet_range(name) else { continue };
+        let Ok(range) = workbook.worksheet_range(name) else {
+            continue;
+        };
         let mut sheet_lines = Vec::new();
         for row in range.rows() {
-            let cells: Vec<String> = row.iter().map(|c| match c {
-                Data::Empty => String::new(),
-                other => other.to_string(),
-            }).collect();
+            let cells: Vec<String> = row
+                .iter()
+                .map(|c| match c {
+                    Data::Empty => String::new(),
+                    other => other.to_string(),
+                })
+                .collect();
             let line = cells.join("\t");
             if !line.trim().is_empty() {
                 sheet_lines.push(line);
@@ -135,7 +139,11 @@ fn extract_pdf_text(bytes: &[u8]) -> Option<String> {
         Ok(text) => {
             let trimmed = text.trim().to_string();
             // Below 50 chars is likely a scan-only PDF with no extractable text
-            if trimmed.len() >= 50 { Some(trimmed) } else { None }
+            if trimmed.len() >= 50 {
+                Some(trimmed)
+            } else {
+                None
+            }
         }
         Err(e) => {
             eprintln!("pdf-extract error: {e}");
@@ -158,16 +166,6 @@ async fn extract_text_via_llm(
     bytes: Vec<u8>,
     content_type: &str,
 ) -> Result<String, AppError> {
-    let anthropic_settings = app_state
-        .settings
-        .anthropic
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| AppError::LlmProviderNotConfigured {
-            provider: "anthropic".to_string(),
-        })?;
-
     let data = BASE64_STANDARD.encode(&bytes);
     let prompt_text = if content_type.starts_with("image/") {
         "Describe the content of this image in detail. If it contains text, extract all the text verbatim. If it's a diagram or chart, describe what it shows."
@@ -175,49 +173,56 @@ async fn extract_text_via_llm(
         "Extract and return all the text content from this document. Preserve the structure where possible."
     };
 
-    let content_block = if content_type == "application/pdf" {
-        AnthropicContentBlock::Document {
-            source: AnthropicDocSource {
-                source_type: "base64".to_string(),
-                media_type: "application/pdf".to_string(),
-                data: Some(data),
-                url: None,
-            },
+    let content = if content_type.starts_with("image/") {
+        llm_plugin::ContentPart::ImageBase64 {
+            data,
+            media_type: content_type.to_string(),
         }
     } else {
-        AnthropicContentBlock::Image {
-            source: AnthropicImageSource {
-                source_type: "base64".to_string(),
-                media_type: Some(content_type.to_string()),
-                data: Some(data),
-                url: None,
-            },
+        llm_plugin::ContentPart::File {
+            name: "source-document".to_string(),
+            data,
+            media_type: content_type.to_string(),
         }
     };
-
-    let messages = vec![AnthropicMessage::with_blocks(
-        AnthropicRole::User,
-        vec![
-            content_block,
-            AnthropicContentBlock::Text { text: prompt_text.to_string() },
-        ],
-    )];
-
-    let result = app_state
-        .req_client
-        .anthropic_generate_text(
-            &anthropic_settings,
-            "claude-haiku-4-5".to_string(),
-            2048,
-            messages,
-            None,
-            None,
-        )
+    let provider = resolve_provider(app_state, "anthropic")
         .await
-        .map_err(|e| {
-            eprintln!("llm text extraction error: {e}");
-            AppError::LlmProviderNotConfigured { provider: "anthropic".to_string() }
+        .map_err(|_| AppError::LlmProviderNotConfigured {
+            provider: "anthropic".to_string(),
         })?;
+    let result = generate_provider_response(
+        provider.as_ref(),
+        llm_plugin::ChatRequest {
+            model: llm_plugin::ModelId::new("claude-haiku-4-5"),
+            messages: vec![llm_plugin::ChatMessage {
+                role: llm_plugin::ChatRole::User,
+                content: vec![
+                    content,
+                    llm_plugin::ContentPart::Text {
+                        text: prompt_text.to_string(),
+                    },
+                ],
+                tool_calls: Vec::new(),
+                tool_result: None,
+            }],
+            temperature: None,
+            max_tokens: Some(2048),
+            tools: Vec::new(),
+            tool_choice: None,
+            web_search: false,
+            options: serde_json::Value::Null,
+        },
+    )
+    .await
+    .map_err(|error| {
+        eprintln!(
+            "LLM text extraction error: {}",
+            provider_error_class(&error)
+        );
+        AppError::LlmProviderNotConfigured {
+            provider: "anthropic".to_string(),
+        }
+    })?;
 
     Ok(result.text)
 }
@@ -242,12 +247,11 @@ async fn extract_text_from_file(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         | "application/vnd.ms-excel"
         | "application/vnd.ms-excel.sheet.macroEnabled.12"
-        | "application/vnd.oasis.opendocument.spreadsheet" => {
-            extract_spreadsheet_text(&bytes).unwrap_or_else(|e| {
+        | "application/vnd.oasis.opendocument.spreadsheet" => extract_spreadsheet_text(&bytes)
+            .unwrap_or_else(|e| {
                 eprintln!("spreadsheet extraction failed: {e}");
                 String::new()
-            })
-        }
+            }),
         "application/pdf" => match extract_pdf_text(&bytes) {
             Some(text) => text,
             None => extract_text_via_llm(app_state, bytes, "application/pdf").await?,
@@ -255,9 +259,7 @@ async fn extract_text_from_file(
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
         | "application/msword"
-        | "application/vnd.ms-powerpoint" => {
-            extract_text_via_llm(app_state, bytes, &mime).await?
-        }
+        | "application/vnd.ms-powerpoint" => extract_text_via_llm(app_state, bytes, &mime).await?,
         m if m.starts_with("image/") => extract_text_via_llm(app_state, bytes, &mime).await?,
         _ => String::from_utf8_lossy(&bytes).to_string(),
     };
@@ -265,7 +267,10 @@ async fn extract_text_from_file(
     Ok(text)
 }
 
-pub async fn delete_source_chunks(db: &DatabaseConnection, source_id: Uuid) -> Result<(), AppError> {
+pub async fn delete_source_chunks(
+    db: &DatabaseConnection,
+    source_id: Uuid,
+) -> Result<(), AppError> {
     project_source_chunks::Entity::delete_many()
         .filter(project_source_chunks::Column::ProjectSourceId.eq(source_id))
         .exec(db)
@@ -363,7 +368,15 @@ pub async fn process_project_source(
             .await?
             .ok_or(AppError::ServiceTemporarilyUnavailable)?;
 
-        store_chunks(db, source_id, project_id, &chunks, &embeddings, &embedding_config).await
+        store_chunks(
+            db,
+            source_id,
+            project_id,
+            &chunks,
+            &embeddings,
+            &embedding_config,
+        )
+        .await
     }
     .await;
 
@@ -378,7 +391,12 @@ pub async fn process_project_source(
     }
 }
 
-pub fn spawn_process_source(app_state: SharedState, source_id: Uuid, project_id: Uuid, file_id: Uuid) {
+pub fn spawn_process_source(
+    app_state: SharedState,
+    source_id: Uuid,
+    project_id: Uuid,
+    file_id: Uuid,
+) {
     tokio::spawn(async move {
         process_project_source(app_state, source_id, project_id, file_id).await;
     });
@@ -405,10 +423,12 @@ pub async fn write_artifact_file(
         })?;
     }
 
-    fs::write(&local_path, content.as_bytes()).await.map_err(|e| {
-        eprintln!("file write error: {e}");
-        AppError::ServiceTemporarilyUnavailable
-    })?;
+    fs::write(&local_path, content.as_bytes())
+        .await
+        .map_err(|e| {
+            eprintln!("file write error: {e}");
+            AppError::ServiceTemporarilyUnavailable
+        })?;
 
     let now = Utc::now();
     let file_row = files::ActiveModel {

@@ -7,6 +7,10 @@ use crate::{
             delete_ai_engines_api_key_key, get_ai_engine_models_by_key, get_ai_engines,
             get_ai_engines_by_key, update_ai_engines_by_key, validate_ai_engines_by_key,
         },
+        admin_ai_plugins::{
+            create_ai_engine, delete_ai_engine, get_ai_engine_plugin_schema,
+            test_ai_engine_connection, validate_ai_engine_plugin,
+        },
         admin_analytics::{
             get_analytics_overview, get_department_analytics, get_timeseries_analytics,
             get_user_analytics,
@@ -68,21 +72,38 @@ pub fn admin_routes() -> Router<SharedState> {
             "/admin/embedding-config",
             get(get_embedding_config).put(update_embedding_config),
         )
-        .route("/admin/ai-engines", get(get_ai_engines))
         .route(
-            "/admin/ai-engines/{engine_key}",
-            put(update_ai_engines_by_key).get(get_ai_engines_by_key),
+            "/admin/ai-engines",
+            get(get_ai_engines).post(create_ai_engine),
         )
         .route(
-            "/admin/ai-engines/{engine-key}/validate",
+            "/admin/ai-engines/plugin-schema",
+            get(get_ai_engine_plugin_schema),
+        )
+        .route(
+            "/admin/ai-engines/plugin-validate",
+            post(validate_ai_engine_plugin),
+        )
+        .route(
+            "/admin/ai-engines/{engine_key}",
+            put(update_ai_engines_by_key)
+                .get(get_ai_engines_by_key)
+                .delete(delete_ai_engine),
+        )
+        .route(
+            "/admin/ai-engines/{engine_key}/test",
+            post(test_ai_engine_connection),
+        )
+        .route(
+            "/admin/ai-engines/{engine_key}/validate",
             post(validate_ai_engines_by_key),
         )
         .route(
-            "/admin/ai-engines/{engine-key}/api-key",
+            "/admin/ai-engines/{engine_key}/api-key",
             delete(delete_ai_engines_api_key_key),
         )
         .route(
-            "/admin/ai-engines/{engine-key}/models",
+            "/admin/ai-engines/{engine_key}/models",
             get(get_ai_engine_models_by_key),
         )
         .route("/admin/sso-providers", get(get_sso_providers))

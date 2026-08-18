@@ -8,25 +8,22 @@ use sea_orm::{
     Statement,
     sea_query::{Alias, BinOper, Expr, Order},
 };
-use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
     config::setting::EmbeddingSettings,
-    dto::embeddings::{GeminiEmbeddingResponse, MistralEmbeddingResponse},
     dto::files::File,
+    dto::prompt::{Prompt, PromptTextResponse},
     error::AppError,
-    llm::{
-        gemini::GEMINI_API_URL,
-        mistral::MISTRAL_API_URL,
-        prompt::{Prompt, PromptTextResponse},
-        provider::{AnthropicApis, OpenaiApis},
-    },
     models::{
         conversation_summaries, message_embeddings, messages, messages::ChatRole,
         project_source_chunks, project_sources,
     },
-    services::embedders_cache::get_model_dimensions,
+    services::{
+        embedders_cache::get_model_dimensions,
+        provider_chat::{generate_provider_text, provider_error_class},
+        provider_resolver::resolve_provider,
+    },
     state::SharedState,
 };
 
@@ -59,7 +56,6 @@ struct ProjectChunkRow {
     #[sea_orm(from_alias = "fileName")]
     file_name: String,
 }
-
 
 pub async fn load_recent_prompts(
     db: &DatabaseConnection,
@@ -213,27 +209,45 @@ pub fn assemble_prompts_with_budget(
 ) -> Vec<Prompt> {
     // Tier 1: everything
     let mut prompts = Vec::new();
-    if let Some(p) = summary.clone() { prompts.push(p); }
-    if let Some(p) = retrieval.clone() { prompts.push(p); }
-    if let Some(p) = project_retrieval.clone() { prompts.push(p); }
+    if let Some(p) = summary.clone() {
+        prompts.push(p);
+    }
+    if let Some(p) = retrieval.clone() {
+        prompts.push(p);
+    }
+    if let Some(p) = project_retrieval.clone() {
+        prompts.push(p);
+    }
     prompts.extend(recent.clone());
     prompts.extend(current.clone());
-    if estimate_tokens(&prompts) <= max_tokens { return prompts; }
+    if estimate_tokens(&prompts) <= max_tokens {
+        return prompts;
+    }
 
     // Tier 2: drop conversation history (lowest value density)
     let mut prompts = Vec::new();
-    if let Some(p) = summary.clone() { prompts.push(p); }
-    if let Some(p) = project_retrieval.clone() { prompts.push(p); }
+    if let Some(p) = summary.clone() {
+        prompts.push(p);
+    }
+    if let Some(p) = project_retrieval.clone() {
+        prompts.push(p);
+    }
     prompts.extend(recent.clone());
     prompts.extend(current.clone());
-    if estimate_tokens(&prompts) <= max_tokens { return prompts; }
+    if estimate_tokens(&prompts) <= max_tokens {
+        return prompts;
+    }
 
     // Tier 3: drop project docs too
     let mut prompts = Vec::new();
-    if let Some(p) = summary.clone() { prompts.push(p); }
+    if let Some(p) = summary.clone() {
+        prompts.push(p);
+    }
     prompts.extend(recent.clone());
     prompts.extend(current.clone());
-    if estimate_tokens(&prompts) <= max_tokens { return prompts; }
+    if estimate_tokens(&prompts) <= max_tokens {
+        return prompts;
+    }
 
     // Tier 4: bare — recent + current only
     let mut prompts = Vec::new();
@@ -456,136 +470,39 @@ pub async fn generate_embeddings(
         None => get_model_dimensions(&app_state.req_client, &provider, &config.model).await,
     };
 
-    match provider.as_str() {
-        "openai" => {
-            let openai_settings = match app_state.settings.openai.read().await.clone() {
-                Some(settings) if settings.is_enabled => settings,
-                _ => return Ok(None),
-            };
-            let response = app_state
-                .req_client
-                .openai_create_embedding(&openai_settings, config.model.clone(), inputs, config.dimensions)
-                .await
-                .map_err(|e| {
-                    eprintln!("embedding request error: {e}");
-                    AppError::LlmProviderNotConfigured {
-                        provider: "openai".to_string(),
-                    }
-                })?;
-            let mut data = response.data;
-            data.sort_by_key(|item| item.index);
-            Ok(Some(
-                data.into_iter()
-                    .map(|item| normalize_to_target(item.embedding, target_dim))
-                    .collect(),
-            ))
-        }
-        "mistral" => {
-            let mistral_settings = match app_state.settings.mistral.read().await.clone() {
-                Some(settings) if settings.is_enabled => settings,
-                _ => return Ok(None),
-            };
-            let response: MistralEmbeddingResponse = app_state
-                .req_client
-                .post(format!("{MISTRAL_API_URL}/v1/embeddings"))
-                .bearer_auth(mistral_settings.api_key)
-                .header("content-type", "application/json")
-                .json(&json!({
-                    "model": config.model,
-                    "input": inputs,
-                }))
-                .send()
-                .await
-                .map_err(|e| {
-                    eprintln!("mistral embedding request error: {e}");
-                    AppError::LlmProviderNotConfigured {
-                        provider: "mistral".to_string(),
-                    }
-                })?
-                .error_for_status()
-                .map_err(|e| {
-                    eprintln!("mistral embedding status error: {e}");
-                    AppError::LlmProviderNotConfigured {
-                        provider: "mistral".to_string(),
-                    }
-                })?
-                .json()
-                .await
-                .map_err(|e| {
-                    eprintln!("mistral embedding decode error: {e}");
-                    AppError::LlmProviderNotConfigured {
-                        provider: "mistral".to_string(),
-                    }
-                })?;
-            let mut data = response.data;
-            data.sort_by_key(|item| item.index);
-            Ok(Some(
-                data.into_iter()
-                    .map(|item| normalize_to_target(item.embedding, target_dim))
-                    .collect(),
-            ))
-        }
-        "gemini" => {
-            let gemini_settings = match app_state.settings.gemini.read().await.clone() {
-                Some(settings) if settings.is_enabled => settings,
-                _ => return Ok(None),
-            };
-            let mut embeddings = Vec::with_capacity(inputs.len());
-            for input in inputs {
-                let mut body = serde_json::Map::new();
-                body.insert(
-                    "content".to_string(),
-                    json!({
-                        "parts": [{"text": input}]
-                    }),
-                );
-                if let Some(dimensions) = config.dimensions {
-                    body.insert("outputDimensionality".to_string(), json!(dimensions));
-                }
-                let response = app_state
-                    .req_client
-                    .post(format!(
-                        "{GEMINI_API_URL}/v1beta/models/{}:embedContent",
-                        config.model
-                    ))
-                    .header("x-goog-api-key", gemini_settings.api_key.clone())
-                    .header("content-type", "application/json")
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        eprintln!("gemini embedding request error: {e}");
-                        AppError::LlmProviderNotConfigured {
-                            provider: "gemini".to_string(),
-                        }
-                    })?;
-
-                if !response.status().is_success() {
-                    let status = response.status();
-                    let body = response.text().await.unwrap_or_default();
-                    eprintln!("gemini embedding status error: {status} body: {body}");
-                    return Err(AppError::LlmProviderNotConfigured {
-                        provider: "gemini".to_string(),
-                    });
-                }
-
-                let parsed: GeminiEmbeddingResponse = response.json().await.map_err(|e| {
-                    eprintln!("gemini embedding decode error: {e}");
-                    AppError::LlmProviderNotConfigured {
-                        provider: "gemini".to_string(),
-                    }
-                })?;
-                if let Some(embedding) = parsed.embedding {
-                    embeddings.push(normalize_to_target(embedding.values, target_dim));
-                }
+    let plugin = match resolve_provider(app_state, &provider).await {
+        Ok(plugin) => plugin,
+        Err(_) => return Ok(None),
+    };
+    let Some(embedder) = plugin.embeddings() else {
+        return Ok(None);
+    };
+    let response = embedder
+        .embed(llm_plugin::EmbeddingRequest {
+            model: llm_plugin::ModelId::new(config.model.clone()),
+            inputs,
+            dimensions: config
+                .dimensions
+                .and_then(|value| u32::try_from(value).ok()),
+            options: serde_json::Value::Null,
+        })
+        .await
+        .map_err(|error| {
+            eprintln!(
+                "provider embedding failed: {}",
+                provider_error_class(&error)
+            );
+            AppError::LlmProviderNotConfigured {
+                provider: provider.clone(),
             }
-            if embeddings.is_empty() {
-                return Ok(None);
-            }
-            Ok(Some(embeddings))
-        }
-        _ => Ok(None),
-    }
+        })?;
+    Ok(Some(
+        response
+            .vectors
+            .into_iter()
+            .map(|embedding| normalize_to_target(embedding, target_dim))
+            .collect(),
+    ))
 }
 
 fn normalize_to_target(mut embedding: Vec<f32>, target_dim: Option<usize>) -> Vec<f32> {
@@ -611,64 +528,20 @@ async fn generate_summary_text(
     model: &str,
     prompt: String,
 ) -> Result<PromptTextResponse, AppError> {
-    match provider.to_lowercase().as_str() {
-        "openai" => {
-            let openai_settings = app_state.settings.openai.read().await.clone().ok_or(
-                AppError::LlmProviderNotConfigured {
-                    provider: "openai".to_string(),
-                },
-            )?;
-            let messages = vec![crate::dto::llm::openai::OpenaiMessage {
-                role: ChatRole::User,
-                content: vec![crate::dto::llm::openai::OpenaiContent {
-                    content_type: crate::dto::llm::openai::OpenaiContentType::Text,
-                    text: Some(prompt),
-                    file_id: None,
-                }],
-            }];
-            app_state
-                .req_client
-                .openai_generate_text(&openai_settings, model.to_string(), messages, None)
-                .await
-                .map_err(|e| {
-                    eprintln!("summary openai error: {e}");
-                    AppError::LlmProviderNotConfigured {
-                        provider: "openai".to_string(),
-                    }
-                })
-        }
-        "anthropic" => {
-            let anthropic_settings = app_state.settings.anthropic.read().await.clone().ok_or(
-                AppError::LlmProviderNotConfigured {
-                    provider: "anthropic".to_string(),
-                },
-            )?;
-            let messages = vec![crate::dto::llm::anthropic::AnthropicMessage::from_text(
-                crate::dto::llm::anthropic::AnthropicRole::User,
-                prompt,
-            )];
-            app_state
-                .req_client
-                .anthropic_generate_text(
-                    &anthropic_settings,
-                    model.to_string(),
-                    512,
-                    messages,
-                    None,
-                    None,
-                )
-                .await
-                .map_err(|e| {
-                    eprintln!("summary anthropic error: {e}");
-                    AppError::LlmProviderNotConfigured {
-                        provider: "anthropic".to_string(),
-                    }
-                })
-        }
-        _ => Err(AppError::LlmProviderNotConfigured {
+    let provider_key = provider.to_lowercase();
+    let plugin = resolve_provider(app_state, &provider_key)
+        .await
+        .map_err(|_| AppError::LlmProviderNotConfigured {
             provider: provider.to_string(),
-        }),
-    }
+        })?;
+    generate_provider_text(plugin.as_ref(), model, None, prompt, Some(512))
+        .await
+        .map_err(|error| {
+            eprintln!("summary provider error: {}", provider_error_class(&error));
+            AppError::LlmProviderNotConfigured {
+                provider: provider.to_string(),
+            }
+        })
 }
 
 async fn insert_message_embedding(
@@ -706,7 +579,11 @@ async fn insert_message_embedding(
         ))
         .await
         .map_err(|e| {
-            eprintln!("embedding insert error: {e}");
+            // FK violation (23503) means the message was deleted before this
+            // background task ran — expected race, not worth logging.
+            if !e.to_string().contains("foreign key") {
+                eprintln!("embedding insert error: {e}");
+            }
             AppError::DbTimeout
         })?;
     Ok(())
@@ -738,10 +615,11 @@ pub async fn build_project_retrieval_prompt(
         _ => return Ok(None),
     };
 
-    let embeddings = match generate_embeddings(app_state, &embedding_config, vec![query.to_string()]).await? {
-        Some(v) if !v.is_empty() => v,
-        _ => return Ok(None),
-    };
+    let embeddings =
+        match generate_embeddings(app_state, &embedding_config, vec![query.to_string()]).await? {
+            Some(v) if !v.is_empty() => v,
+            _ => return Ok(None),
+        };
     let query_vector = format_pgvector(&embeddings[0]);
 
     // <=> cosine operator and ::vector cast have no SeaORM integration.
@@ -755,14 +633,20 @@ pub async fn build_project_retrieval_prompt(
     );
 
     let rows = project_source_chunks::Entity::find()
-        .join(JoinType::InnerJoin, project_source_chunks::Relation::ProjectSource.def())
+        .join(
+            JoinType::InnerJoin,
+            project_source_chunks::Relation::ProjectSource.def(),
+        )
         .filter(project_source_chunks::Column::ProjectId.eq(project_id))
         .filter(project_source_chunks::Column::Provider.eq(embedding_config.provider.clone()))
         .filter(project_source_chunks::Column::Model.eq(embedding_config.model.clone()))
         .filter(project_sources::Column::ProcessingStatus.eq("ready"))
         .select_only()
         .column_as(
-            Expr::col((project_source_chunks::Entity, project_source_chunks::Column::Content)),
+            Expr::col((
+                project_source_chunks::Entity,
+                project_source_chunks::Column::Content,
+            )),
             "content",
         )
         .column_as(

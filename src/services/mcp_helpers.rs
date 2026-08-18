@@ -13,11 +13,11 @@ use crate::{
     auth::encryption::{decrypt_key, encrypt_key},
     dto::mcp::{McpAccessRule, McpServer, McpTool, McpToolExecution},
     error::AppError,
-    llm::tooling::mcp_server_short_id,
     models::{
         departments, mcp_access_policies, mcp_connections, mcp_executions, mcp_oauth_states,
         mcp_servers, mcp_servers::McpTransportType, mcp_tools, roles, users,
     },
+    services::mcp_tools::mcp_server_short_id,
     services::{
         mcp_client::{
             McpOAuthConfig, McpOAuthTokens, build_authorization_url, oauth_config_from_connection,

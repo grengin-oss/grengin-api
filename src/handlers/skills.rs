@@ -7,7 +7,9 @@ use axum::{
 };
 use chrono::Utc;
 use reqwest::StatusCode;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
+};
 use uuid::Uuid;
 
 use crate::{
@@ -62,7 +64,15 @@ pub async fn list_skills(
     .await?;
 
     let skills = rows.into_iter().map(skill_to_response).collect();
-    Ok((StatusCode::OK, Json(SkillListResponse { skills, total, limit, offset })))
+    Ok((
+        StatusCode::OK,
+        Json(SkillListResponse {
+            skills,
+            total,
+            limit,
+            offset,
+        }),
+    ))
 }
 
 #[utoipa::path(
@@ -83,7 +93,10 @@ pub async fn get_skill(
 ) -> Result<(StatusCode, Json<SkillResponse>), AuthError> {
     let skill = get_skill_or_404(id, &app_state.database).await?;
     let knowledge_files = get_skill_knowledge_info(&app_state.database, skill.id).await;
-    Ok((StatusCode::OK, Json(skill_to_response_with_knowledge(skill, knowledge_files))))
+    Ok((
+        StatusCode::OK,
+        Json(skill_to_response_with_knowledge(skill, knowledge_files)),
+    ))
 }
 
 #[utoipa::path(
@@ -118,7 +131,9 @@ pub async fn create_skill(
 
     let identifier = req.identifier.trim().to_ascii_lowercase();
     if identifier.is_empty() || identifier.len() > 100 {
-        return Err(AuthError::InvalidRequest { field: "identifier" });
+        return Err(AuthError::InvalidRequest {
+            field: "identifier",
+        });
     }
     let name = req.name.trim().to_string();
     if name.is_empty() || name.len() > 100 {
@@ -171,7 +186,10 @@ pub async fn create_skill(
         vec![]
     };
 
-    Ok((StatusCode::CREATED, Json(skill_to_response_with_knowledge(skill, knowledge_files))))
+    Ok((
+        StatusCode::CREATED,
+        Json(skill_to_response_with_knowledge(skill, knowledge_files)),
+    ))
 }
 
 #[utoipa::path(
@@ -249,7 +267,10 @@ pub async fn update_skill(
         get_skill_knowledge_info(&app_state.database, skill.id).await
     };
 
-    Ok((StatusCode::OK, Json(skill_to_response_with_knowledge(skill, knowledge_files))))
+    Ok((
+        StatusCode::OK,
+        Json(skill_to_response_with_knowledge(skill, knowledge_files)),
+    ))
 }
 
 #[utoipa::path(
@@ -285,10 +306,13 @@ pub async fn delete_skill(
         return Err(AuthError::PermissionDenied);
     }
 
-    skills::Entity::delete_by_id(id).exec(&app_state.database).await.map_err(|e| {
-        eprintln!("db delete skill error: {e}");
-        AuthError::DbTimeout
-    })?;
+    skills::Entity::delete_by_id(id)
+        .exec(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db delete skill error: {e}");
+            AuthError::DbTimeout
+        })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -365,8 +389,7 @@ pub async fn link_skill(
         .ok_or(AuthError::ResourceNotFound)?;
 
     let skill = get_skill_or_404(req.skill_id, &app_state.database).await?;
-    let link =
-        link_skill_to_conversation(&app_state.database, conversation_id, skill.id).await?;
+    let link = link_skill_to_conversation(&app_state.database, conversation_id, skill.id).await?;
 
     Ok((
         StatusCode::CREATED,

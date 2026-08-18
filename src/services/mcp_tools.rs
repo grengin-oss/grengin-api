@@ -3,14 +3,13 @@
 
 use std::collections::{HashMap, HashSet};
 
+use openssl::sha::sha256;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::{
-    dto::llm::openai::OpenaiTool,
     error::AppError,
-    llm::tooling::mcp_openai_tool_name,
     models::{mcp_access_policies, mcp_servers, mcp_tools},
     services::mcp_access::{
         build_access_context, load_server_rules, load_tool_rules, resolve_server_access_with_rules,
@@ -18,6 +17,44 @@ use crate::{
     },
     state::SharedState,
 };
+
+pub fn sanitize_tool_name(name: &str) -> String {
+    let mut sanitized = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            sanitized.push(ch.to_ascii_lowercase());
+        } else {
+            sanitized.push('_');
+        }
+    }
+    sanitized
+}
+
+pub fn mcp_server_short_id(server_id: &Uuid) -> String {
+    let compact = server_id.to_string().replace('-', "");
+    compact.chars().take(8).collect()
+}
+
+pub fn mcp_tool_name(server_id: &Uuid, tool_name: &str) -> String {
+    let server_part = mcp_server_short_id(server_id);
+    let mut tool_part = sanitize_tool_name(tool_name);
+    if tool_part.is_empty() {
+        tool_part = "tool".to_string();
+    }
+    let digest = sha256(format!("{server_id}:{tool_name}").as_bytes());
+    let hash = digest
+        .iter()
+        .take(4)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let prefix = format!("mcp__{server_part}__");
+    let suffix = format!("__{hash}");
+    let max_tool_len = 64usize.saturating_sub(prefix.len() + suffix.len()).max(1);
+    if tool_part.len() > max_tool_len {
+        tool_part.truncate(max_tool_len);
+    }
+    format!("{prefix}{tool_part}{suffix}")
+}
 
 #[derive(Debug, Clone)]
 pub struct McpToolDescriptor {
@@ -216,22 +253,15 @@ fn normalize_openai_parameters(schema: &Value) -> Value {
     normalized
 }
 
-pub async fn load_openai_mcp_tools(
+pub async fn load_mcp_tools(
     state: &SharedState,
     user_id: Uuid,
     selected_server_ids: &[Uuid],
     selected_tools: &[String],
-) -> Result<
-    (
-        Vec<OpenaiTool>,
-        HashMap<String, McpToolDescriptor>,
-        Vec<McpServerSummary>,
-    ),
-    AppError,
-> {
+) -> Result<(HashMap<String, McpToolDescriptor>, Vec<McpServerSummary>), AppError> {
     let debug = std::env::var("MISTRAL_TOOL_DEBUG").as_deref() == Ok("1");
     if selected_server_ids.is_empty() {
-        return Ok((Vec::new(), HashMap::new(), Vec::new()));
+        return Ok((HashMap::new(), Vec::new()));
     }
 
     let access_context = build_access_context(&state.database, user_id).await?;
@@ -284,7 +314,6 @@ pub async fn load_openai_mcp_tools(
     let selected_set: HashSet<String> = selected_tools.iter().cloned().collect();
     let filter_by_selected = !selected_set.is_empty();
 
-    let mut openai_tools = Vec::new();
     let mut lookup = HashMap::new();
     let mut allowed_servers: HashSet<Uuid> = HashSet::new();
 
@@ -293,7 +322,7 @@ pub async fn load_openai_mcp_tools(
         else {
             continue;
         };
-        let openai_name = mcp_openai_tool_name(&tool.server_id, &tool.name);
+        let openai_name = mcp_tool_name(&tool.server_id, &tool.name);
         if filter_by_selected
             && !selected_set.contains(&openai_name)
             && !selected_set.contains(&tool.name)
@@ -362,17 +391,11 @@ pub async fn load_openai_mcp_tools(
             tool_id: tool.id,
             original_name: tool.original_name.clone(),
             description: tool.description.clone(),
-            input_schema: tool.input_schema.clone(),
+            input_schema: normalize_openai_parameters(&tool.input_schema),
             is_read_only: tool.is_read_only,
             permission: tool_access.permission,
         };
 
-        openai_tools.push(OpenaiTool::Function {
-            name: openai_name.clone(),
-            description: tool.description.clone(),
-            parameters: normalize_openai_parameters(&tool.input_schema),
-            strict: None,
-        });
         lookup.insert(openai_name, descriptor);
         allowed_servers.insert(tool.server_id);
     }
@@ -388,5 +411,5 @@ pub async fn load_openai_mcp_tools(
         }
     }
 
-    Ok((openai_tools, lookup, server_summaries))
+    Ok((lookup, server_summaries))
 }

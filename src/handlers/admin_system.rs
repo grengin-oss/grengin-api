@@ -14,7 +14,9 @@ use crate::{
     dto::system_metrics::SystemMetricsResponse,
     services::{
         authorization::{AuthorizationService, PermissionScopeMode},
-        system_metrics::{collect_container_metrics, collect_database_metrics, collect_machine_metrics},
+        system_metrics::{
+            collect_container_metrics, collect_database_metrics, collect_machine_metrics,
+        },
     },
     state::SharedState,
 };

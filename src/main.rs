@@ -12,8 +12,6 @@ pub mod docs;
 pub mod dto;
 pub mod error;
 pub mod handlers;
-pub mod image_gen;
-pub mod llm;
 pub mod middleware;
 pub mod models;
 pub mod routes;

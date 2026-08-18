@@ -1,0 +1,347 @@
+{
+  "$schema": "../schema/provider-plugin-v1.schema.json",
+  "manifestVersion": "1.0",
+  "id": "openai-compatible",
+  "version": "1.0",
+  "name": "OpenAI-compatible",
+  "description": "Reference manifest for hosted or self-hosted OpenAI-compatible HTTP/SSE APIs.",
+  "baseUrl": "https://api.openai.com/v1/",
+  "credentials": [
+    {
+      "id": "api_key",
+      "type": "secret",
+      "required": true,
+      "label": "API key"
+    }
+  ],
+  "capabilities": {
+    "chat": {
+      "streaming": true,
+      "tools": true,
+      "vision": true,
+      "reasoning": false
+    },
+    "embeddings": true,
+    "imageGeneration": true,
+    "modelListing": true
+  },
+  "mappings": {
+    "message": {
+      "$switch": { "$get": "item.role" },
+      "cases": {
+        "system": {
+          "role": { "$literal": "system" },
+          "content": { "$map": "item.content", "using": "content_part" }
+        },
+        "user": {
+          "role": { "$literal": "user" },
+          "content": { "$map": "item.content", "using": "content_part" }
+        },
+        "assistant": {
+          "role": { "$literal": "assistant" },
+          "content": { "$map": "item.content", "using": "content_part" },
+          "tool_calls": {
+            "$omitIfNull": { "$map": "item.toolCalls", "using": "tool_call" }
+          }
+        },
+        "tool": {
+          "role": { "$literal": "tool" },
+          "tool_call_id": { "$get": "item.toolResult.callId" },
+          "content": { "$jsonEncode": { "$get": "item.toolResult.output" } }
+        }
+      }
+    },
+    "content_part": {
+      "$switch": { "$get": "item.type" },
+      "cases": {
+        "text": {
+          "type": { "$literal": "text" },
+          "text": { "$get": "item.text" }
+        },
+        "image_url": {
+          "type": { "$literal": "image_url" },
+          "image_url": { "url": { "$get": "item.url" } }
+        },
+        "image_base64": {
+          "type": { "$literal": "image_url" },
+          "image_url": {
+            "url": {
+              "$stringConcat": [
+                { "$literal": "data:" },
+                { "$get": "item.mediaType" },
+                { "$literal": ";base64," },
+                { "$get": "item.data" }
+              ]
+            }
+          }
+        },
+        "file": {
+          "type": { "$literal": "file" },
+          "file": {
+            "filename": { "$get": "item.name" },
+            "file_data": {
+              "$stringConcat": [
+                { "$literal": "data:" },
+                { "$get": "item.mediaType" },
+                { "$literal": ";base64," },
+                { "$get": "item.data" }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "tool": {
+      "type": { "$literal": "function" },
+      "function": {
+        "name": { "$get": "item.name" },
+        "description": { "$omitIfNull": { "$get": "item.description" } },
+        "parameters": { "$get": "item.parameters" }
+      }
+    },
+    "tool_call": {
+      "id": { "$get": "item.id" },
+      "type": { "$literal": "function" },
+      "function": {
+        "name": { "$get": "item.name" },
+        "arguments": { "$jsonEncode": { "$get": "item.arguments" } }
+      }
+    },
+    "input_image": {
+      "data": { "$get": "item.data" },
+      "filename": {
+        "$coalesce": [
+          { "$get": "item.filename" },
+          { "$literal": "image.png" }
+        ]
+      },
+      "mediaType": { "$get": "item.mediaType" }
+    }
+  },
+  "models": [],
+  "operations": {
+    "chatStream": {
+      "method": "POST",
+      "path": "chat/completions",
+      "headers": {
+        "Authorization": {
+          "secret": "api_key",
+          "prefix": "Bearer "
+        }
+      },
+      "bodyEncoding": "json",
+      "body": {
+        "model": { "$get": "request.model" },
+        "messages": { "$map": "request.messages", "using": "message" },
+        "temperature": { "$omitIfNull": { "$get": "request.temperature" } },
+        "max_completion_tokens": { "$omitIfNull": { "$get": "request.maxTokens" } },
+        "tools": {
+          "$omitIfNull": { "$map": "request.tools", "using": "tool" }
+        },
+        "web_search_options": {
+          "$omitIfNull": {
+            "$if": { "$get": "request.webSearch" },
+            "then": { "$literal": {} }
+          }
+        },
+        "stream": { "$literal": true },
+        "stream_options": { "$literal": { "include_usage": true } }
+      },
+      "response": {
+        "bodyEncoding": "sse",
+        "eventDataEncoding": "json",
+        "doneData": "[DONE]",
+        "rules": [
+          {
+            "id": "message_start",
+            "when": { "pointer": "/id", "exists": true },
+            "emit": "messageStart",
+            "fields": { "requestId": "/id" }
+          },
+          {
+            "id": "text",
+            "when": { "pointer": "/choices/0/delta/content", "notNull": true },
+            "emit": "textDelta",
+            "value": "/choices/0/delta/content"
+          },
+          {
+            "id": "tool_start",
+            "forEach": "/choices/0/delta/tool_calls",
+            "when": { "pointer": "/id", "notNull": true },
+            "emit": "toolCallStart",
+            "fields": {
+              "id": "/id",
+              "name": "/function/name",
+              "index": "/index"
+            }
+          },
+          {
+            "id": "tool_arguments",
+            "forEach": "/choices/0/delta/tool_calls",
+            "when": { "pointer": "/function/arguments", "notNull": true },
+            "emit": "toolArgumentsDelta",
+            "fields": {
+              "id": "/id",
+              "index": "/index",
+              "fragment": "/function/arguments"
+            }
+          },
+          {
+            "id": "search_start",
+            "when": {
+              "pointer": "/choices/0/delta/annotations",
+              "notNull": true
+            },
+            "emit": "serverToolStart",
+            "constants": { "name": "web_search" }
+          },
+          {
+            "id": "search_results",
+            "when": {
+              "pointer": "/choices/0/delta/annotations",
+              "notNull": true
+            },
+            "emit": "serverToolResult",
+            "constants": { "name": "web_search" },
+            "collect": "/choices/0/delta/annotations",
+            "itemFields": {
+              "title": "/url_citation/title",
+              "url": "/url_citation/url"
+            }
+          },
+          {
+            "id": "usage",
+            "when": { "pointer": "/usage", "exists": true },
+            "emit": "usage",
+            "fields": {
+              "inputTokens": "/usage/prompt_tokens",
+              "outputTokens": "/usage/completion_tokens",
+              "totalTokens": "/usage/total_tokens",
+              "cachedInputTokens": "/usage/prompt_tokens_details/cached_tokens"
+            }
+          },
+          {
+            "id": "completed",
+            "when": { "pointer": "/choices/0/finish_reason", "notNull": true },
+            "emit": "completed",
+            "fields": { "finishReason": "/choices/0/finish_reason" }
+          }
+        ]
+      },
+      "continuation": {
+        "mode": "replay_messages",
+        "maxToolRounds": 3
+      }
+    },
+    "embeddings": {
+      "method": "POST",
+      "path": "embeddings",
+      "headers": {
+        "Authorization": {
+          "secret": "api_key",
+          "prefix": "Bearer "
+        }
+      },
+      "bodyEncoding": "json",
+      "body": {
+        "model": { "$get": "request.model" },
+        "input": { "$get": "request.inputs" },
+        "dimensions": { "$omitIfNull": { "$get": "request.dimensions" } }
+      },
+      "maxBatchSize": 2048,
+      "response": {
+        "bodyEncoding": "json",
+        "itemsPointer": "/data",
+        "vectorPointer": "/embedding",
+        "indexPointer": "/index",
+        "usage": { "totalTokens": "/usage/total_tokens" }
+      }
+    },
+    "imageGeneration": {
+      "method": "POST",
+      "path": "images/generations",
+      "headers": {
+        "Authorization": {
+          "secret": "api_key",
+          "prefix": "Bearer "
+        }
+      },
+      "bodyEncoding": "json",
+      "body": {
+        "model": { "$get": "request.model" },
+        "prompt": { "$get": "request.prompt" },
+        "n": { "$get": "request.count" },
+        "size": { "$omitIfNull": { "$get": "request.size" } },
+        "quality": { "$omitIfNull": { "$get": "request.quality" } }
+      },
+      "response": {
+        "bodyEncoding": "json",
+        "imagesPointer": "/data",
+        "base64Pointer": "/b64_json",
+        "defaultMediaType": "image/png",
+        "usage": {
+          "inputTokens": "/usage/input_tokens",
+          "textInputTokens": "/usage/input_tokens_details/text_tokens",
+          "imageInputTokens": "/usage/input_tokens_details/image_tokens",
+          "outputTokens": "/usage/output_tokens"
+        }
+      }
+    },
+    "imageEdit": {
+      "method": "POST",
+      "path": "images/edits",
+      "headers": {
+        "Authorization": {
+          "secret": "api_key",
+          "prefix": "Bearer "
+        }
+      },
+      "bodyEncoding": "multipart",
+      "body": {
+        "model": { "$get": "request.model" },
+        "prompt": { "$get": "request.prompt" },
+        "n": { "$get": "request.count" },
+        "size": { "$omitIfNull": { "$get": "request.size" } },
+        "quality": { "$omitIfNull": { "$get": "request.quality" } },
+        "image[]": { "$map": "request.inputImages", "using": "input_image" }
+      },
+      "response": {
+        "bodyEncoding": "json",
+        "imagesPointer": "/data",
+        "base64Pointer": "/b64_json",
+        "defaultMediaType": "image/png",
+        "usage": {
+          "inputTokens": "/usage/input_tokens",
+          "textInputTokens": "/usage/input_tokens_details/text_tokens",
+          "imageInputTokens": "/usage/input_tokens_details/image_tokens",
+          "outputTokens": "/usage/output_tokens"
+        }
+      }
+    },
+    "listModels": {
+      "method": "GET",
+      "path": "models",
+      "headers": {
+        "Authorization": {
+          "secret": "api_key",
+          "prefix": "Bearer "
+        }
+      },
+      "bodyEncoding": "none",
+      "response": {
+        "bodyEncoding": "json",
+        "modelsPointer": "/data",
+        "idPointer": "/id",
+        "defaultModelType": "text_generator",
+        "defaultCapabilities": {
+          "chat": {
+            "streaming": true,
+            "tools": true,
+            "vision": true,
+            "reasoning": false
+          }
+        }
+      }
+    }
+  }
+}

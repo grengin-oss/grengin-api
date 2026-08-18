@@ -1,0 +1,223 @@
+{
+  "$schema": "../schema/provider-plugin-v1.schema.json",
+  "manifestVersion": "1.0",
+  "id": "gemini",
+  "version": "1.0",
+  "name": "Google Gemini",
+  "description": "Gemini native streaming chat, functions, and Google Search grounding.",
+  "baseUrl": "https://generativelanguage.googleapis.com/v1beta/",
+  "credentials": [
+    { "id": "api_key", "type": "secret", "required": true, "label": "API key" }
+  ],
+  "capabilities": {
+    "chat": { "streaming": true, "tools": true, "vision": true, "reasoning": true }
+  },
+  "mappings": {
+    "gemini_content": {
+      "$if": {
+        "$switch": { "$get": "item.role" },
+        "cases": { "system": { "$literal": false } },
+        "default": { "$literal": true }
+      },
+      "then": {
+        "$switch": { "$get": "item.role" },
+        "cases": {
+          "assistant": {
+            "role": { "$literal": "model" },
+            "parts": {
+              "$concat": [
+                { "$map": "item.content", "using": "gemini_part" },
+                { "$map": "item.toolCalls", "using": "gemini_function_call" }
+              ]
+            }
+          },
+          "tool": {
+            "role": { "$literal": "user" },
+            "parts": {
+              "$array": [
+                {
+                  "functionResponse": {
+                    "id": { "$get": "item.toolResult.callId" },
+                    "name": { "$get": "item.toolResult.name" },
+                    "response": {
+                      "output": { "$get": "item.toolResult.output" }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "default": {
+          "role": { "$literal": "user" },
+          "parts": { "$map": "item.content", "using": "gemini_part" }
+        }
+      }
+    },
+    "gemini_system_part": {
+      "$if": {
+        "$switch": { "$get": "item.role" },
+        "cases": { "system": { "$literal": true } },
+        "default": { "$literal": false }
+      },
+      "then": { "text": { "$get": "/item/content/0/text" } }
+    },
+    "gemini_part": {
+      "$switch": { "$get": "item.type" },
+      "cases": {
+        "text": { "text": { "$get": "item.text" } },
+        "image_url": {
+          "fileData": {
+            "fileUri": { "$get": "item.url" }
+          }
+        },
+        "image_base64": {
+          "inlineData": {
+            "mimeType": { "$get": "item.mediaType" },
+            "data": { "$get": "item.data" }
+          }
+        },
+        "file": {
+          "inlineData": {
+            "mimeType": { "$get": "item.mediaType" },
+            "data": { "$get": "item.data" }
+          }
+        }
+      }
+    },
+    "gemini_function_call": {
+      "functionCall": {
+        "id": { "$get": "item.id" },
+        "name": { "$get": "item.name" },
+        "args": { "$get": "item.arguments" }
+      },
+      "thoughtSignature": {
+        "$omitIfNull": { "$get": "session.captures.thoughtSignature" }
+      }
+    },
+    "gemini_function_tool": {
+      "function_declarations": {
+        "$array": [
+          {
+            "name": { "$get": "item.name" },
+            "description": { "$omitIfNull": { "$get": "item.description" } },
+            "parameters": { "$get": "item.parameters" }
+          }
+        ]
+      }
+    }
+  },
+  "operations": {
+    "chatStream": {
+      "method": "POST",
+      "path": "models/${request.model}:streamGenerateContent",
+      "headers": {
+        "x-goog-api-key": { "secret": "api_key" },
+        "Accept": { "literal": "text/event-stream" }
+      },
+      "query": { "alt": { "$literal": "sse" } },
+      "bodyEncoding": "json",
+      "body": {
+        "system_instruction": {
+          "parts": { "$map": "request.messages", "using": "gemini_system_part" }
+        },
+        "contents": { "$map": "request.messages", "using": "gemini_content" },
+        "tools": {
+          "$omitIfNull": {
+            "$concat": [
+              {
+                "$if": { "$get": "request.webSearch" },
+                "then": { "$array": [{ "google_search": { "$literal": {} } }] }
+              },
+              { "$map": "request.tools", "using": "gemini_function_tool" }
+            ]
+          }
+        },
+        "generationConfig": {
+          "$object": {
+            "temperature": { "$omitIfNull": { "$get": "request.temperature" } },
+            "maxOutputTokens": { "$omitIfNull": { "$get": "request.maxTokens" } }
+          }
+        }
+      },
+      "response": {
+        "bodyEncoding": "sse",
+        "eventDataEncoding": "json",
+        "rules": [
+          {
+            "id": "message_start",
+            "when": { "pointer": "/usageMetadata", "exists": true },
+            "emit": "messageStart"
+          },
+          {
+            "id": "text_delta",
+            "forEach": "/candidates/0/content/parts",
+            "when": { "pointer": "/text", "valueType": "string" },
+            "emit": "textDelta",
+            "value": "/text"
+          },
+          {
+            "id": "tool_start",
+            "forEach": "/candidates/0/content/parts",
+            "when": { "pointer": "/functionCall/name", "exists": true },
+            "emit": "toolCallStart",
+            "fields": { "id": "/functionCall/id", "name": "/functionCall/name" }
+          },
+          {
+            "id": "tool_arguments",
+            "forEach": "/candidates/0/content/parts",
+            "when": { "pointer": "/functionCall/args", "exists": true },
+            "emit": "toolArgumentsDelta",
+            "fields": { "id": "/functionCall/id" },
+            "jsonFields": { "fragment": "/functionCall/args" }
+          },
+          {
+            "id": "search_start",
+            "when": { "pointer": "/candidates/0/groundingMetadata/webSearchQueries", "exists": true },
+            "emit": "serverToolStart",
+            "constants": { "id": "gemini_web_search", "name": "web_search" },
+            "fields": { "queries": "/candidates/0/groundingMetadata/webSearchQueries" }
+          },
+          {
+            "id": "search_results",
+            "when": { "pointer": "/candidates/0/groundingMetadata/groundingChunks", "exists": true },
+            "emit": "serverToolResult",
+            "constants": { "id": "gemini_web_search", "name": "web_search" },
+            "collect": "/candidates/0/groundingMetadata/groundingChunks",
+            "itemFields": { "title": "/web/title", "url": "/web/uri" }
+          },
+          {
+            "id": "usage",
+            "when": { "pointer": "/usageMetadata", "exists": true },
+            "emit": "usage",
+            "fields": {
+              "inputTokens": "/usageMetadata/promptTokenCount",
+              "outputTokens": "/usageMetadata/candidatesTokenCount",
+              "totalTokens": "/usageMetadata/totalTokenCount",
+              "cachedInputTokens": "/usageMetadata/cachedContentTokenCount"
+            }
+          },
+          {
+            "id": "error",
+            "when": { "pointer": "/error", "exists": true },
+            "emit": "error",
+            "fields": { "message": "/error/message", "kind": "/error/status" }
+          },
+          {
+            "id": "completed",
+            "when": { "pointer": "/candidates/0/finishReason", "notNull": true },
+            "emit": "completed",
+            "fields": { "finishReason": "/candidates/0/finishReason" }
+          }
+        ]
+      },
+      "continuation": {
+        "mode": "replay_messages",
+        "maxToolRounds": 3,
+        "captures": {
+          "thoughtSignature": "/candidates/0/content/parts/0/thoughtSignature"
+        }
+      }
+    }
+  }
+}

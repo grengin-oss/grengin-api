@@ -32,10 +32,15 @@ pub async fn list_user_skills(
         eprintln!("db user skill count error: {e}");
         AuthError::DbTimeout
     })?;
-    let rows = select.offset(offset).limit(limit).all(db).await.map_err(|e| {
-        eprintln!("db user skill list error: {e}");
-        AuthError::DbTimeout
-    })?;
+    let rows = select
+        .offset(offset)
+        .limit(limit)
+        .all(db)
+        .await
+        .map_err(|e| {
+            eprintln!("db user skill list error: {e}");
+            AuthError::DbTimeout
+        })?;
 
     Ok((rows, total))
 }
@@ -69,7 +74,9 @@ pub async fn create_user_skill(
     }
 
     let identifier = format!("user-{user_id}-{}", Uuid::new_v4().simple());
-    let tools_json = req.tools_config.map(|c| serde_json::to_value(c).unwrap_or_default());
+    let tools_json = req
+        .tools_config
+        .map(|c| serde_json::to_value(c).unwrap_or_default());
 
     let now = Utc::now();
     let row = skills::ActiveModel {
@@ -142,10 +149,13 @@ pub async fn delete_user_skill(
     user_id: Uuid,
 ) -> Result<(), AuthError> {
     let _ = get_user_skill_or_404(id, user_id, db).await?;
-    skills::Entity::delete_by_id(id).exec(db).await.map_err(|e| {
-        eprintln!("db delete user skill error: {e}");
-        AuthError::DbTimeout
-    })?;
+    skills::Entity::delete_by_id(id)
+        .exec(db)
+        .await
+        .map_err(|e| {
+            eprintln!("db delete user skill error: {e}");
+            AuthError::DbTimeout
+        })?;
     Ok(())
 }
 

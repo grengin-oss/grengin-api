@@ -1,0 +1,280 @@
+{
+  "$schema": "../schema/provider-plugin-v1.schema.json",
+  "manifestVersion": "1.0",
+  "id": "anthropic",
+  "version": "1.0",
+  "name": "Anthropic",
+  "baseUrl": "https://api.anthropic.com/v1/",
+  "credentials": [
+    {
+      "id": "api_key",
+      "type": "secret",
+      "required": true,
+      "label": "API key"
+    }
+  ],
+  "capabilities": {
+    "modelListing": true,
+    "chat": {
+      "streaming": true,
+      "tools": true,
+      "vision": true,
+      "reasoning": true
+    }
+  },
+  "mappings": {
+    "message": {
+      "$if": {
+        "$switch": { "$get": "item.role" },
+        "cases": { "system": { "$literal": false } },
+        "default": { "$literal": true }
+      },
+      "then": {
+        "$switch": { "$get": "item.role" },
+        "cases": {
+          "assistant": {
+            "role": { "$literal": "assistant" },
+            "content": {
+              "$concat": [
+                { "$map": "item.content", "using": "content_part" },
+                { "$map": "item.toolCalls", "using": "tool_use_block" }
+              ]
+            }
+          },
+          "tool": {
+            "role": { "$literal": "user" },
+            "content": {
+              "$array": [
+                {
+                  "type": { "$literal": "tool_result" },
+                  "tool_use_id": { "$get": "item.toolResult.callId" },
+                  "content": { "$jsonEncode": { "$get": "item.toolResult.output" } },
+                  "is_error": { "$get": "item.toolResult.isError" }
+                }
+              ]
+            }
+          }
+        },
+        "default": {
+          "role": { "$get": "item.role" },
+          "content": { "$map": "item.content", "using": "content_part" }
+        }
+      }
+    },
+    "system_message": {
+      "$if": {
+        "$switch": { "$get": "item.role" },
+        "cases": { "system": { "$literal": true } },
+        "default": { "$literal": false }
+      },
+      "then": {
+        "type": { "$literal": "text" },
+        "text": { "$get": "/item/content/0/text" },
+        "cache_control": { "$literal": { "type": "ephemeral" } }
+      }
+    },
+    "content_part": {
+      "$switch": { "$get": "item.type" },
+      "cases": {
+        "text": {
+          "type": { "$literal": "text" },
+          "text": { "$get": "item.text" }
+        },
+        "image_url": {
+          "type": { "$literal": "image" },
+          "source": {
+            "type": { "$literal": "url" },
+            "url": { "$get": "item.url" }
+          }
+        },
+        "image_base64": {
+          "type": { "$literal": "image" },
+          "source": {
+            "type": { "$literal": "base64" },
+            "media_type": { "$get": "item.mediaType" },
+            "data": { "$get": "item.data" }
+          }
+        },
+        "file": {
+          "type": { "$literal": "document" },
+          "source": {
+            "type": { "$literal": "base64" },
+            "media_type": { "$get": "item.mediaType" },
+            "data": { "$get": "item.data" }
+          }
+        }
+      }
+    },
+    "tool_use_block": {
+      "type": { "$literal": "tool_use" },
+      "id": { "$get": "item.id" },
+      "name": { "$get": "item.name" },
+      "input": { "$get": "item.arguments" }
+    },
+    "tool": {
+      "name": { "$get": "item.name" },
+      "description": { "$omitIfNull": { "$get": "item.description" } },
+      "input_schema": { "$get": "item.parameters" }
+    }
+  },
+  "models": [
+    {
+      "id": "claude-haiku-4-5-20251001",
+      "name": "Claude Haiku 4.5",
+      "modelType": "text_generator",
+      "capabilities": {
+        "chat": {
+          "streaming": true,
+          "tools": true,
+          "vision": false,
+          "reasoning": true
+        }
+      },
+      "metadata": {
+        "inputTokenRate": 1.0,
+        "outputTokenRate": 5.0,
+        "cachedInputTokenRate": 0.1,
+        "cacheCreationTokenRate": 1.25,
+        "maxOutputTokens": 64000,
+        "contextWindow": 200000
+      }
+    }
+  ],
+  "operations": {
+    "chatStream": {
+      "method": "POST",
+      "path": "messages",
+      "headers": {
+        "x-api-key": { "secret": "api_key" },
+        "anthropic-version": { "literal": "2023-06-01" }
+      },
+      "bodyEncoding": "json",
+      "body": {
+        "model": { "$get": "request.model" },
+        "system": {
+          "$omitIfNull": {
+            "$concat": [
+              { "$map": "request.messages", "using": "system_message" }
+            ]
+          }
+        },
+        "messages": { "$map": "request.messages", "using": "message" },
+        "max_tokens": {
+          "$coalesce": [{ "$get": "request.maxTokens" }, { "$literal": 4096 }]
+        },
+        "temperature": { "$omitIfNull": { "$get": "request.temperature" } },
+        "tools": {
+          "$omitIfNull": {
+            "$concat": [
+              { "$map": "request.tools", "using": "tool" },
+              {
+                "$if": { "$get": "request.webSearch" },
+                "then": {
+                  "$literal": [
+                    {
+                      "type": "web_search_20250305",
+                      "name": "web_search",
+                      "max_uses": 3
+                    }
+                  ]
+                },
+                "else": { "$literal": [] }
+              }
+            ]
+          }
+        },
+        "stream": { "$literal": true }
+      },
+      "response": {
+        "bodyEncoding": "sse",
+        "eventDataEncoding": "json",
+        "rules": [
+          {
+            "id": "message_start",
+            "when": { "pointer": "/type", "equals": "message_start" },
+            "emit": "messageStart",
+            "fields": { "requestId": "/message/id" }
+          },
+          {
+            "id": "input_usage",
+            "when": { "pointer": "/type", "equals": "message_start" },
+            "emit": "usage",
+            "fields": {
+              "inputTokens": "/message/usage/input_tokens",
+              "cachedInputTokens": "/message/usage/cache_read_input_tokens",
+              "cacheCreationTokens": "/message/usage/cache_creation_input_tokens"
+            },
+            "inputTokensIncludeCached": false,
+            "inputTokensIncludeCacheCreation": false
+          },
+          {
+            "id": "text",
+            "when": { "pointer": "/delta/type", "equals": "text_delta" },
+            "emit": "textDelta",
+            "value": "/delta/text"
+          },
+          {
+            "id": "output_usage",
+            "when": { "pointer": "/type", "equals": "message_delta" },
+            "emit": "usage",
+            "fields": { "outputTokens": "/usage/output_tokens" }
+          },
+          {
+            "id": "tool_start",
+            "when": { "pointer": "/content_block/type", "equals": "tool_use" },
+            "emit": "toolCallStart",
+            "fields": {
+              "id": "/content_block/id",
+              "name": "/content_block/name",
+              "index": "/index"
+            }
+          },
+          {
+            "id": "search_start",
+            "when": { "pointer": "/content_block/type", "equals": "server_tool_use" },
+            "emit": "serverToolStart",
+            "fields": {
+              "id": "/content_block/id",
+              "name": "/content_block/name",
+              "index": "/index"
+            }
+          },
+          {
+            "id": "tool_arguments",
+            "when": { "pointer": "/delta/type", "equals": "input_json_delta" },
+            "emit": "toolArgumentsDelta",
+            "fields": { "index": "/index", "fragment": "/delta/partial_json" }
+          },
+          {
+            "id": "search_query",
+            "when": { "pointer": "/delta/type", "equals": "input_json_delta" },
+            "emit": "serverToolQueryDelta",
+            "fields": { "index": "/index", "fragment": "/delta/partial_json" }
+          },
+          {
+            "id": "search_results",
+            "when": {
+              "pointer": "/content_block/type",
+              "equals": "web_search_tool_result"
+            },
+            "emit": "serverToolResult",
+            "fields": { "id": "/content_block/tool_use_id" },
+            "constants": { "name": "web_search" },
+            "collect": "/content_block/content",
+            "itemFields": {
+              "title": "/title",
+              "url": "/url",
+              "pageAge": "/page_age"
+            }
+          },
+          {
+            "id": "completed",
+            "when": { "pointer": "/delta/stop_reason", "notNull": true },
+            "emit": "completed",
+            "fields": { "finishReason": "/delta/stop_reason" }
+          }
+        ]
+      }
+    }
+  }
+}

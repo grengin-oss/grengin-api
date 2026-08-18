@@ -11,10 +11,7 @@ use crate::{
         oauth::{AuthCallback, AuthProvider, CallbackExchangeMode, StartParams},
     },
     models::oauth_sessions,
-    services::{
-        oidc_proxy::provider_uses_proxy,
-        oidc_service::oidc_oauth_callback,
-    },
+    services::{oidc_proxy::provider_uses_proxy, oidc_service::oidc_oauth_callback},
     state::SharedState,
     utils::uri::is_azure_mobile_redirect_uri,
 };
@@ -26,12 +23,10 @@ use axum::{
 };
 use chrono::Utc;
 use openidconnect::{
-    CsrfToken, Nonce, PkceCodeChallenge, RedirectUrl, Scope,
-    core::CoreAuthenticationFlow,
+    CsrfToken, Nonce, PkceCodeChallenge, RedirectUrl, Scope, core::CoreAuthenticationFlow,
 };
 use sea_orm::{ActiveModelTrait, ActiveValue::Set};
 use std::borrow::Cow;
-
 
 #[utoipa::path(
     get,
@@ -197,7 +192,6 @@ pub async fn oidc_oauth_callback_get(
 ) -> Result<(StatusCode, Json<AuthToken>), AuthError> {
     oidc_oauth_callback(provider, cb, app_state, CallbackExchangeMode::Auto).await
 }
-
 
 #[utoipa::path(
     post,

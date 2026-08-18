@@ -65,6 +65,10 @@ mod m20260717_000001_create_skill_knowledge;
 mod m20260721_000001_rename_skill_system_role_to_instructions;
 mod m20260721_000002_add_image_gen_model_to_ai_engines;
 mod m20260724_000001_add_fts_indexes;
+mod m20260810_000001_add_plugin_config_to_ai_engines;
+mod m20260810_000001_create_provider_plugins;
+mod m20260814_000001_reconcile_provider_plugin_storage;
+mod m20260816_000001_add_pinned_to_conversations;
 
 pub struct Migrator;
 
@@ -134,6 +138,32 @@ impl MigratorTrait for Migrator {
             Box::new(m20260721_000001_rename_skill_system_role_to_instructions::Migration),
             Box::new(m20260721_000002_add_image_gen_model_to_ai_engines::Migration),
             Box::new(m20260724_000001_add_fts_indexes::Migration),
+            Box::new(m20260810_000001_create_provider_plugins::Migration),
+            Box::new(m20260810_000001_add_plugin_config_to_ai_engines::Migration),
+            Box::new(m20260814_000001_reconcile_provider_plugin_storage::Migration),
+            Box::new(m20260816_000001_add_pinned_to_conversations::Migration),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn provider_storage_migration_histories_are_preserved() {
+        let names = Migrator::migrations()
+            .into_iter()
+            .map(|migration| migration.name().to_owned())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"m20260810_000001_create_provider_plugins".to_owned()));
+        assert!(names.contains(&"m20260810_000001_add_plugin_config_to_ai_engines".to_owned()));
+        assert_eq!(names.len(), names.iter().collect::<HashSet<_>>().len());
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some("m20260816_000001_add_pinned_to_conversations")
+        );
     }
 }

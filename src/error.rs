@@ -151,15 +151,15 @@ pub enum ChatStreamError {
 
 impl ChatStreamError {
     pub fn from_stream_error(
-        kind: crate::handlers::llm::StreamErrorKind,
+        kind: crate::services::provider_stream::StreamErrorKind,
         provider: String,
         message: String,
     ) -> Self {
         match kind {
-            crate::handlers::llm::StreamErrorKind::QuotaExhausted => {
+            crate::services::provider_stream::StreamErrorKind::QuotaExhausted => {
                 Self::ApiQuotaExhausted { provider }
             }
-            crate::handlers::llm::StreamErrorKind::ProviderError => {
+            crate::services::provider_stream::StreamErrorKind::ProviderError => {
                 Self::ProviderError { provider, message }
             }
         }
@@ -193,7 +193,8 @@ impl ChatStreamError {
                 ErrorDetail {
                     code: ErrorCode::LlmStreamProviderError,
                     description: format!("Error from {provider}: {message}"),
-                    solution: "Verify the selected model is available and your API key is valid.".to_string(),
+                    solution: "Verify the selected model is available and your API key is valid."
+                        .to_string(),
                     description_key: "error.llm.stream_provider_error.description".to_string(),
                     solution_key: "error.llm.stream_provider_error.solution".to_string(),
                     params,
@@ -206,8 +207,12 @@ impl ChatStreamError {
                 params.insert("provider".to_string(), provider.clone());
                 ErrorDetail {
                     code: ErrorCode::LlmStreamConnectionFailed,
-                    description: format!("Failed to establish or maintain a stream connection to {provider}."),
-                    solution: "Try again. If the problem persists, check the provider's status page.".to_string(),
+                    description: format!(
+                        "Failed to establish or maintain a stream connection to {provider}."
+                    ),
+                    solution:
+                        "Try again. If the problem persists, check the provider's status page."
+                            .to_string(),
                     description_key: "error.llm.stream_connection_failed.description".to_string(),
                     solution_key: "error.llm.stream_connection_failed.solution".to_string(),
                     params,

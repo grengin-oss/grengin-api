@@ -10,6 +10,7 @@ use crate::{
     services::notifications::NotificationEvent,
 };
 use anyhow::Error;
+use llm_plugin::ProviderRegistry;
 use reqwest::Client as ReqwestClient;
 use sea_orm::{Database, DatabaseConnection, EntityTrait};
 use std::{
@@ -31,6 +32,7 @@ pub struct AppState {
     pub mcp_clients: RwLock<HashMap<Uuid, Arc<McpServerClient>>>,
     pub notification_hub: broadcast::Sender<NotificationEvent>,
     pub stream_cancellations: RwLock<HashMap<Uuid, Arc<StreamCancel>>>,
+    pub provider_registry: ProviderRegistry,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -93,10 +95,14 @@ impl AppState {
             mcp_clients: RwLock::new(HashMap::new()),
             notification_hub,
             stream_cancellations: RwLock::new(HashMap::new()),
+            provider_registry: ProviderRegistry::new(),
         };
         state.refresh_azure_client().await?;
         state.refresh_google_client().await?;
         let _ = state.load_mcp_servers_from_db().await;
+        let _ = crate::services::provider_runtime::load_enabled_providers(&state)
+            .await
+            .map_err(|error| eprintln!("Loading custom AI engines failed: {error}"));
         Ok(Arc::new(state))
     }
 
@@ -198,49 +204,13 @@ impl AppState {
     }
 
     pub async fn check_ai_engine_is_enabled(&self, ai_engine_key: &str) -> Option<bool> {
-        match ai_engine_key.to_lowercase().as_str() {
-            "openai" => {
-                let is_enabled = self
-                    .settings
-                    .openai
-                    .read()
-                    .await
-                    .as_ref()
-                    .map(|setting| setting.is_enabled);
-                is_enabled
-            }
-            "anthropic" => {
-                let is_enabled = self
-                    .settings
-                    .anthropic
-                    .read()
-                    .await
-                    .as_ref()
-                    .map(|setting| setting.is_enabled);
-                is_enabled
-            }
-            "mistral" => {
-                let is_enabled = self
-                    .settings
-                    .mistral
-                    .read()
-                    .await
-                    .as_ref()
-                    .map(|setting| setting.is_enabled);
-                is_enabled
-            }
-            "gemini" => {
-                let is_enabled = self
-                    .settings
-                    .gemini
-                    .read()
-                    .await
-                    .as_ref()
-                    .map(|setting| setting.is_enabled);
-                is_enabled
-            }
-            _ => None,
-        }
+        let key = ai_engine_key.to_lowercase();
+        self.settings
+            .ai_engines_cache
+            .read()
+            .await
+            .get(&key)
+            .map(|engine| engine.is_enabled)
     }
 
     pub async fn register_stream_cancel(&self, message_id: Uuid) -> Arc<StreamCancel> {
@@ -415,5 +385,3 @@ impl AppState {
         clients.remove(server_id);
     }
 }
-
-

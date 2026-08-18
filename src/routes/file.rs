@@ -13,6 +13,9 @@ use axum::{
 pub fn files_routes() -> Router<SharedState> {
     Router::new()
         .route("/files", post(upload_file).get(get_files))
-        .route("/files/{file_id}", get(get_file_by_id).delete(delete_file_by_id))
+        .route(
+            "/files/{file_id}",
+            get(get_file_by_id).delete(delete_file_by_id),
+        )
         .route("/files/{file_id}/download", get(download_file))
 }

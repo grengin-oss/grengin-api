@@ -16,7 +16,9 @@ use crate::{
     models::sso_providers,
     services::{
         authorization::{AuthorizationService, PermissionScopeMode},
-        sso_seed::{EMPTY_VALUE, ensure_sso_providers_from_env, grengin_proxy_available_for_provider},
+        sso_seed::{
+            EMPTY_VALUE, ensure_sso_providers_from_env, grengin_proxy_available_for_provider,
+        },
         sso_validation::{
             build_draft_config, config_hash, has_sensitive_changes, issue_validation_token,
             validate_sso_draft, validate_validation_token,
@@ -32,7 +34,6 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, IntoActiveModel};
 use uuid::Uuid;
-
 
 #[utoipa::path(
     get,
@@ -498,8 +499,11 @@ pub async fn quick_setup_grengin_proxy(
 
     let app_redirect_url =
         std::env::var("REDIRECT_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
-    let proxy_redirect_url =
-        format!("{}/auth/{}/callback", app_redirect_url.trim_end_matches('/'), model.provider);
+    let proxy_redirect_url = format!(
+        "{}/auth/{}/callback",
+        app_redirect_url.trim_end_matches('/'),
+        model.provider
+    );
 
     let tenant_id = match model.provider.as_str() {
         "azure" => Some(

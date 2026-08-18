@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod artifacts;
 pub mod admin_ai;
+pub mod admin_ai_plugins;
 pub mod admin_analytics;
 pub mod admin_audit;
 pub mod admin_department;
@@ -15,12 +15,12 @@ pub mod admin_roles;
 pub mod admin_sso_provider;
 pub mod admin_system;
 pub mod admin_users;
+pub mod artifacts;
 pub mod auth;
 pub mod branding;
 pub mod chat;
 pub mod chat_stream;
 pub mod file;
-pub mod llm;
 pub mod mcp;
 pub mod me;
 pub mod me_prompts;

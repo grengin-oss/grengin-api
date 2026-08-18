@@ -5,7 +5,7 @@ use crate::{
     dto::chat_stream::{
         ChatStreamToolInput, ChatStreamWebSearchResult, ChatStreamWebSearchResultItem,
     },
-    handlers::llm::{StreamWebSearchState, ToolInput},
+    services::provider_stream::{StreamWebSearchState, ToolInput},
 };
 use rust_decimal::prelude::{Decimal, FromPrimitive};
 use serde::Deserialize;
@@ -189,4 +189,40 @@ pub fn output_indicates_error(output: &Value) -> bool {
 pub fn tool_result_status_from_output(output: &Option<Value>) -> Option<String> {
     let is_error = output.as_ref().map(output_indicates_error).unwrap_or(false);
     Some(if is_error { "error" } else { "success" }.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::calculate_llm_cost;
+    use rust_decimal::Decimal;
+
+    #[test]
+    fn llm_cost_prices_regular_cached_created_and_output_tokens_separately() {
+        let cost = calculate_llm_cost(
+            1_000,
+            300,
+            200,
+            100,
+            Some(2.0),
+            Some(0.2),
+            Some(2.5),
+            Some(8.0),
+        );
+
+        assert_eq!(cost, Decimal::from_str_exact("0.00236").unwrap());
+    }
+
+    #[test]
+    fn llm_cost_falls_back_to_regular_input_rate_for_missing_cache_rates() {
+        let cost = calculate_llm_cost(1_000, 300, 200, 100, Some(2.0), None, None, Some(8.0));
+
+        assert_eq!(cost, Decimal::from_str_exact("0.0028").unwrap());
+    }
+
+    #[test]
+    fn llm_cost_is_zero_when_model_pricing_is_not_configured() {
+        let cost = calculate_llm_cost(1_000, 300, 200, 100, None, None, None, None);
+
+        assert_eq!(cost, Decimal::ZERO);
+    }
 }

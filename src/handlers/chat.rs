@@ -32,7 +32,6 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
-
 #[utoipa::path(
     get,
     path = "/chat",
@@ -64,6 +63,7 @@ pub async fn get_chats(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let archived = query.archived.unwrap_or(false);
+    let pinned = query.pinned.unwrap_or(false);
 
     if let Some(search_text) = search.as_ref() {
         let lex_page = search::lexical_conversation_search(
@@ -71,6 +71,7 @@ pub async fn get_chats(
             claims.user_id,
             search_text,
             archived,
+            pinned,
             limit,
             offset,
         )
@@ -81,18 +82,22 @@ pub async fn get_chats(
                 &app_state.database,
                 claims.user_id,
                 archived,
+                pinned,
                 &lex_page.conversation_ids,
             )
             .await?;
             let mut row_map: std::collections::HashMap<_, _> =
                 rows.into_iter().map(|r| (r.id, r)).collect();
             for conversation_id in &lex_page.conversation_ids {
-                let Some(c) = row_map.remove(conversation_id) else { continue };
+                let Some(c) = row_map.remove(conversation_id) else {
+                    continue;
+                };
                 response.push(ConversationResponse {
                     id: c.id,
                     title: c.title,
                     web_search_enabled: resolve_web_search_enabled(c.metadata.as_ref()),
                     archived: c.archived_at.is_some(),
+                    pinned: c.pinned,
                     archived_at: c.archived_at,
                     model: c.model_name,
                     total_tokens: c.total_tokens,
@@ -107,13 +112,16 @@ pub async fn get_chats(
                     search_snippet: lex_page.snippets.get(conversation_id).cloned(),
                 });
             }
-            return Ok((StatusCode::OK, Json(PaginatedConversations {
-                total: lex_page.total,
-                limit,
-                offset,
-                conversations: response,
-                semantic_results: None,
-            })));
+            return Ok((
+                StatusCode::OK,
+                Json(PaginatedConversations {
+                    total: lex_page.total,
+                    limit,
+                    offset,
+                    conversations: response,
+                    semantic_results: None,
+                }),
+            ));
         }
 
         // Lexical found nothing — fall back to semantic if available.
@@ -122,6 +130,7 @@ pub async fn get_chats(
             claims.user_id,
             search_text,
             archived,
+            pinned,
             limit,
             offset,
         )
@@ -132,19 +141,23 @@ pub async fn get_chats(
                     &app_state.database,
                     claims.user_id,
                     archived,
+                    pinned,
                     &sem_page.conversation_ids,
                 )
                 .await?;
                 let mut row_map: std::collections::HashMap<_, _> =
                     rows.into_iter().map(|r| (r.id, r)).collect();
                 for conversation_id in &sem_page.conversation_ids {
-                    let Some(c) = row_map.remove(conversation_id) else { continue };
+                    let Some(c) = row_map.remove(conversation_id) else {
+                        continue;
+                    };
                     let snippet = sem_page.snippets.get(conversation_id);
                     response.push(ConversationResponse {
                         id: c.id,
                         title: c.title,
                         web_search_enabled: resolve_web_search_enabled(c.metadata.as_ref()),
                         archived: c.archived_at.is_some(),
+                        pinned: c.pinned,
                         archived_at: c.archived_at,
                         model: c.model_name,
                         total_tokens: c.total_tokens,
@@ -160,28 +173,44 @@ pub async fn get_chats(
                     });
                 }
                 let semantic_results = Some(
-                    sem_page.snippets
+                    sem_page
+                        .snippets
                         .into_iter()
-                        .map(|(id, s)| (id, SemanticResult { message_id: s.message_id, snippet: s.snippet, distance: s.distance }))
+                        .map(|(id, s)| {
+                            (
+                                id,
+                                SemanticResult {
+                                    message_id: s.message_id,
+                                    snippet: s.snippet,
+                                    distance: s.distance,
+                                },
+                            )
+                        })
                         .collect(),
                 );
-                return Ok((StatusCode::OK, Json(PaginatedConversations {
-                    total: sem_page.total,
-                    limit,
-                    offset,
-                    conversations: response,
-                    semantic_results,
-                })));
+                return Ok((
+                    StatusCode::OK,
+                    Json(PaginatedConversations {
+                        total: sem_page.total,
+                        limit,
+                        offset,
+                        conversations: response,
+                        semantic_results,
+                    }),
+                ));
             }
         }
 
-        return Ok((StatusCode::OK, Json(PaginatedConversations {
-            total: 0,
-            limit,
-            offset,
-            conversations: vec![],
-            semantic_results: None,
-        })));
+        return Ok((
+            StatusCode::OK,
+            Json(PaginatedConversations {
+                total: 0,
+                limit,
+                offset,
+                conversations: vec![],
+                semantic_results: None,
+            }),
+        ));
     }
 
     let mut count_query =
@@ -191,6 +220,7 @@ pub async fn get_chats(
     } else {
         count_query = count_query.filter(conversations::Column::ArchivedAt.is_null());
     }
+    count_query = count_query.filter(conversations::Column::Pinned.eq(pinned));
     let total = count_query.count(&app_state.database).await.map_err(|e| {
         eprintln!("conversation count query error -> {e}");
         AppError::DbTimeout
@@ -208,6 +238,7 @@ pub async fn get_chats(
     } else {
         select = select.filter(conversations::Column::ArchivedAt.is_null());
     }
+    select = select.filter(conversations::Column::Pinned.eq(pinned));
 
     select = select
         .group_by(conversations::Column::Id)
@@ -240,6 +271,7 @@ pub async fn get_chats(
             title: conversation_with_count.title,
             web_search_enabled,
             archived: conversation_with_count.archived_at.is_some(),
+            pinned: conversation_with_count.pinned,
             archived_at: conversation_with_count.archived_at,
             model: conversation_with_count.model_name,
             total_tokens: conversation_with_count.total_tokens,
@@ -272,6 +304,7 @@ async fn fetch_conversations_by_ids(
     db: &sea_orm::DatabaseConnection,
     user_id: Uuid,
     archived: bool,
+    pinned: bool,
     ids: &[Uuid],
 ) -> Result<Vec<ConversationWithCount>, AppError> {
     let mut select = conversations::Entity::find()
@@ -286,6 +319,7 @@ async fn fetch_conversations_by_ids(
     } else {
         select = select.filter(conversations::Column::ArchivedAt.is_null());
     }
+    select = select.filter(conversations::Column::Pinned.eq(pinned));
     select
         .group_by(conversations::Column::Id)
         .into_model::<ConversationWithCount>()
@@ -341,6 +375,7 @@ pub async fn get_chat_by_id(
 
     let web_search_enabled = resolve_web_search_enabled(conversation_model.metadata.as_ref());
     let mut conversation_response = ConversationResponse {
+        pinned: conversation_model.pinned,
         id: conversation_model.id,
         title: conversation_model.title,
         web_search_enabled,
@@ -399,6 +434,16 @@ pub async fn get_chat_by_id(
                 input_tokens: message_model.request_tokens,
                 output_tokens: message_model.response_tokens,
                 total_tokens: message_model.total_tokens,
+                cached_input_tokens: metadata
+                    .and_then(|value| value.get("cachedInputTokens"))
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(|value| i32::try_from(value).ok())
+                    .unwrap_or(0),
+                cache_creation_tokens: metadata
+                    .and_then(|value| value.get("cacheCreationTokens"))
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(|value| i32::try_from(value).ok())
+                    .unwrap_or(0),
             },
         };
         conversation_response
@@ -464,6 +509,7 @@ pub async fn update_chat_by_id(
         })?;
     let web_search_enabled = resolve_web_search_enabled(conversation_model.metadata.as_ref());
     let response = ConversationResponse {
+        pinned: conversation_model.pinned,
         id: conversation_model.id,
         title: conversation_model.title,
         web_search_enabled,

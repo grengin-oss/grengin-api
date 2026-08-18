@@ -237,13 +237,7 @@ pub async fn run_script_command(
         eprintln!(
             "{context} failed with sudo no-new-privileges restriction; retrying without sudo: script={script_path}"
         );
-        return run_with_timeout(
-            build_command(false),
-            timeout_seconds,
-            context,
-            script_path,
-        )
-        .await;
+        return run_with_timeout(build_command(false), timeout_seconds, context, script_path).await;
     }
 
     Ok(output)

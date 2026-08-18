@@ -23,6 +23,7 @@ pub struct PaginationQuery {
     pub offset: Option<u64>,
     pub search: Option<String>,
     pub archived: Option<bool>,
+    pub pinned: Option<bool>,
     pub ascending: Option<bool>,
     pub role_id: Option<Uuid>,
     pub status: Option<UserStatus>,

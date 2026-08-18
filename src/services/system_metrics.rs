@@ -115,7 +115,9 @@ pub fn collect_container_metrics() -> ContainerMetrics {
     }
 }
 
-pub async fn collect_database_metrics(app_state: &SharedState) -> Result<DatabaseMetrics, AuthError> {
+pub async fn collect_database_metrics(
+    app_state: &SharedState,
+) -> Result<DatabaseMetrics, AuthError> {
     let db = &app_state.database;
 
     let latency_started = Instant::now();

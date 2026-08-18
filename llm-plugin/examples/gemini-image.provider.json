@@ -1,0 +1,80 @@
+{
+  "$schema": "../schema/provider-plugin-v1.schema.json",
+  "manifestVersion": "1.0",
+  "id": "gemini-image",
+  "version": "1.0",
+  "name": "Gemini Image",
+  "description": "Reference manifest for Gemini text-to-image and image-to-image generation.",
+  "baseUrl": "https://generativelanguage.googleapis.com/v1beta/",
+  "credentials": [
+    {
+      "id": "api_key",
+      "type": "secret",
+      "required": true,
+      "label": "Gemini API key"
+    }
+  ],
+  "capabilities": {
+    "embeddings": false,
+    "imageGeneration": true,
+    "modelListing": true
+  },
+  "mappings": {
+    "input_image_part": {
+      "inlineData": {
+        "mimeType": { "$get": "item.mediaType" },
+        "data": { "$get": "item.data" }
+      }
+    }
+  },
+  "models": [
+    {
+      "id": "gemini-3.1-flash-lite-image",
+      "name": "Gemini 3.1 Flash Lite Image",
+      "modelType": "image_generator",
+      "capabilities": { "imageGeneration": true }
+    }
+  ],
+  "operations": {
+    "imageGeneration": {
+      "method": "POST",
+      "path": "models/${request.model}:generateContent",
+      "headers": {
+        "x-goog-api-key": { "secret": "api_key" }
+      },
+      "bodyEncoding": "json",
+      "body": {
+        "contents": [
+          {
+            "role": { "$literal": "user" },
+            "parts": {
+              "$concat": [
+                { "$map": "request.inputImages", "using": "input_image_part" },
+                [
+                  { "text": { "$get": "request.prompt" } }
+                ]
+              ]
+            }
+          }
+        ],
+        "generationConfig": {
+          "responseModalities": { "$literal": ["TEXT", "IMAGE"] }
+        }
+      },
+      "timeoutMs": 120000,
+      "maxResponseBytes": 16777216,
+      "response": {
+        "bodyEncoding": "json",
+        "imagesPointer": "/candidates/0/content/parts",
+        "base64Pointer": "/inlineData/data",
+        "mediaTypePointer": "/inlineData/mimeType",
+        "defaultMediaType": "image/png",
+        "usage": {
+          "inputTokens": "/usageMetadata/promptTokenCount",
+          "outputTokens": "/usageMetadata/candidatesTokenCount",
+          "totalTokens": "/usageMetadata/totalTokenCount"
+        }
+      }
+    }
+  }
+}

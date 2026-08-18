@@ -9,8 +9,8 @@ use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
 use sea_orm::sea_query::{Alias, BinOper, Expr, Func};
 use sea_orm::{
-    ColumnTrait, Condition, EntityTrait, JoinType, Order, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+    ColumnTrait, Condition, EntityTrait, JoinType, Order, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait,
 };
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -37,13 +37,10 @@ use crate::{
             MeDepartmentUsersResponse,
         },
     },
+    models::{departments, user_role_assignments, users, users::UserStatus},
     services::department_helpers::{
         department_budget_snapshot, departments_base_select, departments_tree_select,
         load_department_admin_ids_map,
-    },
-    models::{
-        departments, user_role_assignments, users,
-        users::UserStatus,
     },
     services::{
         analytics,
@@ -56,7 +53,6 @@ use crate::{
     },
     state::SharedState,
 };
-
 
 #[utoipa::path(
     get,

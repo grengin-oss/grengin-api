@@ -31,9 +31,18 @@ Only use this for complete standalone files, not for short inline snippets.\n\
 Before the tag, write one sentence describing what you are building.";
 
 pub enum ArtifactParseEvent {
-    Start { id: String, title: String, content_type: String },
-    Delta { id: String, chunk: String },
-    End { id: String },
+    Start {
+        id: String,
+        title: String,
+        content_type: String,
+    },
+    Delta {
+        id: String,
+        chunk: String,
+    },
+    End {
+        id: String,
+    },
 }
 
 pub struct ArtifactParser {
@@ -43,7 +52,10 @@ pub struct ArtifactParser {
 
 impl ArtifactParser {
     pub fn new() -> Self {
-        Self { buffer: String::new(), current_id: None }
+        Self {
+            buffer: String::new(),
+            current_id: None,
+        }
     }
 
     pub fn push(&mut self, text: &str) -> (String, Vec<ArtifactParseEvent>) {
@@ -57,7 +69,10 @@ impl ArtifactParser {
             let chunk = std::mem::take(&mut self.buffer);
             let chunk = chunk.trim_end_matches('\n').to_string();
             if !chunk.is_empty() {
-                events.push(ArtifactParseEvent::Delta { id: id.clone(), chunk });
+                events.push(ArtifactParseEvent::Delta {
+                    id: id.clone(),
+                    chunk,
+                });
             }
             events.push(ArtifactParseEvent::End { id });
             (String::new(), events)
@@ -139,7 +154,10 @@ impl ArtifactParser {
                 if let Some(close_rel) = self.buffer.find("</artifact>") {
                     let chunk = self.buffer[..close_rel].trim_end_matches('\n').to_string();
                     if !chunk.is_empty() {
-                        events.push(ArtifactParseEvent::Delta { id: id.clone(), chunk });
+                        events.push(ArtifactParseEvent::Delta {
+                            id: id.clone(),
+                            chunk,
+                        });
                     }
                     self.buffer = self.buffer[close_rel + "</artifact>".len()..].to_string();
                     events.push(ArtifactParseEvent::End { id });

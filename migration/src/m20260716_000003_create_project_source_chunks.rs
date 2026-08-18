@@ -142,9 +142,7 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .get_connection()
-            .execute_unprepared(
-                r#"DROP INDEX IF EXISTS "idx-project-source-chunks-embedding";"#,
-            )
+            .execute_unprepared(r#"DROP INDEX IF EXISTS "idx-project-source-chunks-embedding";"#)
             .await?;
 
         manager

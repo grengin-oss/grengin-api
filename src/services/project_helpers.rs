@@ -1,20 +1,21 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use crate::{
+    auth::error::AuthError,
+    dto::projects::{
+        ProjectChatResponse, ProjectMcpServerResponse, ProjectResponse, ProjectSourceResponse,
+    },
+    models::{
+        conversation_projects, conversations, mcp_servers, project_mcp_servers, project_members,
+        project_sources, project_sources::ProcessingStatus, projects, projects::ProjectVisibility,
+    },
+};
 use sea_orm::{
     ColumnTrait, Condition, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
 };
+use std::collections::HashMap;
 use uuid::Uuid;
-use crate::{
-    auth::error::AuthError,
-    dto::projects::{ProjectChatResponse, ProjectMcpServerResponse, ProjectResponse, ProjectSourceResponse},
-    models::{
-        conversation_projects, conversations, mcp_servers, project_mcp_servers, project_members,
-        project_sources, project_sources::ProcessingStatus, projects,
-        projects::ProjectVisibility,
-    },
-};
 
 pub async fn get_project_or_404(
     id: Uuid,
@@ -48,11 +49,19 @@ pub async fn ensure_project_read_access(
             AuthError::DbTimeout
         })?
         .is_some();
-    if is_member { Ok(()) } else { Err(AuthError::PermissionDenied) }
+    if is_member {
+        Ok(())
+    } else {
+        Err(AuthError::PermissionDenied)
+    }
 }
 
 pub fn ensure_project_owner(user_id: Uuid, project: &projects::Model) -> Result<(), AuthError> {
-    if project.owner_id == user_id { Ok(()) } else { Err(AuthError::PermissionDenied) }
+    if project.owner_id == user_id {
+        Ok(())
+    } else {
+        Err(AuthError::PermissionDenied)
+    }
 }
 
 pub async fn ensure_project_write_access(
@@ -261,7 +270,6 @@ pub async fn fetch_project_chats(
 pub fn is_valid_category(s: &str) -> bool {
     crate::models::projects::VALID_CATEGORIES.contains(&s)
 }
-
 
 pub async fn fetch_project_mcp_servers(
     project_id: Uuid,

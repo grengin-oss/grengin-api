@@ -1,0 +1,168 @@
+// JSON does not support comments. This JSONC companion explains example.json;
+// submit example.json itself to Grengin because manifests are parsed as strict JSON.
+{
+  // The checked-in schema enables editor completion and validation.
+  "$schema": "../schema/provider-plugin-v1.schema.json",
+  "manifestVersion": "1.0",
+
+  // id is the stable machine identity. version changes when this manifest changes.
+  "id": "complete-example",
+  "version": "1.0",
+  "name": "Complete provider example",
+  "description": "Copy example.json and replace the fictional protocol paths and pointers.",
+  "baseUrl": "https://api.example.invalid/v1/",
+
+  // Credential values are supplied separately and encrypted by Grengin. Never place
+  // an API key in a manifest. secret masks the value; text is suitable for non-secret IDs.
+  "credentials": [
+    { "id": "api_key", "type": "secret", "required": true, "label": "API key" },
+    { "id": "organization_id", "type": "text", "required": true, "label": "Organization ID" }
+  ],
+
+  // Runtime configuration is also supplied separately. This is ordinary JSON Schema.
+  "configurationSchema": {
+    "type": "object",
+    "properties": {
+      // Defaults document intent; Grengin validates configuration but does not insert defaults.
+      "apiVersion": { "type": "string", "default": "2026-08-01" },
+      "clientTag": { "type": "string", "minLength": 1, "maxLength": 64 },
+      "webSearchMaxUses": { "type": "integer", "minimum": 1, "maximum": 10, "default": 3 }
+    },
+    "required": ["apiVersion", "clientTag", "webSearchMaxUses"],
+    "additionalProperties": false
+  },
+
+  // A capability must have a matching operation below, except modelListing may use
+  // the static models array, a listModels operation, or both.
+  "capabilities": {
+    "chat": { "streaming": true, "tools": true, "vision": true, "reasoning": true },
+    "embeddings": true,
+    "imageGeneration": true,
+    "modelListing": true
+  },
+
+  // Reusable mappings keep provider wire-format details out of application code.
+  // Supported operators are demonstrated in example.json:
+  // $get, $literal, $omitIfNull, $jsonEncode, $base64, $map, $if,
+  // $switch, $merge, $concat, $coalesce, $object, and $array.
+  "mappings": {
+    "message": {
+      "$switch": { "$get": "item.role" },
+      "cases": {
+        "user": { "role": { "$literal": "user" }, "content": { "$map": "item.content", "using": "content_part" } },
+        "assistant": { "role": { "$literal": "assistant" }, "content": { "$map": "item.content", "using": "content_part" } },
+        "tool": {
+          "role": { "$literal": "tool" },
+          "tool_call_id": { "$get": "item.toolResult.callId" },
+          "content": { "$jsonEncode": { "$get": "item.toolResult.output" } }
+        }
+      },
+      "default": { "role": { "$get": "item.role" }, "content": { "$map": "item.content", "using": "content_part" } }
+    },
+    "content_part": {
+      "$switch": { "$get": "item.type" },
+      "cases": {
+        "text": { "type": { "$literal": "text" }, "text": { "$get": "item.text" } },
+        "image_url": { "type": { "$literal": "image_url" }, "url": { "$get": "item.url" } },
+        "image_base64": { "type": { "$literal": "image_base64" }, "data": { "$get": "item.data" }, "media_type": { "$get": "item.mediaType" } },
+        "file": { "type": { "$literal": "file" }, "name": { "$get": "item.name" }, "data": { "$get": "item.data" }, "media_type": { "$get": "item.mediaType" } }
+      }
+    },
+    "tool": {
+      "type": { "$literal": "function" },
+      "function": { "name": { "$get": "item.name" }, "description": { "$omitIfNull": { "$get": "item.description" } }, "parameters": { "$get": "item.parameters" } }
+    },
+    "tool_call": {
+      "id": { "$get": "item.id" },
+      "type": { "$literal": "function" },
+      "function": { "name": { "$get": "item.name" }, "arguments": { "$jsonEncode": { "$get": "item.arguments" } } }
+    }
+  },
+
+  // Static model entries are useful for self-hosted providers without a model API.
+  // The full example.json includes chat, embedding, and image model entries.
+  "models": [],
+
+  "operations": {
+    "chatStream": {
+      // Allowed methods: GET, POST, PUT, PATCH. Chat responses are SSE in v1.
+      // ${request.model} is percent-encoded before being inserted into the URL path.
+      "method": "POST",
+      "path": "chat/${request.model}/completions",
+      "headers": {
+        // Plain string, credential, literal, and mapped headers are all supported.
+        "Accept": "text/event-stream",
+        "Authorization": { "secret": "api_key", "prefix": "Bearer " },
+        "X-Organization": { "secret": "organization_id" },
+        "X-Plugin-Version": { "literal": "1.0" },
+        "X-Client-Tag": { "mapping": { "$get": "config.clientTag" } }
+      },
+      // Array query values become repeated parameters: feature=streaming&feature=tools.
+      "query": {
+        "api-version": { "$get": "config.apiVersion" },
+        "feature": { "$literal": ["streaming", "tools"] }
+      },
+      // bodyEncoding supports json, form, multipart, text, binary, or none.
+      // Binary bodies are base64 strings. Multipart file objects use data,
+      // filename, and mediaType. See runtime_http.rs for executable alternatives.
+      "bodyEncoding": "json",
+      "body": {
+        "model": { "$get": "request.model" },
+        "messages": { "$map": "request.messages", "using": "message" },
+        "temperature": { "$omitIfNull": { "$get": "request.temperature" } },
+        "max_tokens": { "$coalesce": [{ "$get": "request.maxTokens" }, { "$literal": 4096 }] },
+        "tools": { "$omitIfNull": { "$map": "request.tools", "using": "tool" } },
+        "tool_choice": { "$omitIfNull": { "$get": "request.toolChoice" } },
+        "stream": { "$literal": true }
+      },
+      // Manifest limits are ceilings beneath the stricter operator-level limits.
+      "timeoutMs": 60000,
+      "maxResponseBytes": 8388608,
+      "response": {
+        "bodyEncoding": "sse",
+        "eventDataEncoding": "json",
+        "doneData": "[DONE]",
+        // example.json contains rules for every normalized stream event:
+        // messageStart, textDelta, reasoningDelta, toolCallStart,
+        // toolArgumentsDelta, toolCallEnd, serverToolStart,
+        // serverToolQueryDelta, serverToolResult, usage, providerEvent,
+        // error, and completed. forEach emits one event per array item;
+        // collect gathers citation items into one safe serverToolResult.
+        // Usage rules may set inputTokensIncludeCached and
+        // inputTokensIncludeCacheCreation false when a provider reports those
+        // buckets separately. Canonical inputTokens always includes both.
+        "rules": [
+          { "id": "text_delta", "when": { "pointer": "/type", "equals": "text_delta" }, "emit": "textDelta", "value": "/delta/text" },
+          { "id": "completed", "when": { "pointer": "/type", "equals": "completed" }, "emit": "completed", "fields": { "finishReason": "/finish_reason" } }
+        ]
+      },
+      // Replay preserves the canonical conversation and tool results for another request.
+      "continuation": { "mode": "replay_messages", "maxToolRounds": 4, "captures": { "requestId": "/request_id" } }
+    },
+
+    // Full request mappings, usage pointers, and cache-accounting flags are in example.json.
+    "embeddings": {
+      "method": "POST",
+      "path": "embeddings/${request.model}",
+      "bodyEncoding": "json",
+      "body": { "model": { "$get": "request.model" }, "input": { "$get": "request.inputs" } },
+      "maxBatchSize": 2048,
+      "response": { "bodyEncoding": "json", "itemsPointer": "/data", "vectorPointer": "/embedding", "indexPointer": "/index" }
+    },
+    "imageGeneration": {
+      "method": "POST",
+      "path": "images/${request.model}/generations",
+      "bodyEncoding": "json",
+      "body": { "prompt": { "$get": "request.prompt" }, "count": { "$get": "request.count" } },
+      // JSON responses may use base64Pointer, urlPointer, or both. A binary
+      // response instead sets bodyEncoding to binary and defaultMediaType.
+      "response": { "bodyEncoding": "json", "imagesPointer": "/data", "base64Pointer": "/b64_json", "urlPointer": "/url", "mediaTypePointer": "/media_type", "defaultMediaType": "image/png" }
+    },
+    "listModels": {
+      "method": "GET",
+      "path": "models",
+      "bodyEncoding": "none",
+      "response": { "bodyEncoding": "json", "modelsPointer": "/data", "idPointer": "/id", "namePointer": "/name" }
+    }
+  }
+}

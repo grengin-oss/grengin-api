@@ -14,6 +14,8 @@ pub fn me_skills_routes() -> Router<SharedState> {
         .route("/me/skills", get(list_my_skills).post(create_my_skill))
         .route(
             "/me/skills/{id}",
-            get(get_my_skill).put(update_my_skill).delete(delete_my_skill),
+            get(get_my_skill)
+                .put(update_my_skill)
+                .delete(delete_my_skill),
         )
 }
