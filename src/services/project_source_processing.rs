@@ -75,23 +75,17 @@ pub fn chunk_text(text: &str) -> Vec<String> {
 
 fn extract_html_text(bytes: &[u8]) -> String {
     let html = String::from_utf8_lossy(bytes);
-    scraper::Html::parse_document(&html)
-        .root_element()
-        .text()
-        .map(|t| t.trim())
-        .filter(|t| !t.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
+    crate::utils::html::extract_text(&html)
 }
 
 fn extract_csv_text(bytes: &[u8]) -> String {
-    let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(bytes);
+    let mut reader = crate::utils::csv::CsvReader::new(bytes).flexible(true);
     let mut lines = Vec::new();
-    if let Ok(headers) = reader.headers().cloned() {
-        lines.push(headers.iter().collect::<Vec<_>>().join(", "));
+    if let Some(headers) = reader.headers() {
+        lines.push(headers.join(", "));
     }
-    for record in reader.records().flatten() {
-        let row = record.iter().collect::<Vec<_>>().join(", ");
+    for record in reader.records() {
+        let row = record.join(", ");
         if !row.trim().is_empty() {
             lines.push(row);
         }
@@ -154,8 +148,8 @@ fn extract_pdf_text(bytes: &[u8]) -> Option<String> {
 
 fn effective_mime(bytes: &[u8], declared: &str) -> String {
     if declared == "application/octet-stream" || declared.is_empty() {
-        if let Some(kind) = infer::get(bytes) {
-            return kind.mime_type().to_string();
+        if let Some(m) = crate::utils::mime::detect_mime(bytes) {
+            return m.to_string();
         }
     }
     declared.to_string()
@@ -215,10 +209,14 @@ async fn extract_text_via_llm(
     )
     .await
     .map_err(|error| {
-        eprintln!(
-            "LLM text extraction error: {}",
-            provider_error_class(&error)
-        );
+        // ResponseMapping means the provider rejected the file (bad format, unsupported
+        // content type) — expected for malformed uploads, not worth logging as an error.
+        if !matches!(error, llm_plugin::ProviderError::ResponseMapping(_)) {
+            eprintln!(
+                "LLM text extraction error: {}",
+                provider_error_class(&error)
+            );
+        }
         AppError::LlmProviderNotConfigured {
             provider: "anthropic".to_string(),
         }

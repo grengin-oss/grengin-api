@@ -232,8 +232,14 @@ pub async fn semantic_conversation_search(
             None => return Ok(None),
         };
 
-    let total =
-        load_total_matches(&app_state.database, user_id, archived, pinned, &embedding_config).await?;
+    let total = load_total_matches(
+        &app_state.database,
+        user_id,
+        archived,
+        pinned,
+        &embedding_config,
+    )
+    .await?;
 
     if total == 0 {
         return Ok(Some(SemanticConversationPage {
