@@ -248,12 +248,20 @@ pub async fn get_chats(
         Order::Desc
     };
     select = match query.sort {
-        Some(SortRule::Name) => select.order_by(conversations::Column::Title, sort_type),
-        Some(SortRule::CreatedAt) => select.order_by(conversations::Column::CreatedAt, sort_type),
-        Some(SortRule::UpdatedAt) => select.order_by(conversations::Column::UpdatedAt, sort_type),
-        Some(SortRule::Size) => select.order_by(conversations::Column::TotalTokens, sort_type),
-        _ => select.order_by(conversations::Column::UpdatedAt, sort_type),
+        Some(SortRule::Name) => select.order_by(conversations::Column::Title, sort_type.clone()),
+        Some(SortRule::CreatedAt) => {
+            select.order_by(conversations::Column::CreatedAt, sort_type.clone())
+        }
+        Some(SortRule::UpdatedAt) => {
+            select.order_by(conversations::Column::UpdatedAt, sort_type.clone())
+        }
+        Some(SortRule::Size) => {
+            select.order_by(conversations::Column::TotalTokens, sort_type.clone())
+        }
+        _ => select.order_by(conversations::Column::UpdatedAt, sort_type.clone()),
     };
+    // Tiebreaker so rows sharing a sort value (e.g. duplicate titles) still paginate deterministically.
+    select = select.order_by(conversations::Column::Id, sort_type);
 
     select = select
         .group_by(conversations::Column::Id)
@@ -270,14 +278,7 @@ pub async fn get_chats(
             AppError::DbTimeout
         })?;
     for conversation_with_count in rows {
-        let message_count = messages::Entity::find()
-            .filter(messages::Column::ConversationId.eq(conversation_with_count.id.clone()))
-            .count(&app_state.database)
-            .await
-            .map_err(|e| {
-                eprintln!("conversation in count error {}", e);
-                AppError::DbTimeout
-            })?;
+        let message_count = conversation_with_count.message_count.max(0) as u64;
         let web_search_enabled =
             resolve_web_search_enabled(conversation_with_count.metadata.as_ref());
         let conversation_response = ConversationResponse {

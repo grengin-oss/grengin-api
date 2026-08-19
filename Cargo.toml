@@ -44,7 +44,7 @@ calamine = "0.36"
 flate2 = "1"
 pdf-extract = "0.12"
 
-# [profile.release]
-# opt-level = 3
-# lto = true
-# codegen-units = 1
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
