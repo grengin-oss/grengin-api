@@ -137,15 +137,18 @@ pub enum ContentPart {
     },
     ImageUrl {
         url: String,
+        #[serde(rename = "mediaType")]
         media_type: Option<String>,
     },
     ImageBase64 {
         data: String,
+        #[serde(rename = "mediaType")]
         media_type: String,
     },
     File {
         name: String,
         data: String,
+        #[serde(rename = "mediaType")]
         media_type: String,
     },
     /// A Grengin-owned file that a native adapter may resolve at request time.
@@ -154,6 +157,7 @@ pub enum ContentPart {
     FileReference {
         id: String,
         name: String,
+        #[serde(rename = "mediaType")]
         media_type: String,
     },
 }
