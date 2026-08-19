@@ -311,6 +311,30 @@ live_test!(
     OPENAI_COMPATIBLE
 );
 live_test!(
+    huggingface_chat_smoke,
+    "HuggingFace",
+    "HF_TOKEN",
+    "https://router.huggingface.co/v1/",
+    "Qwen/Qwen3-32B",
+    OPENAI_COMPATIBLE
+);
+live_test!(
+    azure_openai_chat_smoke,
+    "Azure OpenAI",
+    "AZURE_OPENAI_API_KEY",
+    "https://south-india-default-resource.services.ai.azure.com/openai/v1/",
+    "gpt-5-nano",
+    OPENAI_COMPATIBLE
+);
+live_test!(
+    orca_router_chat_smoke,
+    "OrcaRouter",
+    "ORCA_API_KEY",
+    "https://api.orcarouter.ai/v1/",
+    "orcarouter/free",
+    OPENAI_COMPATIBLE
+);
+live_test!(
     cerebras_chat_smoke,
     "Cerebras",
     "CEREBRAS_API_KEY",
