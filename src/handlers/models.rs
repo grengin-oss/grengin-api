@@ -112,10 +112,14 @@ pub async fn get_list_models(
         let Some(plugin) = app_state.provider_registry.get(&descriptor.id).await else {
             continue;
         };
-        let Some(model_provider) = plugin.models() else {
+        if plugin.models().is_none() {
             continue;
-        };
-        let plugin_models = match model_provider.list_models().await {
+        }
+        let plugin_models = match app_state
+            .live_models_cache
+            .get_or_fetch(&provider_key, plugin.as_ref())
+            .await
+        {
             Ok(models) => models,
             Err(error) => {
                 eprintln!(

@@ -57,10 +57,11 @@ use crate::{
     },
     services::{image_gen_helpers::generate_and_save, models_cache::get_model_info_cached},
     state::SharedState,
-    utils::chat_stream::{
-        calculate_cost_decimal, calculate_llm_cost, extract_llm_error_message, to_chat_tool_input,
-        to_chat_web_search_result, tool_input_to_value, tool_result_status_from_output,
+    utils::cost_calc::{
+        calculate_cost_decimal, calculate_llm_cost, to_chat_tool_input, to_chat_web_search_result,
+        tool_input_to_value, tool_result_status_from_output,
     },
+    utils::llm_error::extract_llm_error_message,
 };
 use axum::{
     Json,
@@ -83,8 +84,8 @@ use std::{collections::HashMap, convert::Infallible};
 use tokio::time::Instant;
 use uuid::Uuid;
 
-fn hydrate_prompt_files(prompts: &mut [Prompt], user_id: Uuid) -> Result<(), AppError> {
-    for file in prompts.iter_mut().flat_map(|prompt| &mut prompt.files) {
+fn hydrate_files(files: &mut [File], user_id: Uuid) -> Result<(), AppError> {
+    for file in files {
         if file.base64.is_some() {
             continue;
         }
@@ -94,6 +95,13 @@ fn hydrate_prompt_files(prompts: &mut [Prompt], user_id: Uuid) -> Result<(), App
         if file.base64.is_none() {
             return Err(AppError::ResourceNotFound);
         }
+    }
+    Ok(())
+}
+
+fn hydrate_prompt_files(prompts: &mut [Prompt], user_id: Uuid) -> Result<(), AppError> {
+    for prompt in prompts {
+        hydrate_files(&mut prompt.files, user_id)?;
     }
     Ok(())
 }
@@ -545,6 +553,8 @@ pub async fn handle_chat_stream(
 
     let plugin_model_info = match crate::services::provider_models::find_provider_model(
         provider_config.as_ref(),
+        &provider_key,
+        &app_state.live_models_cache,
         &model_name,
     )
     .await
@@ -780,11 +790,17 @@ pub async fn handle_chat_stream(
         }
         (conversation_id, None)
     } else {
-        let first_prompt = req
+        let first_message = req
             .messages
             .first()
-            .map(|message| message.content.clone())
             .ok_or(AppError::ValidationEmptyField { field: "messages" })?;
+        let first_prompt = first_message.content.clone();
+        let mut first_message_files = first_message.files.clone();
+        // Best-effort: title generation is non-fatal, so a hydration failure just
+        // falls back to a text-only title instead of failing the whole request.
+        if hydrate_files(&mut first_message_files, claims.user_id).is_err() {
+            first_message_files.clear();
+        }
         let new_conversation_id = Uuid::new_v4();
         let mut new_metadata = metadata.clone();
         let title_result = if is_image_gen {
@@ -794,6 +810,7 @@ pub async fn handle_chat_stream(
                 provider_config.as_ref(),
                 model_name.clone(),
                 first_prompt.clone(),
+                first_message_files,
             )
             .await
             .map_err(|error| {

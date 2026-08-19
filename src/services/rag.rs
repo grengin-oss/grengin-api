@@ -534,7 +534,7 @@ async fn generate_summary_text(
         .map_err(|_| AppError::LlmProviderNotConfigured {
             provider: provider.to_string(),
         })?;
-    generate_provider_text(plugin.as_ref(), model, None, prompt, Some(512))
+    generate_provider_text(plugin.as_ref(), model, None, prompt, Vec::new(), Some(512))
         .await
         .map_err(|error| {
             eprintln!("summary provider error: {}", provider_error_class(&error));

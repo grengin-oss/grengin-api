@@ -501,6 +501,10 @@ pub async fn update_ai_engines_by_key(
             AuthError::DbTimeout
         })?;
     app_state
+        .live_models_cache
+        .invalidate(&model.engine_key)
+        .await;
+    app_state
         .settings
         .load_ai_engine_in_state(
             &ai_engine_key,
@@ -607,6 +611,10 @@ pub async fn delete_ai_engines_api_key_key(
             AuthError::DbTimeout
         })?;
     unregister_provider(&app_state, &ai_engine.engine_key).await;
+    app_state
+        .live_models_cache
+        .invalidate(&ai_engine.engine_key)
+        .await;
     active_model
         .clone()
         .update(&app_state.database)

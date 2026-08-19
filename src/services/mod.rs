@@ -17,6 +17,7 @@ pub mod department_policies;
 pub mod embedders_cache;
 pub mod embedding_helpers;
 pub mod image_gen_helpers;
+pub mod live_models_cache;
 pub mod mcp_access;
 pub mod mcp_client;
 pub mod mcp_helpers;

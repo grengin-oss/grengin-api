@@ -12,6 +12,7 @@ use llm_plugin::{
 use serde_json::Value;
 
 use crate::{
+    dto::files::File as FileAttachment,
     dto::prompt::{Prompt, PromptTextResponse, PromptTitleResponse},
     models::messages::ChatRole,
     services::mcp_tools::McpToolDescriptor,
@@ -116,12 +117,14 @@ pub async fn generate_provider_title(
     provider: &dyn ProviderPlugin,
     model: impl Into<String>,
     prompt: String,
+    files: Vec<FileAttachment>,
 ) -> Result<PromptTitleResponse, ProviderError> {
     let response = generate_provider_text(
         provider,
         model,
         Some("Write a short conversation title. Return only the title.".to_string()),
         prompt,
+        files,
         Some(32),
     )
     .await?;
@@ -149,6 +152,7 @@ pub async fn generate_provider_text(
     model: impl Into<String>,
     system: Option<String>,
     prompt: String,
+    files: Vec<FileAttachment>,
     max_tokens: Option<u32>,
 ) -> Result<PromptTextResponse, ProviderError> {
     let mut messages = Vec::with_capacity(2);
@@ -160,9 +164,12 @@ pub async fn generate_provider_text(
             tool_result: None,
         });
     }
+    let mut content = Vec::with_capacity(files.len() + 1);
+    content.push(ContentPart::Text { text: prompt });
+    content.extend(files.into_iter().map(file_to_content_part));
     messages.push(ChatMessage {
         role: PluginChatRole::User,
-        content: vec![ContentPart::Text { text: prompt }],
+        content,
         tool_calls: Vec::new(),
         tool_result: None,
     });
@@ -223,35 +230,31 @@ pub async fn generate_provider_response(
     })
 }
 
+fn file_to_content_part(file: FileAttachment) -> ContentPart {
+    match file.base64 {
+        Some(data) if file.content_type.starts_with("image/") => ContentPart::ImageBase64 {
+            data,
+            media_type: file.content_type,
+        },
+        Some(data) => ContentPart::File {
+            name: file.name,
+            data,
+            media_type: file.content_type,
+        },
+        None => ContentPart::FileReference {
+            id: file.id.to_string(),
+            name: file.name,
+            media_type: file.content_type,
+        },
+    }
+}
+
 fn prompt_to_message(prompt: Prompt) -> ChatMessage {
     let mut content = Vec::with_capacity(prompt.files.len() + 1);
     if !prompt.text.is_empty() {
         content.push(ContentPart::Text { text: prompt.text });
     }
-    for file in prompt.files {
-        match file.base64 {
-            Some(data) if file.content_type.starts_with("image/") => {
-                content.push(ContentPart::ImageBase64 {
-                    data,
-                    media_type: file.content_type,
-                });
-            }
-            Some(data) => {
-                content.push(ContentPart::File {
-                    name: file.name,
-                    data,
-                    media_type: file.content_type,
-                });
-            }
-            None => {
-                content.push(ContentPart::FileReference {
-                    id: file.id.to_string(),
-                    name: file.name,
-                    media_type: file.content_type,
-                });
-            }
-        }
-    }
+    content.extend(prompt.files.into_iter().map(file_to_content_part));
     ChatMessage {
         role: match prompt.role {
             ChatRole::System => llm_plugin::ChatRole::System,
@@ -639,9 +642,10 @@ mod tests {
     #[tokio::test]
     async fn title_generation_uses_the_canonical_chat_capability() {
         let provider = TitleProvider::new();
-        let response = generate_provider_title(&provider, "model", "Explain Rust".to_string())
-            .await
-            .expect("title response");
+        let response =
+            generate_provider_title(&provider, "model", "Explain Rust".to_string(), Vec::new())
+                .await
+                .expect("title response");
         assert_eq!(response.title, "Provider-neutral title");
         assert_eq!(response.input_tokens, 9);
         assert_eq!(response.output_tokens, 3);

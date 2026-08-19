@@ -335,6 +335,14 @@ live_test!(
     OPENAI_COMPATIBLE
 );
 live_test!(
+    bedrock_chat_smoke,
+    "AWS Bedrock",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/",
+    "openai.gpt-oss-20b-1:0",
+    OPENAI_COMPATIBLE
+);
+live_test!(
     cerebras_chat_smoke,
     "Cerebras",
     "CEREBRAS_API_KEY",
