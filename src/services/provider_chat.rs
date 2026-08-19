@@ -642,14 +642,10 @@ mod tests {
     #[tokio::test]
     async fn title_generation_uses_the_canonical_chat_capability() {
         let provider = TitleProvider::new();
-        let response = generate_provider_title(
-            &provider,
-            "model",
-            "Explain Rust".to_string(),
-            Vec::new(),
-        )
-        .await
-        .expect("title response");
+        let response =
+            generate_provider_title(&provider, "model", "Explain Rust".to_string(), Vec::new())
+                .await
+                .expect("title response");
         assert_eq!(response.title, "Provider-neutral title");
         assert_eq!(response.input_tokens, 9);
         assert_eq!(response.output_tokens, 3);

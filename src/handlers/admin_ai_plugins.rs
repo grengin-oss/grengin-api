@@ -279,6 +279,7 @@ pub async fn delete_ai_engine(
         .await
         .map_err(|_| AuthError::DbTimeout)?;
     unregister_provider(&state, &engine_key).await;
+    state.live_models_cache.invalidate(&engine_key).await;
     state
         .settings
         .remove_ai_engine_from_state(&engine_key)

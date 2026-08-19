@@ -3,10 +3,15 @@
 
 use llm_plugin::{ProviderError, ProviderModel, ProviderModelType, ProviderPlugin};
 
-use crate::dto::models::{ModelInfo, ModelType};
+use crate::{
+    dto::models::{ModelInfo, ModelType},
+    services::live_models_cache::LiveModelsCache,
+};
 
 pub async fn find_provider_model(
     provider: &dyn ProviderPlugin,
+    engine_key: &str,
+    live_models_cache: &LiveModelsCache,
     model_id: &str,
 ) -> Result<Option<ProviderModel>, ProviderError> {
     let Some(models) = provider.models() else {
@@ -22,8 +27,8 @@ pub async fn find_provider_model(
     {
         return Ok(Some(model));
     }
-    Ok(models
-        .list_models()
+    Ok(live_models_cache
+        .get_or_fetch(engine_key, provider)
         .await?
         .into_iter()
         .find(|model| model.id.as_str() == model_id || model.name == model_id))

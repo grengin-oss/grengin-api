@@ -57,10 +57,11 @@ use crate::{
     },
     services::{image_gen_helpers::generate_and_save, models_cache::get_model_info_cached},
     state::SharedState,
-    utils::chat_stream::{
-        calculate_cost_decimal, calculate_llm_cost, extract_llm_error_message, to_chat_tool_input,
-        to_chat_web_search_result, tool_input_to_value, tool_result_status_from_output,
+    utils::cost_calc::{
+        calculate_cost_decimal, calculate_llm_cost, to_chat_tool_input, to_chat_web_search_result,
+        tool_input_to_value, tool_result_status_from_output,
     },
+    utils::llm_error::extract_llm_error_message,
 };
 use axum::{
     Json,
@@ -552,6 +553,8 @@ pub async fn handle_chat_stream(
 
     let plugin_model_info = match crate::services::provider_models::find_provider_model(
         provider_config.as_ref(),
+        &provider_key,
+        &app_state.live_models_cache,
         &model_name,
     )
     .await

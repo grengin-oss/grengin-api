@@ -6,6 +6,7 @@ use crate::{
     config::setting::{ConfigError, OidcClient, Settings},
     dto::oauth::AuthProvider,
     models::{mcp_servers, users},
+    services::live_models_cache::LiveModelsCache,
     services::mcp_client::McpServerClient,
     services::notifications::NotificationEvent,
 };
@@ -33,6 +34,7 @@ pub struct AppState {
     pub notification_hub: broadcast::Sender<NotificationEvent>,
     pub stream_cancellations: RwLock<HashMap<Uuid, Arc<StreamCancel>>>,
     pub provider_registry: ProviderRegistry,
+    pub live_models_cache: LiveModelsCache,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -96,6 +98,7 @@ impl AppState {
             notification_hub,
             stream_cancellations: RwLock::new(HashMap::new()),
             provider_registry: ProviderRegistry::new(),
+            live_models_cache: LiveModelsCache::new(),
         };
         state.refresh_azure_client().await?;
         state.refresh_google_client().await?;
