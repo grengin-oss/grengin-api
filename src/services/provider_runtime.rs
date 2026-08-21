@@ -12,6 +12,7 @@ use thiserror::Error;
 use crate::{
     auth::encryption::decrypt_key,
     models::ai_engines::{self, PluginConfig},
+    services::provider_manifests,
     state::AppState,
 };
 
@@ -23,6 +24,8 @@ pub enum ProviderLoadError {
     Provider(#[from] ProviderError),
     #[error("provider credential could not be decrypted")]
     CredentialDecryption,
+    #[error("no plugin manifest is available for this AI engine")]
+    ManifestUnavailable,
 }
 
 pub fn parse_plugin_config(value: &serde_json::Value) -> Result<PluginConfig, ProviderLoadError> {
@@ -57,7 +60,9 @@ fn manifest_value(manifest: &ProviderManifestV1) -> Result<serde_json::Value, Pr
     })
 }
 
-pub fn builtin_plugin_config(engine_key: &str) -> Result<PluginConfig, ProviderLoadError> {
+// Ok(None) means the engine has no compiled-in manifest and must come from the
+// provider catalog; only the four originally hardcoded engines are embedded.
+pub fn embedded_plugin_config(engine_key: &str) -> Result<Option<PluginConfig>, ProviderLoadError> {
     let bytes = match engine_key {
         "anthropic" => {
             include_bytes!("../../llm-plugin/examples/anthropic.provider.json").as_slice()
@@ -65,12 +70,7 @@ pub fn builtin_plugin_config(engine_key: &str) -> Result<PluginConfig, ProviderL
         "openai" | "mistral" | "gemini" => {
             include_bytes!("../../llm-plugin/examples/openai-compatible.provider.json").as_slice()
         }
-        _ => {
-            return Err(ProviderError::InvalidManifest(format!(
-                "no embedded manifest exists for AI engine {engine_key}"
-            ))
-            .into());
-        }
+        _ => return Ok(None),
     };
     let mut manifest = ProviderManifestV1::from_json(bytes)?;
     let chat_overlay = match engine_key {
@@ -142,13 +142,34 @@ pub fn builtin_plugin_config(engine_key: &str) -> Result<PluginConfig, ProviderL
         }
         _ => unreachable!(),
     }
-    Ok(PluginConfig {
+    Ok(Some(PluginConfig {
         manifest: manifest_value(&manifest)?,
         configuration: serde_json::json!({}),
         base_url_override: None,
         allow_insecure_http: false,
         allow_private_network: false,
-    })
+    }))
+}
+
+pub async fn plugin_config_for(
+    req_client: &reqwest::Client,
+    engine: &ai_engines::Model,
+) -> Result<PluginConfig, ProviderLoadError> {
+    if let Some(value) = engine.plugin_config.as_ref() {
+        return parse_plugin_config(value);
+    }
+    if let Some(config) = embedded_plugin_config(&engine.engine_key)? {
+        return Ok(config);
+    }
+    provider_manifests::catalog_plugin_config(req_client, &engine.engine_key)
+        .await
+        .map_err(|error| {
+            eprintln!(
+                "catalog manifest for AI engine {} was not loaded: {error}",
+                engine.engine_key
+            );
+            ProviderLoadError::ManifestUnavailable
+        })
 }
 
 pub fn compile_provider(
@@ -181,14 +202,12 @@ pub fn compile_provider(
     .map_err(ProviderLoadError::from)
 }
 
-pub fn build_provider(
+pub async fn build_provider(
     app_key: &[u8; 32],
+    req_client: &reqwest::Client,
     engine: &ai_engines::Model,
 ) -> Result<DeclarativeProvider, ProviderLoadError> {
-    let config = match engine.plugin_config.as_ref() {
-        Some(config) => parse_plugin_config(config)?,
-        None => builtin_plugin_config(&engine.engine_key)?,
-    };
+    let config = plugin_config_for(req_client, engine).await?;
     let api_key = engine
         .api_key
         .as_ref()
@@ -203,7 +222,10 @@ pub fn build_provider(
 pub fn provider_plugin_version(engine: &ai_engines::Model) -> Option<String> {
     let config = match engine.plugin_config.as_ref() {
         Some(value) => parse_plugin_config(value).ok()?,
-        None => builtin_plugin_config(&engine.engine_key).ok()?,
+        None => match embedded_plugin_config(&engine.engine_key).ok()? {
+            Some(config) => config,
+            None => provider_manifests::cached_plugin_config(&engine.engine_key)?,
+        },
     };
     parse_manifest(&config)
         .ok()
@@ -214,7 +236,7 @@ pub async fn register_provider(
     state: &AppState,
     engine: &ai_engines::Model,
 ) -> Result<(), ProviderLoadError> {
-    let provider = build_provider(&state.settings.auth.app_key, engine)?;
+    let provider = build_provider(&state.settings.auth.app_key, &state.req_client, engine).await?;
     state.provider_registry.register(Arc::new(provider)).await;
     Ok(())
 }
@@ -229,10 +251,15 @@ pub async fn unregister_provider(state: &AppState, engine_key: &str) {
 pub async fn load_enabled_providers(state: &AppState) -> Result<(), ProviderLoadError> {
     let engines = ai_engines::Entity::find()
         .filter(ai_engines::Column::IsEnabled.eq(true))
-        .filter(ai_engines::Column::PluginConfig.is_not_null())
         .all(&state.database)
         .await
         .map_err(|_| ProviderLoadError::Database)?;
+    let catalog_keys: Vec<String> = engines
+        .iter()
+        .filter(|engine| engine.plugin_config.is_none())
+        .map(|engine| engine.engine_key.clone())
+        .collect();
+    provider_manifests::prefetch(&state.req_client, &catalog_keys).await;
     for engine in engines {
         if let Err(error) = register_provider(state, &engine).await {
             eprintln!(
@@ -249,6 +276,7 @@ fn error_class(error: &ProviderLoadError) -> &'static str {
     match error {
         ProviderLoadError::Database => "database",
         ProviderLoadError::CredentialDecryption => "credential_decryption",
+        ProviderLoadError::ManifestUnavailable => "manifest_unavailable",
         ProviderLoadError::Provider(_) => "provider_configuration",
     }
 }
@@ -286,7 +314,9 @@ mod tests {
     #[test]
     fn all_embedded_providers_compile_through_the_declarative_runtime() {
         for engine_key in ["openai", "anthropic", "mistral", "gemini"] {
-            let config = builtin_plugin_config(engine_key).expect("embedded manifest");
+            let config = embedded_plugin_config(engine_key)
+                .expect("embedded manifest")
+                .expect("engine is embedded");
             let manifest = parse_manifest(&config).expect("embedded manifest parses");
             assert_eq!(manifest.version, "1.0");
             let provider = compile_provider(config, engine_key, Some("test-key".to_string()))
@@ -305,7 +335,9 @@ mod tests {
             );
         }
 
-        let mut config = builtin_plugin_config("openai").expect("embedded manifest");
+        let mut config = embedded_plugin_config("openai")
+            .expect("embedded manifest")
+            .expect("engine is embedded");
         config.manifest["id"] = serde_json::json!("custom-provider");
         config.manifest["version"] = serde_json::json!("2.1");
         let stored_config = serde_json::to_value(config).expect("serializable plugin config");
@@ -319,7 +351,9 @@ mod tests {
     #[test]
     fn manifest_id_must_match_the_ai_engine_key() {
         let error = match compile_provider(
-            builtin_plugin_config("openai").expect("embedded manifest"),
+            embedded_plugin_config("openai")
+                .expect("embedded manifest")
+                .expect("engine is embedded"),
             "different-engine",
             Some("test-key".to_string()),
         ) {
@@ -334,7 +368,9 @@ mod tests {
 
     #[test]
     fn v1_ai_engine_rejects_multiple_credentials() {
-        let mut config = builtin_plugin_config("openai").expect("embedded manifest");
+        let mut config = embedded_plugin_config("openai")
+            .expect("embedded manifest")
+            .expect("engine is embedded");
         config
             .manifest
             .get_mut("credentials")

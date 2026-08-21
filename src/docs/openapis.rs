@@ -7,7 +7,7 @@ use crate::docs::{app_error_catlog::AppErrorCatalogItem, security::ApiSecurityAd
 use crate::dto::admin_ai::{
     AIEngineConnectionTest, AIEngineCreate, AIEngineDetail, AIEngineModels,
     AIEnginePluginValidationRequest, AIEnginePluginValidationResponse, AIEngineUpdate,
-    AIEngineValidation, AiModel, AiModelCapabilities,
+    AIEngineValidation, AiModel, AiModelCapabilities, PluginModel,
 };
 use crate::dto::admin_department::{
     Department, DepartmentCreate, DepartmentListQuery, DepartmentMembersResponse, DepartmentMove,
@@ -311,6 +311,7 @@ use utoipa::OpenApi;
             EmbeddingConfigUpdateRequest,
             FileResponse,
             FileUploadRequest,
+            PluginModel,
             ProviderInfo,
             ModelInfo,
             AIEngineValidation,

@@ -74,7 +74,15 @@ pub struct AIEnginePluginValidationResponse {
     #[schema(value_type = Object)]
     pub capabilities: Option<serde_json::Value>,
     pub credential_required: bool,
+    pub models: Vec<PluginModel>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct PluginModel {
+    pub key: String,
+    pub name: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -216,6 +224,10 @@ mod tests {
             destination: Some("https://example.com".to_string()),
             capabilities: Some(json!({})),
             credential_required: true,
+            models: vec![PluginModel {
+                key: "custom-model".to_string(),
+                name: "Custom Model".to_string(),
+            }],
             error: None,
         };
         let value = serde_json::to_value(response).expect("validation response JSON");

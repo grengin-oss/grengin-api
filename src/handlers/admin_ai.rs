@@ -16,9 +16,12 @@ use crate::{
         models::{ModelInfo, ModelType},
     },
     models::ai_engines::{self, ApiKeyStatus},
-    services::ai_engine_helpers::{load_models_response, load_models_response_refreshed},
+    services::ai_engine_helpers::{
+        load_models_response, load_models_response_refreshed, sort_engines_by_readiness,
+    },
     services::{
         authorization::{AuthorizationService, PermissionScopeMode},
+        provider_manifests,
         provider_models::to_model_info,
         provider_runtime::{
             ProviderLoadError, build_provider, compile_provider, parse_manifest,
@@ -149,6 +152,15 @@ pub async fn get_ai_engines(
                 AuthError::DbTimeout
             })?;
     }
+
+    sort_engines_by_readiness(&mut ai_engines);
+
+    let catalog_keys: Vec<String> = ai_engines
+        .iter()
+        .filter(|engine| engine.plugin_config.is_none())
+        .map(|engine| engine.engine_key.clone())
+        .collect();
+    provider_manifests::prefetch(&app_state.req_client, &catalog_keys).await;
 
     let response = ai_engines
         .into_iter()
@@ -287,8 +299,13 @@ pub async fn get_ai_engine_models_by_key(
         .ok_or(AuthError::ResourceNotFound)?;
     let mut response = AIEngineModels { models: Vec::new() };
     if ai_engine.plugin_config.is_some() {
-        let provider = build_provider(&app_state.settings.auth.app_key, &ai_engine)
-            .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
+        let provider = build_provider(
+            &app_state.settings.auth.app_key,
+            &app_state.req_client,
+            &ai_engine,
+        )
+        .await
+        .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
         let model_provider = provider
             .models()
             .ok_or(AuthError::ServiceTemporarilyUnavailable)?;
@@ -423,11 +440,6 @@ pub async fn update_ai_engines_by_key(
         active_model.default_image_gen_model = Set(Some(default_image_gen_model));
     }
     if let Some(plugin_config) = req.plugin_config {
-        if ai_engine.plugin_config.is_none() {
-            return Err(AuthError::InvalidRequest {
-                field: "plugin_config",
-            });
-        }
         let manifest = parse_manifest(&plugin_config).map_err(|_| AuthError::InvalidRequest {
             field: "plugin_config",
         })?;
@@ -464,10 +476,14 @@ pub async fn update_ai_engines_by_key(
     };
     let compiled_provider = if model.is_enabled {
         Some(
-            build_provider(&app_state.settings.auth.app_key, &model).map_err(|_| {
-                AuthError::InvalidRequest {
-                    field: "plugin_config",
-                }
+            build_provider(
+                &app_state.settings.auth.app_key,
+                &app_state.req_client,
+                &model,
+            )
+            .await
+            .map_err(|_| AuthError::InvalidRequest {
+                field: "plugin_config",
             })?,
         )
     } else if let Some(config_value) = model.plugin_config.as_ref() {
@@ -689,7 +705,13 @@ pub async fn validate_ai_engines_by_key(
             AuthError::DbTimeout
         })?
         .ok_or(AuthError::ResourceNotFound)?;
-    let validation = match build_provider(&app_state.settings.auth.app_key, &ai_engine) {
+    let validation = match build_provider(
+        &app_state.settings.auth.app_key,
+        &app_state.req_client,
+        &ai_engine,
+    )
+    .await
+    {
         Ok(provider) => match provider.models() {
             Some(models) => match models.list_models().await {
                 Ok(models) => (ApiKeyStatus::Valid, models.len() as i64),

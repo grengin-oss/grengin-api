@@ -16,6 +16,7 @@ pub struct ProvidersCache {
     pub providers: Vec<ProviderInfo>,
     pub models_by_key: HashMap<String, ModelInfo>,
     pub title_model_by_engine: HashMap<String, String>,
+    pub plugin_url_by_key: HashMap<String, String>,
 }
 
 static PROVIDERS_CACHE: OnceCell<RwLock<Option<ProvidersCache>>> = OnceCell::const_new();
@@ -53,6 +54,12 @@ pub async fn load_providers_cached(
     Ok(load_models_cache(req_client).await?.providers)
 }
 
+pub async fn load_plugin_urls_cached(
+    req_client: &reqwest::Client,
+) -> Result<HashMap<String, String>, Error> {
+    Ok(load_models_cache(req_client).await?.plugin_url_by_key)
+}
+
 pub async fn get_model_info_cached(
     req_client: &reqwest::Client,
     model_key: &str,
@@ -64,6 +71,7 @@ pub async fn get_model_info_cached(
 struct FetchedData {
     providers: Vec<ProviderInfo>,
     title_model_by_engine: HashMap<String, String>,
+    plugin_url_by_key: HashMap<String, String>,
 }
 
 fn build_providers_cache(data: FetchedData) -> ProvidersCache {
@@ -84,46 +92,76 @@ fn build_providers_cache(data: FetchedData) -> ProvidersCache {
         providers: data.providers,
         models_by_key,
         title_model_by_engine: data.title_model_by_engine,
+        plugin_url_by_key: data.plugin_url_by_key,
     }
 }
 
 async fn fetch_all(req_client: &reqwest::Client) -> Result<FetchedData, Error> {
     let (providers, title_model_by_engine) =
         tokio::join!(fetch_providers(req_client), fetch_title_models(req_client),);
+    let (providers, plugin_url_by_key) = providers?;
     Ok(FetchedData {
-        providers: providers?,
+        providers,
         title_model_by_engine: title_model_by_engine.unwrap_or_default(),
+        plugin_url_by_key,
     })
 }
 
-async fn fetch_providers(req_client: &reqwest::Client) -> Result<Vec<ProviderInfo>, Error> {
+async fn fetch_providers(
+    req_client: &reqwest::Client,
+) -> Result<(Vec<ProviderInfo>, HashMap<String, String>), Error> {
     let providers_value = fetch_json(req_client, PROVIDERS_URL).await?;
     let providers_array = providers_value
         .as_array()
         .ok_or_else(|| anyhow!("providers.json root is not an array"))?;
 
-    let mut providers = Vec::with_capacity(providers_array.len());
+    let mut stubs = Vec::with_capacity(providers_array.len());
+    let mut plugin_url_by_key = HashMap::new();
     for provider_value in providers_array {
-        let (mut provider, text_url, image_url, embed_url) = parse_provider_stub(provider_value)?;
-
-        let mut all_models = Vec::new();
-        if let Some(url) = text_url {
-            let mut models = fetch_text_models(req_client, &url).await?;
-            all_models.append(&mut models);
+        let stub = parse_provider_stub(provider_value)?;
+        if let Some(plugin_url) = stub.plugin_url.clone() {
+            plugin_url_by_key.insert(stub.provider.key.clone(), plugin_url);
         }
-        if let Some(url) = image_url {
-            let mut models = fetch_image_models(req_client, &url).await?;
-            all_models.append(&mut models);
-        }
-        if let Some(url) = embed_url {
-            let mut models = fetch_embed_models(req_client, &url, &provider.key).await?;
-            all_models.append(&mut models);
-        }
-        provider.models = all_models;
-        providers.push(provider);
+        stubs.push(stub);
     }
 
-    Ok(providers)
+    // The catalog is now ~15 providers x up to 3 model lists; fetching those
+    // serially made every cold /models call wait on ~45 round trips.
+    let providers = futures_util::future::try_join_all(stubs.into_iter().map(|stub| async move {
+        let ProviderStub {
+            mut provider,
+            text_url,
+            image_url,
+            embed_url,
+            plugin_url: _,
+        } = stub;
+        let key = provider.key.clone();
+        let (text, image, embed) = tokio::join!(
+            async {
+                match text_url {
+                    Some(url) => fetch_text_models(req_client, &url).await,
+                    None => Ok(Vec::new()),
+                }
+            },
+            async {
+                match image_url {
+                    Some(url) => fetch_image_models(req_client, &url).await,
+                    None => Ok(Vec::new()),
+                }
+            },
+            async {
+                match embed_url {
+                    Some(url) => fetch_embed_models(req_client, &url, &key).await,
+                    None => Ok(Vec::new()),
+                }
+            },
+        );
+        provider.models = [text?, image?, embed?].concat();
+        Ok::<ProviderInfo, Error>(provider)
+    }))
+    .await?;
+
+    Ok((providers, plugin_url_by_key))
 }
 
 async fn fetch_title_models(
@@ -190,9 +228,15 @@ async fn fetch_json(req_client: &reqwest::Client, url: &str) -> Result<Value, Er
     Ok(value)
 }
 
-fn parse_provider_stub(
-    value: &Value,
-) -> Result<(ProviderInfo, Option<String>, Option<String>, Option<String>), Error> {
+struct ProviderStub {
+    provider: ProviderInfo,
+    text_url: Option<String>,
+    image_url: Option<String>,
+    embed_url: Option<String>,
+    plugin_url: Option<String>,
+}
+
+fn parse_provider_stub(value: &Value) -> Result<ProviderStub, Error> {
     let key = get_str(value, "key")?;
     let name = get_str(value, "name")?;
     let icon = get_str(value, "icon")?;
@@ -207,8 +251,8 @@ fn parse_provider_stub(
             .map(str::to_string)
     };
 
-    Ok((
-        ProviderInfo {
+    Ok(ProviderStub {
+        provider: ProviderInfo {
             key,
             name,
             icon,
@@ -216,10 +260,14 @@ fn parse_provider_stub(
             status,
             models: Vec::new(),
         },
-        get_url("text"),
-        get_url("image"),
-        get_url("embed"),
-    ))
+        text_url: get_url("text"),
+        image_url: get_url("image"),
+        embed_url: get_url("embed"),
+        plugin_url: value
+            .pointer("/plugin/url")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
 }
 
 fn parse_text_model(value: &Value) -> Result<ModelInfo, Error> {
