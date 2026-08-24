@@ -35,8 +35,10 @@ pub async fn resolve_provider(
     if !engine.is_enabled {
         return Err(ResolveProviderError::Disabled);
     }
-    let provider = provider_runtime::build_provider(&state.settings.auth.app_key, &engine)
-        .map_err(|_| ResolveProviderError::NotConfigured)?;
+    let provider =
+        provider_runtime::build_provider(&state.settings.auth.app_key, &state.req_client, &engine)
+            .await
+            .map_err(|_| ResolveProviderError::NotConfigured)?;
     let provider: Arc<dyn ProviderPlugin> = Arc::new(provider);
     state.provider_registry.register(provider.clone()).await;
     Ok(provider)

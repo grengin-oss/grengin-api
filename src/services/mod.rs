@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod ai_engine_helpers;
+pub mod ai_plugin;
 pub mod analytics;
 pub mod analytics_cache;
 pub mod artifacts;
@@ -32,6 +33,7 @@ pub mod oidc_service;
 pub mod project_helpers;
 pub mod project_source_processing;
 pub mod provider_chat;
+pub mod provider_manifests;
 pub mod provider_models;
 pub mod provider_resolver;
 pub mod provider_runtime;

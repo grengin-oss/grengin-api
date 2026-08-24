@@ -234,7 +234,7 @@ grengin-api/
 - Authorization is enforced through scoped roles and permissions.
 - MCP servers and tools have explicit access policies.
 - Administrative changes are recorded in audit logs.
-- CORS is restricted to `REDIRECT_URL` unless explicitly overridden.
+- CORS allows any origin; the API is bearer-token only and sends no credentials cross-origin.
 
 Never commit `.env`, production secrets, provider keys, or database snapshots.
 Report security issues privately through the contact details on

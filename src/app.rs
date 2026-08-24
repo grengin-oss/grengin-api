@@ -18,12 +18,11 @@ use crate::{
     state::AppState,
 };
 use anyhow::Error;
-use axum::http::HeaderValue;
 use axum::{Json, Router, extract::DefaultBodyLimit, middleware::from_fn_with_state, routing::get};
 use migration::MigratorTrait;
 use reqwest::StatusCode;
 use serde_json::json;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::cors::{Any, CorsLayer};
 
 async fn sample_root() -> (StatusCode, Json<serde_json::Value>) {
     (
@@ -45,30 +44,9 @@ pub async fn init_app() -> Result<(), Error> {
     let app_state = AppState::from_settings(settings).await?;
     spawn_analytics_cache_refresh(app_state.database.clone());
     spawn_audit_log_retention_worker(app_state.database.clone());
-    // Restrict CORS to the configured instance origin so a phishing webapp
-    // pointed at this API cannot receive auth responses in a cross-origin fetch.
-    // CORS_ALLOWED_ORIGINS overrides (comma-separated, useful in dev).
-    // Falls back to REDIRECT_URL (the canonical instance base URL).
-    // Falls back to Any only when neither env var is set (local dev without config).
-    let cors_allow_origin: AllowOrigin = std::env::var("CORS_ALLOWED_ORIGINS")
-        .or_else(|_| std::env::var("REDIRECT_URL"))
-        .ok()
-        .and_then(|raw| {
-            let origins: Vec<HeaderValue> = raw
-                .split(',')
-                .map(|s| s.trim().trim_end_matches('/').to_owned())
-                .filter_map(|s| s.parse::<HeaderValue>().ok())
-                .collect();
-            if origins.is_empty() {
-                None
-            } else {
-                Some(AllowOrigin::list(origins))
-            }
-        })
-        .unwrap_or_else(|| AllowOrigin::any());
     let cors = CorsLayer::new()
         .allow_methods(Any)
-        .allow_origin(cors_allow_origin)
+        .allow_origin(Any)
         .allow_headers(Any)
         .allow_credentials(false);
     let app = Router::new()
