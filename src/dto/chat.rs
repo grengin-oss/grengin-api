@@ -17,8 +17,12 @@ pub enum SearchMode {
 
 #[derive(Deserialize, ToSchema, IntoParams)]
 pub struct ArchiveChatRequest {
-    pub title: String,
-    pub archived: bool,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub archived: Option<bool>,
+    #[serde(default)]
+    pub pinned: Option<bool>,
 }
 
 #[derive(Serialize, ToSchema, IntoParams)]
