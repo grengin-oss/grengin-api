@@ -210,6 +210,69 @@ pub async fn sync_department_admin_assignments(
     Ok(())
 }
 
+pub async fn ensure_department_admin_assignment(
+    authz: &AuthorizationService<'_>,
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    user_id: Uuid,
+    department_id: Uuid,
+) -> Result<(), AuthError> {
+    let role = roles::Entity::find()
+        .filter(roles::Column::Name.eq(ROLE_DEPARTMENT_ADMIN))
+        .one(db)
+        .await
+        .map_err(|e| {
+            eprintln!("role lookup error: {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+
+    let exists = user_role_assignments::Entity::find()
+        .filter(user_role_assignments::Column::UserId.eq(user_id))
+        .filter(user_role_assignments::Column::RoleId.eq(role.id))
+        .filter(user_role_assignments::Column::ScopeDepartmentId.eq(department_id))
+        .one(db)
+        .await
+        .map_err(|e| {
+            eprintln!("role assignment lookup error: {e}");
+            AuthError::DbTimeout
+        })?
+        .is_some();
+    if exists {
+        return Ok(());
+    }
+
+    let assignment_id = Uuid::new_v4();
+    let now = Utc::now();
+    user_role_assignments::ActiveModel {
+        id: Set(assignment_id),
+        user_id: Set(user_id),
+        role_id: Set(role.id),
+        scope_department_id: Set(Some(department_id)),
+        assigned_by: Set(actor_id),
+        created_at: Set(now),
+        updated_at: Set(now),
+    }
+    .insert(db)
+    .await
+    .map_err(|e| {
+        eprintln!("creator role assignment insert error: {e}");
+        AuthError::DbTimeout
+    })?;
+
+    if let Some(payload) = build_audit_payload(RoleAssignmentPayload {
+        assignment_id,
+        user_id,
+        role_id: role.id,
+        scope_department_id: Some(department_id),
+    }) {
+        let _ = record_auth_event(db, "auth.role_assigned", Some(actor_id), payload).await;
+    }
+
+    authz.recompute_effective_permissions(user_id).await?;
+    Ok(())
+}
+
 pub async fn sync_department_allowed_models(
     db: &DatabaseConnection,
     department_id: Uuid,
