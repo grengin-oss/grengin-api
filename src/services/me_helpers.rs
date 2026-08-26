@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    auth::{claims::Claims, error::AuthError},
+    auth::{claims::Claims, error::AuthError, permissions::ROLE_SUPER_ADMIN},
     dto::me::PermissionScope,
-    models::{departments, permissions, role_permissions, roles, user_role_assignments, users},
+    models::{departments, permissions, role_permissions, roles, user_role_assignments},
     services::authorization::AuthorizationService,
     state::SharedState,
 };
@@ -21,81 +21,77 @@ pub async fn load_administered_department_ids(
     app_state: &SharedState,
 ) -> Result<Vec<Uuid>, AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
-
-    let mut user = users::Entity::find_by_id(claims.user_id)
-        .one(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("user lookup error: {e}");
-            AuthError::DbTimeout
-        })?
-        .ok_or(AuthError::ResourceNotFound)?;
-
-    let mut needs_refresh = needs_effective_permissions_refresh(&user.effective_permissions);
-    if !needs_refresh
-        && should_refresh_administered_departments(
-            &app_state.database,
-            user.id,
-            &user.effective_permissions,
-        )
+    if authz
+        .user_has_role_name(claims.user_id, ROLE_SUPER_ADMIN)
         .await?
     {
-        needs_refresh = true;
+        return load_all_department_ids(&app_state.database).await;
     }
 
-    if needs_refresh {
-        authz.recompute_effective_permissions(user.id).await?;
-        user = users::Entity::find_by_id(claims.user_id)
-            .one(&app_state.database)
-            .await
-            .map_err(|e| {
-                eprintln!("user lookup error: {e}");
-                AuthError::DbTimeout
-            })?
-            .ok_or(AuthError::ResourceNotFound)?;
+    let rows = user_role_assignments::Entity::find()
+        .select_only()
+        .column(user_role_assignments::Column::ScopeDepartmentId)
+        .column_as(permissions::Column::Action, "action")
+        .join(
+            JoinType::InnerJoin,
+            user_role_assignments::Relation::Roles.def(),
+        )
+        .join(JoinType::InnerJoin, roles::Relation::RolePermissions.def())
+        .join(
+            JoinType::InnerJoin,
+            role_permissions::Relation::Permissions.def(),
+        )
+        .filter(user_role_assignments::Column::UserId.eq(claims.user_id))
+        .filter(permissions::Column::Domain.eq("departments"))
+        .filter(
+            Condition::any()
+                .add(permissions::Column::Action.eq("manage"))
+                .add(permissions::Column::Action.eq("view")),
+        )
+        .into_tuple::<(Option<Uuid>, String)>()
+        .all(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("department permission scope lookup error: {e}");
+            AuthError::DbTimeout
+        })?;
+
+    match preferred_department_scope(&rows) {
+        PermissionScope::OrgWide => load_all_department_ids(&app_state.database).await,
+        PermissionScope::Scoped(ids) => Ok(ids),
+        PermissionScope::Missing => Ok(Vec::new()),
+    }
+}
+
+fn preferred_department_scope(rows: &[(Option<Uuid>, String)]) -> PermissionScope {
+    let manage_scope = permission_scope_from_rows(rows, "manage");
+    if !matches!(manage_scope, PermissionScope::Missing) {
+        return manage_scope;
+    }
+    permission_scope_from_rows(rows, "view")
+}
+
+fn permission_scope_from_rows(rows: &[(Option<Uuid>, String)], action: &str) -> PermissionScope {
+    let mut matched = false;
+    let mut ids = Vec::new();
+    for (scope_id, row_action) in rows {
+        if row_action != action {
+            continue;
+        }
+        matched = true;
+        match scope_id {
+            None => return PermissionScope::OrgWide,
+            Some(id) => ids.push(*id),
+        }
     }
 
-    let mut dept_ids = Vec::new();
-    if let Some(value) = user.effective_permissions {
-        let permissions_val = value.get("permissions").unwrap_or(&Value::Null);
-        let manage_scope = parse_permission_scope(permissions_val, "departments:manage");
-        let view_scope = parse_permission_scope(permissions_val, "departments:view");
-
-        if matches!(manage_scope, PermissionScope::Missing)
-            && matches!(view_scope, PermissionScope::Missing)
-        {
-            return Ok(Vec::new());
-        }
-
-        if let Some(list) = value
-            .get("administered_departments")
-            .and_then(|v| v.as_array())
-        {
-            for item in list {
-                if let Some(id_str) = item.as_str() {
-                    if let Ok(id) = Uuid::parse_str(id_str) {
-                        dept_ids.push(id);
-                    }
-                }
-            }
-        }
-
-        if dept_ids.is_empty() {
-            dept_ids = match manage_scope {
-                PermissionScope::OrgWide => load_all_department_ids(&app_state.database).await?,
-                PermissionScope::Scoped(ids) if !ids.is_empty() => ids,
-                _ => match view_scope {
-                    PermissionScope::OrgWide => {
-                        load_all_department_ids(&app_state.database).await?
-                    }
-                    PermissionScope::Scoped(ids) => ids,
-                    PermissionScope::Missing => Vec::new(),
-                },
-            };
-        }
+    if !matched {
+        PermissionScope::Missing
+    } else {
+        ids.sort_unstable();
+        ids.dedup();
+        PermissionScope::Scoped(ids)
     }
-
-    Ok(dept_ids)
 }
 
 pub fn needs_effective_permissions_refresh(value: &Option<Value>) -> bool {
@@ -229,4 +225,45 @@ pub fn scope_condition(scope_paths: &[String]) -> Condition {
         ));
     }
     cond
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manage_scope_takes_precedence_over_view_scope() {
+        let managed = Uuid::new_v4();
+        let viewed = Uuid::new_v4();
+        let rows = vec![
+            (Some(viewed), "view".to_string()),
+            (Some(managed), "manage".to_string()),
+        ];
+
+        assert_eq!(
+            preferred_department_scope(&rows),
+            PermissionScope::Scoped(vec![managed])
+        );
+    }
+
+    #[test]
+    fn org_wide_scope_wins_within_the_selected_permission() {
+        let rows = vec![
+            (Some(Uuid::new_v4()), "manage".to_string()),
+            (None, "manage".to_string()),
+        ];
+
+        assert_eq!(preferred_department_scope(&rows), PermissionScope::OrgWide);
+    }
+
+    #[test]
+    fn view_scope_is_used_when_manage_permission_is_missing() {
+        let viewed = Uuid::new_v4();
+        let rows = vec![(Some(viewed), "view".to_string())];
+
+        assert_eq!(
+            preferred_department_scope(&rows),
+            PermissionScope::Scoped(vec![viewed])
+        );
+    }
 }
