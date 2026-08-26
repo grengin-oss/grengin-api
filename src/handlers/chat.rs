@@ -508,14 +508,19 @@ pub async fn update_chat_by_id(
             eprintln!("{}", e);
             AppError::DbTimeout
         })?;
-    let mut active_model = conversation_model.clone().into_active_model();
-    active_model.archived_at = if req.archived {
-        Set(Some(utc_now))
-    } else {
-        Set(None)
-    };
-    active_model.title = Set(Some(req.title));
-    active_model
+    let mut active_model = conversation_model.into_active_model();
+    // Every field is optional so a client can pin without having to resend the
+    // title it does not own, and an absent field leaves the column untouched.
+    if let Some(title) = req.title {
+        active_model.title = Set(Some(title));
+    }
+    if let Some(archived) = req.archived {
+        active_model.archived_at = Set(archived.then_some(utc_now));
+    }
+    if let Some(pinned) = req.pinned {
+        active_model.pinned = Set(pinned);
+    }
+    let conversation_model = active_model
         .update(&app_state.database)
         .await
         .map_err(|e| {
@@ -528,8 +533,8 @@ pub async fn update_chat_by_id(
         id: conversation_model.id,
         title: conversation_model.title,
         web_search_enabled,
-        archived: req.archived,
-        archived_at: Some(utc_now),
+        archived: conversation_model.archived_at.is_some(),
+        archived_at: conversation_model.archived_at,
         model: conversation_model.model_name,
         total_tokens: conversation_model.total_tokens,
         total_cost: conversation_model.total_cost.to_f32().unwrap_or_default(),

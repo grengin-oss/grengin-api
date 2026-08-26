@@ -7,6 +7,7 @@ use crate::{
         error::{AuthError, Error},
         permissions::{
             PERMISSION_DEPARTMENTS_MANAGE, PERMISSION_DEPARTMENTS_VIEW, PERMISSION_USERS_VIEW,
+            ROLE_SUPER_ADMIN,
         },
     },
     dto::{
@@ -31,8 +32,9 @@ use crate::{
         },
         department_helpers::{
             build_ltree_path, department_budget_snapshot, departments_base_select,
-            departments_tree_select, load_department_admin_ids_map, max_subtree_depth,
-            sync_department_admin_assignments, sync_department_allowed_models,
+            departments_tree_select, ensure_department_admin_assignment,
+            load_department_admin_ids_map, max_subtree_depth, sync_department_admin_assignments,
+            sync_department_allowed_models,
         },
         department_policies::{
             load_allowed_models_map, validate_allowed_models_subset, validate_retention_days,
@@ -61,6 +63,18 @@ use sea_orm::{
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+fn department_admin_plan(
+    requested_admin_ids: Option<&[Uuid]>,
+    creator_id: Uuid,
+    is_super_admin: bool,
+) -> (Vec<Uuid>, bool) {
+    let mut requested = requested_admin_ids.unwrap_or_default().to_vec();
+    requested.retain(|user_id| *user_id != creator_id);
+    requested.sort_unstable();
+    requested.dedup();
+    (requested, !is_super_admin)
+}
+
 #[utoipa::path(
     post,
     path = "/admin/departments",
@@ -88,6 +102,12 @@ pub async fn create_department(
             req.parent_id,
         )
         .await?;
+
+    let is_super_admin = authz
+        .user_has_role_name(claims.user_id, ROLE_SUPER_ADMIN)
+        .await?;
+    let (requested_admin_ids, assign_creator) =
+        department_admin_plan(req.admin_ids.as_deref(), claims.user_id, is_super_admin);
 
     let id = Uuid::new_v4();
     let created_at = Utc::now();
@@ -176,14 +196,24 @@ pub async fn create_department(
 
     sync_department_allowed_models(&app_state.database, id, req.allowed_models.as_deref()).await?;
 
-    if let Some(admin_ids) = req.admin_ids.as_deref() {
+    if !requested_admin_ids.is_empty() {
         sync_department_admin_assignments(
             &authz,
             &app_state.database,
             claims.user_id,
             id,
-            admin_ids,
+            &requested_admin_ids,
             req.parent_id,
+        )
+        .await?;
+    }
+    if assign_creator {
+        ensure_department_admin_assignment(
+            &authz,
+            &app_state.database,
+            claims.user_id,
+            claims.user_id,
+            id,
         )
         .await?;
     }
@@ -747,16 +777,16 @@ pub async fn get_department_by_id(
     Ok((StatusCode::OK, Json(resp)))
 }
 
-#[utoipa::path( 
+#[utoipa::path(
     put, path = "/admin/departments/{department_id}",
     tag = "admin", params( ("department_id" = Uuid, Path, description = "Department id") ),
     request_body = DepartmentUpdate,
-    responses( 
+    responses(
         (status = 200, body = Department),
         (status = 401, content_type = "application/json", body = Error),
         (status = 404, content_type = "application/json", body = Error),
         (status = 503, content_type = "application/json", body = Error), 
-    ) 
+    )
 )]
 pub async fn update_department(
     claims: Claims,
@@ -1536,4 +1566,32 @@ pub async fn get_users_from_department(
         .collect();
     response.total = response.members.len() as i32;
     Ok((StatusCode::OK, Json(response)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::department_admin_plan;
+    use uuid::Uuid;
+
+    #[test]
+    fn non_super_admin_creator_is_assigned_and_removed_from_explicit_list() {
+        let creator = Uuid::new_v4();
+        let selected = Uuid::new_v4();
+        let (requested, assign_creator) =
+            department_admin_plan(Some(&[creator, selected, selected]), creator, false);
+
+        assert_eq!(requested, vec![selected]);
+        assert!(assign_creator);
+    }
+
+    #[test]
+    fn super_admin_creator_is_not_assigned_to_the_department() {
+        let creator = Uuid::new_v4();
+        let selected = Uuid::new_v4();
+        let (requested, assign_creator) =
+            department_admin_plan(Some(&[creator, selected]), creator, true);
+
+        assert_eq!(requested, vec![selected]);
+        assert!(!assign_creator);
+    }
 }

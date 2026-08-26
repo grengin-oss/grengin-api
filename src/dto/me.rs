@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum PermissionScope {
     Missing,
     OrgWide,
