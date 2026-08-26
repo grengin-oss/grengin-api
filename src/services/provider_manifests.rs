@@ -4,6 +4,7 @@
 use std::{
     collections::HashMap,
     sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Error, anyhow};
@@ -13,22 +14,36 @@ use crate::{models::ai_engines::PluginConfig, services::models_cache::load_plugi
 
 // std RwLock, not tokio: the read side is called from sync fns such as
 // provider_plugin_version that sit inside non-async response mapping.
-static MANIFEST_CACHE: RwLock<Option<HashMap<String, PluginConfig>>> = RwLock::new(None);
+const MANIFEST_TTL: Duration = Duration::from_secs(300);
 
-fn read_cache() -> RwLockReadGuard<'static, Option<HashMap<String, PluginConfig>>> {
+#[derive(Clone)]
+struct CacheEntry {
+    config: PluginConfig,
+    fetched_at: Instant,
+}
+
+static MANIFEST_CACHE: RwLock<Option<HashMap<String, CacheEntry>>> = RwLock::new(None);
+
+fn read_cache() -> RwLockReadGuard<'static, Option<HashMap<String, CacheEntry>>> {
     MANIFEST_CACHE
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn write_cache() -> RwLockWriteGuard<'static, Option<HashMap<String, PluginConfig>>> {
+fn write_cache() -> RwLockWriteGuard<'static, Option<HashMap<String, CacheEntry>>> {
     MANIFEST_CACHE
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub fn cached_plugin_config(engine_key: &str) -> Option<PluginConfig> {
-    read_cache().as_ref()?.get(engine_key).cloned()
+    let cache = read_cache();
+    let entry = cache.as_ref()?.get(engine_key)?;
+    is_fresh(entry.fetched_at, Instant::now()).then(|| entry.config.clone())
+}
+
+fn is_fresh(fetched_at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(fetched_at) < MANIFEST_TTL
 }
 
 pub fn invalidate(engine_key: &str) {
@@ -45,9 +60,13 @@ pub async fn catalog_plugin_config(
         return Ok(config);
     }
     let config = fetch_plugin_config(req_client, engine_key).await?;
-    write_cache()
-        .get_or_insert_with(HashMap::new)
-        .insert(engine_key.to_string(), config.clone());
+    write_cache().get_or_insert_with(HashMap::new).insert(
+        engine_key.to_string(),
+        CacheEntry {
+            config: config.clone(),
+            fetched_at: Instant::now(),
+        },
+    );
     Ok(config)
 }
 
@@ -70,10 +89,33 @@ pub async fn prefetch(req_client: &reqwest::Client, engine_keys: &[String]) {
     for (key, result) in fetched {
         match result {
             Ok(config) => {
-                cache.insert(key, config);
+                cache.insert(
+                    key,
+                    CacheEntry {
+                        config,
+                        fetched_at: Instant::now(),
+                    },
+                );
             }
             Err(error) => eprintln!("catalog manifest for AI engine {key} was not loaded: {error}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::{MANIFEST_TTL, is_fresh};
+
+    #[test]
+    fn catalog_manifest_cache_expires_at_the_ttl() {
+        let fetched_at = Instant::now();
+        assert!(is_fresh(
+            fetched_at,
+            fetched_at + MANIFEST_TTL - Duration::from_millis(1)
+        ));
+        assert!(!is_fresh(fetched_at, fetched_at + MANIFEST_TTL));
     }
 }
 

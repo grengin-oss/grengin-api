@@ -5,9 +5,9 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use futures_util::StreamExt;
 use llm_plugin::{
-    ChatRequest, DeclarativeProvider, EmbeddingRequest, ImageRequest, ModelId, ProviderError,
-    ProviderEvent, ProviderEventStream, ProviderManifestV1, ProviderModelType, ProviderPlugin,
-    ProviderRuntimeConfig, ToolCallId, ToolResult,
+    ChatMessage, ChatRequest, ChatRole, ContentPart, DeclarativeProvider, EmbeddingRequest,
+    ImageRequest, ModelId, ProviderError, ProviderEvent, ProviderEventStream, ProviderManifestV1,
+    ProviderModelType, ProviderPlugin, ProviderRuntimeConfig, ToolCallId, ToolResult,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -160,6 +160,39 @@ fn manifest(base_url: &str, capabilities: Value, operations: Value) -> ProviderM
     ProviderManifestV1::from_json(&serde_json::to_vec(&value).unwrap()).unwrap()
 }
 
+fn stub_chat_operation() -> Value {
+    json!({
+        "method": "POST",
+        "path": "chat",
+        "bodyEncoding": "json",
+        "body": {},
+        "response": {
+            "bodyEncoding": "sse",
+            "eventDataEncoding": "json",
+            "doneData": "[DONE]",
+            "rules": [{
+                "id": "completed",
+                "when": {"pointer": "/done", "exists": true},
+                "emit": "completed"
+            }]
+        }
+    })
+}
+
+fn stub_embeddings_operation() -> Value {
+    json!({
+        "method": "POST",
+        "path": "embeddings",
+        "bodyEncoding": "json",
+        "body": {},
+        "response": {
+            "bodyEncoding": "json",
+            "itemsPointer": "/data",
+            "vectorPointer": "/embedding"
+        }
+    })
+}
+
 fn provider(base_url: String, capabilities: Value, operations: Value) -> DeclarativeProvider {
     let manifest = manifest(&base_url, capabilities, operations);
     DeclarativeProvider::new(manifest, runtime(base_url)).unwrap()
@@ -168,7 +201,14 @@ fn provider(base_url: String, capabilities: Value, operations: Value) -> Declara
 fn chat_request(model: &str) -> ChatRequest {
     ChatRequest {
         model: ModelId::new(model),
-        messages: Vec::new(),
+        messages: vec![ChatMessage {
+            role: ChatRole::User,
+            content: vec![ContentPart::Text {
+                text: "hello".to_string(),
+            }],
+            tool_calls: Vec::new(),
+            tool_result: None,
+        }],
         temperature: None,
         max_tokens: None,
         tools: Vec::new(),
@@ -506,13 +546,14 @@ async fn replays_tool_calls_and_results_on_continuation() {
     let requests = requests.lock().await;
     let replayed = requests[1].json();
     let messages = replayed["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 2, "unexpected replay: {replayed}");
-    assert_eq!(messages[0]["role"], "assistant");
-    assert_eq!(messages[0]["toolCalls"][0]["name"], "lookup");
+    assert_eq!(messages.len(), 3, "unexpected replay: {replayed}");
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(messages[1]["toolCalls"][0]["name"], "lookup");
     // Argument fragments are reassembled and parsed, not forwarded as a raw string.
-    assert_eq!(messages[0]["toolCalls"][0]["arguments"]["q"], "rust");
-    assert_eq!(messages[1]["role"], "tool");
-    assert_eq!(messages[1]["toolResult"]["callId"], "call-1");
+    assert_eq!(messages[1]["toolCalls"][0]["arguments"]["q"], "rust");
+    assert_eq!(messages[2]["role"], "tool");
+    assert_eq!(messages[2]["toolResult"]["callId"], "call-1");
 }
 
 #[tokio::test]
@@ -564,10 +605,10 @@ async fn replays_assistant_narration_alongside_the_tool_call_it_preceded() {
     // Providers that validate history reject an assistant turn whose text was dropped, and the
     // model loses its own reasoning-in-prose if the narration disappears.
     assert_eq!(
-        messages["messages"][0]["content"][0]["text"], "Let me look that up.",
+        messages["messages"][1]["content"][0]["text"], "Let me look that up.",
         "narration missing from replayed turn: {messages}"
     );
-    assert_eq!(messages["messages"][0]["toolCalls"][0]["id"], "call-1");
+    assert_eq!(messages["messages"][1]["toolCalls"][0]["id"], "call-1");
 }
 
 /// End-to-end web search over the real Anthropic reference manifest: a server-side search and a
@@ -1311,12 +1352,29 @@ async fn lists_models_from_a_static_manifest_without_an_endpoint() {
         "version": "1.0",
         "name": "Static models",
         "baseUrl": "https://api.example.com/v1/",
-        "capabilities": {"modelListing": true},
+        "capabilities": {
+            "modelListing": true,
+            "embeddings": true,
+            "chat": {"streaming": true}
+        },
         "models": [
-            {"id": "model-a", "name": "Model A", "modelType": "text_embedder"},
-            {"id": "model-b", "name": "Model B", "modelType": "text_generator"}
+            {
+                "id": "model-a",
+                "name": "Model A",
+                "modelType": "text_embedder",
+                "capabilities": {"embeddings": true}
+            },
+            {
+                "id": "model-b",
+                "name": "Model B",
+                "modelType": "text_generator",
+                "capabilities": {"chat": {"streaming": true}}
+            }
         ],
-        "operations": {}
+        "operations": {
+            "chatStream": stub_chat_operation(),
+            "embeddings": stub_embeddings_operation()
+        }
     });
     let manifest = ProviderManifestV1::from_json(&serde_json::to_vec(&value).unwrap()).unwrap();
     let provider = DeclarativeProvider::new(manifest, ProviderRuntimeConfig::default()).unwrap();
@@ -1338,24 +1396,26 @@ async fn lists_models_from_a_static_manifest_without_an_endpoint() {
 async fn decodes_model_listings_from_the_provider() {
     let response = json!({"data": [{"id": "gpt-4.1", "display": "GPT 4.1"}, {"id": "o3"}]});
     let (base_url, requests) = serve(vec![MockResponse::json("200 OK", &response)]).await;
+    let mut operations = json!({
+        "listModels": {
+            "method": "GET",
+            "path": "models",
+            "headers": {"Authorization": {"secret": "api_key", "prefix": "Bearer "}},
+            "bodyEncoding": "none",
+            "response": {
+                "modelsPointer": "/data",
+                "idPointer": "/id",
+                "namePointer": "/display",
+                "defaultModelType": "text_generator",
+                "defaultCapabilities": {"chat": {"streaming": true}}
+            }
+        }
+    });
+    operations["chatStream"] = stub_chat_operation();
     let provider = provider(
         base_url,
-        json!({"modelListing": true}),
-        json!({
-            "listModels": {
-                "method": "GET",
-                "path": "models",
-                "headers": {"Authorization": {"secret": "api_key", "prefix": "Bearer "}},
-                "bodyEncoding": "none",
-                "response": {
-                    "modelsPointer": "/data",
-                    "idPointer": "/id",
-                    "namePointer": "/display",
-                    "defaultModelType": "text_generator",
-                    "defaultCapabilities": {}
-                }
-            }
-        }),
+        json!({"modelListing": true, "chat": {"streaming": true}}),
+        operations,
     );
 
     let models = provider.models().unwrap().list_models().await.unwrap();
@@ -1449,22 +1509,24 @@ async fn maps_and_enriches_all_canonical_model_types() {
 async fn rejects_duplicate_dynamic_model_ids() {
     let response = json!({"data": [{"id": "duplicate"}, {"id": "duplicate"}]});
     let (base_url, _) = serve(vec![MockResponse::json("200 OK", &response)]).await;
+    let mut operations = json!({
+        "listModels": {
+            "method": "GET",
+            "path": "models",
+            "bodyEncoding": "none",
+            "response": {
+                "modelsPointer": "/data",
+                "idPointer": "/id",
+                "defaultModelType": "text_generator",
+                "defaultCapabilities": {"chat": {"streaming": true}}
+            }
+        }
+    });
+    operations["chatStream"] = stub_chat_operation();
     let provider = provider(
         base_url,
-        json!({"modelListing": true}),
-        json!({
-            "listModels": {
-                "method": "GET",
-                "path": "models",
-                "bodyEncoding": "none",
-                "response": {
-                    "modelsPointer": "/data",
-                    "idPointer": "/id",
-                    "defaultModelType": "text_generator",
-                    "defaultCapabilities": {}
-                }
-            }
-        }),
+        json!({"modelListing": true, "chat": {"streaming": true}}),
+        operations,
     );
 
     let error = provider.models().unwrap().list_models().await.unwrap_err();

@@ -18,11 +18,12 @@ use crate::{
     state::AppState,
 };
 use anyhow::Error;
+use axum::http::HeaderValue;
 use axum::{Json, Router, extract::DefaultBodyLimit, middleware::from_fn_with_state, routing::get};
 use migration::MigratorTrait;
 use reqwest::StatusCode;
 use serde_json::json;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 async fn sample_root() -> (StatusCode, Json<serde_json::Value>) {
     (
@@ -44,9 +45,21 @@ pub async fn init_app() -> Result<(), Error> {
     let app_state = AppState::from_settings(settings).await?;
     spawn_analytics_cache_refresh(app_state.database.clone());
     spawn_audit_log_retention_worker(app_state.database.clone());
+    let configured_origins = std::env::var("CORS_ALLOWED_ORIGINS")
+        .or_else(|_| std::env::var("REDIRECT_URL"))
+        .ok();
+    let cors_allow_origin = configured_origins.map_or_else(AllowOrigin::any, |raw| {
+        let origins = raw
+            .split(',')
+            .map(|origin| origin.trim().trim_end_matches('/'))
+            .filter(|origin| !origin.is_empty())
+            .filter_map(|origin| origin.parse::<HeaderValue>().ok())
+            .collect::<Vec<_>>();
+        AllowOrigin::list(origins)
+    });
     let cors = CorsLayer::new()
         .allow_methods(Any)
-        .allow_origin(Any)
+        .allow_origin(cors_allow_origin)
         .allow_headers(Any)
         .allow_credentials(false);
     let app = Router::new()

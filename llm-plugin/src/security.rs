@@ -115,18 +115,27 @@ pub fn validate_destination_ip(
 
     let blocked = match ip {
         IpAddr::V4(ip) => {
+            let octets = ip.octets();
             ip.is_private()
                 || ip.is_loopback()
                 || ip.is_link_local()
                 || ip.is_broadcast()
                 || ip.is_documentation()
-                || ip.octets()[0] == 0
+                || octets[0] == 0
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+                || (octets[0] == 198 && matches!(octets[1], 18 | 19))
+                || octets[0] >= 240
         }
         IpAddr::V6(ip) => {
             ip.is_loopback()
                 || ip.is_unique_local()
                 || ip.is_unicast_link_local()
                 || ip.is_unspecified()
+                || ip.segments()[0..2] == [0x2001, 0x0db8]
+                || ip
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped| validate_destination_ip(mapped.into(), false).is_err())
         }
     };
     if blocked {
@@ -144,7 +153,7 @@ fn is_local_hostname(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     use url::Url;
 
@@ -161,9 +170,20 @@ mod tests {
 
     #[test]
     fn blocks_private_destinations_by_default() {
-        let private = IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254));
-        assert!(validate_destination_ip(private, false).is_err());
-        assert!(validate_destination_ip(private, true).is_ok());
+        for private in [
+            IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)),
+            IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1)),
+            IpAddr::V6("::ffff:127.0.0.1".parse::<Ipv6Addr>().unwrap()),
+            IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()),
+        ] {
+            assert!(
+                validate_destination_ip(private, false).is_err(),
+                "{private}"
+            );
+            assert!(validate_destination_ip(private, true).is_ok(), "{private}");
+        }
+        assert!(validate_destination_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), false).is_ok());
     }
 
     #[test]

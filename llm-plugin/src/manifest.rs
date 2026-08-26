@@ -554,8 +554,13 @@ impl ProviderManifestV1 {
         validate_capability(
             "imageGeneration",
             self.capabilities.image_generation,
-            self.operations.image_generation.is_some() || self.operations.image_edit.is_some(),
+            self.operations.image_generation.is_some(),
         )?;
+        if self.operations.image_edit.is_some() && !self.capabilities.image_generation {
+            return Err(ProviderError::InvalidManifest(
+                "imageEdit requires imageGeneration capability".to_string(),
+            ));
+        }
         // A static `models` list satisfies model listing just as well as a live endpoint does.
         validate_capability(
             "modelListing",
@@ -591,6 +596,27 @@ impl ProviderManifestV1 {
                     )));
                 }
                 validate_rule(rule)?;
+            }
+            if chat
+                .response
+                .done_data
+                .as_deref()
+                .is_some_and(|sentinel| sentinel.trim().is_empty())
+            {
+                return Err(ProviderError::InvalidManifest(
+                    "chatStream doneData must not be empty".to_string(),
+                ));
+            }
+            if chat.response.done_data.is_none()
+                && !chat
+                    .response
+                    .rules
+                    .iter()
+                    .any(|rule| rule.emit == EventKind::Completed)
+            {
+                return Err(ProviderError::InvalidManifest(
+                    "chatStream requires doneData or a completed response rule".to_string(),
+                ));
             }
             if !(1..=16).contains(&chat.continuation.max_tool_rounds) {
                 return Err(ProviderError::InvalidManifest(
@@ -737,6 +763,29 @@ fn validate_model_capabilities(
     model: &ManifestModel,
     provider: &ManifestCapabilities,
 ) -> Result<(), ProviderError> {
+    let type_matches = match model.model_type {
+        ProviderModelType::TextGenerator => {
+            model.capabilities.chat.is_some()
+                && !model.capabilities.embeddings
+                && !model.capabilities.image_generation
+        }
+        ProviderModelType::TextEmbedder => {
+            model.capabilities.chat.is_none()
+                && model.capabilities.embeddings
+                && !model.capabilities.image_generation
+        }
+        ProviderModelType::ImageGenerator => {
+            model.capabilities.chat.is_none()
+                && !model.capabilities.embeddings
+                && model.capabilities.image_generation
+        }
+    };
+    if !type_matches || model.capabilities.model_listing {
+        return Err(ProviderError::InvalidManifest(format!(
+            "model {} capabilities do not match modelType",
+            model.id
+        )));
+    }
     let chat_unsupported = match (&model.capabilities.chat, &provider.chat) {
         (None, _) => false,
         (Some(_), None) => true,
@@ -943,7 +992,70 @@ fn validate_rule(rule: &ResponseRule) -> Result<(), ProviderError> {
     for pointer in rule.json_fields.values() {
         validate_pointer(pointer)?;
     }
+    let require = |field: &str| {
+        if rule_supplies(rule, field) {
+            Ok(())
+        } else {
+            Err(ProviderError::InvalidManifest(format!(
+                "response rule {} must supply {field}",
+                rule.id
+            )))
+        }
+    };
+    match rule.emit {
+        EventKind::TextDelta | EventKind::ReasoningDelta => require("value")?,
+        EventKind::ToolCallStart => {
+            if !rule_supplies(rule, "id")
+                && !rule_supplies(rule, "index")
+                && rule.for_each.is_none()
+            {
+                return Err(ProviderError::InvalidManifest(format!(
+                    "response rule {} must supply id or index, or use forEach",
+                    rule.id
+                )));
+            }
+            require("name")?;
+        }
+        EventKind::ToolArgumentsDelta => {
+            if !rule_supplies(rule, "id")
+                && !rule_supplies(rule, "index")
+                && rule.for_each.is_none()
+            {
+                return Err(ProviderError::InvalidManifest(format!(
+                    "response rule {} must supply id or index, or use forEach",
+                    rule.id
+                )));
+            }
+            require("fragment")?;
+        }
+        EventKind::ToolCallEnd => {
+            if !rule_supplies(rule, "id")
+                && !rule_supplies(rule, "index")
+                && rule.for_each.is_none()
+            {
+                return Err(ProviderError::InvalidManifest(format!(
+                    "response rule {} must supply id or index, or use forEach",
+                    rule.id
+                )));
+            }
+        }
+        EventKind::ServerToolQueryDelta => require("fragment")?,
+        EventKind::ProviderEvent => require("kind")?,
+        EventKind::Error => require("message")?,
+        EventKind::MessageStart
+        | EventKind::ServerToolStart
+        | EventKind::ServerToolResult
+        | EventKind::Usage
+        | EventKind::Completed => {}
+    }
     Ok(())
+}
+
+fn rule_supplies(rule: &ResponseRule, field: &str) -> bool {
+    (field == "value" && rule.value.is_some())
+        || rule.fields.contains_key(field)
+        || rule.json_fields.contains_key(field)
+        || rule.constants.contains_key(field)
 }
 
 fn validate_usage_mapping(mapping: Option<&UsageMapping>) -> Result<(), ProviderError> {
@@ -1146,6 +1258,53 @@ mod tests {
             "chat": {"streaming": true, "tools": true}
         });
         ProviderManifestV1::from_json(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn rejects_chat_without_a_completion_signal_or_required_rule_fields() {
+        let mut manifest = chat_manifest();
+        manifest["operations"]["chatStream"]["response"]
+            .as_object_mut()
+            .unwrap()
+            .remove("doneData");
+        assert!(ProviderManifestV1::from_json(&serde_json::to_vec(&manifest).unwrap()).is_err());
+
+        let mut manifest = chat_manifest();
+        manifest["operations"]["chatStream"]["response"]["rules"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("value");
+        assert!(ProviderManifestV1::from_json(&serde_json::to_vec(&manifest).unwrap()).is_err());
+    }
+
+    #[test]
+    fn rejects_model_types_with_incoherent_capabilities() {
+        let mut manifest = chat_manifest();
+        manifest["capabilities"]["modelListing"] = json!(true);
+        manifest["models"] = json!([{
+            "id": "wrong-kind",
+            "name": "Wrong kind",
+            "modelType": "text_embedder",
+            "capabilities": {"chat": {"streaming": true}}
+        }]);
+        assert!(ProviderManifestV1::from_json(&serde_json::to_vec(&manifest).unwrap()).is_err());
+    }
+
+    #[test]
+    fn image_generation_capability_requires_a_generation_operation() {
+        let mut manifest = chat_manifest();
+        manifest["capabilities"]["imageGeneration"] = json!(true);
+        manifest["operations"]["imageEdit"] = json!({
+            "method": "POST",
+            "path": "images/edits",
+            "bodyEncoding": "json",
+            "body": {},
+            "response": {
+                "imagesPointer": "/data",
+                "base64Pointer": "/b64_json"
+            }
+        });
+        assert!(ProviderManifestV1::from_json(&serde_json::to_vec(&manifest).unwrap()).is_err());
     }
 
     #[test]

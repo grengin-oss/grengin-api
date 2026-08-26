@@ -2,7 +2,7 @@
   "$schema": "../schema/provider-plugin-v1.schema.json",
   "manifestVersion": "1.0",
   "id": "anthropic",
-  "version": "1.0",
+  "version": "1.1",
   "name": "Anthropic",
   "baseUrl": "https://api.anthropic.com/v1/",
   "credentials": [
@@ -183,6 +183,20 @@
             ]
           }
         },
+        "tool_choice": {
+          "$omitIfNull": {
+            "$switch": { "$get": "request.toolChoice.type" },
+            "cases": {
+              "auto": { "type": { "$literal": "auto" } },
+              "none": { "type": { "$literal": "none" } },
+              "required": { "type": { "$literal": "any" } },
+              "named": {
+                "type": { "$literal": "tool" },
+                "name": { "$get": "request.toolChoice.name" }
+              }
+            }
+          }
+        },
         "stream": { "$literal": true }
       },
       "response": {
@@ -212,6 +226,12 @@
             "when": { "pointer": "/delta/type", "equals": "text_delta" },
             "emit": "textDelta",
             "value": "/delta/text"
+          },
+          {
+            "id": "thinking",
+            "when": { "pointer": "/delta/type", "equals": "thinking_delta" },
+            "emit": "reasoningDelta",
+            "value": "/delta/thinking"
           },
           {
             "id": "output_usage",

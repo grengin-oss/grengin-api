@@ -10,7 +10,7 @@ fn reference_openai_compatible_manifest_is_valid() {
     ))
     .unwrap();
     assert_eq!(manifest.id, "openai-compatible");
-    assert_eq!(manifest.version, "1.0");
+    assert_eq!(manifest.version, "1.1");
     assert!(manifest.capabilities.chat.unwrap().tools);
     assert!(manifest.capabilities.embeddings);
     assert!(manifest.capabilities.image_generation);
@@ -47,7 +47,7 @@ fn reference_anthropic_manifest_is_valid() {
         ProviderManifestV1::from_json(include_bytes!("../examples/anthropic.provider.json"))
             .unwrap();
     assert_eq!(manifest.id, "anthropic");
-    assert_eq!(manifest.version, "1.0");
+    assert_eq!(manifest.version, "1.1");
     assert!(manifest.capabilities.chat.unwrap().streaming);
     let model = manifest
         .models
@@ -81,7 +81,7 @@ fn builtin_chat_manifests_are_valid() {
         include_bytes!("../examples/gemini.provider.json").as_slice(),
     ] {
         let manifest = ProviderManifestV1::from_json(bytes).unwrap();
-        assert_eq!(manifest.version, "1.0");
+        assert_eq!(manifest.version, "1.1");
         assert!(manifest.operations.chat_stream.is_some());
         assert!(manifest.capabilities.chat.unwrap().tools);
     }

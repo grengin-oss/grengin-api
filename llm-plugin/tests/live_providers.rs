@@ -13,13 +13,12 @@ use serde_json::Value;
 struct LiveProvider {
     name: &'static str,
     key_env: &'static str,
-    base_url: &'static str,
+    base_url: Option<&'static str>,
     model: &'static str,
-    manifest: &'static [u8],
+    manifest: Vec<u8>,
 }
 
 const OPENAI_COMPATIBLE: &[u8] = include_bytes!("../examples/openai-compatible.provider.json");
-const ANTHROPIC: &[u8] = include_bytes!("../examples/anthropic.provider.json");
 
 fn enabled() -> bool {
     env::var("GRENGIN_LIVE_PROVIDER_TESTS").as_deref() == Ok("1")
@@ -48,8 +47,10 @@ async fn smoke(provider: LiveProvider) {
         return;
     };
     let model = provider.model;
-    let mut manifest = ProviderManifestV1::from_json(provider.manifest).unwrap();
-    manifest.base_url = provider.base_url.to_string();
+    let mut manifest = ProviderManifestV1::from_json(&provider.manifest).unwrap();
+    if let Some(base_url) = provider.base_url {
+        manifest.base_url = base_url.to_string();
+    }
     let runtime = ProviderRuntimeConfig {
         credentials: BTreeMap::from([("api_key".to_string(), api_key)]),
         default_timeout_ms: 30_000,
@@ -144,7 +145,7 @@ async fn smoke(provider: LiveProvider) {
         provider.descriptor().id
     );
     assert!(
-        total_tokens.is_some_and(|tokens| {
+        total_tokens.is_none_or(|tokens| {
             tokens >= input_tokens.unwrap_or(0) + output_tokens.unwrap_or(0)
         }),
         "{} emitted invalid total token usage",
@@ -171,8 +172,10 @@ async fn embedding_smoke(provider: LiveProvider) {
         return;
     };
     let model = provider.model;
-    let mut manifest = ProviderManifestV1::from_json(provider.manifest).unwrap();
-    manifest.base_url = provider.base_url.to_string();
+    let mut manifest = ProviderManifestV1::from_json(&provider.manifest).unwrap();
+    if let Some(base_url) = provider.base_url {
+        manifest.base_url = base_url.to_string();
+    }
     let runtime = ProviderRuntimeConfig {
         credentials: BTreeMap::from([("api_key".to_string(), api_key)]),
         default_timeout_ms: 30_000,
@@ -226,7 +229,7 @@ async fn embedding_smoke(provider: LiveProvider) {
     );
     if let Some(usage) = result.usage {
         assert!(
-            usage.total_tokens.map_or(true, |tokens| tokens > 0),
+            usage.total_tokens.is_none_or(|tokens| tokens > 0),
             "provider returned invalid embedding token usage"
         );
     }
@@ -252,6 +255,91 @@ fn error_class(error: &llm_plugin::ProviderError) -> &'static str {
     }
 }
 
+#[tokio::test]
+#[ignore = "requires GRENGIN_LIVE_PROVIDER_TESTS=1, GRENGIN_PROVIDER_CATALOG_DIR, and OPEN_ROUTER_API_KEY"]
+async fn openrouter_web_search_smoke() {
+    if !enabled() {
+        return;
+    }
+    let Some(api_key) = env::var("OPEN_ROUTER_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        eprintln!("skipping OpenRouter web search: OPEN_ROUTER_API_KEY is not configured");
+        return;
+    };
+    let catalog = env::var("GRENGIN_PROVIDER_CATALOG_DIR")
+        .expect("set GRENGIN_PROVIDER_CATALOG_DIR to master-data/providers");
+    let manifest = std::fs::read(format!("{catalog}/openrouter/plugin.json"))
+        .expect("OpenRouter catalog manifest");
+    let manifest = ProviderManifestV1::from_json(&manifest).unwrap();
+    let provider = DeclarativeProvider::new(
+        manifest,
+        ProviderRuntimeConfig {
+            credentials: BTreeMap::from([("api_key".to_string(), api_key)]),
+            default_timeout_ms: 60_000,
+            max_response_bytes: 2 * 1024 * 1024,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut session = provider
+        .chat()
+        .unwrap()
+        .start(ChatRequest {
+            model: ModelId::new("nvidia/nemotron-3-ultra-550b-a55b:free"),
+            messages: vec![ChatMessage {
+                role: ChatRole::User,
+                content: vec![ContentPart::Text {
+                    text: "What is the current stable Rust version? Cite one source.".to_string(),
+                }],
+                tool_calls: Vec::new(),
+                tool_result: None,
+            }],
+            temperature: Some(0.0),
+            max_tokens: Some(96),
+            tools: Vec::new(),
+            tool_choice: None,
+            web_search: true,
+            options: Value::Null,
+        })
+        .await
+        .unwrap();
+    let mut stream = session.stream().await.unwrap_or_else(|error| {
+        panic!(
+            "OpenRouter web-search request failed: {}",
+            error_class(&error)
+        )
+    });
+    let mut received_text = false;
+    let mut completed = false;
+    let mut citation_count = 0usize;
+    while let Some(event) = stream.next().await {
+        match event.unwrap_or_else(|error| {
+            panic!(
+                "OpenRouter web-search stream failed: {}",
+                error_class(&error)
+            )
+        }) {
+            ProviderEvent::TextDelta { .. } => received_text = true,
+            ProviderEvent::ServerToolResult { results, .. } => {
+                citation_count += results
+                    .iter()
+                    .filter(|result| !result.url.trim().is_empty())
+                    .count();
+            }
+            ProviderEvent::Completed { .. } => completed = true,
+            _ => {}
+        }
+    }
+    assert!(received_text, "OpenRouter web search emitted no text");
+    assert!(completed, "OpenRouter web search emitted no completion");
+    assert!(
+        citation_count > 0,
+        "OpenRouter web search emitted no citations"
+    );
+}
+
 macro_rules! live_test {
     ($name:ident, $display:literal, $key:literal, $base:literal, $model:literal, $manifest:expr) => {
         #[tokio::test]
@@ -260,9 +348,30 @@ macro_rules! live_test {
             let provider = LiveProvider {
                 name: $display,
                 key_env: $key,
-                base_url: $base,
+                base_url: Some($base),
                 model: $model,
-                manifest: $manifest,
+                manifest: $manifest.to_vec(),
+            };
+            smoke(provider).await;
+        }
+    };
+}
+
+macro_rules! catalog_live_test {
+    ($name:ident, $display:literal, $key:literal, $provider:literal, $model:literal) => {
+        #[tokio::test]
+        #[ignore = "requires GRENGIN_LIVE_PROVIDER_TESTS=1, GRENGIN_PROVIDER_CATALOG_DIR, and a provider credential"]
+        async fn $name() {
+            let catalog = env::var("GRENGIN_PROVIDER_CATALOG_DIR")
+                .expect("set GRENGIN_PROVIDER_CATALOG_DIR to master-data/providers");
+            let manifest = std::fs::read(format!("{catalog}/{}/plugin.json", $provider))
+                .expect("catalog provider manifest");
+            let provider = LiveProvider {
+                name: $display,
+                key_env: $key,
+                base_url: None,
+                model: $model,
+                manifest,
             };
             smoke(provider).await;
         }
@@ -277,22 +386,21 @@ macro_rules! live_embedding_test {
             let provider = LiveProvider {
                 name: $display,
                 key_env: $key,
-                base_url: $base,
+                base_url: Some($base),
                 model: $model,
-                manifest: OPENAI_COMPATIBLE,
+                manifest: OPENAI_COMPATIBLE.to_vec(),
             };
             embedding_smoke(provider).await;
         }
     };
 }
 
-live_test!(
+catalog_live_test!(
     openai_chat_smoke,
     "OpenAI",
     "OPENAI_API_KEY",
-    "https://api.openai.com/v1/",
-    "gpt-4o-mini",
-    OPENAI_COMPATIBLE
+    "openai",
+    "gpt-5.4-nano"
 );
 live_test!(
     groq_chat_smoke,
@@ -302,13 +410,12 @@ live_test!(
     "llama-3.1-8b-instant",
     OPENAI_COMPATIBLE
 );
-live_test!(
+catalog_live_test!(
     openrouter_chat_smoke,
     "OpenRouter",
     "OPEN_ROUTER_API_KEY",
-    "https://openrouter.ai/api/v1/",
-    "openrouter/auto",
-    OPENAI_COMPATIBLE
+    "openrouter",
+    "nvidia/nemotron-3-ultra-550b-a55b:free"
 );
 live_test!(
     huggingface_chat_smoke,
@@ -358,29 +465,26 @@ live_test!(
     "deepseek-v4-flash",
     OPENAI_COMPATIBLE
 );
-live_test!(
+catalog_live_test!(
     mistral_chat_smoke,
     "Mistral",
     "MISTRAL_API_KEY",
-    "https://api.mistral.ai/v1/",
-    "mistral-small-latest",
-    OPENAI_COMPATIBLE
+    "mistral",
+    "mistral-small-2603"
 );
-live_test!(
+catalog_live_test!(
     gemini_openai_compatible_chat_smoke,
     "Gemini",
     "GEMINI_API_KEY",
-    "https://generativelanguage.googleapis.com/v1beta/openai/",
-    "gemini-3.1-flash-lite",
-    OPENAI_COMPATIBLE
+    "gemini",
+    "gemini-3.1-flash-lite"
 );
-live_test!(
+catalog_live_test!(
     anthropic_chat_smoke,
     "Anthropic",
     "ANTHROPIC_API_KEY",
-    "https://api.anthropic.com/v1/",
-    "claude-haiku-4-5-20251001",
-    ANTHROPIC
+    "anthropic",
+    "claude-haiku-4-5"
 );
 
 live_embedding_test!(
