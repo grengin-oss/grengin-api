@@ -69,6 +69,16 @@ function openaiTextFrames() {
   ];
 }
 
+function openaiReasoningFrames() {
+  return [
+    data({ id: 'chatcmpl-mock', choices: [{ index: 0, delta: { reasoning_content: 'First step. ' } }] }),
+    data({ id: 'chatcmpl-mock', choices: [{ index: 0, delta: { reasoning: 'Second step.' } }] }),
+    data({ id: 'chatcmpl-mock', choices: [{ index: 0, delta: { content: 'Answer' } }] }),
+    data({ id: 'chatcmpl-mock', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+    'data: [DONE]\n\n',
+  ];
+}
+
 function openaiToolCallFrames(toolName) {
   const call = (fields) => ({
     id: 'chatcmpl-mock',
@@ -159,6 +169,19 @@ function anthropicTextFrames() {
     data({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello from' } }),
     data({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: ' the mock server' } }),
     data({ type: 'content_block_stop', index: 0 }),
+    ...anthropicClose('end_turn'),
+  ];
+}
+
+function anthropicReasoningFrames() {
+  return [
+    ...anthropicOpen(),
+    data({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } }),
+    data({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'Check the facts.' } }),
+    data({ type: 'content_block_stop', index: 0 }),
+    data({ type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } }),
+    data({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'Answer' } }),
+    data({ type: 'content_block_stop', index: 1 }),
     ...anthropicClose('end_turn'),
   ];
 }
@@ -308,6 +331,7 @@ const server = createServer((request, response) => {
       case 'POST /v1/chat/completions': {
         const prompt = lastUserText(body).toLowerCase();
         if (hasToolResult(body)) return writeFrames(response, openaiToolAnswerFrames(body));
+        if (prompt.includes('reasoning')) return writeFrames(response, openaiReasoningFrames());
         if (prompt.includes('search')) return writeFrames(response, openaiWebSearchFrames());
         if (prompt.includes('weather') && (body.tools ?? []).length > 0) {
           return writeFrames(response, openaiToolCallFrames(clientToolName(body, 'openai')));
@@ -315,9 +339,221 @@ const server = createServer((request, response) => {
         return writeFrames(response, openaiTextFrames());
       }
 
+      case 'POST /v1/responses': {
+        const toolResult = (body.input ?? []).find((item) => item.type === 'function_call_output');
+        if (toolResult) {
+          return writeFrames(response, [
+            data({ type: 'response.created', response: { id: 'resp_mock' } }),
+            data({ type: 'response.output_text.delta', delta: 'The tool said: 11 degrees' }),
+            data({
+              type: 'response.completed',
+              response: {
+                status: 'completed',
+                usage: { input_tokens: 14, output_tokens: 6, total_tokens: 20 },
+              },
+            }),
+            'data: [DONE]\n\n',
+          ]);
+        }
+        const webSearch = (body.tools ?? []).some((item) => item.type === 'web_search');
+        if (webSearch) {
+          return writeFrames(response, [
+            data({ type: 'response.created', response: { id: 'resp_mock' } }),
+            data({
+              type: 'response.output_item.added',
+              output_index: 0,
+              item: { type: 'web_search_call', id: 'search_resp_1' },
+            }),
+            data({
+              type: 'response.output_text.annotation.added',
+              annotation: {
+                type: 'url_citation',
+                title: 'Rust Releases',
+                url: 'https://releases.rs/',
+              },
+            }),
+            data({ type: 'response.output_text.delta', delta: 'Rust 1.90' }),
+            data({
+              type: 'response.completed',
+              response: {
+                status: 'completed',
+                usage: { input_tokens: 12, output_tokens: 4, total_tokens: 16 },
+              },
+            }),
+            'data: [DONE]\n\n',
+          ]);
+        }
+        const tool = (body.tools ?? []).find((item) => item.type === 'function');
+        if (tool) {
+          return writeFrames(response, [
+            data({ type: 'response.created', response: { id: 'resp_mock' } }),
+            data({
+              type: 'response.output_item.added',
+              output_index: 0,
+              item: { type: 'function_call', call_id: 'call_resp_1', name: tool.name },
+            }),
+            data({
+              type: 'response.function_call_arguments.delta',
+              output_index: 0,
+              delta: '{"city":"Paris"}',
+            }),
+            data({
+              type: 'response.completed',
+              response: {
+                status: 'completed',
+                usage: { input_tokens: 12, output_tokens: 4, total_tokens: 16 },
+              },
+            }),
+            'data: [DONE]\n\n',
+          ]);
+        }
+        return writeFrames(response, [
+          data({ type: 'response.created', response: { id: 'resp_mock' } }),
+          data({ type: 'response.output_text.delta', delta: 'Hello from the mock server' }),
+          data({
+            type: 'response.completed',
+            response: {
+              status: 'completed',
+              usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+            },
+          }),
+          'data: [DONE]\n\n',
+        ]);
+      }
+
+      case 'POST /v1/conversations': {
+        const result = (body.inputs ?? []).find((item) => item.type === 'function.result');
+        if (result) {
+          return writeFrames(response, [
+            data({ type: 'conversation.response.started', conversation_id: 'conv_mock' }),
+            data({ type: 'message.output.delta', content: 'The tool said: 11 degrees' }),
+            data({
+              type: 'conversation.response.done',
+              usage: { prompt_tokens: 14, completion_tokens: 6, total_tokens: 20 },
+            }),
+          ]);
+        }
+        const webSearch = (body.tools ?? []).some((item) => item.type === 'web_search');
+        if (webSearch) {
+          return writeFrames(response, [
+            data({ type: 'conversation.response.started', conversation_id: 'conv_mock' }),
+            data({
+              type: 'tool.execution.started',
+              id: 'search_mistral_1',
+              output_index: 0,
+              arguments: '{"query":"rust version"}',
+            }),
+            data({
+              type: 'tool.execution.result',
+              content: {
+                type: 'tool_reference',
+                title: 'Rust Releases',
+                url: 'https://releases.rs/',
+                tool: 'web_search',
+                description: 'Rust release history',
+              },
+            }),
+            data({ type: 'message.output.delta', content: 'Rust 1.90' }),
+            data({
+              type: 'conversation.response.done',
+              usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 },
+            }),
+          ]);
+        }
+        const tool = (body.tools ?? []).find((item) => item.type === 'function');
+        if (tool) {
+          return writeFrames(response, [
+            data({ type: 'conversation.response.started', conversation_id: 'conv_mock' }),
+            data({
+              type: 'function.call.delta',
+              output_index: 0,
+              tool_call_id: 'call_mistral_1',
+              name: tool.function.name,
+              arguments: '{"city":"Paris"}',
+            }),
+            data({
+              type: 'conversation.response.done',
+              usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 },
+            }),
+          ]);
+        }
+        return writeFrames(response, [
+          data({ type: 'conversation.response.started', conversation_id: 'conv_mock' }),
+          data({ type: 'message.output.delta', content: 'Hello from the mock server' }),
+          data({
+            type: 'conversation.response.done',
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+          }),
+        ]);
+      }
+
+      case 'POST /v1/models/mock-model:streamGenerateContent': {
+        const parts = (body.contents ?? []).flatMap((content) => content.parts ?? []);
+        const toolResult = parts.find((part) => part.functionResponse);
+        if (toolResult) {
+          return writeFrames(response, [
+            data({
+              candidates: [{
+                content: { parts: [{ text: 'The tool said: 11 degrees' }] },
+                finishReason: 'STOP',
+              }],
+              usageMetadata: { promptTokenCount: 14, candidatesTokenCount: 6, totalTokenCount: 20 },
+            }),
+          ]);
+        }
+        const webSearch = (body.tools ?? []).some((tool) => tool.google_search);
+        if (webSearch) {
+          return writeFrames(response, [
+            data({
+              candidates: [{
+                content: { parts: [{ text: 'Rust 1.90' }] },
+                groundingMetadata: {
+                  webSearchQueries: ['rust stable version'],
+                  groundingChunks: [{
+                    web: { title: 'Rust Releases', uri: 'https://releases.rs/' },
+                  }],
+                },
+                finishReason: 'STOP',
+              }],
+              usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 4, totalTokenCount: 16 },
+            }),
+          ]);
+        }
+        const declaration = (body.tools ?? [])
+          .flatMap((tool) => tool.function_declarations ?? tool.functionDeclarations ?? [])
+          .at(0);
+        if (declaration) {
+          return writeFrames(response, [
+            data({
+              candidates: [{
+                content: {
+                  parts: [{ functionCall: { name: declaration.name, args: { city: 'Paris' } } }],
+                },
+                finishReason: 'STOP',
+              }],
+              usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 4, totalTokenCount: 16 },
+            }),
+          ]);
+        }
+        return writeFrames(response, [
+          data({
+            candidates: [{
+              content: { parts: [{ text: 'Hello from the mock server' }] },
+              finishReason: 'STOP',
+            }],
+            usageMetadata: {
+              promptTokenCount: 10,
+              candidatesTokenCount: 5,
+              totalTokenCount: 15,
+            },
+          }),
+        ]);
+      }
+
       case 'POST /v1/messages': {
         const prompt = lastUserText(body).toLowerCase();
         if (hasToolResult(body)) return writeFrames(response, anthropicToolAnswerFrames(body));
+        if (prompt.includes('reasoning')) return writeFrames(response, anthropicReasoningFrames());
         if (prompt.includes('search')) {
           return writeFrames(
             response,

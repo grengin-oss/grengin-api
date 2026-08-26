@@ -575,7 +575,10 @@ fn evaluate(
             Ok(Evaluation::Value(Value::Array(output)))
         }
         MappingExpression::If(value) => {
-            let condition = required_value(evaluate(&value.condition, scope, false, child_depth)?)?;
+            let condition = match evaluate(&value.condition, scope, optional, child_depth)? {
+                Evaluation::Omit => return Ok(Evaluation::Omit),
+                Evaluation::Value(value) => value,
+            };
             let condition = condition.as_bool().ok_or_else(|| {
                 ProviderError::PayloadMapping("$if condition must evaluate to boolean".to_string())
             })?;
@@ -588,7 +591,10 @@ fn evaluate(
             }
         }
         MappingExpression::Switch(value) => {
-            let selected = required_value(evaluate(&value.value, scope, false, child_depth)?)?;
+            let selected = match evaluate(&value.value, scope, optional, child_depth)? {
+                Evaluation::Omit => return Ok(Evaluation::Omit),
+                Evaluation::Value(value) => value,
+            };
             let selected = match selected {
                 Value::String(value) => value,
                 Value::Bool(value) => value.to_string(),
@@ -967,6 +973,29 @@ mod tests {
                 &definitions
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn omit_if_null_propagates_through_conditional_operators() {
+        let context = MappingContext::new(json!({"request": {}}));
+        let mapping = expression(json!({
+            "choice": {
+                "$omitIfNull": {
+                    "$switch": {"$get": "request.choice.type"},
+                    "cases": {"auto": {"$literal": "auto"}}
+                }
+            },
+            "feature": {
+                "$omitIfNull": {
+                    "$if": {"$get": "request.feature.enabled"},
+                    "then": {"$literal": true}
+                }
+            }
+        }));
+        assert_eq!(
+            evaluate_mapping(&mapping, &context, &BTreeMap::new()).unwrap(),
+            json!({})
         );
     }
 

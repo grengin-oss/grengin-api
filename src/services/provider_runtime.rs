@@ -318,11 +318,11 @@ mod tests {
                 .expect("embedded manifest")
                 .expect("engine is embedded");
             let manifest = parse_manifest(&config).expect("embedded manifest parses");
-            assert_eq!(manifest.version, "1.0");
+            assert_eq!(manifest.version, "1.1");
             let provider = compile_provider(config, engine_key, Some("test-key".to_string()))
                 .expect("compiled provider");
             assert_eq!(provider.descriptor().id.as_str(), engine_key);
-            assert_eq!(provider.descriptor().version, "1.0");
+            assert_eq!(provider.descriptor().version, "1.1");
         }
     }
 
@@ -331,7 +331,7 @@ mod tests {
         for engine_key in ["openai", "anthropic", "mistral", "gemini"] {
             assert_eq!(
                 provider_plugin_version(&test_engine(engine_key, None)).as_deref(),
-                Some("1.0")
+                Some("1.1")
             );
         }
 

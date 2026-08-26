@@ -2,7 +2,7 @@
   "$schema": "../schema/provider-plugin-v1.schema.json",
   "manifestVersion": "1.0",
   "id": "openai",
-  "version": "1.0",
+  "version": "1.1",
   "name": "OpenAI",
   "description": "OpenAI Responses API chat, tools, and provider-native web search.",
   "baseUrl": "https://api.openai.com/v1/",
@@ -125,6 +125,20 @@
             ]
           }
         },
+        "tool_choice": {
+          "$omitIfNull": {
+            "$switch": { "$get": "request.toolChoice.type" },
+            "cases": {
+              "auto": { "$literal": "auto" },
+              "none": { "$literal": "none" },
+              "required": { "$literal": "required" },
+              "named": {
+                "type": { "$literal": "function" },
+                "name": { "$get": "request.toolChoice.name" }
+              }
+            }
+          }
+        },
         "stream": { "$literal": true }
       },
       "response": {
@@ -142,6 +156,18 @@
             "id": "text_delta",
             "when": { "pointer": "/type", "equals": "response.output_text.delta" },
             "emit": "textDelta",
+            "value": "/delta"
+          },
+          {
+            "id": "reasoning_summary_delta",
+            "when": { "pointer": "/type", "equals": "response.reasoning_summary_text.delta" },
+            "emit": "reasoningDelta",
+            "value": "/delta"
+          },
+          {
+            "id": "reasoning_text_delta",
+            "when": { "pointer": "/type", "equals": "response.reasoning_text.delta" },
+            "emit": "reasoningDelta",
             "value": "/delta"
           },
           {

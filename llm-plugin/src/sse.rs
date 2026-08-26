@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use serde_json::Value;
 
@@ -10,6 +13,8 @@ use crate::{
     ProviderEvent, ProviderEventErrorKind, RequestId, ResponseRule, ServerToolResultItem,
     TokenUsage, ToolCallId,
 };
+
+static NEXT_MAPPER_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedSseEvent {
@@ -132,8 +137,8 @@ impl SseEventMapper {
         }
     }
 
-    /// True once a completion event has been emitted. Accounting and diagnostic events may still
-    /// be mapped after completion.
+    /// True once a completion or provider error event has made the stream terminal. Accounting and
+    /// diagnostic events may still be mapped after completion.
     pub fn is_completed(&self) -> bool {
         self.state.completed
     }
@@ -163,13 +168,19 @@ impl SseEventMapper {
                         rule.id
                     ))
                 })?;
-                for item in items {
+                for (position, item) in items.iter().enumerate() {
                     if rule_matches(rule, item) {
-                        output.extend(self.state.map_rule(rule, item)?);
+                        let position = u32::try_from(position).map_err(|_| {
+                            ProviderError::ResponseMapping(format!(
+                                "response rule {} produced too many items",
+                                rule.id
+                            ))
+                        })?;
+                        output.extend(self.state.map_rule(rule, item, Some(position))?);
                     }
                 }
             } else if rule_matches(rule, &value) {
-                output.extend(self.state.map_rule(rule, &value)?);
+                output.extend(self.state.map_rule(rule, &value, None)?);
             }
         }
         Ok(output)
@@ -189,7 +200,7 @@ impl SseEventMapper {
 
 /// Cross-event mapper state, kept separate from the immutable spec so mapping a single event
 /// borrows the rules without cloning them.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct MapperState {
     tool_ids_by_index: BTreeMap<u32, ToolCallId>,
     /// Server-executed tools, tracked separately because providers such as Anthropic number them
@@ -198,6 +209,19 @@ struct MapperState {
     server_tools_by_index: BTreeMap<u32, (Option<ToolCallId>, String)>,
     message_started: bool,
     completed: bool,
+    synthetic_id_namespace: u64,
+}
+
+impl Default for MapperState {
+    fn default() -> Self {
+        Self {
+            tool_ids_by_index: BTreeMap::new(),
+            server_tools_by_index: BTreeMap::new(),
+            message_started: false,
+            completed: false,
+            synthetic_id_namespace: NEXT_MAPPER_ID.fetch_add(1, Ordering::Relaxed),
+        }
+    }
 }
 
 /// Outcome of resolving a rule's target when the rule and the event may disagree about which tool
@@ -213,6 +237,7 @@ impl MapperState {
         &mut self,
         rule: &ResponseRule,
         value: &Value,
+        fallback_index: Option<u32>,
     ) -> Result<Vec<ProviderEvent>, ProviderError> {
         let events = match rule.emit {
             EventKind::MessageStart => {
@@ -231,8 +256,12 @@ impl MapperState {
                 text: required_rule_string(rule, value, "value")?,
             }],
             EventKind::ToolCallStart => {
-                let id = ToolCallId::new(required_string(rule, value, "id")?);
-                let index = optional_u32(rule, value, "index")?.unwrap_or(0);
+                let index = optional_u32(rule, value, "index")?
+                    .or(fallback_index)
+                    .unwrap_or(0);
+                let id = optional_string(rule, value, "id")?
+                    .map(ToolCallId::new)
+                    .unwrap_or_else(|| self.synthetic_tool_id(index));
                 if self.server_tools_by_index.contains_key(&index) {
                     return Err(ProviderError::ResponseMapping(format!(
                         "tool index {index} was already assigned to a provider-native tool"
@@ -254,7 +283,7 @@ impl MapperState {
                 vec![ProviderEvent::ToolCallStart { id, name, index }]
             }
             EventKind::ToolArgumentsDelta => {
-                let Resolved::Found(id) = self.resolve_tool_id(rule, value)? else {
+                let Resolved::Found(id) = self.resolve_tool_id(rule, value, fallback_index)? else {
                     return Ok(Vec::new());
                 };
                 vec![ProviderEvent::ToolArgumentsDelta {
@@ -263,7 +292,7 @@ impl MapperState {
                 }]
             }
             EventKind::ToolCallEnd => {
-                let Resolved::Found(id) = self.resolve_tool_id(rule, value)? else {
+                let Resolved::Found(id) = self.resolve_tool_id(rule, value, fallback_index)? else {
                     return Ok(Vec::new());
                 };
                 self.tool_ids_by_index.retain(|_, active| active != &id);
@@ -272,7 +301,7 @@ impl MapperState {
             EventKind::ServerToolStart => {
                 let id = optional_string(rule, value, "id")?.map(ToolCallId::new);
                 let name = required_string(rule, value, "name")?;
-                if let Some(index) = optional_u32(rule, value, "index")? {
+                if let Some(index) = optional_u32(rule, value, "index")?.or(fallback_index) {
                     if self.tool_ids_by_index.contains_key(&index) {
                         return Err(ProviderError::ResponseMapping(format!(
                             "provider-native tool index {index} was already assigned to a client tool"
@@ -299,7 +328,9 @@ impl MapperState {
                 }]
             }
             EventKind::ServerToolQueryDelta => {
-                let Resolved::Found((id, name)) = self.resolve_server_tool(rule, value)? else {
+                let Resolved::Found((id, name)) =
+                    self.resolve_server_tool(rule, value, fallback_index)?
+                else {
                     return Ok(Vec::new());
                 };
                 vec![ProviderEvent::ServerToolQueryDelta {
@@ -309,7 +340,9 @@ impl MapperState {
                 }]
             }
             EventKind::ServerToolResult => {
-                let Resolved::Found((id, name)) = self.resolve_server_tool(rule, value)? else {
+                let Resolved::Found((id, name)) =
+                    self.resolve_server_tool(rule, value, fallback_index)?
+                else {
                     return Ok(Vec::new());
                 };
                 vec![ProviderEvent::ServerToolResult {
@@ -348,6 +381,7 @@ impl MapperState {
             EventKind::Error => {
                 let kind =
                     optional_string(rule, value, "kind")?.unwrap_or_else(|| "provider".to_string());
+                self.completed = true;
                 vec![ProviderEvent::Error {
                     kind: if matches!(kind.as_str(), "quota" | "rate_limit" | "quota_exhausted") {
                         ProviderEventErrorKind::QuotaExhausted
@@ -371,11 +405,12 @@ impl MapperState {
         &self,
         rule: &ResponseRule,
         value: &Value,
+        fallback_index: Option<u32>,
     ) -> Result<Resolved<ToolCallId>, ProviderError> {
         if let Some(id) = optional_string(rule, value, "id")? {
             return Ok(Resolved::Found(ToolCallId::new(id)));
         }
-        let index = self.required_index(rule, value)?;
+        let index = self.required_index(rule, value, fallback_index)?;
         if let Some(id) = self.tool_ids_by_index.get(&index) {
             return Ok(Resolved::Found(id.clone()));
         }
@@ -392,6 +427,7 @@ impl MapperState {
         &self,
         rule: &ResponseRule,
         value: &Value,
+        fallback_index: Option<u32>,
     ) -> Result<Resolved<(Option<ToolCallId>, String)>, ProviderError> {
         let id = optional_string(rule, value, "id")?.map(ToolCallId::new);
         // An explicit name plus an id (Anthropic's `web_search_tool_result` carries `tool_use_id`)
@@ -401,7 +437,7 @@ impl MapperState {
         {
             return Ok(Resolved::Found((id, name)));
         }
-        let index = self.required_index(rule, value)?;
+        let index = self.required_index(rule, value, fallback_index)?;
         if let Some((known_id, name)) = self.server_tools_by_index.get(&index) {
             return Ok(Resolved::Found((
                 id.or_else(|| known_id.clone()),
@@ -417,13 +453,27 @@ impl MapperState {
         )))
     }
 
-    fn required_index(&self, rule: &ResponseRule, value: &Value) -> Result<u32, ProviderError> {
-        optional_u32(rule, value, "index")?.ok_or_else(|| {
-            ProviderError::ResponseMapping(format!(
-                "response rule {} requires a tool id or index",
-                rule.id
-            ))
-        })
+    fn required_index(
+        &self,
+        rule: &ResponseRule,
+        value: &Value,
+        fallback_index: Option<u32>,
+    ) -> Result<u32, ProviderError> {
+        optional_u32(rule, value, "index")?
+            .or(fallback_index)
+            .ok_or_else(|| {
+                ProviderError::ResponseMapping(format!(
+                    "response rule {} requires a tool id or index",
+                    rule.id
+                ))
+            })
+    }
+
+    fn synthetic_tool_id(&self, index: u32) -> ToolCallId {
+        ToolCallId::new(format!(
+            "grengin_call_{}_{}",
+            self.synthetic_id_namespace, index
+        ))
     }
 
     fn complete(&mut self, finish_reason: Option<FinishReason>) -> Vec<ProviderEvent> {
@@ -465,10 +515,13 @@ fn rule_matches(rule: &ResponseRule, value: &Value) -> bool {
     {
         return false;
     }
-    if let Some(not_null) = condition.not_null
-        && selected.is_some_and(|selected| !selected.is_null()) != not_null
-    {
-        return false;
+    if let Some(not_null) = condition.not_null {
+        let Some(selected) = selected else {
+            return false;
+        };
+        if !selected.is_null() != not_null {
+            return false;
+        }
     }
     if let Some(value_type) = condition.value_type
         && !selected.is_some_and(|selected| json_type_matches(selected, value_type))
@@ -751,10 +804,10 @@ mod tests {
 
     use crate::{
         ChatBodyEncoding, ChatResponseSpec, EventDataEncoding, EventKind, FinishReason,
-        MatchCondition, ProviderEvent, ResponseRule,
+        MatchCondition, ProviderEvent, ProviderEventErrorKind, ResponseRule,
     };
 
-    use super::{DecodedSseEvent, SseDecoder, SseEventMapper};
+    use super::{DecodedSseEvent, SseDecoder, SseEventMapper, rule_matches};
 
     #[test]
     fn decodes_fragmented_crlf_multiline_and_comments() {
@@ -986,6 +1039,102 @@ mod tests {
                 .map(&event(r#"{"choices":[{"delta":{"content":null}}]}"#))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn not_null_false_matches_explicit_null_but_not_a_missing_path() {
+        let rule: ResponseRule = serde_json::from_value(json!({
+            "id": "null_only",
+            "when": {"pointer": "/value", "notNull": false},
+            "emit": "completed"
+        }))
+        .unwrap();
+        assert!(rule_matches(&rule, &json!({"value": null})));
+        assert!(!rule_matches(&rule, &json!({})));
+        assert!(!rule_matches(&rule, &json!({"value": "present"})));
+    }
+
+    #[test]
+    fn synthesizes_stable_distinct_ids_for_parallel_tools_without_provider_ids() {
+        let response: ChatResponseSpec = serde_json::from_value(json!({
+            "eventDataEncoding": "json",
+            "doneData": "[DONE]",
+            "rules": [
+                {
+                    "id": "tool_start",
+                    "forEach": "/parts",
+                    "when": {"pointer": "/functionCall/name", "exists": true},
+                    "emit": "toolCallStart",
+                    "fields": {"name": "/functionCall/name"}
+                },
+                {
+                    "id": "tool_arguments",
+                    "forEach": "/parts",
+                    "when": {"pointer": "/functionCall/args", "exists": true},
+                    "emit": "toolArgumentsDelta",
+                    "jsonFields": {"fragment": "/functionCall/args"}
+                }
+            ]
+        }))
+        .unwrap();
+        let mut mapper = SseEventMapper::new(response);
+        let events = mapper
+            .map(&event(
+                r#"{"parts":[{"functionCall":{"name":"first","args":{"x":1}}},{"functionCall":{"name":"second","args":{"y":2}}}]}"#,
+            ))
+            .unwrap();
+
+        let starts = events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::ToolCallStart { id, name, index } => {
+                    Some((id.clone(), name.clone(), *index))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(starts.len(), 2, "{events:?}");
+        assert_ne!(starts[0].0, starts[1].0);
+        assert_eq!((starts[0].1.as_str(), starts[0].2), ("first", 0));
+        assert_eq!((starts[1].1.as_str(), starts[1].2), ("second", 1));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProviderEvent::ToolArgumentsDelta { id, fragment }
+                if id == &starts[0].0 && fragment == r#"{"x":1}"#
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProviderEvent::ToolArgumentsDelta { id, fragment }
+                if id == &starts[1].0 && fragment == r#"{"y":2}"#
+        )));
+    }
+
+    #[test]
+    fn provider_error_events_make_the_stream_terminal() {
+        let response: ChatResponseSpec = serde_json::from_value(json!({
+            "eventDataEncoding": "json",
+            "rules": [{
+                "id": "error",
+                "when": {"pointer": "/type", "equals": "error"},
+                "emit": "error",
+                "fields": {"kind": "/error/type", "message": "/error/message"}
+            }]
+        }))
+        .unwrap();
+        let mut mapper = SseEventMapper::new(response);
+        let events = mapper
+            .map(&event(
+                r#"{"type":"error","error":{"type":"rate_limit","message":"slow down"}}"#,
+            ))
+            .unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [ProviderEvent::Error {
+                kind: ProviderEventErrorKind::QuotaExhausted,
+                message
+            }] if message == "slow down"
+        ));
+        assert!(mapper.is_completed());
     }
 
     #[test]

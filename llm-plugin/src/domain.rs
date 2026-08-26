@@ -172,12 +172,31 @@ pub struct ToolDefinition {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "type", content = "name", rename_all = "snake_case")]
 pub enum ToolChoice {
     Auto,
     None,
     Required,
     Named(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::ToolChoice;
+
+    #[test]
+    fn tool_choice_has_a_mapping_friendly_tagged_shape() {
+        assert_eq!(
+            serde_json::to_value(ToolChoice::Auto).unwrap(),
+            json!({"type": "auto"})
+        );
+        assert_eq!(
+            serde_json::to_value(ToolChoice::Named("lookup".to_string())).unwrap(),
+            json!({"type": "named", "name": "lookup"})
+        );
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

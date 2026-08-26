@@ -12,6 +12,7 @@
 
 use std::{
     collections::BTreeMap,
+    fs,
     io::{BufRead, BufReader},
     process::{Child, ChildStdout, Command, Stdio},
 };
@@ -20,13 +21,16 @@ use futures_util::StreamExt;
 use llm_plugin::{
     ChatMessage, ChatRequest, ChatRole, ContentPart, DeclarativeProvider, EmbeddingRequest,
     ImageRequest, ModelId, ProviderError, ProviderEvent, ProviderManifestV1, ProviderPlugin,
-    ProviderRuntimeConfig, ToolCallId, ToolDefinition, ToolResult,
+    ProviderRuntimeConfig, ToolCallId, ToolChoice, ToolDefinition, ToolResult,
 };
 use serde_json::{Value, json};
 
 const OPENAI_COMPATIBLE: &[u8] = include_bytes!("../examples/openai-compatible.provider.json");
+const OPENAI: &[u8] = include_bytes!("../examples/openai.provider.json");
 const ANTHROPIC: &[u8] = include_bytes!("../examples/anthropic.provider.json");
+const GEMINI: &[u8] = include_bytes!("../examples/gemini.provider.json");
 const GEMINI_IMAGE: &[u8] = include_bytes!("../examples/gemini-image.provider.json");
+const MISTRAL: &[u8] = include_bytes!("../examples/mistral.provider.json");
 const MCP_TOOL: &str = "mcp__ab12cd34__get_weather__9f3c1d02";
 
 struct MockServer {
@@ -177,6 +181,16 @@ fn text_of(events: &[ProviderEvent]) -> String {
         .collect()
 }
 
+fn reasoning_of(events: &[ProviderEvent]) -> String {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::ReasoningDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn citations(events: &[ProviderEvent]) -> Vec<(String, String)> {
     events
         .iter()
@@ -271,6 +285,34 @@ async fn anthropic_manifest_streams_chat_text() {
     assert_eq!(sent["stream"], true);
     // cache_control is now per-system-block, not top-level
     assert_eq!(sent["cache_control"], json!(null));
+}
+
+#[tokio::test]
+async fn shipped_manifests_keep_reasoning_separate_from_answer_text() {
+    let server = mock_server!();
+    let openai = server.provider(OPENAI_COMPATIBLE, |manifest| {
+        manifest["capabilities"]["chat"]["reasoning"] = json!(true);
+    });
+    let mut session = openai
+        .chat()
+        .unwrap()
+        .start(request("mock-model", "show reasoning", Vec::new()))
+        .await
+        .unwrap();
+    let events = drain(&mut session.stream().await.unwrap()).await;
+    assert_eq!(reasoning_of(&events), "First step. Second step.");
+    assert_eq!(text_of(&events), "Answer");
+
+    let anthropic = server.provider(ANTHROPIC, |_| {});
+    let mut session = anthropic
+        .chat()
+        .unwrap()
+        .start(request("mock-model", "show reasoning", Vec::new()))
+        .await
+        .unwrap();
+    let events = drain(&mut session.stream().await.unwrap()).await;
+    assert_eq!(reasoning_of(&events), "Check the facts.");
+    assert_eq!(text_of(&events), "Answer");
 }
 
 #[tokio::test]
@@ -417,6 +459,47 @@ async fn openai_compatible_manifest_completes_an_mcp_tool_round_trip() {
 }
 
 #[tokio::test]
+async fn openai_responses_manifest_completes_an_mcp_tool_round_trip() {
+    let server = mock_server!();
+    let provider = server.provider(OPENAI, |_| {});
+    mcp_round_trip(&server, provider, |body| {
+        let input = body["input"].as_array().expect("Responses input");
+        let call = input
+            .iter()
+            .find(|item| item["type"] == "function_call")
+            .expect("no Responses function_call replay");
+        let result = input
+            .iter()
+            .find(|item| item["type"] == "function_call_output")
+            .expect("no Responses function_call_output replay");
+        assert_eq!(call["call_id"], "call_resp_1");
+        assert_eq!(call["name"], MCP_TOOL);
+        assert_eq!(result["call_id"], "call_resp_1");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn openai_compatible_manifest_maps_named_tool_choice() {
+    let server = mock_server!();
+    let provider = server.provider(OPENAI_COMPATIBLE, |_| {});
+    let mut chat = request(
+        "mock-model",
+        "what is the weather in Paris?",
+        vec![weather_tool()],
+    );
+    chat.tool_choice = Some(ToolChoice::Named(MCP_TOOL.to_string()));
+    let mut session = provider.chat().unwrap().start(chat).await.unwrap();
+    drain(&mut session.stream().await.unwrap()).await;
+
+    let sent = &server.requests().await[0]["body"];
+    assert_eq!(
+        sent["tool_choice"],
+        json!({"type": "function", "function": {"name": MCP_TOOL}})
+    );
+}
+
+#[tokio::test]
 async fn anthropic_manifest_completes_an_mcp_tool_round_trip() {
     let server = mock_server!();
     let provider = server.provider(ANTHROPIC, |_| {});
@@ -447,9 +530,137 @@ async fn anthropic_manifest_completes_an_mcp_tool_round_trip() {
     .await;
 }
 
+#[tokio::test]
+async fn gemini_manifest_synthesizes_an_id_and_completes_an_mcp_tool_round_trip() {
+    let server = mock_server!();
+    let provider = server.provider(GEMINI, |_| {});
+    mcp_round_trip(&server, provider, |body| {
+        let contents = body["contents"].as_array().expect("Gemini contents");
+        let call = contents
+            .iter()
+            .flat_map(|content| content["parts"].as_array().cloned().unwrap_or_default())
+            .find(|part| part["functionCall"].is_object())
+            .expect("no Gemini functionCall was replayed");
+        let result = contents
+            .iter()
+            .flat_map(|content| content["parts"].as_array().cloned().unwrap_or_default())
+            .find(|part| part["functionResponse"].is_object())
+            .expect("no Gemini functionResponse was replayed");
+        let call_id = call["functionCall"]["id"]
+            .as_str()
+            .expect("synthetic call id");
+        assert!(call_id.starts_with("grengin_call_"), "{body}");
+        assert_eq!(result["functionResponse"]["id"], call_id);
+        assert_eq!(call["functionCall"]["name"], MCP_TOOL);
+        assert_eq!(result["functionResponse"]["name"], MCP_TOOL);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn mistral_conversations_manifest_completes_an_mcp_tool_round_trip() {
+    let server = mock_server!();
+    let provider = server.provider(MISTRAL, |_| {});
+    mcp_round_trip(&server, provider, |body| {
+        let inputs = body["inputs"].as_array().expect("Mistral inputs");
+        let call = inputs
+            .iter()
+            .find(|item| item["type"] == "function.call")
+            .expect("no Mistral function.call replay");
+        let result = inputs
+            .iter()
+            .find(|item| item["type"] == "function.result")
+            .expect("no Mistral function.result replay");
+        assert_eq!(call["tool_call_id"], "call_mistral_1");
+        assert_eq!(call["name"], MCP_TOOL);
+        assert_eq!(result["tool_call_id"], "call_mistral_1");
+    })
+    .await;
+}
+
 // ---------------------------------------------------------------------------
 // Web search
 // ---------------------------------------------------------------------------
+
+async fn web_search_round_trip(
+    server: &MockServer,
+    provider: DeclarativeProvider,
+    expect_request: fn(&Value),
+) {
+    let mut chat = request(
+        "mock-model",
+        "search the web for the rust version",
+        Vec::new(),
+    );
+    chat.web_search = true;
+    let mut session = provider.chat().unwrap().start(chat).await.unwrap();
+    let events = drain(&mut session.stream().await.unwrap()).await;
+    assert_eq!(text_of(&events), "Rust 1.90", "{events:?}");
+    assert_eq!(
+        citations(&events),
+        vec![(
+            "Rust Releases".to_string(),
+            "https://releases.rs/".to_string()
+        )],
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::Completed { .. })),
+        "{events:?}"
+    );
+    let requests = server.requests().await;
+    expect_request(&requests.last().unwrap()["body"]);
+}
+
+#[tokio::test]
+async fn openai_responses_manifest_maps_native_web_search() {
+    let server = mock_server!();
+    let provider = server.provider(OPENAI, |_| {});
+    web_search_round_trip(&server, provider, |body| {
+        assert!(
+            body["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["type"] == "web_search")
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn mistral_conversations_manifest_maps_native_web_search() {
+    let server = mock_server!();
+    let provider = server.provider(MISTRAL, |_| {});
+    web_search_round_trip(&server, provider, |body| {
+        assert!(
+            body["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["type"] == "web_search")
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn gemini_manifest_maps_native_web_search() {
+    let server = mock_server!();
+    let provider = server.provider(GEMINI, |_| {});
+    web_search_round_trip(&server, provider, |body| {
+        assert!(
+            body["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["google_search"].is_object())
+        );
+    })
+    .await;
+}
 
 #[tokio::test]
 async fn openai_compatible_manifest_surfaces_web_search_citations() {
@@ -582,6 +793,74 @@ async fn anthropic_manifest_routes_web_search_and_a_client_tool_from_one_index_s
         "event payload is bloated: {} bytes",
         encoded.len()
     );
+}
+
+#[tokio::test]
+#[ignore = "requires GRENGIN_PROVIDER_CATALOG_DIR pointing at grengin-list/master-data/providers"]
+async fn every_catalog_manifest_streams_against_the_mock_provider() {
+    let catalog = std::env::var("GRENGIN_PROVIDER_CATALOG_DIR")
+        .expect("set GRENGIN_PROVIDER_CATALOG_DIR to master-data/providers");
+    let mut manifests = fs::read_dir(&catalog)
+        .expect("catalog directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("plugin.json"))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    manifests.sort();
+    assert!(
+        !manifests.is_empty(),
+        "no plugin manifests found in {catalog}"
+    );
+
+    let server = mock_server!();
+    for path in manifests {
+        let bytes = fs::read(&path).unwrap_or_else(|error| {
+            panic!("could not read {}: {error}", path.display());
+        });
+        let id = serde_json::from_slice::<Value>(&bytes).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let provider = server.provider(&bytes, |_| {});
+        let mut chat = request("mock-model", "hello there", Vec::new());
+        if id == "openrouter" {
+            chat.messages[0].content = vec![ContentPart::Text {
+                text: "search the web for the rust version".to_string(),
+            }];
+            chat.web_search = true;
+        }
+        let mut session = provider
+            .chat()
+            .unwrap_or_else(|| panic!("{id} has no chat capability"))
+            .start(chat)
+            .await
+            .unwrap_or_else(|error| panic!("{id} request failed preflight: {error}"));
+        let events = drain(
+            &mut session
+                .stream()
+                .await
+                .unwrap_or_else(|error| panic!("{id} stream failed to start: {error}")),
+        )
+        .await;
+        let expected_text = if id == "openrouter" {
+            "Rust 1.90"
+        } else {
+            "Hello from the mock server"
+        };
+        assert_eq!(text_of(&events), expected_text, "{id}: {events:?}");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::Completed { .. })),
+            "{id} emitted no completion: {events:?}"
+        );
+
+        if id == "openrouter" {
+            let sent = server.requests().await.pop().expect("OpenRouter request");
+            assert_eq!(sent["body"]["plugins"], json!([{"id": "web"}]));
+            assert_eq!(citations(&events).len(), 2, "{events:?}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

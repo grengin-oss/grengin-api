@@ -2,7 +2,7 @@
   "$schema": "../schema/provider-plugin-v1.schema.json",
   "manifestVersion": "1.0",
   "id": "gemini",
-  "version": "1.0",
+  "version": "1.1",
   "name": "Google Gemini",
   "description": "Gemini native streaming chat, functions, and Google Search grounding.",
   "baseUrl": "https://generativelanguage.googleapis.com/v1beta/",
@@ -10,7 +10,7 @@
     { "id": "api_key", "type": "secret", "required": true, "label": "API key" }
   ],
   "capabilities": {
-    "chat": { "streaming": true, "tools": true, "vision": true, "reasoning": true }
+    "chat": { "streaming": true, "tools": true, "vision": true, "reasoning": false }
   },
   "mappings": {
     "gemini_content": {
@@ -131,6 +131,36 @@
               },
               { "$map": "request.tools", "using": "gemini_function_tool" }
             ]
+          }
+        },
+        "toolConfig": {
+          "$omitIfNull": {
+            "$switch": { "$get": "request.toolChoice.type" },
+            "cases": {
+              "auto": {
+                "functionCallingConfig": {
+                  "mode": { "$literal": "AUTO" }
+                }
+              },
+              "none": {
+                "functionCallingConfig": {
+                  "mode": { "$literal": "NONE" }
+                }
+              },
+              "required": {
+                "functionCallingConfig": {
+                  "mode": { "$literal": "ANY" }
+                }
+              },
+              "named": {
+                "functionCallingConfig": {
+                  "mode": { "$literal": "ANY" },
+                  "allowedFunctionNames": [
+                    { "$get": "request.toolChoice.name" }
+                  ]
+                }
+              }
+            }
           }
         },
         "generationConfig": {

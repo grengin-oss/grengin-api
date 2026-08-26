@@ -41,6 +41,7 @@ const DEFAULT_MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 const MAX_SSE_EVENT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CONFIGURATION_BYTES: usize = 1024 * 1024;
+const MAX_IMAGE_COUNT: u8 = 16;
 
 /// Percent-encodes everything except the RFC 3986 unreserved set, so a templated value can never
 /// introduce URL structure while ordinary model ids such as `gpt-4.1-mini` survive intact.
@@ -450,9 +451,20 @@ impl ProviderPlugin for DeclarativeProvider {
 #[async_trait]
 impl ChatProvider for DeclarativeProvider {
     async fn start(&self, request: ChatRequest) -> Result<Box<dyn ChatSession>, ProviderError> {
-        if self.manifest.operations.chat_stream.is_none() {
-            return Err(ProviderError::UnsupportedCapability("chat"));
-        }
+        let capabilities = self
+            .descriptor
+            .capabilities
+            .chat
+            .as_ref()
+            .ok_or(ProviderError::UnsupportedCapability("chat"))?;
+        validate_chat_request(&request, capabilities)?;
+        validate_model_chat_request(
+            &request,
+            self.manifest
+                .models
+                .iter()
+                .find(|model| model.id == request.model.as_str()),
+        )?;
         Ok(Box::new(DeclarativeChatSession {
             provider: self.clone(),
             request,
@@ -496,11 +508,13 @@ impl ChatSession for DeclarativeChatSession {
             let mut observed = self.observed.lock().await;
             (observed.take_calls()?, observed.take_text())
         };
-        if calls.is_empty() && !results.is_empty() {
+        if calls.is_empty() {
             return Err(ProviderError::ResponseMapping(
-                "tool results were supplied before the provider emitted tool calls".to_string(),
+                "tool continuation was requested before the provider emitted tool calls"
+                    .to_string(),
             ));
         }
+        validate_tool_results(&calls, &results)?;
         if !calls.is_empty() {
             // The assistant's own words belong in the replayed turn: providers that validate
             // history (Anthropic in particular) reject a turn whose content was silently dropped,
@@ -527,6 +541,42 @@ impl ChatSession for DeclarativeChatSession {
         self.tool_round += 1;
         self.send_stream().await
     }
+}
+
+fn validate_tool_results(calls: &[ToolCall], results: &[ToolResult]) -> Result<(), ProviderError> {
+    if calls.len() != results.len() {
+        return Err(ProviderError::Configuration(format!(
+            "tool continuation requires exactly {} results, received {}",
+            calls.len(),
+            results.len()
+        )));
+    }
+    let expected = calls
+        .iter()
+        .map(|call| (&call.id, call.name.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = BTreeSet::new();
+    for result in results {
+        let expected_name = expected.get(&result.call_id).ok_or_else(|| {
+            ProviderError::Configuration(format!(
+                "tool result references unknown call {}",
+                result.call_id
+            ))
+        })?;
+        if !seen.insert(&result.call_id) {
+            return Err(ProviderError::Configuration(format!(
+                "tool result for call {} was supplied more than once",
+                result.call_id
+            )));
+        }
+        if result.name != *expected_name {
+            return Err(ProviderError::Configuration(format!(
+                "tool result for call {} names {}, expected {}",
+                result.call_id, result.name, expected_name
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl DeclarativeChatSession {
@@ -678,6 +728,11 @@ impl EmbeddingProvider for DeclarativeProvider {
                 operation.max_batch_size
             )));
         }
+        if request.dimensions == Some(0) {
+            return Err(ProviderError::Configuration(
+                "embedding dimensions must be greater than zero".to_string(),
+            ));
+        }
         let (_, bytes) = self
             .send_buffered(&operation.request, &request, &Value::Null)
             .await?;
@@ -704,6 +759,16 @@ impl ImageProvider for DeclarativeProvider {
             return Err(ProviderError::Configuration(
                 "image request must ask for at least one image".to_string(),
             ));
+        }
+        if request.count > MAX_IMAGE_COUNT {
+            return Err(ProviderError::Configuration(format!(
+                "image request count exceeds the host limit of {MAX_IMAGE_COUNT}"
+            )));
+        }
+        if request.input_images.len() > usize::from(MAX_IMAGE_COUNT) {
+            return Err(ProviderError::Configuration(format!(
+                "image request contains more than {MAX_IMAGE_COUNT} input images"
+            )));
         }
         let (headers, bytes) = self
             .send_buffered(&operation.request, &request, &Value::Null)
@@ -774,6 +839,11 @@ impl DeclarativeProvider {
                         "provider image is not valid base64: {error}"
                     ))
                 })?;
+                if bytes.is_empty() {
+                    return Err(ProviderError::ResponseMapping(
+                        "provider returned an empty image".to_string(),
+                    ));
+                }
                 images.push(GeneratedImage { bytes, media_type });
                 continue;
             }
@@ -797,6 +867,11 @@ impl DeclarativeProvider {
                 let headers = response.headers().clone();
                 let bytes =
                     read_limited(response, self.response_limit_for(&operation.request)).await?;
+                if bytes.is_empty() {
+                    return Err(ProviderError::ResponseMapping(
+                        "provider returned an empty image".to_string(),
+                    ));
+                }
                 let media_type = headers
                     .get(CONTENT_TYPE)
                     .and_then(|value| value.to_str().ok())
@@ -893,6 +968,106 @@ fn validate_credentials(
                 "credential {slot} contains characters that cannot be sent in an HTTP header, such as a line break"
             )));
         }
+    }
+    Ok(())
+}
+
+fn validate_chat_request(
+    request: &ChatRequest,
+    capabilities: &crate::ChatCapabilities,
+) -> Result<(), ProviderError> {
+    if request.messages.is_empty() {
+        return Err(ProviderError::Configuration(
+            "chat request must contain at least one message".to_string(),
+        ));
+    }
+    if request.max_tokens == Some(0) {
+        return Err(ProviderError::Configuration(
+            "chat maxTokens must be greater than zero".to_string(),
+        ));
+    }
+    if request
+        .temperature
+        .is_some_and(|temperature| !temperature.is_finite())
+    {
+        return Err(ProviderError::Configuration(
+            "chat temperature must be finite".to_string(),
+        ));
+    }
+    if (!request.tools.is_empty() || request.tool_choice.is_some()) && !capabilities.tools {
+        return Err(ProviderError::UnsupportedCapability("tools"));
+    }
+    let mut names = BTreeSet::new();
+    for tool in &request.tools {
+        if tool.name.trim().is_empty() || !names.insert(tool.name.as_str()) {
+            return Err(ProviderError::Configuration(
+                "chat tools must have non-empty unique names".to_string(),
+            ));
+        }
+    }
+    match request.tool_choice.as_ref() {
+        Some(crate::ToolChoice::Required) if request.tools.is_empty() => {
+            return Err(ProviderError::Configuration(
+                "required tool choice needs at least one tool".to_string(),
+            ));
+        }
+        Some(crate::ToolChoice::Named(name))
+            if !request.tools.iter().any(|tool| tool.name == *name) =>
+        {
+            return Err(ProviderError::Configuration(format!(
+                "named tool choice references unknown tool {name}"
+            )));
+        }
+        _ => {}
+    }
+    let has_images = request.messages.iter().any(|message| {
+        message.content.iter().any(|part| {
+            matches!(
+                part,
+                ContentPart::ImageUrl { .. } | ContentPart::ImageBase64 { .. }
+            )
+        })
+    });
+    if has_images && !capabilities.vision {
+        return Err(ProviderError::UnsupportedCapability("vision"));
+    }
+    Ok(())
+}
+
+fn validate_model_chat_request(
+    request: &ChatRequest,
+    model: Option<&crate::ManifestModel>,
+) -> Result<(), ProviderError> {
+    let Some(model) = model else {
+        return Ok(());
+    };
+    let capabilities = model
+        .capabilities
+        .chat
+        .as_ref()
+        .ok_or(ProviderError::UnsupportedCapability("chat"))?;
+    if (!request.tools.is_empty() || request.tool_choice.is_some()) && !capabilities.tools {
+        return Err(ProviderError::UnsupportedCapability("tools"));
+    }
+    let has_images = request.messages.iter().any(|message| {
+        message.content.iter().any(|part| {
+            matches!(
+                part,
+                ContentPart::ImageUrl { .. } | ContentPart::ImageBase64 { .. }
+            )
+        })
+    });
+    if has_images && !capabilities.vision {
+        return Err(ProviderError::UnsupportedCapability("vision"));
+    }
+    if request.web_search
+        && !model
+            .metadata
+            .get("supportsWebSearch")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
+        return Err(ProviderError::UnsupportedCapability("web_search"));
     }
     Ok(())
 }
@@ -1191,14 +1366,17 @@ fn decode_embeddings(
                 "embedding vectors must not be empty".to_string(),
             ));
         }
-        let index = operation
-            .response
-            .index_pointer
-            .as_deref()
-            .and_then(|pointer| select(item, pointer))
-            .and_then(Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok())
-            .unwrap_or(position);
+        let index = match operation.response.index_pointer.as_deref() {
+            Some(pointer) => select(item, pointer)
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| {
+                    ProviderError::ResponseMapping(format!(
+                        "embedding item {position} has a missing or invalid index"
+                    ))
+                })?,
+            None => position,
+        };
         indexed.push((index, vector));
     }
     if indexed.len() != request.inputs.len() {
@@ -1242,9 +1420,13 @@ fn decode_embeddings(
 }
 
 fn validate_image_media_type(media_type: &str) -> Result<(), ProviderError> {
-    if !media_type.to_ascii_lowercase().starts_with("image/") {
+    let normalized = media_type.to_ascii_lowercase();
+    if !matches!(
+        normalized.as_str(),
+        "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+    ) {
         return Err(ProviderError::ResponseMapping(format!(
-            "provider returned non-image media type {media_type}"
+            "provider returned unsupported image media type {media_type}"
         )));
     }
     Ok(())
@@ -1281,6 +1463,7 @@ fn decode_models(
                     "modelMapping did not produce a canonical model: {error}"
                 ))
             })?;
+            validate_dynamic_model(&mapped)?;
             provider_model_from_manifest(&mapped)
         } else {
             let id_pointer = operation.response.id_pointer.as_deref().ok_or_else(|| {
@@ -1300,6 +1483,11 @@ fn decode_models(
                 .and_then(|pointer| select(item, pointer))
                 .and_then(Value::as_str)
                 .unwrap_or(id);
+            if id.trim().is_empty() || name.trim().is_empty() {
+                return Err(ProviderError::ResponseMapping(
+                    "provider returned an empty model id or name".to_string(),
+                ));
+            }
             let model_type = operation.response.default_model_type.ok_or_else(|| {
                 ProviderError::ResponseMapping(
                     "pointer-based model listing has no defaultModelType".to_string(),
@@ -1362,6 +1550,44 @@ fn model_capabilities_are_subset(
     chat_supported
         && (!model.embeddings || provider.embeddings)
         && (!model.image_generation || provider.image_generation)
+}
+
+fn validate_dynamic_model(model: &ManifestModel) -> Result<(), ProviderError> {
+    if model.id.trim().is_empty() || model.name.trim().is_empty() {
+        return Err(ProviderError::ResponseMapping(
+            "modelMapping produced an empty model id or name".to_string(),
+        ));
+    }
+    if !model.metadata.is_null() && !model.metadata.is_object() {
+        return Err(ProviderError::ResponseMapping(format!(
+            "modelMapping metadata for {} must be an object",
+            model.id
+        )));
+    }
+    let matches_type = match model.model_type {
+        crate::ProviderModelType::TextGenerator => {
+            model.capabilities.chat.is_some()
+                && !model.capabilities.embeddings
+                && !model.capabilities.image_generation
+        }
+        crate::ProviderModelType::TextEmbedder => {
+            model.capabilities.chat.is_none()
+                && model.capabilities.embeddings
+                && !model.capabilities.image_generation
+        }
+        crate::ProviderModelType::ImageGenerator => {
+            model.capabilities.chat.is_none()
+                && !model.capabilities.embeddings
+                && model.capabilities.image_generation
+        }
+    };
+    if !matches_type || model.capabilities.model_listing {
+        return Err(ProviderError::ResponseMapping(format!(
+            "modelMapping capabilities for {} do not match modelType",
+            model.id
+        )));
+    }
+    Ok(())
 }
 
 fn provider_model_from_manifest(model: &ManifestModel) -> ProviderModel {
@@ -1441,7 +1667,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use crate::{
-        EmbeddingOperation, EmbeddingRequest, ModelId, ProviderEvent, ToolCallId,
+        ChatCapabilities, ChatMessage, ChatRequest, ChatRole, ContentPart, EmbeddingOperation,
+        EmbeddingRequest, ModelId, ProviderEvent, ToolCallId, ToolChoice, ToolDefinition,
         mapping::MappingContext,
     };
 
@@ -1449,7 +1676,8 @@ mod tests {
 
     use super::{
         DeclarativeProvider, ObservedToolCalls, ProviderRuntimeConfig, decode_embeddings,
-        ensure_within_base, render_template, validate_image_media_type,
+        ensure_within_base, render_template, validate_chat_request, validate_image_media_type,
+        validate_model_chat_request, validate_tool_results,
     };
 
     fn embedding_operation() -> EmbeddingOperation {
@@ -1504,6 +1732,17 @@ mod tests {
         assert!(
             decode_embeddings(&operation, &embedding_request(2, Some(2)), &dimensions).is_err()
         );
+
+        for malformed_index in [json!(null), json!("0"), json!(-1)] {
+            let body = serde_json::to_vec(&json!({
+                "data": [{"index": malformed_index, "embedding": [1.0, 2.0]}]
+            }))
+            .unwrap();
+            assert!(
+                decode_embeddings(&operation, &embedding_request(1, None), &body).is_err(),
+                "declared index pointer accepted {malformed_index}"
+            );
+        }
     }
 
     #[test]
@@ -1672,8 +1911,179 @@ mod tests {
 
     #[test]
     fn only_accepts_image_media_types() {
-        assert!(validate_image_media_type("image/png").is_ok());
-        assert!(validate_image_media_type("text/html").is_err());
+        for media_type in ["image/png", "image/jpeg", "image/webp", "image/gif"] {
+            assert!(
+                validate_image_media_type(media_type).is_ok(),
+                "{media_type}"
+            );
+        }
+        for media_type in ["text/html", "image/svg+xml", "image/x-icon"] {
+            assert!(
+                validate_image_media_type(media_type).is_err(),
+                "{media_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_or_incoherent_chat_features_before_http() {
+        let text = ChatMessage {
+            role: ChatRole::User,
+            content: vec![ContentPart::Text {
+                text: "hello".to_string(),
+            }],
+            tool_calls: Vec::new(),
+            tool_result: None,
+        };
+        let mut request = ChatRequest {
+            model: ModelId::new("chat"),
+            messages: vec![text.clone()],
+            temperature: None,
+            max_tokens: Some(128),
+            tools: Vec::new(),
+            tool_choice: None,
+            web_search: false,
+            options: Value::Null,
+        };
+        let text_only = ChatCapabilities {
+            streaming: true,
+            tools: false,
+            vision: false,
+            reasoning: false,
+        };
+        request.tools.push(ToolDefinition {
+            name: "lookup".to_string(),
+            description: None,
+            parameters: json!({"type": "object"}),
+        });
+        assert!(matches!(
+            validate_chat_request(&request, &text_only),
+            Err(crate::ProviderError::UnsupportedCapability("tools"))
+        ));
+
+        let tool_capable = ChatCapabilities {
+            tools: true,
+            ..text_only
+        };
+        request.tool_choice = Some(ToolChoice::Named("missing".to_string()));
+        assert!(validate_chat_request(&request, &tool_capable).is_err());
+        request.tool_choice = Some(ToolChoice::Named("lookup".to_string()));
+        assert!(validate_chat_request(&request, &tool_capable).is_ok());
+
+        request.messages = vec![ChatMessage {
+            role: ChatRole::User,
+            content: vec![ContentPart::ImageUrl {
+                url: "https://example.com/image.png".to_string(),
+                media_type: Some("image/png".to_string()),
+            }],
+            tool_calls: Vec::new(),
+            tool_result: None,
+        }];
+        request.tools.clear();
+        request.tool_choice = None;
+        assert!(matches!(
+            validate_chat_request(&request, &text_only),
+            Err(crate::ProviderError::UnsupportedCapability("vision"))
+        ));
+    }
+
+    #[test]
+    fn tool_continuation_requires_one_exact_result_per_call() {
+        let calls = vec![
+            crate::ToolCall {
+                id: ToolCallId::new("call-1"),
+                name: "lookup".to_string(),
+                arguments: json!({}),
+                index: Some(0),
+            },
+            crate::ToolCall {
+                id: ToolCallId::new("call-2"),
+                name: "calculate".to_string(),
+                arguments: json!({}),
+                index: Some(1),
+            },
+        ];
+        let result = |id: &str, name: &str| crate::ToolResult {
+            call_id: ToolCallId::new(id),
+            name: name.to_string(),
+            output: json!({"ok": true}),
+            is_error: false,
+        };
+
+        assert!(
+            validate_tool_results(
+                &calls,
+                &[result("call-2", "calculate"), result("call-1", "lookup")]
+            )
+            .is_ok()
+        );
+        assert!(validate_tool_results(&calls, &[result("call-1", "lookup")]).is_err());
+        assert!(
+            validate_tool_results(
+                &calls,
+                &[result("call-1", "lookup"), result("call-1", "lookup")]
+            )
+            .is_err()
+        );
+        assert!(
+            validate_tool_results(
+                &calls,
+                &[result("call-1", "wrong"), result("call-2", "calculate")]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn known_model_capabilities_narrow_the_provider_contract() {
+        let model: crate::ManifestModel = serde_json::from_value(json!({
+            "id": "limited",
+            "name": "Limited",
+            "modelType": "text_generator",
+            "capabilities": {
+                "chat": {
+                    "streaming": true,
+                    "tools": false,
+                    "vision": false,
+                    "reasoning": false
+                }
+            },
+            "metadata": {"supportsWebSearch": false}
+        }))
+        .unwrap();
+        let mut request = ChatRequest {
+            model: ModelId::new("limited"),
+            messages: vec![ChatMessage {
+                role: ChatRole::User,
+                content: vec![ContentPart::Text {
+                    text: "hello".to_string(),
+                }],
+                tool_calls: Vec::new(),
+                tool_result: None,
+            }],
+            temperature: None,
+            max_tokens: None,
+            tools: vec![ToolDefinition {
+                name: "lookup".to_string(),
+                description: None,
+                parameters: json!({"type": "object"}),
+            }],
+            tool_choice: None,
+            web_search: false,
+            options: Value::Null,
+        };
+
+        assert!(matches!(
+            validate_model_chat_request(&request, Some(&model)),
+            Err(crate::ProviderError::UnsupportedCapability("tools"))
+        ));
+        request.tools.clear();
+        request.web_search = true;
+        assert!(matches!(
+            validate_model_chat_request(&request, Some(&model)),
+            Err(crate::ProviderError::UnsupportedCapability("web_search"))
+        ));
+        assert!(validate_model_chat_request(&request, None).is_ok());
     }
 
     #[test]

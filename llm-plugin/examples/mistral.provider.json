@@ -2,7 +2,7 @@
   "$schema": "../schema/provider-plugin-v1.schema.json",
   "manifestVersion": "1.0",
   "id": "mistral",
-  "version": "1.0",
+  "version": "1.1",
   "name": "Mistral AI",
   "description": "Mistral Conversations API chat, functions, and provider-native web search.",
   "baseUrl": "https://api.mistral.ai/v1/",
@@ -99,7 +99,23 @@
         "completion_args": {
           "$omitIfNull": {
             "$object": {
-              "temperature": { "$omitIfNull": { "$get": "request.temperature" } }
+              "temperature": { "$omitIfNull": { "$get": "request.temperature" } },
+              "tool_choice": {
+                "$omitIfNull": {
+                  "$switch": { "$get": "request.toolChoice.type" },
+                  "cases": {
+                    "auto": { "$literal": "auto" },
+                    "none": { "$literal": "none" },
+                    "required": { "$literal": "required" },
+                    "named": {
+                      "type": { "$literal": "function" },
+                      "function": {
+                        "name": { "$get": "request.toolChoice.name" }
+                      }
+                    }
+                  }
+                }
+              }
             }
           }
         },
