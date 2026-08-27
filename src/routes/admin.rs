@@ -40,8 +40,9 @@ use crate::{
             list_roles, list_user_role_assignments, remove_role_from_user, update_role,
         },
         admin_sso_provider::{
-            delete_sso_provider_by_id, get_sso_provider_by_id, get_sso_providers,
-            quick_setup_grengin_proxy, update_sso_provider_by_id, validate_sso_provider_by_id,
+            create_sso_provider, delete_sso_provider_by_id, get_sso_provider_by_id,
+            get_sso_providers, quick_setup_grengin_proxy, update_sso_provider_by_id,
+            validate_sso_provider_by_id,
         },
         admin_system::get_system_metrics,
         admin_users::{
@@ -106,7 +107,10 @@ pub fn admin_routes() -> Router<SharedState> {
             "/admin/ai-engines/{engine_key}/models",
             get(get_ai_engine_models_by_key),
         )
-        .route("/admin/sso-providers", get(get_sso_providers))
+        .route(
+            "/admin/sso-providers",
+            get(get_sso_providers).post(create_sso_provider),
+        )
         .route(
             "/admin/sso-providers/{provider_id}/validate",
             post(validate_sso_provider_by_id),

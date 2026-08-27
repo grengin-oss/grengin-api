@@ -8,5 +8,6 @@ pub mod error;
 pub mod google;
 pub mod jwt;
 pub mod permissions;
+pub mod provider_config;
 pub mod sso_provider;
 pub mod sso_proxy;

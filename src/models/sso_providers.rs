@@ -24,6 +24,8 @@ pub struct Model {
     pub is_default: bool,
     pub use_grengin_proxy: bool,
     pub jit_provisioning: bool,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub configuration: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

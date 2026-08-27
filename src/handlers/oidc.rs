@@ -4,13 +4,16 @@
 use crate::{
     auth::{
         error::{AuthError, Error},
+        provider_config::OidcProviderConfiguration,
         sso_proxy::build_proxy_authorize_url,
     },
     dto::{
         auth::AuthToken,
-        oauth::{AuthCallback, AuthProvider, CallbackExchangeMode, StartParams},
+        oauth::{
+            AuthCallback, AuthProvider, AuthProviderSummary, CallbackExchangeMode, StartParams,
+        },
     },
-    models::oauth_sessions,
+    models::{oauth_sessions, sso_providers},
     services::{oidc_proxy::provider_uses_proxy, oidc_service::oidc_oauth_callback},
     state::SharedState,
     utils::uri::is_azure_mobile_redirect_uri,
@@ -25,8 +28,53 @@ use chrono::Utc;
 use openidconnect::{
     CsrfToken, Nonce, PkceCodeChallenge, RedirectUrl, Scope, core::CoreAuthenticationFlow,
 };
-use sea_orm::{ActiveModelTrait, ActiveValue::Set};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
+};
 use std::borrow::Cow;
+
+#[utoipa::path(
+    get,
+    path = "/auth/providers",
+    tag = "auth",
+    responses(
+        (status = 200, body = Vec<AuthProviderSummary>),
+        (status = 503, content_type = "application/json", body = Error, description = "Authentication configuration unavailable"),
+    )
+)]
+pub async fn list_auth_providers(
+    State(app_state): State<SharedState>,
+) -> Result<(StatusCode, Json<Vec<AuthProviderSummary>>), AuthError> {
+    let models = sso_providers::Entity::find()
+        .filter(sso_providers::Column::IsEnabled.eq(true))
+        .order_by_asc(sso_providers::Column::Name)
+        .all(&app_state.database)
+        .await
+        .map_err(|error| {
+            eprintln!("enabled auth provider lookup failed: {error:?}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
+    let mut providers = Vec::new();
+    for model in models {
+        let Some(runtime) = app_state.oidc_provider(&model.provider).await else {
+            continue;
+        };
+        if !runtime.is_enabled {
+            continue;
+        }
+        let Ok(configuration) = OidcProviderConfiguration::from_value(model.configuration.as_ref())
+        else {
+            continue;
+        };
+        providers.push(AuthProviderSummary {
+            login_path: format!("/auth/{}", model.provider),
+            provider: model.provider,
+            name: model.name,
+            auto_redirect: configuration.auto_redirect,
+        });
+    }
+    Ok((StatusCode::OK, Json(providers)))
+}
 
 #[utoipa::path(
     get,
@@ -65,12 +113,13 @@ pub async fn oidc_login_start(
             provider: Some(provider.clone()),
         });
     }
-    let (oidc_client, _, default_redirect_uri) = app_state
-        .get_oidc_client_and_column_and_redirect_uri(&provider)
+    let runtime = app_state
+        .get_oidc_provider_runtime(&provider)
         .await
         .map_err(|_| AuthError::InvalidProvider {
             provider: Some(provider.clone()),
         })?;
+    let default_redirect_uri = Some(runtime.redirect_url.clone());
 
     // Accept a caller-supplied redirect_uri only when it exactly matches the
     // configured value or is a recognised mobile scheme (msauth://).  Arbitrary
@@ -124,23 +173,26 @@ pub async fn oidc_login_start(
     }
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-    let (auth_url, csrf_state, nonce) = oidc_client
-        .read()
-        .await
-        .as_ref()
-        .ok_or(AuthError::SsoProviderNotConfigured {
-            provider: Some(provider.clone()),
-        })?
+    let oidc_client = runtime.client.ok_or(AuthError::SsoProviderNotConfigured {
+        provider: Some(provider.clone()),
+    })?;
+    let mut authorization = oidc_client
         .authorize_url(
             CoreAuthenticationFlow::AuthorizationCode,
             CsrfToken::new_random,
             Nonce::new_random,
         )
         .set_redirect_uri(Cow::Owned(redirect_uri.clone()))
-        .add_scope(Scope::new("email".to_string()))
-        .add_scope(Scope::new("profile".to_string()))
-        .set_pkce_challenge(pkce_challenge)
-        .url();
+        .set_pkce_challenge(pkce_challenge);
+    for scope in runtime.configuration.scopes {
+        if scope != "openid" {
+            authorization = authorization.add_scope(Scope::new(scope));
+        }
+    }
+    for (key, value) in runtime.configuration.authorization_params {
+        authorization = authorization.add_extra_param(key, value);
+    }
+    let (auth_url, csrf_state, nonce) = authorization.url();
     let sess = oauth_sessions::ActiveModel {
         state: Set(csrf_state.secret().to_string()),
         pkce_verifier: Set(pkce_verifier.secret().to_string()),

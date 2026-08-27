@@ -4,7 +4,24 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use utoipa::ToSchema;
+
+/// One linked external identity, keyed in [`IdentityMap`] by the auth provider
+/// slug (matches `auth_providers.provider`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderIdentity {
+    pub subject: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_at: Option<DateTime<Utc>>,
+}
+
+/// Contents of `users.identities`. Keyed by provider slug so a runtime-configured
+/// provider needs no schema change, unlike the fixed google_id/azure_id columns.
+pub type IdentityMap = HashMap<String, ProviderIdentity>;
 
 #[derive(
     Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize, ToSchema,
@@ -53,6 +70,21 @@ pub struct Model {
     pub effective_permissions: Option<serde_json::Value>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub metadata: Option<serde_json::Value>,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub identities: Option<serde_json::Value>,
+}
+
+impl Model {
+    pub fn identity_map(&self) -> IdentityMap {
+        self.identities
+            .as_ref()
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn identity_for(&self, provider: &str) -> Option<ProviderIdentity> {
+        self.identity_map().remove(provider)
+    }
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -53,7 +53,7 @@ pub async fn build_azure_client<S: Into<String>>(
     let client_id = ClientId::new(client_id.into());
     let client_secret = ClientSecret::new(client_secret.into());
     let tenant_id = tenant_id.into();
-    let redirect_uri = RedirectUrl::new(format!("{}/auth/azure/login", redirect_url.into()))?;
+    let redirect_uri = RedirectUrl::new(redirect_url.into())?;
     let client = match tenant_id.as_str() {
         "common" | "organizations" | "consumers" => {
             let (issuer, auth, token, jwks, userinfo) = mk_urls(&tenant_id)?;
@@ -126,4 +126,28 @@ where
     }
     .set_redirect_uri(redirect_uri);
     Ok(client)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn confidential_client_keeps_the_exact_configured_callback() {
+        let callback = "https://app.example.com/auth/azure/callback";
+        let client = build_azure_client(
+            &ReqwestClient::new(),
+            "client-id",
+            "client-secret",
+            callback,
+            "common",
+        )
+        .await
+        .expect("common-tenant client");
+
+        assert_eq!(
+            client.redirect_uri().map(|url| url.as_str()),
+            Some(callback)
+        );
+    }
 }

@@ -2,10 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    auth::{azure::build_azure_client, encryption::decrypt_key, google::build_google_client},
+    auth::{
+        azure::build_azure_client,
+        encryption::decrypt_key,
+        google::build_google_client,
+        provider_config::{OidcProviderConfiguration, build_discovered_oidc_client},
+    },
     config::setting::{ConfigError, OidcClient, Settings},
     dto::oauth::AuthProvider,
-    models::{mcp_servers, users},
+    models::{mcp_servers, sso_providers},
     services::live_models_cache::LiveModelsCache,
     services::mcp_client::McpServerClient,
     services::notifications::NotificationEvent,
@@ -13,7 +18,7 @@ use crate::{
 use anyhow::Error;
 use llm_plugin::ProviderRegistry;
 use reqwest::Client as ReqwestClient;
-use sea_orm::{Database, DatabaseConnection, EntityTrait};
+use sea_orm::{ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter};
 use std::{
     collections::HashMap,
     sync::{
@@ -26,8 +31,7 @@ use uuid::Uuid;
 
 pub struct AppState {
     pub database: DatabaseConnection,
-    pub google_client: RwLock<Option<OidcClient>>,
-    pub azure_client: RwLock<Option<OidcClient>>,
+    pub oidc_providers: RwLock<HashMap<String, OidcProviderRuntime>>,
     pub req_client: ReqwestClient,
     pub settings: Settings,
     pub mcp_clients: RwLock<HashMap<Uuid, Arc<McpServerClient>>>,
@@ -35,6 +39,17 @@ pub struct AppState {
     pub stream_cancellations: RwLock<HashMap<Uuid, Arc<StreamCancel>>>,
     pub provider_registry: ProviderRegistry,
     pub live_models_cache: LiveModelsCache,
+}
+
+#[derive(Clone)]
+pub struct OidcProviderRuntime {
+    pub client: Option<OidcClient>,
+    pub redirect_url: String,
+    pub allowed_domains: Vec<String>,
+    pub is_enabled: bool,
+    pub use_grengin_proxy: bool,
+    pub jit_provisioning: bool,
+    pub configuration: OidcProviderConfiguration,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -90,8 +105,7 @@ impl AppState {
         let (notification_hub, _) = broadcast::channel(256);
         let state = Self {
             database,
-            google_client: RwLock::new(None),
-            azure_client: RwLock::new(None),
+            oidc_providers: RwLock::new(HashMap::new()),
             req_client,
             settings,
             mcp_clients: RwLock::new(HashMap::new()),
@@ -100,8 +114,7 @@ impl AppState {
             provider_registry: ProviderRegistry::new(),
             live_models_cache: LiveModelsCache::new(),
         };
-        state.refresh_azure_client().await?;
-        state.refresh_google_client().await?;
+        state.reload_oidc_providers().await?;
         let _ = state.load_mcp_servers_from_db().await;
         let _ = crate::services::provider_runtime::load_enabled_providers(&state)
             .await
@@ -110,29 +123,9 @@ impl AppState {
     }
 
     pub async fn check_sso_provider_is_enabled(&self, provider: &AuthProvider) -> Option<bool> {
-        match provider.to_lowercase().as_str() {
-            "azure" => {
-                let is_enabled = self
-                    .settings
-                    .azure
-                    .read()
-                    .await
-                    .as_ref()
-                    .map(|setting| setting.is_enabled);
-                is_enabled
-            }
-            "google" => {
-                let is_enabled = self
-                    .settings
-                    .google
-                    .read()
-                    .await
-                    .as_ref()
-                    .map(|setting| setting.is_enabled);
-                is_enabled
-            }
-            _ => None,
-        }
+        self.oidc_provider(provider)
+            .await
+            .map(|runtime| runtime.is_enabled)
     }
 
     pub async fn is_email_domain_allowed(
@@ -141,69 +134,29 @@ impl AppState {
         provider: &AuthProvider,
     ) -> (bool, Option<String>) {
         if let Some((_, domain)) = email.split_once('@') {
-            match provider.to_lowercase().as_str() {
-                "azure" => {
-                    let allowed_domains = self
-                        .settings
-                        .azure
-                        .read()
-                        .await
-                        .as_ref()
-                        .map(|setting| setting.allowed_domains.clone())
-                        .unwrap_or(Vec::new());
-                    if allowed_domains.is_empty() {
-                        return (true, None);
-                    } else {
-                        return (
-                            allowed_domains.contains(&domain.to_string()),
-                            Some(domain.to_string()),
-                        );
-                    }
-                }
-                "google" => {
-                    let allowed_domains = self
-                        .settings
-                        .google
-                        .read()
-                        .await
-                        .as_ref()
-                        .map(|setting| setting.allowed_domains.clone())
-                        .unwrap_or(Vec::new());
-                    if allowed_domains.is_empty() {
-                        return (true, None);
-                    } else {
-                        return (
-                            allowed_domains.contains(&domain.to_string()),
-                            Some(domain.to_string()),
-                        );
-                    }
-                }
-                _ => return (false, Some(domain.to_string())),
+            let Some(runtime) = self.oidc_provider(provider).await else {
+                return (false, Some(domain.to_string()));
+            };
+            if runtime.allowed_domains.is_empty() {
+                return (true, None);
             }
+            let domain = domain.to_ascii_lowercase();
+            return (
+                runtime
+                    .allowed_domains
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(&domain)),
+                Some(domain),
+            );
         }
         (false, None)
     }
 
     pub async fn sso_jit_provisioning_enabled(&self, provider: &AuthProvider) -> bool {
-        match provider.to_lowercase().as_str() {
-            "azure" => self
-                .settings
-                .azure
-                .read()
-                .await
-                .as_ref()
-                .map(|s| s.jit_provisioning)
-                .unwrap_or(true),
-            "google" => self
-                .settings
-                .google
-                .read()
-                .await
-                .as_ref()
-                .map(|s| s.jit_provisioning)
-                .unwrap_or(true),
-            _ => true,
-        }
+        self.oidc_provider(provider)
+            .await
+            .map(|runtime| runtime.jit_provisioning)
+            .unwrap_or(false)
     }
 
     pub async fn check_ai_engine_is_enabled(&self, ai_engine_key: &str) -> Option<bool> {
@@ -238,42 +191,120 @@ impl AppState {
         guard.remove(&message_id);
     }
 
-    pub async fn get_oidc_client_and_column_and_redirect_uri(
+    pub async fn get_oidc_provider_runtime(
         &self,
         provider: &AuthProvider,
-    ) -> Result<(&RwLock<Option<OidcClient>>, users::Column, Option<String>), ConfigError> {
-        match provider.to_lowercase().as_str() {
-            "azure" => {
-                let redirect_url = self
-                    .settings
-                    .azure
-                    .read()
-                    .await
-                    .as_ref()
-                    .map(|setting| setting.redirect_url.clone());
-                return Ok((&self.azure_client, users::Column::AzureId, redirect_url));
-            }
-            "google" => {
-                let redirect_url = self
-                    .settings
-                    .google
-                    .read()
-                    .await
-                    .as_ref()
-                    .map(|setting| setting.redirect_url.clone());
-                return Ok((&self.google_client, users::Column::GoogleId, redirect_url));
-            }
-            _ => Err(ConfigError::InvalidSSoProvider(provider.into())),
-        }
+    ) -> Result<OidcProviderRuntime, ConfigError> {
+        self.oidc_provider(provider)
+            .await
+            .ok_or_else(|| ConfigError::InvalidSSoProvider(provider.into()))
     }
 
     pub async fn refresh_oidc_client(&self, provider: &AuthProvider) -> Result<(), Error> {
-        match provider.to_lowercase().as_str() {
-            "azure" => self.refresh_azure_client().await?,
-            "google" => self.refresh_google_client().await?,
-            _ => return Err(anyhow::anyhow!("Unknown provider: {}", provider)),
-        }
+        let provider = provider.trim().to_ascii_lowercase();
+        let model = sso_providers::Entity::find()
+            .filter(sso_providers::Column::Provider.eq(&provider))
+            .one(&self.database)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Unknown provider: {provider}"))?;
+        let runtime = self.build_oidc_provider_runtime(&model).await?;
+        self.oidc_providers.write().await.insert(provider, runtime);
         Ok(())
+    }
+
+    pub async fn remove_oidc_provider(&self, provider: &str) {
+        self.oidc_providers
+            .write()
+            .await
+            .remove(&provider.trim().to_ascii_lowercase());
+    }
+
+    pub async fn oidc_provider(&self, provider: &str) -> Option<OidcProviderRuntime> {
+        self.oidc_providers
+            .read()
+            .await
+            .get(&provider.trim().to_ascii_lowercase())
+            .cloned()
+    }
+
+    async fn reload_oidc_providers(&self) -> Result<(), ConfigError> {
+        let models = sso_providers::Entity::find()
+            .all(&self.database)
+            .await
+            .map_err(|error| ConfigError::DbError(error.to_string()))?;
+        let mut runtimes = HashMap::new();
+        for model in models {
+            match self.build_oidc_provider_runtime(&model).await {
+                Ok(runtime) => {
+                    runtimes.insert(model.provider.trim().to_ascii_lowercase(), runtime);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "Skipping invalid OIDC provider '{}': {error:?}",
+                        model.provider
+                    );
+                }
+            }
+        }
+        *self.oidc_providers.write().await = runtimes;
+        Ok(())
+    }
+
+    async fn build_oidc_provider_runtime(
+        &self,
+        model: &sso_providers::Model,
+    ) -> Result<OidcProviderRuntime, Error> {
+        let configuration = OidcProviderConfiguration::from_value(model.configuration.as_ref())?;
+        let client = if !model.is_enabled || model.use_grengin_proxy {
+            None
+        } else {
+            let client_secret = decrypt_key(&self.settings.auth.app_key, &model.client_secret)
+                .map_err(|error| anyhow::anyhow!("OIDC client secret decrypt failed: {error:?}"))?;
+            let client = match model.provider.as_str() {
+                "azure" => {
+                    build_azure_client(
+                        &self.req_client,
+                        model.client_id.clone(),
+                        client_secret,
+                        model.redirect_url.clone(),
+                        model
+                            .tenant_id
+                            .clone()
+                            .unwrap_or_else(|| "common".to_string()),
+                    )
+                    .await?
+                }
+                "google" => {
+                    build_google_client(
+                        &self.req_client,
+                        model.client_id.clone(),
+                        client_secret,
+                        model.redirect_url.clone(),
+                    )
+                    .await?
+                }
+                _ => {
+                    build_discovered_oidc_client(
+                        &self.req_client,
+                        &model.issuer_url,
+                        model.client_id.clone(),
+                        client_secret,
+                        model.redirect_url.clone(),
+                    )
+                    .await?
+                }
+            };
+            Some(client)
+        };
+        Ok(OidcProviderRuntime {
+            client,
+            redirect_url: model.redirect_url.clone(),
+            allowed_domains: model.allowed_domains.clone(),
+            is_enabled: model.is_enabled,
+            use_grengin_proxy: model.use_grengin_proxy,
+            jit_provisioning: model.jit_provisioning,
+            configuration,
+        })
     }
 
     pub async fn load_mcp_servers_from_db(&self) -> Result<(), Error> {
@@ -315,41 +346,6 @@ impl AppState {
                 None
             }
         }
-    }
-
-    async fn refresh_google_client(&self) -> Result<(), ConfigError> {
-        let google = self.settings.google.read().await.clone();
-        let Some(google) = google else {
-            *self.google_client.write().await = None;
-            return Ok(());
-        };
-        let google_client = build_google_client(
-            &self.req_client,
-            google.client_id,
-            google.client_secret,
-            google.redirect_url,
-        )
-        .await;
-        *self.google_client.write().await = google_client.ok();
-        Ok(())
-    }
-
-    async fn refresh_azure_client(&self) -> Result<(), ConfigError> {
-        let azure = self.settings.azure.read().await.clone();
-        let Some(azure) = azure else {
-            *self.azure_client.write().await = None;
-            return Ok(());
-        };
-        let azure_client = build_azure_client(
-            &self.req_client,
-            azure.client_id,
-            azure.client_secret,
-            azure.redirect_url,
-            azure.tenant_id,
-        )
-        .await;
-        *self.azure_client.write().await = azure_client.ok();
-        Ok(())
     }
 
     pub fn get_decrypted_api_key_preview(&self, api_key: &Option<String>) -> Option<String> {

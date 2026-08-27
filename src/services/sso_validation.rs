@@ -2,7 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    auth::{claims::Claiming, encryption::decrypt_key, error::AuthError},
+    auth::{
+        claims::Claiming,
+        encryption::decrypt_key,
+        error::AuthError,
+        provider_config::{
+            OidcProviderConfiguration, build_discovered_oidc_client, normalize_provider_slug,
+            validate_provider_url,
+        },
+    },
     models::sso_providers,
     state::SharedState,
 };
@@ -24,6 +32,7 @@ pub struct SsoDraftConfig {
     pub client_secret: String,
     pub issuer_url: String,
     pub redirect_url: String,
+    pub configuration: OidcProviderConfiguration,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -120,10 +129,15 @@ pub fn build_draft_config(
     issuer_url: Option<&String>,
     redirect_url: Option<&String>,
     frontend_hosted_url: Option<&String>,
+    configuration: Option<&OidcProviderConfiguration>,
 ) -> Result<SsoDraftConfig, AuthError> {
-    let provider = provider
+    let provider_input = provider
         .map(|p| p.trim().to_lowercase())
         .unwrap_or_else(|| model.provider.trim().to_lowercase());
+    let provider =
+        normalize_provider_slug(&provider_input).map_err(|_| AuthError::InvalidProvider {
+            provider: Some(provider_input),
+        })?;
     let tenant_id = tenant_id.cloned().or_else(|| model.tenant_id.clone());
     let decrypted_existing_secret =
         decrypt_key(&app_state.settings.auth.app_key, &model.client_secret)
@@ -137,7 +151,21 @@ pub fn build_draft_config(
     let issuer_url = issuer_url
         .cloned()
         .unwrap_or_else(|| model.issuer_url.clone());
-    ensure_valid_url(&issuer_url)?;
+    validate_provider_url(&issuer_url, true).map_err(|_| AuthError::InvalidProvider {
+        provider: Some(provider.clone()),
+    })?;
+    let configuration = configuration.cloned().unwrap_or(
+        OidcProviderConfiguration::from_value(model.configuration.as_ref()).map_err(|_| {
+            AuthError::InvalidProvider {
+                provider: Some(provider.clone()),
+            }
+        })?,
+    );
+    configuration
+        .validate()
+        .map_err(|_| AuthError::InvalidProvider {
+            provider: Some(provider.clone()),
+        })?;
 
     Ok(SsoDraftConfig {
         provider,
@@ -150,6 +178,7 @@ pub fn build_draft_config(
             .unwrap_or_else(|| decrypted_existing_secret.clone()),
         issuer_url,
         redirect_url,
+        configuration,
     })
 }
 
@@ -160,6 +189,8 @@ pub fn has_sensitive_changes(
 ) -> bool {
     let existing_secret = decrypt_key(&app_state.settings.auth.app_key, &model.client_secret)
         .unwrap_or_else(|_| String::new());
+    let existing_configuration =
+        OidcProviderConfiguration::from_value(model.configuration.as_ref()).unwrap_or_default();
     draft.provider != model.provider.to_lowercase()
         || draft.tenant_id != model.tenant_id
         || draft.client_id != model.client_id
@@ -167,11 +198,13 @@ pub fn has_sensitive_changes(
             != normalize_secret_for_compare(&existing_secret)
         || draft.issuer_url != model.issuer_url
         || draft.redirect_url != model.redirect_url
+        || draft.configuration != existing_configuration
 }
 
 pub fn config_hash(draft: &SsoDraftConfig) -> String {
+    let configuration = serde_json::to_string(&draft.configuration).unwrap_or_default();
     let material = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
         draft.provider.trim().to_lowercase(),
         draft
             .tenant_id
@@ -183,6 +216,7 @@ pub fn config_hash(draft: &SsoDraftConfig) -> String {
         normalize_secret_for_compare(draft.client_secret.trim()),
         draft.issuer_url.trim().to_lowercase(),
         draft.redirect_url.trim(),
+        configuration,
     );
     sha256(material.as_bytes())
         .iter()
@@ -342,11 +376,71 @@ pub async fn validate_sso_draft(
     if draft.client_secret.trim().is_empty() || draft.client_secret == EMPTY_VALUE {
         return Ok((false, "Client secret is required".to_string()));
     }
+    draft
+        .configuration
+        .validate()
+        .map_err(|_| AuthError::InvalidProvider {
+            provider: Some(draft.provider.clone()),
+        })?;
     match draft.provider.as_str() {
         "google" => probe_google_config(app_state, draft).await,
         "azure" => probe_azure_config(app_state, draft).await,
-        _ => Err(AuthError::InvalidProvider {
-            provider: Some(draft.provider.clone()),
-        }),
+        _ => {
+            build_discovered_oidc_client(
+                &app_state.req_client,
+                &draft.issuer_url,
+                draft.client_id.clone(),
+                draft.client_secret.clone(),
+                draft.redirect_url.clone(),
+            )
+            .await
+            .map_err(|error| {
+                eprintln!("OIDC discovery validation failed: {error:?}");
+                AuthError::InvalidProvider {
+                    provider: Some(draft.provider.clone()),
+                }
+            })?;
+            Ok((
+                true,
+                "OIDC discovery and provider configuration validated".to_string(),
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn draft() -> SsoDraftConfig {
+        SsoDraftConfig {
+            provider: "keycloak".to_string(),
+            tenant_id: None,
+            client_id: "client-id".to_string(),
+            client_secret: "client-secret".to_string(),
+            issuer_url: "https://id.example.com/realms/acme".to_string(),
+            redirect_url: "https://app.example.com/auth/keycloak/callback".to_string(),
+            configuration: OidcProviderConfiguration::default(),
+        }
+    }
+
+    #[test]
+    fn validation_hash_covers_provider_configuration() {
+        let first = draft();
+        let mut second = first.clone();
+        second.configuration.scopes.push("groups".to_string());
+
+        assert_ne!(config_hash(&first), config_hash(&second));
+    }
+
+    #[test]
+    fn frontend_origin_cannot_override_derived_callback() {
+        let error = resolve_redirect_url(
+            "keycloak",
+            Some(&"https://attacker.example/callback".to_string()),
+            Some(&"https://app.example.com/login".to_string()),
+            "https://app.example.com/auth/keycloak/callback",
+        );
+        assert!(matches!(error, Err(AuthError::InvalidRedirectUri { .. })));
     }
 }
