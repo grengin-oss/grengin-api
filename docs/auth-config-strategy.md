@@ -23,6 +23,13 @@ supports GitHub OAuth Apps through a native, typed OAuth 2.0 social adapter.
 - GitHub uses fixed GitHub authorization, token, user, and verified-email endpoints. Provider
   JSON may configure its presentation and least-privilege scopes, but may not replace those
   endpoints.
+- Auth0 compatibility covers discovery, PKCE, standard profile claims, `offline_access`, and the
+  configurable `audience`/organization authorization parameters used for API access and token
+  reuse preparation.
+- Keycloak compatibility covers realm discovery behavior, standard profile claims, group and
+  `realm_access.roles` token shapes, custom scopes, and `kc_idp_hint` authorization parameters.
+  Required/admin role enforcement and role synchronization remain part of the claim-mapping
+  roadmap below; a successful Keycloak login must not be presented as role-mapping parity.
 - Entra tenant-independent authorities (`common`, `organizations`, and `consumers`) validate the
   token tenant ID against both the token issuer and the selected signing key's issuer metadata.
   The verified tenant is security context only; persisted identity subjects retain their legacy
@@ -237,10 +244,11 @@ Graph/Admin APIs, native mobile login behavior, and other provider-specific edge
 integration tests.
 
 OIDC protocol tests use a pinned `navikt/mock-oauth2-server` container to exercise discovery,
-authorization-code issuance, PKCE, nonce propagation, signed ID tokens, code replay, and exact
-web/Android/iOS callback preservation without vendor credentials. Microsoft-specific multitenant
-issuer and signing-key issuer rules remain deterministic Rust tests because they are Entra
-extensions rather than standard OIDC metadata.
+authorization-code issuance, PKCE, nonce propagation, signed ID tokens, code replay, exact
+web/Android/iOS callback preservation, and Auth0/Keycloak-shaped authorization and claim profiles
+without vendor credentials. Microsoft-specific multitenant issuer and signing-key issuer rules
+remain deterministic Rust tests because they are Entra extensions rather than standard OIDC
+metadata.
 
 Run the credential-free OIDC protocol suite with `./tests/auth/mock_oauth2.sh`. The script starts
 and removes the pinned container automatically; regular `cargo test` keeps these cases ignored.
