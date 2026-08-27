@@ -235,3 +235,12 @@ client-secret JWT or Apple Developer HTTPS registration. GitHub is covered separ
 native OAuth2 adapter tests. Vendor-native SDKs,
 Graph/Admin APIs, native mobile login behavior, and other provider-specific edges require separate
 integration tests.
+
+OIDC protocol tests use a pinned `navikt/mock-oauth2-server` container to exercise discovery,
+authorization-code issuance, PKCE, nonce propagation, signed ID tokens, code replay, and exact
+web/Android/iOS callback preservation without vendor credentials. Microsoft-specific multitenant
+issuer and signing-key issuer rules remain deterministic Rust tests because they are Entra
+extensions rather than standard OIDC metadata.
+
+Run the credential-free OIDC protocol suite with `./tests/auth/mock_oauth2.sh`. The script starts
+and removes the pinned container automatically; regular `cargo test` keeps these cases ignored.
