@@ -23,6 +23,12 @@ supports GitHub OAuth Apps through a native, typed OAuth 2.0 social adapter.
 - GitHub uses fixed GitHub authorization, token, user, and verified-email endpoints. Provider
   JSON may configure its presentation and least-privilege scopes, but may not replace those
   endpoints.
+- Entra tenant-independent authorities (`common`, `organizations`, and `consumers`) validate the
+  token tenant ID against both the token issuer and the selected signing key's issuer metadata.
+  The verified tenant is security context only; persisted identity subjects retain their legacy
+  representation so existing accounts continue to resolve.
+- Entra tenant-independent JWKS metadata is cached by authority for 24 hours, with a short failure
+  backoff and immediate invalidation when signature verification indicates key rotation.
 - PKCE S256 remains mandatory except for the typed Apple web profile, whose published metadata
   does not advertise PKCE. State, nonce, ID token signature verification, issuer validation, and
   exact callback redirects remain mandatory for every OIDC profile.
@@ -179,6 +185,8 @@ References:
   previews.
 - OIDC identities are keyed by provider and subject. Email is an attribute, never the primary
   external identity.
+- Microsoft multitenant tokens additionally validate the `tid` claim against the token and signing
+  key issuers without changing the persisted provider subject.
 - Automatic email linking requires a verified claim. Disabled linking requires an explicit admin
   or authenticated-user linking flow.
 - Callback state is atomically consumed with `DELETE ... RETURNING` and expires after 15 minutes.

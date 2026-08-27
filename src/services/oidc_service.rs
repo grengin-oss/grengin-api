@@ -3,7 +3,10 @@
 
 use crate::{
     auth::{
-        azure::build_azure_public_client,
+        azure::{
+            AzureMultitenantValidation, AzureOidcClient, build_azure_public_client,
+            invalidate_azure_multitenant_cache, validate_azure_multitenant_id_token,
+        },
         claims::{Claiming as _, Claims, RefreshClaims},
         error::AuthError,
         github::GitHubAdapterError,
@@ -27,7 +30,7 @@ use axum::{Json, http::StatusCode};
 use chrono::Utc;
 use openidconnect::{
     AuthorizationCode, ClaimsVerificationError, Nonce, PkceCodeVerifier, RedirectUrl,
-    core::CoreUserInfoClaims,
+    core::{CoreIdToken, CoreIdTokenClaims, CoreUserInfoClaims},
 };
 use openidconnect::{OAuth2TokenResponse, TokenResponse as OidcTokenResponse};
 use sea_orm::{
@@ -84,7 +87,7 @@ fn apple_callback_display_name(value: Option<&str>) -> Option<String> {
 pub async fn build_azure_public_client_for_redirect(
     app_state: &SharedState,
     redirect_uri: &str,
-) -> Result<OidcClient, AuthError> {
+) -> Result<AzureOidcClient, AuthError> {
     let azure = app_state.settings.azure.read().await.clone().ok_or(
         AuthError::SsoProviderNotConfigured {
             provider: Some("azure".to_string()),
@@ -101,6 +104,36 @@ pub async fn build_azure_public_client_for_redirect(
         eprintln!("azure public oidc client build error: {e:?}");
         AuthError::ServiceTemporarilyUnavailable
     })
+}
+
+#[derive(Debug, thiserror::Error)]
+enum IdTokenValidationError {
+    #[error("OIDC claims validation failed: {0}")]
+    Core(#[source] ClaimsVerificationError),
+    #[error("Azure multitenant issuer validation failed: {0}")]
+    Azure(#[source] anyhow::Error),
+}
+
+fn verify_id_token_claims<'a>(
+    id_token: &'a CoreIdToken,
+    oidc_client: &OidcClient,
+    nonce: &Nonce,
+    azure_multitenant_validation: Option<&AzureMultitenantValidation>,
+) -> Result<(&'a CoreIdTokenClaims, Option<Uuid>), IdTokenValidationError> {
+    let verifier = oidc_client.id_token_verifier();
+    let claims = if azure_multitenant_validation.is_some() {
+        id_token.claims(&verifier.require_issuer_match(false), nonce)
+    } else {
+        id_token.claims(&verifier, nonce)
+    }
+    .map_err(IdTokenValidationError::Core)?;
+    let azure_tenant_id = azure_multitenant_validation
+        .map(|validation| {
+            validate_azure_multitenant_id_token(id_token, validation)
+                .map_err(IdTokenValidationError::Azure)
+        })
+        .transpose()?;
+    Ok((claims, azure_tenant_id))
 }
 
 /// Merge one provider identity into a user's identity map. Keyed by provider slug so a
@@ -240,11 +273,16 @@ pub async fn oidc_oauth_callback(
                 })?
         } else {
             let use_public_azure_client = is_mobile_redirect;
-            let mut oidc_client = if use_public_azure_client {
-                build_azure_public_client_for_redirect(&app_state, &redirect_uri_value).await?
+            let (mut oidc_client, mut azure_multitenant_validation) = if use_public_azure_client {
+                let azure =
+                    build_azure_public_client_for_redirect(&app_state, &redirect_uri_value).await?;
+                (azure.client, azure.multitenant_validation)
             } else {
-                match runtime.client.clone() {
-                    Some(AuthProtocolClient::Oidc(client)) => client,
+                match (
+                    runtime.client.clone(),
+                    runtime.azure_multitenant_validation.clone(),
+                ) {
+                    (Some(AuthProtocolClient::Oidc(client)), validation) => (client, validation),
                     _ => {
                         return Err(AuthError::SsoProviderNotConfigured {
                             provider: Some(provider.clone()),
@@ -274,22 +312,33 @@ pub async fn oidc_oauth_callback(
             let id_token = token_resp
                 .id_token()
                 .ok_or(AuthError::ServiceTemporarilyUnavailable)?;
-            let claims = match {
-                let verifier = oidc_client.id_token_verifier();
-                id_token.claims(&verifier, &nonce)
-            } {
+            let (claims, _verified_azure_tenant_id) = match verify_id_token_claims(
+                id_token,
+                &oidc_client,
+                &nonce,
+                azure_multitenant_validation.as_ref(),
+            ) {
                 Ok(c) => c,
                 Err(e) => {
-                    let should_refresh =
-                        matches!(e, ClaimsVerificationError::SignatureVerification(_));
+                    let should_refresh = matches!(
+                        e,
+                        IdTokenValidationError::Core(
+                            ClaimsVerificationError::SignatureVerification(_)
+                        )
+                    );
                     if !should_refresh {
-                        eprintln!("id_token claims verification failed (non-refreshable): {e:?}");
+                        eprintln!("id_token claims verification failed (non-refreshable): {e}");
                         return Err(AuthError::InvalidToken);
                     }
+                    if let Some(validation) = azure_multitenant_validation.as_ref() {
+                        invalidate_azure_multitenant_cache(validation.authority()).await;
+                    }
                     if use_public_azure_client {
-                        oidc_client =
+                        let azure =
                             build_azure_public_client_for_redirect(&app_state, &redirect_uri_value)
                                 .await?;
+                        oidc_client = azure.client;
+                        azure_multitenant_validation = azure.multitenant_validation;
                     } else {
                         app_state
                             .refresh_oidc_client(&provider)
@@ -299,14 +348,13 @@ pub async fn oidc_oauth_callback(
                                 AuthError::ServiceTemporarilyUnavailable
                             })?;
 
-                        oidc_client = match app_state
+                        let refreshed_runtime = app_state
                             .get_oidc_provider_runtime(&provider)
                             .await
                             .map_err(|_| AuthError::SsoProviderNotConfigured {
                                 provider: Some(provider.clone()),
-                            })?
-                            .client
-                        {
+                            })?;
+                        oidc_client = match refreshed_runtime.client {
                             Some(AuthProtocolClient::Oidc(client)) => client,
                             _ => {
                                 return Err(AuthError::SsoProviderNotConfigured {
@@ -314,15 +362,23 @@ pub async fn oidc_oauth_callback(
                                 });
                             }
                         };
+                        azure_multitenant_validation =
+                            refreshed_runtime.azure_multitenant_validation;
                     }
 
-                    let verifier2 = oidc_client.id_token_verifier();
-                    id_token.claims(&verifier2, &nonce).map_err(|e2| {
-                        eprintln!("id_token claims verification failed after refresh: {e2:?}");
+                    verify_id_token_claims(
+                        id_token,
+                        &oidc_client,
+                        &nonce,
+                        azure_multitenant_validation.as_ref(),
+                    )
+                    .map_err(|e2| {
+                        eprintln!("id_token claims verification failed after refresh: {e2}");
                         AuthError::InvalidToken
                     })?
                 }
             };
+            // Keep the persisted subject unchanged for compatibility with existing Entra users.
             let subject = claims.subject().as_str().to_string();
             let mut email = claims.email().map(|e| e.as_str().to_string());
             let mut email_verified = claims.email_verified().unwrap_or_else(|| {
@@ -644,6 +700,143 @@ pub async fn oidc_oauth_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonwebtoken::{Algorithm, EncodingKey, Header};
+    use openidconnect::{
+        AuthUrl, ClientId, ClientSecret, EmptyAdditionalProviderMetadata, IssuerUrl,
+        JsonWebKeySetUrl, ResponseTypes, TokenUrl, UserInfoUrl,
+        core::{
+            CoreClient, CoreJsonWebKeySet, CoreJwsSigningAlgorithm, CoreProviderMetadata,
+            CoreResponseType, CoreSubjectIdentifierType,
+        },
+    };
+    use std::{collections::HashMap, str::FromStr};
+
+    const TEST_CLIENT_ID: &str = "azure-test-client";
+    const TEST_CLIENT_SECRET: &[u8] = b"azure-test-client-secret";
+    const TEST_KEY_ID: &str = "azure-test-key";
+    const TEST_TENANT_ID: &str = "ff507be6-32aa-4573-99a0-185d88089a7e";
+
+    fn multitenant_test_client() -> OidcClient {
+        let metadata = CoreProviderMetadata::new(
+            IssuerUrl::new("https://login.microsoftonline.com/{tenantid}/v2.0".to_string())
+                .expect("issuer URL"),
+            AuthUrl::new("https://login.microsoftonline.com/common/oauth2/v2.0/authorize".into())
+                .expect("authorization URL"),
+            JsonWebKeySetUrl::new(
+                "https://login.microsoftonline.com/common/discovery/v2.0/keys".into(),
+            )
+            .expect("JWKS URL"),
+            vec![ResponseTypes::new(vec![CoreResponseType::Code])],
+            vec![CoreSubjectIdentifierType::Public],
+            vec![CoreJwsSigningAlgorithm::HmacSha256],
+            EmptyAdditionalProviderMetadata {},
+        )
+        .set_token_endpoint(Some(
+            TokenUrl::new("https://login.microsoftonline.com/common/oauth2/v2.0/token".into())
+                .expect("token URL"),
+        ))
+        .set_userinfo_endpoint(Some(
+            UserInfoUrl::new("https://graph.microsoft.com/oidc/userinfo".into())
+                .expect("userinfo URL"),
+        ))
+        .set_jwks(CoreJsonWebKeySet::new(Vec::new()));
+        CoreClient::from_provider_metadata(
+            metadata,
+            ClientId::new(TEST_CLIENT_ID.to_string()),
+            Some(ClientSecret::new(
+                String::from_utf8(TEST_CLIENT_SECRET.to_vec()).expect("client secret"),
+            )),
+        )
+    }
+
+    fn multitenant_validation() -> AzureMultitenantValidation {
+        AzureMultitenantValidation::new(
+            "common",
+            HashMap::from([(
+                TEST_KEY_ID.to_string(),
+                "https://login.microsoftonline.com/{tenantid}/v2.0".to_string(),
+            )]),
+        )
+    }
+
+    fn signed_azure_token(
+        tenant_id: &str,
+        issuer: &str,
+        audience: &str,
+        nonce: &str,
+    ) -> CoreIdToken {
+        let now = Utc::now().timestamp();
+        let claims = serde_json::json!({
+            "iss": issuer,
+            "sub": "azure-subject",
+            "aud": audience,
+            "exp": now + 300,
+            "iat": now,
+            "nonce": nonce,
+            "tid": tenant_id
+        });
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(TEST_KEY_ID.to_string());
+        let token = jsonwebtoken::encode(
+            &header,
+            &claims,
+            &EncodingKey::from_secret(TEST_CLIENT_SECRET),
+        )
+        .expect("signed test token");
+        CoreIdToken::from_str(&token).expect("OIDC ID token")
+    }
+
+    #[test]
+    fn multitenant_verifier_preserves_existing_subject_representation() {
+        let client = multitenant_test_client();
+        let validation = multitenant_validation();
+        let nonce = Nonce::new("expected-nonce".to_string());
+        let issuer = format!("https://login.microsoftonline.com/{TEST_TENANT_ID}/v2.0");
+        let token = signed_azure_token(TEST_TENANT_ID, &issuer, TEST_CLIENT_ID, nonce.secret());
+
+        let (claims, tenant_id) =
+            verify_id_token_claims(&token, &client, &nonce, Some(&validation))
+                .expect("valid Azure multitenant token");
+
+        assert_eq!(claims.subject().as_str(), "azure-subject");
+        assert_eq!(tenant_id.expect("tenant ID").to_string(), TEST_TENANT_ID);
+        assert_eq!(claims.subject().as_str(), "azure-subject");
+    }
+
+    #[test]
+    fn multitenant_verifier_rejects_wrong_issuer_audience_and_nonce() {
+        let client = multitenant_test_client();
+        let validation = multitenant_validation();
+        let nonce = Nonce::new("expected-nonce".to_string());
+        let issuer = format!("https://login.microsoftonline.com/{TEST_TENANT_ID}/v2.0");
+        let wrong_issuer = signed_azure_token(
+            TEST_TENANT_ID,
+            "https://login.microsoftonline.com/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/v2.0",
+            TEST_CLIENT_ID,
+            nonce.secret(),
+        );
+        let wrong_audience =
+            signed_azure_token(TEST_TENANT_ID, &issuer, "other-client", nonce.secret());
+        let wrong_nonce =
+            signed_azure_token(TEST_TENANT_ID, &issuer, TEST_CLIENT_ID, "other-nonce");
+
+        assert!(matches!(
+            verify_id_token_claims(&wrong_issuer, &client, &nonce, Some(&validation)),
+            Err(IdTokenValidationError::Azure(_))
+        ));
+        assert!(matches!(
+            verify_id_token_claims(&wrong_audience, &client, &nonce, Some(&validation)),
+            Err(IdTokenValidationError::Core(
+                ClaimsVerificationError::InvalidAudience(_)
+            ))
+        ));
+        assert!(matches!(
+            verify_id_token_claims(&wrong_nonce, &client, &nonce, Some(&validation)),
+            Err(IdTokenValidationError::Core(
+                ClaimsVerificationError::InvalidNonce(_)
+            ))
+        ));
+    }
 
     #[test]
     fn identity_merge_is_provider_scoped() {
