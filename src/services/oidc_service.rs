@@ -31,8 +31,8 @@ use openidconnect::{
 };
 use openidconnect::{OAuth2TokenResponse, TokenResponse as OidcTokenResponse};
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, TryIntoModel, sea_query::Expr,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DbErr, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, TryIntoModel, sea_query::Expr,
 };
 use serde::Deserialize;
 use std::borrow::Cow;
@@ -124,6 +124,19 @@ fn merged_identities(
     serde_json::to_value(map).ok()
 }
 
+async fn consume_oauth_session<C>(
+    database: &C,
+    state: &str,
+) -> Result<Option<oauth_sessions::Model>, DbErr>
+where
+    C: ConnectionTrait,
+{
+    let mut sessions = oauth_sessions::Entity::delete_by_id(state.to_string())
+        .exec_with_returning(database)
+        .await?;
+    Ok(sessions.pop())
+}
+
 pub async fn oidc_oauth_callback(
     provider: AuthProvider,
     cb: AuthCallback,
@@ -152,13 +165,10 @@ pub async fn oidc_oauth_callback(
             provider: Some(provider.clone()),
         })?;
     let default_redirect_uri = Some(runtime.redirect_url.clone());
-    let sess = oauth_sessions::Entity::find()
-        .filter(oauth_sessions::Column::State.eq(Some(cb.state.to_owned())))
-        .order_by_desc(oauth_sessions::Column::CreatedAt)
-        .one(&app_state.database)
+    let sess = consume_oauth_session(&app_state.database, &cb.state)
         .await
         .map_err(|e| {
-            eprintln!("db error while fetching session: {e:?}");
+            eprintln!("db error while consuming oauth session: {e:?}");
             AuthError::ServiceTemporarilyUnavailable
         })?
         .ok_or(AuthError::InvalidToken)?;
@@ -184,11 +194,6 @@ pub async fn oidc_oauth_callback(
         AuthError::InvalidRedirectUri {
             redirect_uri: sess.redirect_uri.clone(),
         }
-    })?;
-    let active: oauth_sessions::ActiveModel = sess.clone().into();
-    active.delete(&app_state.database).await.map_err(|e| {
-        eprintln!("db error while deleting oauth_session: {e:?}");
-        AuthError::ServiceTemporarilyUnavailable
     })?;
     let identity = if let Some(assertion) = cb.assertion.clone() {
         let expected_audience =
@@ -452,6 +457,7 @@ pub async fn oidc_oauth_callback(
             user = users::Entity::find()
                 .filter(users::Column::Email.eq(em))
                 .filter(users::Column::Status.ne(UserStatus::Deleted))
+                .order_by_asc(users::Column::CreatedAt)
                 .one(&app_state.database)
                 .await
                 .map_err(|e| {

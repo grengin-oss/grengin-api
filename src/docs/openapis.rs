@@ -25,7 +25,8 @@ use crate::dto::admin_roles::{
     UserRoleAssignmentDto, UserRoleAssignmentInput, UserRoleAssignmentsResponse,
 };
 use crate::dto::admin_sso_providers::{
-    SsoProvider, SsoProviderUpdate, SsoProviderValidationRequest, SsoProviderValidationResponse,
+    GrenginProxySetupRequest, GrenginProxySetupValidationRequest, SsoProvider, SsoProviderUpdate,
+    SsoProviderValidationRequest, SsoProviderValidationResponse,
 };
 use crate::dto::admin_user::{PaginatedUsers, User, UserCreate, UserPatchRequest, UserUpdate};
 use crate::dto::analytics::{
@@ -148,6 +149,8 @@ use utoipa::OpenApi;
         admin_sso_provider::create_sso_provider,
         admin_sso_provider::get_sso_provider_by_id,
         admin_sso_provider::validate_sso_provider_by_id,
+        admin_sso_provider::validate_grengin_proxy_setup,
+        admin_sso_provider::quick_setup_grengin_proxy,
         admin_sso_provider::update_sso_provider_by_id,
         admin_sso_provider::delete_sso_provider_by_id,
         file::get_file_by_id,
@@ -325,6 +328,8 @@ use utoipa::OpenApi;
             SsoProviderUpdate,
             SsoProviderValidationRequest,
             SsoProviderValidationResponse,
+            GrenginProxySetupValidationRequest,
+            GrenginProxySetupRequest,
             AuthError,
             AppError,
             AuthErrorCode,

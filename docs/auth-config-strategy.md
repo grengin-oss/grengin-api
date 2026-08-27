@@ -89,6 +89,12 @@ Rules:
    configured frontend callback with Grengin tokens in the URL fragment. The frontend removes
    the fragment before making a network request.
 
+Managed Grengin proxy setup follows the same invariant through a separate probe because its
+sentinel credentials cannot be validated against Google or Entra directly. The client first calls
+`POST /admin/sso-providers/{id}/quick-setup/validate` with the intended domains and tenant, then
+passes the returned token to `POST /admin/sso-providers/{id}/quick-setup`. That token is bound to
+the admin, provider ID, normalized domains, tenant, and exact callback URL.
+
 An admin must not be able to enable a new or materially changed provider without validating the
 same draft. Deleting a provider disables credentials and evicts it from runtime state; linked
 identity history remains on users for audit and safe re-enablement.
@@ -175,8 +181,8 @@ References:
   external identity.
 - Automatic email linking requires a verified claim. Disabled linking requires an explicit admin
   or authenticated-user linking flow.
-- Callback state is single-use and expires after 15 minutes. Nonce is mandatory. PKCE S256 is
-  mandatory except for the versioned Apple profile.
+- Callback state is atomically consumed with `DELETE ... RETURNING` and expires after 15 minutes.
+  Nonce is mandatory. PKCE S256 is mandatory except for the versioned Apple profile.
 - Redirects are exact configured values; arbitrary request redirects are rejected.
 - Provider configuration changes are permission checked and audit logged.
 - The public provider catalog exposes documented issuer patterns only. It never exposes configured

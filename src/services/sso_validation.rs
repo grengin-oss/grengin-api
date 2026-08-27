@@ -11,11 +11,13 @@ use crate::{
             OidcProviderConfiguration, build_discovered_oidc_client, normalize_provider_slug,
             validate_issuer_url_for_provider, validate_redirect_url_for_provider,
         },
+        sso_proxy::sso_proxy_jwks_url,
     },
     models::sso_providers,
     state::SharedState,
 };
 use chrono::{DateTime, Duration, Utc};
+use jsonwebtoken::jwk::JwkSet;
 use openssl::sha::sha256;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -232,8 +234,15 @@ pub fn issue_validation_token(
     user_id: Uuid,
     draft: &SsoDraftConfig,
 ) -> (String, DateTime<Utc>) {
-    let (claims, expires_at) =
-        SsoValidationTokenClaims::new(provider_id, user_id, config_hash(draft));
+    issue_validation_token_for_hash(provider_id, user_id, config_hash(draft))
+}
+
+pub fn issue_validation_token_for_hash(
+    provider_id: Uuid,
+    user_id: Uuid,
+    config_hash: String,
+) -> (String, DateTime<Utc>) {
+    let (claims, expires_at) = SsoValidationTokenClaims::new(provider_id, user_id, config_hash);
     (claims.get_token_string(), expires_at)
 }
 
@@ -252,6 +261,67 @@ pub fn validate_validation_token(
         return Err(AuthError::InvalidToken);
     }
     Ok(())
+}
+
+pub fn normalize_allowed_domains(domains: &[String]) -> Vec<String> {
+    let mut normalized = domains
+        .iter()
+        .map(|domain| domain.trim().trim_start_matches('@').to_ascii_lowercase())
+        .filter(|domain| !domain.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+pub fn grengin_proxy_config_hash(
+    provider: &str,
+    tenant_id: Option<&str>,
+    redirect_url: &str,
+    allowed_domains: &[String],
+) -> String {
+    let domains = normalize_allowed_domains(allowed_domains);
+    let domains = serde_json::to_string(&domains).unwrap_or_default();
+    let material = format!(
+        "grengin-proxy-v1\n{}\n{}\n{}\n{}",
+        provider.trim().to_ascii_lowercase(),
+        tenant_id.unwrap_or_default().trim().to_ascii_lowercase(),
+        redirect_url.trim(),
+        domains,
+    );
+    sha256(material.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
+}
+
+pub async fn validate_grengin_proxy(app_state: &SharedState) -> Result<(bool, String), AuthError> {
+    let response = app_state
+        .req_client
+        .get(sso_proxy_jwks_url())
+        .send()
+        .await
+        .map_err(|error| {
+            eprintln!("Grengin SSO proxy validation request failed: {error}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
+    if !response.status().is_success() {
+        return Ok((
+            false,
+            "Grengin SSO proxy verification endpoint is unavailable".to_string(),
+        ));
+    }
+    let jwks = response.json::<JwkSet>().await.map_err(|error| {
+        eprintln!("Grengin SSO proxy JWKS validation failed: {error}");
+        AuthError::ServiceTemporarilyUnavailable
+    })?;
+    if jwks.keys.is_empty() {
+        return Ok((
+            false,
+            "Grengin SSO proxy published no verification keys".to_string(),
+        ));
+    }
+    Ok((true, "Grengin SSO proxy connection validated".to_string()))
 }
 
 fn parse_oauth_error(body: &str) -> (String, String) {
@@ -446,6 +516,7 @@ pub async fn validate_sso_draft(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::jwt::{KEYS, Keys};
 
     fn draft() -> SsoDraftConfig {
         SsoDraftConfig {
@@ -466,6 +537,86 @@ mod tests {
         second.configuration.scopes.push("groups".to_string());
 
         assert_ne!(config_hash(&first), config_hash(&second));
+    }
+
+    #[test]
+    fn proxy_hash_is_stable_for_equivalent_domain_lists() {
+        let first = grengin_proxy_config_hash(
+            "Azure",
+            Some("COMMON"),
+            "https://app.example.com/auth/azure/callback",
+            &[" Example.com ".to_string(), "@example.com".to_string()],
+        );
+        let second = grengin_proxy_config_hash(
+            "azure",
+            Some("common"),
+            "https://app.example.com/auth/azure/callback",
+            &["example.com".to_string()],
+        );
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn proxy_hash_changes_with_security_sensitive_fields() {
+        let domains = ["example.com".to_string()];
+        let original = grengin_proxy_config_hash(
+            "azure",
+            Some("common"),
+            "https://app.example.com/auth/azure/callback",
+            &domains,
+        );
+
+        assert_ne!(
+            original,
+            grengin_proxy_config_hash(
+                "azure",
+                Some("tenant-id"),
+                "https://app.example.com/auth/azure/callback",
+                &domains,
+            )
+        );
+        assert_ne!(
+            original,
+            grengin_proxy_config_hash(
+                "azure",
+                Some("common"),
+                "https://other.example.com/auth/azure/callback",
+                &domains,
+            )
+        );
+        assert_ne!(
+            original,
+            grengin_proxy_config_hash(
+                "azure",
+                Some("common"),
+                "https://app.example.com/auth/azure/callback",
+                &["other.example".to_string()],
+            )
+        );
+    }
+
+    #[test]
+    fn validation_token_is_bound_to_provider_user_and_configuration() {
+        let _ = KEYS.set(Keys::new(b"sso-validation-test-secret"));
+        let provider_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let config_hash = "expected-config-hash".to_string();
+        let (token, _) = issue_validation_token_for_hash(provider_id, user_id, config_hash.clone());
+
+        assert!(validate_validation_token(&token, provider_id, user_id, &config_hash).is_ok());
+        assert!(matches!(
+            validate_validation_token(&token, Uuid::new_v4(), user_id, &config_hash),
+            Err(AuthError::InvalidToken)
+        ));
+        assert!(matches!(
+            validate_validation_token(&token, provider_id, Uuid::new_v4(), &config_hash),
+            Err(AuthError::InvalidToken)
+        ));
+        assert!(matches!(
+            validate_validation_token(&token, provider_id, user_id, "changed-config-hash"),
+            Err(AuthError::InvalidToken)
+        ));
     }
 
     #[test]
