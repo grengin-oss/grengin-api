@@ -41,6 +41,7 @@ use uuid::Uuid;
         ("limit" = Option<u64>, Query, description = "Number of items per page (default: 20, max: 100)"),
         ("offset" = Option<u64>, Query, description = "Number of items to skip (default: 0)"),
         ("archived" = Option<bool>, Query, description = "Filter by archived status. If not provided, returns only non-archived conversations"),
+        ("pinned" = Option<bool>, Query, description = "Filter by pinned status. If omitted, returns pinned and unpinned conversations; non-search results place pinned conversations first"),
         ("search" = Option<String>, Query, description = "Search conversation titles and message content. Lexical full-text search runs first, followed automatically by semantic search when no lexical matches are found."),
         ("sort" = Option<SortRule>, Query, description = "Sort by column example 'name','updated_at','created_at' (only applies when 'search' is not provided)"),
         ("ascending" = Option<bool>, Query, description = "Order of conversations list, default false"),
@@ -65,7 +66,7 @@ pub async fn get_chats(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let archived = query.archived.unwrap_or(false);
-    let pinned = query.pinned.unwrap_or(false);
+    let pinned = query.pinned;
 
     if let Some(search_text) = search.as_ref() {
         let lex_page = search::lexical_conversation_search(
@@ -222,7 +223,7 @@ pub async fn get_chats(
     } else {
         count_query = count_query.filter(conversations::Column::ArchivedAt.is_null());
     }
-    count_query = count_query.filter(conversations::Column::Pinned.eq(pinned));
+    count_query = apply_pinned_filter(count_query, pinned);
     let total = count_query.count(&app_state.database).await.map_err(|e| {
         eprintln!("conversation count query error -> {e}");
         AppError::DbTimeout
@@ -240,7 +241,10 @@ pub async fn get_chats(
     } else {
         select = select.filter(conversations::Column::ArchivedAt.is_null());
     }
-    select = select.filter(conversations::Column::Pinned.eq(pinned));
+    select = apply_pinned_filter(select, pinned);
+    if pinned.is_none() {
+        select = select.order_by_desc(conversations::Column::Pinned);
+    }
 
     let sort_type = if query.ascending.unwrap_or(false) {
         Order::Asc
@@ -319,7 +323,7 @@ async fn fetch_conversations_by_ids(
     db: &sea_orm::DatabaseConnection,
     user_id: Uuid,
     archived: bool,
-    pinned: bool,
+    pinned: Option<bool>,
     ids: &[Uuid],
 ) -> Result<Vec<ConversationWithCount>, AppError> {
     let mut select = conversations::Entity::find()
@@ -334,7 +338,7 @@ async fn fetch_conversations_by_ids(
     } else {
         select = select.filter(conversations::Column::ArchivedAt.is_null());
     }
-    select = select.filter(conversations::Column::Pinned.eq(pinned));
+    select = apply_pinned_filter(select, pinned);
     select
         .group_by(conversations::Column::Id)
         .into_model::<ConversationWithCount>()
@@ -344,6 +348,41 @@ async fn fetch_conversations_by_ids(
             eprintln!("fetch_conversations_by_ids error: {e}");
             AppError::DbTimeout
         })
+}
+
+fn apply_pinned_filter(
+    mut select: sea_orm::Select<conversations::Entity>,
+    pinned: Option<bool>,
+) -> sea_orm::Select<conversations::Entity> {
+    if let Some(pinned) = pinned {
+        select = select.filter(conversations::Column::Pinned.eq(pinned));
+    }
+    select
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_pinned_filter;
+    use crate::models::conversations;
+    use sea_orm::{DatabaseBackend, EntityTrait, QueryTrait};
+
+    #[test]
+    fn omitted_pinned_query_does_not_add_a_filter() {
+        let statement = apply_pinned_filter(conversations::Entity::find(), None)
+            .build(DatabaseBackend::Postgres);
+
+        assert!(!statement.sql.contains(r#""conversations"."pinned" ="#));
+    }
+
+    #[test]
+    fn explicit_pinned_query_adds_a_filter() {
+        for pinned in [true, false] {
+            let statement = apply_pinned_filter(conversations::Entity::find(), Some(pinned))
+                .build(DatabaseBackend::Postgres);
+
+            assert!(statement.sql.contains(r#""conversations"."pinned" ="#));
+        }
+    }
 }
 
 #[utoipa::path(
