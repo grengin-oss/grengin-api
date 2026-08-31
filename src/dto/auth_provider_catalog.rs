@@ -16,6 +16,7 @@ pub struct AuthProviderCatalog {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AuthProviderTemplateSummary {
     pub id: String,
+    pub version: String,
     pub name: String,
     pub description: String,
     pub protocol: AuthProviderProtocol,

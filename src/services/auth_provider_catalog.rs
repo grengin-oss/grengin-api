@@ -103,6 +103,11 @@ fn validate_auth_provider_catalog(catalog: &AuthProviderCatalog) -> Result<(), E
                 "auth provider catalog contains an invalid provider id"
             ));
         }
+        if !is_semantic_version(&provider.version) {
+            return Err(anyhow!(
+                "auth provider catalog contains an invalid provider version"
+            ));
+        }
         if provider.name.trim().is_empty()
             || provider.name.len() > 80
             || provider.description.trim().is_empty()
@@ -168,6 +173,7 @@ mod tests {
             catalog_version: "1.0.0".to_string(),
             providers: vec![AuthProviderTemplateSummary {
                 id: "keycloak".to_string(),
+                version: "1.0.0".to_string(),
                 name: "Keycloak".to_string(),
                 description: "OIDC through a Keycloak realm.".to_string(),
                 protocol: AuthProviderProtocol::Oidc,
@@ -204,6 +210,7 @@ mod tests {
             "catalogVersion": "1.0.0",
             "providers": [{
                 "id": "keycloak",
+                "version": "1.0.0",
                 "name": "Keycloak",
                 "description": "OIDC through a Keycloak realm.",
                 "protocol": "oidc",
