@@ -14,6 +14,7 @@ pub mod analytics;
 pub mod artifacts;
 pub mod audit_logs;
 pub mod auth;
+pub mod auth_provider_catalog;
 pub mod branding;
 pub mod chat;
 pub mod chat_stream;

@@ -31,6 +31,12 @@ Public login discovery uses `GET /auth/providers`. It returns only the enabled p
 slug, login path, and auto-redirect preference. It never returns client IDs, secrets, issuers,
 domains, or internal policy.
 
+Provider setup discovery is a separate, credential-free catalog. Versioned templates live at
+`https://meta.grengin.com/auth-providers/` and describe provider names, icons, documented issuer
+patterns, required/recommended scopes, and safe configuration defaults. `GET
+/auth/provider-templates` exposes the compact template index to clients with a five-minute cache
+and stale-on-CDN-error fallback. It is never used to determine which login methods are enabled.
+
 ## Provider Configuration
 
 The `configuration` JSON document is versioned independently from the database schema:
@@ -66,7 +72,8 @@ Rules:
 3. `PUT /admin/sso-providers/{id}` supplies that token for sensitive changes and enables the
    provider.
 4. `GET /auth/providers` makes the enabled login methods discoverable to clients.
-5. `GET /auth/{provider}` starts login and `/auth/{provider}/callback` completes it.
+5. `GET /auth/provider-templates` lists the provider templates available to the admin UI.
+6. `GET /auth/{provider}` starts login and `/auth/{provider}/callback` completes it.
 
 An admin must not be able to enable a new or materially changed provider without validating the
 same draft. Deleting a provider disables credentials and evicts it from runtime state; linked
@@ -137,7 +144,8 @@ References:
 - Callback state is single-use and expires after 15 minutes. PKCE and nonce are mandatory.
 - Redirects are exact configured values; arbitrary request redirects are rejected.
 - Provider configuration changes are permission checked and audit logged.
-- The public provider catalog exposes no tenant IDs, issuers, domains, credentials, or policy.
+- The public provider catalog exposes documented issuer patterns only. It never exposes configured
+  tenant IDs, installation domains, client IDs, credentials, or internal policy.
 - JIT provisioning, domain restrictions, and account status checks apply uniformly to every
   adapter.
 - Authentication logs contain provider slug and outcome, not authorization codes, tokens,
@@ -159,3 +167,20 @@ Every adapter and configuration version must cover:
 
 Remote provider tests use local mock OIDC/LDAP/SAML servers in CI. Live vendor smoke tests are
 optional staging checks and must never be the only coverage for protocol behavior.
+
+The OIDC mock matrix is split by issuer path so one server can exercise several configured
+profiles at once. The focused smoke cases in this slice are:
+
+- `/auth0`
+- `/okta`
+- `/keycloak`
+- `/apple`
+- `/github`
+
+Google OIDC and Microsoft Entra ID / Azure AD are already covered elsewhere and are intentionally
+skipped here. Each issuer gets its own discovery document, token endpoint, and JWKS. Auth0, Okta,
+and Keycloak use this standard OIDC path in production. The Apple and GitHub profiles only prove
+that an OIDC-shaped issuer with their requested scopes and authorization parameters works; they do
+not prove Sign in with Apple's client-secret JWT/form-post behavior or GitHub's OAuth2-only user
+login flow. Vendor-native SDKs, Graph/Admin APIs, native mobile login behavior, and other
+provider-specific edges require separate integration tests.

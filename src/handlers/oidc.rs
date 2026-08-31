@@ -9,19 +9,23 @@ use crate::{
     },
     dto::{
         auth::AuthToken,
+        auth_provider_catalog::AuthProviderCatalog,
         oauth::{
             AuthCallback, AuthProvider, AuthProviderSummary, CallbackExchangeMode, StartParams,
         },
     },
     models::{oauth_sessions, sso_providers},
-    services::{oidc_proxy::provider_uses_proxy, oidc_service::oidc_oauth_callback},
+    services::{
+        auth_provider_catalog::load_auth_provider_catalog, oidc_proxy::provider_uses_proxy,
+        oidc_service::oidc_oauth_callback,
+    },
     state::SharedState,
     utils::uri::is_azure_mobile_redirect_uri,
 };
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{StatusCode, header::CACHE_CONTROL},
     response::Redirect,
 };
 use chrono::Utc;
@@ -74,6 +78,38 @@ pub async fn list_auth_providers(
         });
     }
     Ok((StatusCode::OK, Json(providers)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/auth/provider-templates",
+    tag = "auth",
+    responses(
+        (status = 200, body = AuthProviderCatalog, description = "Credential-free authentication provider templates"),
+        (status = 503, content_type = "application/json", body = Error, description = "Authentication provider catalog unavailable"),
+    )
+)]
+pub async fn list_auth_provider_templates(
+    State(app_state): State<SharedState>,
+) -> Result<
+    (
+        StatusCode,
+        [(axum::http::HeaderName, &'static str); 1],
+        Json<AuthProviderCatalog>,
+    ),
+    AuthError,
+> {
+    let catalog = load_auth_provider_catalog(&app_state.req_client)
+        .await
+        .map_err(|error| {
+            eprintln!("auth provider catalog lookup failed: {error:#}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
+    Ok((
+        StatusCode::OK,
+        [(CACHE_CONTROL, "public, max-age=300, stale-if-error=86400")],
+        Json(catalog),
+    ))
 }
 
 #[utoipa::path(

@@ -9,6 +9,7 @@ pub mod artifacts;
 pub mod artifacts_helpers;
 pub mod audit_logs;
 pub mod auth_audit;
+pub mod auth_provider_catalog;
 pub mod authorization;
 pub mod branding_helpers;
 pub mod budget_allocation;
