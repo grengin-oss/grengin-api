@@ -38,10 +38,6 @@ use crate::dto::audit_logs::{
     AuditLogsExportQuery, AuditLogsQuery, AuditLogsResponse,
 };
 use crate::dto::auth::{AuthInit, AuthToken, RefreshToken, TokenType};
-use crate::dto::auth_provider_catalog::{
-    AuthProviderCatalog, AuthProviderProtocol, AuthProviderTemplateStatus,
-    AuthProviderTemplateSummary,
-};
 use crate::dto::branding::{Branding, BrandingUpdate};
 use crate::dto::chat::{
     ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse,
@@ -112,7 +108,6 @@ use utoipa::OpenApi;
         auth::handle_refresh_token,
         oidc::oidc_login_start,
         oidc::list_auth_providers,
-        oidc::list_auth_provider_templates,
         oidc::oidc_oauth_callback_get,
         oidc::oidc_oauth_callback_post,
         oidc::azure_mobile_oauth_callback_get,
@@ -303,10 +298,6 @@ use utoipa::OpenApi;
             ChatInput,
             Attachment,
             AuthCallback,
-            AuthProviderCatalog,
-            AuthProviderTemplateSummary,
-            AuthProviderProtocol,
-            AuthProviderTemplateStatus,
             SortRule,
             PaginationQuery,
             PaginatedUsers,

@@ -9,40 +9,46 @@ use crate::{
     },
     dto::{
         auth::AuthToken,
-        auth_provider_catalog::AuthProviderCatalog,
         oauth::{
             AuthCallback, AuthProvider, AuthProviderSummary, CallbackExchangeMode, StartParams,
         },
     },
     models::{oauth_sessions, sso_providers},
-    services::{
-        auth_provider_catalog::load_auth_provider_catalog, oidc_proxy::provider_uses_proxy,
-        oidc_service::oidc_oauth_callback,
-    },
+    services::{oidc_proxy::provider_uses_proxy, oidc_service::oidc_oauth_callback},
     state::SharedState,
     utils::uri::is_azure_mobile_redirect_uri,
 };
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::{StatusCode, header::CACHE_CONTROL},
+    http::StatusCode,
     response::Redirect,
 };
 use chrono::Utc;
 use openidconnect::{
     CsrfToken, Nonce, PkceCodeChallenge, RedirectUrl, Scope, core::CoreAuthenticationFlow,
 };
-use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
-};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, QueryOrder};
 use std::borrow::Cow;
+
+fn auth_provider_summary(model: sso_providers::Model) -> AuthProviderSummary {
+    let configuration =
+        OidcProviderConfiguration::from_value(model.configuration.as_ref()).unwrap_or_default();
+    AuthProviderSummary {
+        login_path: format!("/auth/{}", model.provider),
+        provider: model.provider,
+        name: model.name,
+        is_enabled: model.is_enabled,
+        auto_redirect: configuration.auto_redirect,
+    }
+}
 
 #[utoipa::path(
     get,
     path = "/auth/providers",
     tag = "auth",
     responses(
-        (status = 200, body = Vec<AuthProviderSummary>),
+        (status = 200, body = Vec<AuthProviderSummary>, description = "Authentication providers configured on this installation"),
         (status = 503, content_type = "application/json", body = Error, description = "Authentication configuration unavailable"),
     )
 )]
@@ -50,66 +56,15 @@ pub async fn list_auth_providers(
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode, Json<Vec<AuthProviderSummary>>), AuthError> {
     let models = sso_providers::Entity::find()
-        .filter(sso_providers::Column::IsEnabled.eq(true))
         .order_by_asc(sso_providers::Column::Name)
         .all(&app_state.database)
         .await
         .map_err(|error| {
-            eprintln!("enabled auth provider lookup failed: {error:?}");
+            eprintln!("configured auth provider lookup failed: {error:?}");
             AuthError::ServiceTemporarilyUnavailable
         })?;
-    let mut providers = Vec::new();
-    for model in models {
-        let Some(runtime) = app_state.oidc_provider(&model.provider).await else {
-            continue;
-        };
-        if !runtime.is_enabled {
-            continue;
-        }
-        let Ok(configuration) = OidcProviderConfiguration::from_value(model.configuration.as_ref())
-        else {
-            continue;
-        };
-        providers.push(AuthProviderSummary {
-            login_path: format!("/auth/{}", model.provider),
-            provider: model.provider,
-            name: model.name,
-            auto_redirect: configuration.auto_redirect,
-        });
-    }
+    let providers = models.into_iter().map(auth_provider_summary).collect();
     Ok((StatusCode::OK, Json(providers)))
-}
-
-#[utoipa::path(
-    get,
-    path = "/auth/provider-templates",
-    tag = "auth",
-    responses(
-        (status = 200, body = AuthProviderCatalog, description = "Credential-free authentication provider templates"),
-        (status = 503, content_type = "application/json", body = Error, description = "Authentication provider catalog unavailable"),
-    )
-)]
-pub async fn list_auth_provider_templates(
-    State(app_state): State<SharedState>,
-) -> Result<
-    (
-        StatusCode,
-        [(axum::http::HeaderName, &'static str); 1],
-        Json<AuthProviderCatalog>,
-    ),
-    AuthError,
-> {
-    let catalog = load_auth_provider_catalog(&app_state.req_client)
-        .await
-        .map_err(|error| {
-            eprintln!("auth provider catalog lookup failed: {error:#}");
-            AuthError::ServiceTemporarilyUnavailable
-        })?;
-    Ok((
-        StatusCode::OK,
-        [(CACHE_CONTROL, "public, max-age=300, stale-if-error=86400")],
-        Json(catalog),
-    ))
 }
 
 #[utoipa::path(
@@ -372,4 +327,51 @@ pub async fn azure_mobile_oauth_callback_post(
         CallbackExchangeMode::AzureMobilePublic,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn configured_provider_summary_includes_disabled_state_without_sensitive_configuration() {
+        let now = Utc::now();
+        let summary = auth_provider_summary(sso_providers::Model {
+            id: Uuid::new_v4(),
+            provider: "keycloak".to_string(),
+            name: "Company Keycloak".to_string(),
+            tenant_id: Some("private-realm".to_string()),
+            client_id: "private-client-id".to_string(),
+            client_secret: "encrypted-secret".to_string(),
+            issuer_url: "https://identity.example.com/realms/private".to_string(),
+            redirect_url: "https://chat.example.com/auth/keycloak/callback".to_string(),
+            allowed_domains: vec!["example.com".to_string()],
+            is_enabled: false,
+            is_default: false,
+            use_grengin_proxy: false,
+            jit_provisioning: true,
+            configuration: Some(serde_json::json!({
+                "version": "1.0",
+                "scopes": ["openid", "email", "profile"],
+                "authorizationParams": {},
+                "emailLinking": "verifiedEmail",
+                "autoRedirect": true
+            })),
+            created_at: now,
+            updated_at: now,
+        });
+
+        let payload = serde_json::to_value(summary).expect("provider summary serializes");
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "provider": "keycloak",
+                "name": "Company Keycloak",
+                "login_path": "/auth/keycloak",
+                "is_enabled": false,
+                "auto_redirect": true
+            })
+        );
+    }
 }

@@ -13,6 +13,7 @@ pub struct AuthProviderSummary {
     pub provider: String,
     pub name: String,
     pub login_path: String,
+    pub is_enabled: bool,
     pub auto_redirect: bool,
 }
 

@@ -27,15 +27,16 @@ Google, Microsoft Entra ID, Keycloak, Authentik, Okta, Dex, and compatible self-
   per provider.
 - Custom providers are created disabled, validated, then explicitly enabled.
 
-Public login discovery uses `GET /auth/providers`. It returns only the enabled provider name,
-slug, login path, and auto-redirect preference. It never returns client IDs, secrets, issuers,
-domains, or internal policy.
+Public provider discovery uses `GET /auth/providers`. It returns every provider configured on the
+installation with its name, slug, login path, enabled state, and auto-redirect preference. It
+never returns client IDs, secrets, issuers, domains, or internal policy. Clients must only present
+an enabled provider as an available login method.
 
-Provider setup discovery is a separate, credential-free catalog. Versioned templates live at
-`https://meta.grengin.com/auth-providers/` and describe provider names, icons, documented issuer
-patterns, required/recommended scopes, and safe configuration defaults. `GET
-/auth/provider-templates` exposes the compact template index to clients with a five-minute cache
-and stale-on-CDN-error fallback. It is never used to determine which login methods are enabled.
+Provider setup discovery is a separate, credential-free catalog. Frontends fetch the versioned
+templates directly from `https://meta.grengin.com/auth-providers/index.json`. The catalog describes
+provider names, icons, documented issuer patterns, required/recommended scopes, and safe
+configuration defaults. It is never used to determine which login methods are configured or
+enabled on an installation.
 
 ## Provider Configuration
 
@@ -71,9 +72,9 @@ Rules:
    bound to the admin, provider ID, and exact draft hash.
 3. `PUT /admin/sso-providers/{id}` supplies that token for sensitive changes and enables the
    provider.
-4. `GET /auth/providers` makes the enabled login methods discoverable to clients.
-5. `GET /auth/provider-templates` lists the provider templates available to the admin UI.
-6. `GET /auth/{provider}` starts login and `/auth/{provider}/callback` completes it.
+4. `GET /auth/providers` makes all configured providers and their enabled state discoverable to
+   clients.
+5. `GET /auth/{provider}` starts login and `/auth/{provider}/callback` completes it.
 
 An admin must not be able to enable a new or materially changed provider without validating the
 same draft. Deleting a provider disables credentials and evicts it from runtime state; linked
