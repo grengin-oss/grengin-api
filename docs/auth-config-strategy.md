@@ -13,12 +13,16 @@ redirect allowlisting, or secret encryption.
 
 ## Current Foundation
 
-The first implementation slice supports any standards-compliant OIDC provider, including
-Google, Microsoft Entra ID, Keycloak, Authentik, Okta, Dex, and compatible self-hosted systems.
+The implementation supports any standards-compliant OIDC provider, including Google,
+Microsoft Entra ID, Keycloak, Authentik, Okta, Dex, and compatible self-hosted systems. It also
+supports GitHub OAuth Apps through a native, typed OAuth 2.0 social adapter.
 
 - `sso_providers` is the source of truth; credentials remain encrypted with `APP_KEY`.
 - `AppState` loads enabled providers into a runtime registry keyed by a validated provider slug.
 - Google and Entra keep their compatibility adapters. Other providers use OIDC discovery.
+- GitHub uses fixed GitHub authorization, token, user, and verified-email endpoints. Provider
+  JSON may configure its presentation and least-privilege scopes, but may not replace those
+  endpoints.
 - PKCE S256, state, nonce, ID token signature verification, issuer validation, and exact callback
   redirects remain mandatory.
 - Returning users resolve by provider slug plus OIDC subject. The legacy Google and Entra ID
@@ -56,7 +60,8 @@ The `configuration` JSON document is versioned independently from the database s
 
 Rules:
 
-- `openid` is mandatory and PKCE cannot be disabled.
+- `openid` is mandatory for OIDC providers. The GitHub OAuth profile instead requires exactly
+  `read:user` and `user:email`. PKCE cannot be disabled for either protocol.
 - Reserved OAuth parameters such as `redirect_uri`, `client_id`, `state`, `nonce`, `scope`, and
   `code_challenge` cannot be overridden.
 - HTTPS is mandatory except for loopback development URLs.
@@ -99,11 +104,12 @@ trait AuthProtocolAdapter {
 stable issuer/provider key, subject, verified-email state, display claims, groups, and optional
 upstream tokens. Protocol adapters cannot write users directly.
 
-Planned adapters:
+Adapters:
 
 1. OIDC: current foundation; add configurable claim and role/group mapping.
-2. OAuth 2.0 social profiles: typed profiles for providers that do not expose OIDC identity
-   tokens. PKCE remains required when supported.
+2. OAuth 2.0 social profiles: GitHub is implemented with authorization code plus PKCE and
+   verified identity data from `/user` and `/user/emails`. Additional non-OIDC vendors require
+   their own typed profile rather than endpoint JSON.
 3. LDAP/Active Directory: bind/search settings, StartTLS or LDAPS, username/email mapping, and no
    plaintext bind passwords outside encrypted storage.
 4. SAML 2.0: signed assertions, audience/recipient/time validation, metadata rotation, and
@@ -170,18 +176,17 @@ Remote provider tests use local mock OIDC/LDAP/SAML servers in CI. Live vendor s
 optional staging checks and must never be the only coverage for protocol behavior.
 
 The OIDC mock matrix is split by issuer path so one server can exercise several configured
-profiles at once. The focused smoke cases in this slice are:
+profiles at once. The focused OIDC smoke cases in this slice are:
 
 - `/auth0`
 - `/okta`
 - `/keycloak`
 - `/apple`
-- `/github`
 
 Google OIDC and Microsoft Entra ID / Azure AD are already covered elsewhere and are intentionally
 skipped here. Each issuer gets its own discovery document, token endpoint, and JWKS. Auth0, Okta,
-and Keycloak use this standard OIDC path in production. The Apple and GitHub profiles only prove
-that an OIDC-shaped issuer with their requested scopes and authorization parameters works; they do
-not prove Sign in with Apple's client-secret JWT/form-post behavior or GitHub's OAuth2-only user
-login flow. Vendor-native SDKs, Graph/Admin APIs, native mobile login behavior, and other
-provider-specific edges require separate integration tests.
+and Keycloak use this standard OIDC path in production. The Apple profile only proves that an
+OIDC-shaped issuer with its requested scopes and authorization parameters works; it does not prove
+Sign in with Apple's client-secret JWT/form-post behavior. GitHub is covered separately by its
+native OAuth2 adapter tests. Vendor-native SDKs, Graph/Admin APIs, native mobile login behavior,
+and other provider-specific edges require separate integration tests.

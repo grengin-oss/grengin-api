@@ -68,7 +68,24 @@ impl OidcProviderConfiguration {
         Ok(configuration)
     }
 
+    pub fn from_value_for_provider(
+        value: Option<&serde_json::Value>,
+        provider: &str,
+    ) -> Result<Self, ProviderConfigError> {
+        let configuration = match value {
+            Some(value) => serde_json::from_value(value.clone())
+                .map_err(|error| ProviderConfigError::InvalidConfiguration(error.to_string()))?,
+            None => Self::default(),
+        };
+        configuration.validate_for_provider(provider)?;
+        Ok(configuration)
+    }
+
     pub fn validate(&self) -> Result<(), ProviderConfigError> {
+        self.validate_for_provider("oidc")
+    }
+
+    pub fn validate_for_provider(&self, provider: &str) -> Result<(), ProviderConfigError> {
         if self.version != OIDC_PROVIDER_CONFIG_VERSION {
             return Err(ProviderConfigError::UnsupportedVersion(
                 self.version.clone(),
@@ -89,7 +106,11 @@ impl OidcProviderConfiguration {
                 return Err(ProviderConfigError::InvalidScopes);
             }
         }
-        if !seen.contains("openid") {
+        if provider.eq_ignore_ascii_case("github") {
+            if seen.len() != 2 || !seen.contains("read:user") || !seen.contains("user:email") {
+                return Err(ProviderConfigError::InvalidScopes);
+            }
+        } else if !seen.contains("openid") {
             return Err(ProviderConfigError::MissingOpenIdScope);
         }
 
@@ -224,6 +245,34 @@ mod tests {
             reserved.validate(),
             Err(ProviderConfigError::InvalidAuthorizationParameter(_))
         ));
+    }
+
+    #[test]
+    fn github_requires_only_identity_scopes() {
+        let valid = OidcProviderConfiguration {
+            scopes: vec!["read:user".to_string(), "user:email".to_string()],
+            ..Default::default()
+        };
+        assert!(valid.validate_for_provider("github").is_ok());
+
+        for scopes in [
+            vec!["read:user".to_string()],
+            vec!["read:user".to_string(), "repo".to_string()],
+            vec![
+                "read:user".to_string(),
+                "user:email".to_string(),
+                "repo".to_string(),
+            ],
+        ] {
+            let configuration = OidcProviderConfiguration {
+                scopes,
+                ..Default::default()
+            };
+            assert_eq!(
+                configuration.validate_for_provider("github"),
+                Err(ProviderConfigError::InvalidScopes)
+            );
+        }
     }
 
     #[test]
@@ -499,15 +548,6 @@ mod mock_oidc_matrix_tests {
                 display_name: "Apple User",
                 id_token_email: Some("apple.user@example.com"),
                 userinfo_email: None,
-            },
-            ProviderCase {
-                slug: "github",
-                scopes: &["email", "profile", "offline_access"],
-                authorization_params: &[("allow_signup", "false")],
-                subject: "github-user-01",
-                display_name: "GitHub User",
-                id_token_email: None,
-                userinfo_email: Some("github.user@example.com"),
             },
         ]
     }

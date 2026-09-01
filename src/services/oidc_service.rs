@@ -6,6 +6,8 @@ use crate::{
         azure::build_azure_public_client,
         claims::{Claiming as _, Claims, RefreshClaims},
         error::AuthError,
+        github::GitHubAdapterError,
+        identity::VerifiedIdentity,
         provider_config::EmailLinkingMode,
     },
     config::setting::OidcClient,
@@ -18,7 +20,7 @@ use crate::{
         users::{self, UserStatus},
     },
     services::{authorization::AuthorizationService, oidc_proxy::verify_proxy_assertion},
-    state::SharedState,
+    state::{AuthProtocolClient, SharedState},
     utils::uri::{is_azure_mobile_redirect_uri, origin_from_url},
 };
 use axum::{Json, http::StatusCode};
@@ -140,9 +142,7 @@ pub async fn oidc_oauth_callback(
         eprintln!("db error while deleting oauth_session: {e:?}");
         AuthError::ServiceTemporarilyUnavailable
     })?;
-    let (sub, email, email_verified, display_name, picture, hd) = if let Some(assertion) =
-        cb.assertion.clone()
-    {
+    let identity = if let Some(assertion) = cb.assertion.clone() {
         let expected_audience =
             origin_from_url(&redirect_uri_value).ok_or(AuthError::InvalidRedirectUri {
                 redirect_uri: Some(redirect_uri_value.clone()),
@@ -155,116 +155,161 @@ pub async fn oidc_oauth_callback(
             &expected_audience,
         )
         .await?;
-        (
-            claims.provider_sub.ok_or(AuthError::InvalidToken)?,
-            claims.email,
-            true,
-            claims.name,
-            claims.picture,
-            None,
-        )
+        VerifiedIdentity {
+            subject: claims.provider_sub.ok_or(AuthError::InvalidToken)?,
+            email: claims.email,
+            email_verified: true,
+            display_name: claims.name,
+            picture: claims.picture,
+            hosted_domain: None,
+        }
     } else {
         let code = cb.code.ok_or(AuthError::InvalidCallbackParameters)?;
-        let use_public_azure_client = is_mobile_redirect;
-        let mut oidc_client = if use_public_azure_client {
-            build_azure_public_client_for_redirect(&app_state, &redirect_uri_value).await?
+        if provider.eq_ignore_ascii_case("github") {
+            let adapter = match runtime.client.clone() {
+                Some(AuthProtocolClient::GitHub(adapter)) => adapter,
+                _ => {
+                    return Err(AuthError::SsoProviderNotConfigured {
+                        provider: Some(provider.clone()),
+                    });
+                }
+            };
+            adapter
+                .complete(code, sess.pkce_verifier.clone(), &app_state.req_client)
+                .await
+                .map_err(|error| {
+                    eprintln!("GitHub OAuth completion failed: {error}");
+                    match error {
+                        GitHubAdapterError::MissingVerifiedEmail
+                        | GitHubAdapterError::InvalidIdentity => AuthError::InvalidToken,
+                        _ => AuthError::ServiceTemporarilyUnavailable,
+                    }
+                })?
         } else {
-            runtime
-                .client
-                .clone()
-                .ok_or(AuthError::SsoProviderNotConfigured {
-                    provider: Some(provider.clone()),
-                })?
-        };
-        let token_resp = oidc_client
-            .exchange_code(AuthorizationCode::new(code))
-            .expect("Failed to get token response")
-            .set_pkce_verifier(PkceCodeVerifier::new(sess.pkce_verifier.clone()))
-            .set_redirect_uri(Cow::Owned(redirect_uri))
-            .request_async(&app_state.req_client)
-            .await
-            .map_err(|e| {
-                eprintln!("token exchange err: {e:?}");
-                AuthError::ServiceTemporarilyUnavailable
-            })?;
-        let nonce = Nonce::new(sess.nonce.clone());
-        let id_token = token_resp
-            .id_token()
-            .ok_or(AuthError::ServiceTemporarilyUnavailable)?;
-        let claims = match {
-            let verifier = oidc_client.id_token_verifier();
-            id_token.claims(&verifier, &nonce)
-        } {
-            Ok(c) => c,
-            Err(e) => {
-                let should_refresh = matches!(e, ClaimsVerificationError::SignatureVerification(_));
-                if !should_refresh {
-                    eprintln!("id_token claims verification failed (non-refreshable): {e:?}");
-                    return Err(AuthError::InvalidToken);
-                }
-                if use_public_azure_client {
-                    oidc_client =
-                        build_azure_public_client_for_redirect(&app_state, &redirect_uri_value)
-                            .await?;
-                } else {
-                    app_state
-                        .refresh_oidc_client(&provider)
-                        .await
-                        .map_err(|err| {
-                            eprintln!("oidc client refresh error: {err:?}");
-                            AuthError::ServiceTemporarilyUnavailable
-                        })?;
-
-                    oidc_client = app_state
-                        .get_oidc_provider_runtime(&provider)
-                        .await
-                        .map_err(|_| AuthError::SsoProviderNotConfigured {
+            let use_public_azure_client = is_mobile_redirect;
+            let mut oidc_client = if use_public_azure_client {
+                build_azure_public_client_for_redirect(&app_state, &redirect_uri_value).await?
+            } else {
+                match runtime.client.clone() {
+                    Some(AuthProtocolClient::Oidc(client)) => client,
+                    _ => {
+                        return Err(AuthError::SsoProviderNotConfigured {
                             provider: Some(provider.clone()),
-                        })?
-                        .client
-                        .ok_or(AuthError::SsoProviderNotConfigured {
-                            provider: Some(provider.clone()),
-                        })?;
+                        });
+                    }
                 }
-
-                let verifier2 = oidc_client.id_token_verifier();
-                id_token.claims(&verifier2, &nonce).map_err(|e2| {
-                    eprintln!("id_token claims verification failed after refresh: {e2:?}");
-                    AuthError::InvalidToken
-                })?
-            }
-        };
-        let sub = claims.subject().as_str().to_string();
-        let mut email = claims.email().map(|e| e.as_str().to_string());
-        let mut email_verified = claims
-            .email_verified()
-            .unwrap_or_else(|| provider.eq_ignore_ascii_case("azure"));
-        let picture = claims
-            .picture()
-            .and_then(|pic_claim| pic_claim.get(None))
-            .map(|url| url.as_str().to_owned());
-        let hd = claims
-            .website()
-            .and_then(|website_claim| website_claim.get(None))
-            .map(|url| url.as_str().to_owned());
-        let mut display_name = claims
-            .name()
-            .and_then(|n| n.get(None).map(|s| s.to_string()));
-        if email.is_none() {
-            let info: CoreUserInfoClaims = oidc_client
-                .user_info(token_resp.access_token().to_owned(), None)
-                .expect("userinfo req")
+            };
+            let token_resp = oidc_client
+                .exchange_code(AuthorizationCode::new(code))
+                .expect("Failed to get token response")
+                .set_pkce_verifier(PkceCodeVerifier::new(sess.pkce_verifier.clone()))
+                .set_redirect_uri(Cow::Owned(redirect_uri))
                 .request_async(&app_state.req_client)
                 .await
-                .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
-            email = info.email().map(|e| e.as_str().to_string());
-            email_verified = info.email_verified().unwrap_or(email_verified);
-            if display_name.is_none() {
-                display_name = info.name().and_then(|n| n.get(None).map(|s| s.to_string()));
+                .map_err(|e| {
+                    eprintln!("token exchange err: {e:?}");
+                    AuthError::ServiceTemporarilyUnavailable
+                })?;
+            let nonce = Nonce::new(sess.nonce.clone());
+            let id_token = token_resp
+                .id_token()
+                .ok_or(AuthError::ServiceTemporarilyUnavailable)?;
+            let claims = match {
+                let verifier = oidc_client.id_token_verifier();
+                id_token.claims(&verifier, &nonce)
+            } {
+                Ok(c) => c,
+                Err(e) => {
+                    let should_refresh =
+                        matches!(e, ClaimsVerificationError::SignatureVerification(_));
+                    if !should_refresh {
+                        eprintln!("id_token claims verification failed (non-refreshable): {e:?}");
+                        return Err(AuthError::InvalidToken);
+                    }
+                    if use_public_azure_client {
+                        oidc_client =
+                            build_azure_public_client_for_redirect(&app_state, &redirect_uri_value)
+                                .await?;
+                    } else {
+                        app_state
+                            .refresh_oidc_client(&provider)
+                            .await
+                            .map_err(|err| {
+                                eprintln!("oidc client refresh error: {err:?}");
+                                AuthError::ServiceTemporarilyUnavailable
+                            })?;
+
+                        oidc_client = match app_state
+                            .get_oidc_provider_runtime(&provider)
+                            .await
+                            .map_err(|_| AuthError::SsoProviderNotConfigured {
+                                provider: Some(provider.clone()),
+                            })?
+                            .client
+                        {
+                            Some(AuthProtocolClient::Oidc(client)) => client,
+                            _ => {
+                                return Err(AuthError::SsoProviderNotConfigured {
+                                    provider: Some(provider.clone()),
+                                });
+                            }
+                        };
+                    }
+
+                    let verifier2 = oidc_client.id_token_verifier();
+                    id_token.claims(&verifier2, &nonce).map_err(|e2| {
+                        eprintln!("id_token claims verification failed after refresh: {e2:?}");
+                        AuthError::InvalidToken
+                    })?
+                }
+            };
+            let subject = claims.subject().as_str().to_string();
+            let mut email = claims.email().map(|e| e.as_str().to_string());
+            let mut email_verified = claims
+                .email_verified()
+                .unwrap_or_else(|| provider.eq_ignore_ascii_case("azure"));
+            let picture = claims
+                .picture()
+                .and_then(|pic_claim| pic_claim.get(None))
+                .map(|url| url.as_str().to_owned());
+            let hosted_domain = claims
+                .website()
+                .and_then(|website_claim| website_claim.get(None))
+                .map(|url| url.as_str().to_owned());
+            let mut display_name = claims
+                .name()
+                .and_then(|n| n.get(None).map(|s| s.to_string()));
+            if email.is_none() {
+                let info: CoreUserInfoClaims = oidc_client
+                    .user_info(token_resp.access_token().to_owned(), None)
+                    .expect("userinfo req")
+                    .request_async(&app_state.req_client)
+                    .await
+                    .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
+                email = info.email().map(|e| e.as_str().to_string());
+                email_verified = info.email_verified().unwrap_or(email_verified);
+                if display_name.is_none() {
+                    display_name = info.name().and_then(|n| n.get(None).map(|s| s.to_string()));
+                }
+            }
+            VerifiedIdentity {
+                subject,
+                email,
+                email_verified,
+                display_name,
+                picture,
+                hosted_domain,
             }
         }
-        (sub, email, email_verified, display_name, picture, hd)
     };
+    let VerifiedIdentity {
+        subject: sub,
+        email,
+        email_verified,
+        display_name,
+        picture,
+        hosted_domain: hd,
+    } = identity;
 
     let google_id = if provider == "google" {
         Some(sub.clone())

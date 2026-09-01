@@ -15,7 +15,7 @@ use crate::{
     },
     models::{oauth_sessions, sso_providers},
     services::{oidc_proxy::provider_uses_proxy, oidc_service::oidc_oauth_callback},
-    state::SharedState,
+    state::{AuthProtocolClient, SharedState},
     utils::uri::is_azure_mobile_redirect_uri,
 };
 use axum::{
@@ -32,8 +32,11 @@ use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, QueryOrder};
 use std::borrow::Cow;
 
 fn auth_provider_summary(model: sso_providers::Model) -> AuthProviderSummary {
-    let configuration =
-        OidcProviderConfiguration::from_value(model.configuration.as_ref()).unwrap_or_default();
+    let configuration = OidcProviderConfiguration::from_value_for_provider(
+        model.configuration.as_ref(),
+        &model.provider,
+    )
+    .unwrap_or_default();
     AuthProviderSummary {
         login_path: format!("/auth/{}", model.provider),
         provider: model.provider,
@@ -163,31 +166,53 @@ pub async fn oidc_login_start(
         return Ok(Redirect::to(&proxy_authorize_url));
     }
 
-    let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-    let oidc_client = runtime.client.ok_or(AuthError::SsoProviderNotConfigured {
+    let client = runtime.client.ok_or(AuthError::SsoProviderNotConfigured {
         provider: Some(provider.clone()),
     })?;
-    let mut authorization = oidc_client
-        .authorize_url(
-            CoreAuthenticationFlow::AuthorizationCode,
-            CsrfToken::new_random,
-            Nonce::new_random,
-        )
-        .set_redirect_uri(Cow::Owned(redirect_uri.clone()))
-        .set_pkce_challenge(pkce_challenge);
-    for scope in runtime.configuration.scopes {
-        if scope != "openid" {
-            authorization = authorization.add_scope(Scope::new(scope));
+    let (auth_url, state, nonce, pkce_verifier) = match client {
+        AuthProtocolClient::Oidc(oidc_client) => {
+            let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+            let mut authorization = oidc_client
+                .authorize_url(
+                    CoreAuthenticationFlow::AuthorizationCode,
+                    CsrfToken::new_random,
+                    Nonce::new_random,
+                )
+                .set_redirect_uri(Cow::Owned(redirect_uri.clone()))
+                .set_pkce_challenge(pkce_challenge);
+            for scope in runtime.configuration.scopes {
+                if scope != "openid" {
+                    authorization = authorization.add_scope(Scope::new(scope));
+                }
+            }
+            for (key, value) in runtime.configuration.authorization_params {
+                authorization = authorization.add_extra_param(key, value);
+            }
+            let (auth_url, state, nonce) = authorization.url();
+            (
+                auth_url,
+                state.secret().to_string(),
+                nonce.secret().to_string(),
+                pkce_verifier.secret().to_string(),
+            )
         }
-    }
-    for (key, value) in runtime.configuration.authorization_params {
-        authorization = authorization.add_extra_param(key, value);
-    }
-    let (auth_url, csrf_state, nonce) = authorization.url();
+        AuthProtocolClient::GitHub(adapter) => {
+            let authorization = adapter.begin(&runtime.configuration).map_err(|error| {
+                eprintln!("GitHub authorization start failed: {error}");
+                AuthError::ServiceTemporarilyUnavailable
+            })?;
+            (
+                authorization.url,
+                authorization.state,
+                authorization.nonce,
+                authorization.pkce_verifier,
+            )
+        }
+    };
     let sess = oauth_sessions::ActiveModel {
-        state: Set(csrf_state.secret().to_string()),
-        pkce_verifier: Set(pkce_verifier.secret().to_string()),
-        nonce: Set(nonce.secret().to_string()),
+        state: Set(state),
+        pkce_verifier: Set(pkce_verifier),
+        nonce: Set(nonce),
         redirect_uri: Set(Some(redirect_uri.to_string())),
         created_at: Set(Utc::now()),
     };

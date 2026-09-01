@@ -6,6 +6,7 @@ use crate::{
         claims::Claiming,
         encryption::decrypt_key,
         error::AuthError,
+        github::{GitHubAdapterError, GitHubOAuthAdapter},
         provider_config::{
             OidcProviderConfiguration, build_discovered_oidc_client, normalize_provider_slug,
             validate_provider_url,
@@ -155,14 +156,13 @@ pub fn build_draft_config(
         provider: Some(provider.clone()),
     })?;
     let configuration = configuration.cloned().unwrap_or(
-        OidcProviderConfiguration::from_value(model.configuration.as_ref()).map_err(|_| {
-            AuthError::InvalidProvider {
+        OidcProviderConfiguration::from_value_for_provider(model.configuration.as_ref(), &provider)
+            .map_err(|_| AuthError::InvalidProvider {
                 provider: Some(provider.clone()),
-            }
-        })?,
+            })?,
     );
     configuration
-        .validate()
+        .validate_for_provider(&provider)
         .map_err(|_| AuthError::InvalidProvider {
             provider: Some(provider.clone()),
         })?;
@@ -189,8 +189,11 @@ pub fn has_sensitive_changes(
 ) -> bool {
     let existing_secret = decrypt_key(&app_state.settings.auth.app_key, &model.client_secret)
         .unwrap_or_else(|_| String::new());
-    let existing_configuration =
-        OidcProviderConfiguration::from_value(model.configuration.as_ref()).unwrap_or_default();
+    let existing_configuration = OidcProviderConfiguration::from_value_for_provider(
+        model.configuration.as_ref(),
+        &model.provider,
+    )
+    .unwrap_or_default();
     draft.provider != model.provider.to_lowercase()
         || draft.tenant_id != model.tenant_id
         || draft.client_id != model.client_id
@@ -378,13 +381,45 @@ pub async fn validate_sso_draft(
     }
     draft
         .configuration
-        .validate()
+        .validate_for_provider(&draft.provider)
         .map_err(|_| AuthError::InvalidProvider {
             provider: Some(draft.provider.clone()),
         })?;
     match draft.provider.as_str() {
         "google" => probe_google_config(app_state, draft).await,
         "azure" => probe_azure_config(app_state, draft).await,
+        "github" => {
+            if !GitHubOAuthAdapter::supports_issuer(&draft.issuer_url) {
+                return Ok((
+                    false,
+                    "GitHub issuer must be https://github.com".to_string(),
+                ));
+            }
+            let adapter = GitHubOAuthAdapter::new(
+                draft.client_id.clone(),
+                draft.client_secret.clone(),
+                draft.redirect_url.clone(),
+            )
+            .map_err(|_| AuthError::InvalidProvider {
+                provider: Some(draft.provider.clone()),
+            })?;
+            match adapter.validate_remote(&app_state.req_client).await {
+                Ok(()) => Ok((
+                    true,
+                    "GitHub OAuth credentials and callback configuration validated".to_string(),
+                )),
+                Err(GitHubAdapterError::InvalidCredentials) => {
+                    Ok((false, "GitHub client credentials are invalid".to_string()))
+                }
+                Err(GitHubAdapterError::InvalidConfiguration) => {
+                    Ok((false, "GitHub OAuth configuration is invalid".to_string()))
+                }
+                Err(error) => {
+                    eprintln!("GitHub validation request failed: {error}");
+                    Err(AuthError::ServiceTemporarilyUnavailable)
+                }
+            }
+        }
         _ => {
             build_discovered_oidc_client(
                 &app_state.req_client,

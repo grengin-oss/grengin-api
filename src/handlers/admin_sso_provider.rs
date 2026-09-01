@@ -42,7 +42,11 @@ use sea_orm::{
 use uuid::Uuid;
 
 fn configuration_from_model(model: &sso_providers::Model) -> OidcProviderConfiguration {
-    OidcProviderConfiguration::from_value(model.configuration.as_ref()).unwrap_or_default()
+    OidcProviderConfiguration::from_value_for_provider(
+        model.configuration.as_ref(),
+        &model.provider,
+    )
+    .unwrap_or_default()
 }
 
 fn provider_response(app_state: &SharedState, model: sso_providers::Model) -> SsoProvider {
@@ -150,7 +154,7 @@ pub async fn create_sso_provider(
         redirect_uri: Some(req.redirect_url.clone()),
     })?;
     req.configuration
-        .validate()
+        .validate_for_provider(&provider)
         .map_err(|_| AuthError::InvalidProvider {
             provider: Some(provider.clone()),
         })?;
@@ -531,7 +535,7 @@ pub async fn update_sso_provider_by_id(
     }
     if let Some(configuration) = req.configuration {
         configuration
-            .validate()
+            .validate_for_provider(&draft.provider)
             .map_err(|_| AuthError::InvalidProvider {
                 provider: Some(draft.provider.clone()),
             })?;
