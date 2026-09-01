@@ -325,6 +325,7 @@ pub async fn add_new_user(
         is_independent: Set(false),
         effective_permissions: Set(None),
         metadata: Set(None),
+        identities: Set(None),
     };
     user.insert(&app_state.database).await.map_err(|e| {
         eprintln!("insert error: {e}");

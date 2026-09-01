@@ -94,7 +94,6 @@ pub async fn lexical_conversation_search(
     user_id: Uuid,
     query: &str,
     archived: bool,
-    pinned: bool,
     limit: u64,
     offset: u64,
 ) -> Result<LexicalSearchPage, AppError> {
@@ -103,12 +102,6 @@ pub async fn lexical_conversation_search(
     } else {
         r#"AND c."archivedAt" IS NULL"#
     };
-    let pinned_filter = if pinned {
-        r#"AND c."pinned" = true"#
-    } else {
-        r#"AND c."pinned" = false"#
-    };
-
     let fts_query = build_fts_or_query(query);
     let count_sql = format!(
         r#"
@@ -121,7 +114,6 @@ pub async fn lexical_conversation_search(
           AND to_tsvector('english', coalesce(c."title", '') || ' ' || m."messageContent")
               @@ websearch_to_tsquery('english', $2)
           {archived_filter}
-          {pinned_filter}
         "#
     );
 
@@ -165,7 +157,6 @@ pub async fn lexical_conversation_search(
               AND to_tsvector('english', coalesce(c."title", '') || ' ' || m."messageContent")
                   @@ websearch_to_tsquery('english', $1)
               {archived_filter}
-              {pinned_filter}
             ORDER BY c."id", "rank" DESC
         ) sub
         ORDER BY "rank" DESC
@@ -212,7 +203,6 @@ pub async fn semantic_conversation_search(
     user_id: Uuid,
     query_text: &str,
     archived: bool,
-    pinned: bool,
     limit: u64,
     offset: u64,
 ) -> Result<Option<SemanticConversationPage>, AppError> {
@@ -232,14 +222,8 @@ pub async fn semantic_conversation_search(
             None => return Ok(None),
         };
 
-    let total = load_total_matches(
-        &app_state.database,
-        user_id,
-        archived,
-        pinned,
-        &embedding_config,
-    )
-    .await?;
+    let total =
+        load_total_matches(&app_state.database, user_id, archived, &embedding_config).await?;
 
     if total == 0 {
         return Ok(Some(SemanticConversationPage {
@@ -257,7 +241,7 @@ pub async fn semantic_conversation_search(
     let distance_min: sea_orm::sea_query::SimpleExpr = Func::min(distance_expr.clone()).into();
 
     let rows: Vec<SemanticConversationRow> =
-        build_semantic_base_query(user_id, archived, pinned, &embedding_config)
+        build_semantic_base_query(user_id, archived, &embedding_config)
             .select_only()
             .column_as(
                 Expr::col((
@@ -291,7 +275,6 @@ pub async fn semantic_conversation_search(
         &app_state.database,
         user_id,
         archived,
-        pinned,
         &embedding_config,
         &conversation_ids,
         &embedding,
@@ -308,7 +291,6 @@ pub async fn semantic_conversation_search(
 fn build_semantic_base_query(
     user_id: Uuid,
     archived: bool,
-    pinned: bool,
     config: &EmbeddingSettings,
 ) -> sea_orm::Select<message_embeddings::Entity> {
     let mut query = message_embeddings::Entity::find()
@@ -331,8 +313,6 @@ fn build_semantic_base_query(
     } else {
         query = query.filter(conversations::Column::ArchivedAt.is_null());
     }
-    query = query.filter(conversations::Column::Pinned.eq(pinned));
-
     query
 }
 
@@ -340,10 +320,9 @@ async fn load_total_matches(
     db: &sea_orm::DatabaseConnection,
     user_id: Uuid,
     archived: bool,
-    pinned: bool,
     config: &EmbeddingSettings,
 ) -> Result<i64, AppError> {
-    let row = build_semantic_base_query(user_id, archived, pinned, config)
+    let row = build_semantic_base_query(user_id, archived, config)
         .select_only()
         .column_as(
             Expr::col((
@@ -368,7 +347,6 @@ async fn load_semantic_snippets(
     db: &sea_orm::DatabaseConnection,
     user_id: Uuid,
     archived: bool,
-    pinned: bool,
     config: &EmbeddingSettings,
     conversation_ids: &[Uuid],
     embedding: &[f32],
@@ -390,7 +368,7 @@ async fn load_semantic_snippets(
             )
         };
 
-        let row = build_semantic_base_query(user_id, archived, pinned, config)
+        let row = build_semantic_base_query(user_id, archived, config)
             .filter(message_embeddings::Column::ConversationId.eq(conv_id))
             .select_only()
             .column_as(

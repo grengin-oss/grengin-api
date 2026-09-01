@@ -28,25 +28,11 @@ pub struct ProxyAssertionClaims {
 }
 
 pub async fn provider_uses_proxy(app_state: &SharedState, provider: &AuthProvider) -> bool {
-    match provider.to_lowercase().as_str() {
-        "google" => app_state
-            .settings
-            .google
-            .read()
-            .await
-            .as_ref()
-            .map(|s| s.use_grengin_proxy)
-            .unwrap_or(false),
-        "azure" => app_state
-            .settings
-            .azure
-            .read()
-            .await
-            .as_ref()
-            .map(|s| s.use_grengin_proxy)
-            .unwrap_or(false),
-        _ => false,
-    }
+    app_state
+        .oidc_provider(provider)
+        .await
+        .map(|runtime| runtime.use_grengin_proxy)
+        .unwrap_or(false)
 }
 
 fn select_assertion_jwk<'a>(jwks: &'a JwkSet, kid: Option<&str>) -> Option<&'a Jwk> {

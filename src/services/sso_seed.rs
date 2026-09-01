@@ -283,6 +283,7 @@ pub async fn ensure_sso_providers_from_env(
                 is_default: Set(false),
                 use_grengin_proxy: Set(seed.use_grengin_proxy),
                 jit_provisioning: Set(seed.jit_provisioning),
+                configuration: Set(None),
                 created_at: Set(Utc::now()),
                 updated_at: Set(Utc::now()),
             },

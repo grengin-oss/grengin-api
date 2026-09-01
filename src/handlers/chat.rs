@@ -65,7 +65,6 @@ pub async fn get_chats(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let archived = query.archived.unwrap_or(false);
-    let pinned = query.pinned.unwrap_or(false);
 
     if let Some(search_text) = search.as_ref() {
         let lex_page = search::lexical_conversation_search(
@@ -73,7 +72,6 @@ pub async fn get_chats(
             claims.user_id,
             search_text,
             archived,
-            pinned,
             limit,
             offset,
         )
@@ -84,7 +82,6 @@ pub async fn get_chats(
                 &app_state.database,
                 claims.user_id,
                 archived,
-                pinned,
                 &lex_page.conversation_ids,
             )
             .await?;
@@ -132,7 +129,6 @@ pub async fn get_chats(
             claims.user_id,
             search_text,
             archived,
-            pinned,
             limit,
             offset,
         )
@@ -143,7 +139,6 @@ pub async fn get_chats(
                     &app_state.database,
                     claims.user_id,
                     archived,
-                    pinned,
                     &sem_page.conversation_ids,
                 )
                 .await?;
@@ -222,7 +217,6 @@ pub async fn get_chats(
     } else {
         count_query = count_query.filter(conversations::Column::ArchivedAt.is_null());
     }
-    count_query = count_query.filter(conversations::Column::Pinned.eq(pinned));
     let total = count_query.count(&app_state.database).await.map_err(|e| {
         eprintln!("conversation count query error -> {e}");
         AppError::DbTimeout
@@ -240,7 +234,7 @@ pub async fn get_chats(
     } else {
         select = select.filter(conversations::Column::ArchivedAt.is_null());
     }
-    select = select.filter(conversations::Column::Pinned.eq(pinned));
+    select = select.order_by_desc(conversations::Column::Pinned);
 
     let sort_type = if query.ascending.unwrap_or(false) {
         Order::Asc
@@ -319,7 +313,6 @@ async fn fetch_conversations_by_ids(
     db: &sea_orm::DatabaseConnection,
     user_id: Uuid,
     archived: bool,
-    pinned: bool,
     ids: &[Uuid],
 ) -> Result<Vec<ConversationWithCount>, AppError> {
     let mut select = conversations::Entity::find()
@@ -334,7 +327,6 @@ async fn fetch_conversations_by_ids(
     } else {
         select = select.filter(conversations::Column::ArchivedAt.is_null());
     }
-    select = select.filter(conversations::Column::Pinned.eq(pinned));
     select
         .group_by(conversations::Column::Id)
         .into_model::<ConversationWithCount>()

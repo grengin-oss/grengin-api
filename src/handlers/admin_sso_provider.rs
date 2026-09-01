@@ -7,11 +7,15 @@ use crate::{
         encryption::{decrypt_key, encrypt_key},
         error::{AuthError, Error},
         permissions::{PERMISSION_SSO_PROVIDERS_MANAGE, PERMISSION_SSO_PROVIDERS_VIEW},
+        provider_config::{
+            OidcProviderConfiguration, normalize_provider_slug, validate_provider_url,
+        },
         sso_provider::is_editable,
     },
     dto::admin_sso_providers::{
-        EditableField, GrenginProxySetupRequest, SsoProvider, SsoProviderEditable,
-        SsoProviderUpdate, SsoProviderValidationRequest, SsoProviderValidationResponse,
+        EditableField, GrenginProxySetupRequest, SsoProvider, SsoProviderCreate,
+        SsoProviderEditable, SsoProviderUpdate, SsoProviderValidationRequest,
+        SsoProviderValidationResponse,
     },
     models::sso_providers,
     services::{
@@ -32,8 +36,43 @@ use axum::{
 };
 use chrono::Utc;
 use reqwest::StatusCode;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, IntoActiveModel};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
+};
 use uuid::Uuid;
+
+fn configuration_from_model(model: &sso_providers::Model) -> OidcProviderConfiguration {
+    OidcProviderConfiguration::from_value_for_provider(
+        model.configuration.as_ref(),
+        &model.provider,
+    )
+    .unwrap_or_default()
+}
+
+fn provider_response(app_state: &SharedState, model: sso_providers::Model) -> SsoProvider {
+    let configuration = configuration_from_model(&model);
+    let grengin_proxy_available = grengin_proxy_available_for_provider(&model.provider);
+    SsoProvider {
+        id: model.id,
+        redirect_url: model.redirect_url,
+        provider: model.provider,
+        name: model.name,
+        client_id: model.client_id,
+        client_secret: app_state
+            .get_decrypted_api_key_preview(&Some(model.client_secret))
+            .unwrap_or(EMPTY_VALUE.to_string()),
+        issuer_url: model.issuer_url,
+        tenant_id: model.tenant_id,
+        allowed_domains: model.allowed_domains,
+        is_enabled: model.is_enabled,
+        use_grengin_proxy: model.use_grengin_proxy,
+        jit_provisioning: model.jit_provisioning,
+        configuration,
+        grengin_proxy_available,
+        created_at: model.created_at,
+        updated_at: model.updated_at,
+    }
+}
 
 #[utoipa::path(
     get,
@@ -71,30 +110,117 @@ pub async fn get_sso_providers(
     let models = ensure_sso_providers_from_env(&app_state, models).await?;
     let response = models
         .into_iter()
-        .map(|model| {
-            let grengin_proxy_available = grengin_proxy_available_for_provider(&model.provider);
-            SsoProvider {
-                id: model.id,
-                redirect_url: model.redirect_url,
-                provider: model.provider,
-                name: model.name,
-                client_id: model.client_id,
-                client_secret: app_state
-                    .get_decrypted_api_key_preview(&Some(model.client_secret))
-                    .unwrap_or(EMPTY_VALUE.to_string()),
-                issuer_url: model.issuer_url,
-                tenant_id: model.tenant_id,
-                allowed_domains: model.allowed_domains,
-                is_enabled: model.is_enabled,
-                use_grengin_proxy: model.use_grengin_proxy,
-                jit_provisioning: model.jit_provisioning,
-                grengin_proxy_available,
-                created_at: model.created_at,
-                updated_at: model.updated_at,
-            }
-        })
+        .map(|model| provider_response(&app_state, model))
         .collect();
     Ok((StatusCode::OK, Json(response)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/admin/sso-providers",
+    tag = "admin",
+    request_body = SsoProviderCreate,
+    responses(
+        (status = 201, body = SsoProvider),
+        (status = 400, content_type = "application/json", body = Error, description = "Invalid provider configuration"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token"),
+        (status = 409, content_type = "application/json", body = Error, description = "Provider slug already exists"),
+    )
+)]
+pub async fn create_sso_provider(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Json(req): Json<SsoProviderCreate>,
+) -> Result<(StatusCode, Json<SsoProvider>), AuthError> {
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_SSO_PROVIDERS_MANAGE,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await?;
+
+    let provider =
+        normalize_provider_slug(&req.provider).map_err(|_| AuthError::InvalidProvider {
+            provider: Some(req.provider.clone()),
+        })?;
+    validate_provider_url(&req.issuer_url, true).map_err(|_| AuthError::InvalidProvider {
+        provider: Some(provider.clone()),
+    })?;
+    validate_provider_url(&req.redirect_url, true).map_err(|_| AuthError::InvalidRedirectUri {
+        redirect_uri: Some(req.redirect_url.clone()),
+    })?;
+    req.configuration
+        .validate_for_provider(&provider)
+        .map_err(|_| AuthError::InvalidProvider {
+            provider: Some(provider.clone()),
+        })?;
+
+    let exists = sso_providers::Entity::find()
+        .filter(sso_providers::Column::Provider.eq(&provider))
+        .one(&app_state.database)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?
+        .is_some();
+    if exists {
+        return Err(AuthError::DbConflict);
+    }
+
+    let mut allowed_domains = req
+        .allowed_domains
+        .into_iter()
+        .map(|domain| domain.trim().trim_start_matches('@').to_ascii_lowercase())
+        .filter(|domain| !domain.is_empty())
+        .collect::<Vec<_>>();
+    allowed_domains.sort();
+    allowed_domains.dedup();
+    let now = Utc::now();
+    let model = sso_providers::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        provider: Set(provider.clone()),
+        name: Set(req.name.trim().to_string()),
+        tenant_id: Set(req.tenant_id),
+        client_id: Set(req.client_id.trim().to_string()),
+        client_secret: Set(encrypt_key(
+            &app_state.settings.auth.app_key,
+            req.client_secret.trim().as_bytes(),
+        )
+        .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?),
+        issuer_url: Set(req.issuer_url),
+        redirect_url: Set(req.redirect_url),
+        allowed_domains: Set(allowed_domains),
+        is_enabled: Set(false),
+        is_default: Set(false),
+        use_grengin_proxy: Set(false),
+        jit_provisioning: Set(req.jit_provisioning),
+        configuration: Set(Some(
+            serde_json::to_value(req.configuration)
+                .map_err(|_| AuthError::InvalidCallbackParameters)?,
+        )),
+        created_at: Set(now),
+        updated_at: Set(now),
+    }
+    .insert(&app_state.database)
+    .await
+    .map_err(|error| {
+        eprintln!("DB insert SSO provider error: {error:?}");
+        AuthError::DbConflict
+    })?;
+
+    app_state
+        .refresh_oidc_client(&provider)
+        .await
+        .map_err(|error| {
+            eprintln!("OIDC provider cache refresh failed: {error:?}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
+    Ok((
+        StatusCode::CREATED,
+        Json(provider_response(&app_state, model)),
+    ))
 }
 
 #[utoipa::path(
@@ -133,6 +259,7 @@ pub async fn get_sso_provider_by_id(
     let response = model
         .map(|model| {
             let editable = is_editable(&model.provider);
+            let configuration = configuration_from_model(&model);
             SsoProviderEditable {
                 id: model.id,
                 provider: EditableField {
@@ -168,6 +295,7 @@ pub async fn get_sso_provider_by_id(
                 allowed_domains: model.allowed_domains,
                 is_enabled: model.is_enabled,
                 jit_provisioning: model.jit_provisioning,
+                configuration,
                 created_at: model.created_at,
                 updated_at: model.updated_at,
             }
@@ -222,6 +350,7 @@ pub async fn validate_sso_provider_by_id(
         req.issuer_url.as_ref(),
         req.redirect_url.as_ref(),
         req.frontend_hosted_url.as_ref(),
+        req.configuration.as_ref(),
     )?;
 
     let (valid, message) = validate_sso_draft(&app_state, &draft).await?;
@@ -278,6 +407,7 @@ pub async fn delete_sso_provider_by_id(
             AuthError::DbTimeout
         })?
         .ok_or(AuthError::ResourceNotFound)?;
+    let provider = model.provider.clone();
     let mut active_model = model.into_active_model();
     active_model.client_id = Set("<empty>".to_string());
     active_model.client_secret = Set("<empty>".to_string());
@@ -292,6 +422,7 @@ pub async fn delete_sso_provider_by_id(
             eprintln!("Db get one error: {}", e);
             AuthError::DbTimeout
         })?;
+    app_state.remove_oidc_provider(&provider).await;
     Ok((StatusCode::OK, "Deleted successfully"))
 }
 
@@ -330,6 +461,7 @@ pub async fn update_sso_provider_by_id(
             AuthError::DbTimeout
         })?
         .ok_or(AuthError::DbNotFound)?;
+    let original_provider = model.provider.clone();
     let draft = build_draft_config(
         &app_state,
         &model,
@@ -340,8 +472,10 @@ pub async fn update_sso_provider_by_id(
         req.issuer_url.as_ref(),
         req.redirect_url.as_ref(),
         req.frontend_hosted_url.as_ref(),
+        req.configuration.as_ref(),
     )?;
-    if has_sensitive_changes(&app_state, &model, &draft) {
+    let enabling_provider = req.is_enabled == Some(true) && !model.is_enabled;
+    if has_sensitive_changes(&app_state, &model, &draft) || enabling_provider {
         let validation_token = req
             .validation_token
             .as_deref()
@@ -355,13 +489,20 @@ pub async fn update_sso_provider_by_id(
     }
 
     let mut active_model = model.into_active_model();
-    if let Some(provider) = req.provider {
-        active_model.provider = Set(provider.to_lowercase());
+    if req.provider.is_some() {
+        active_model.provider = Set(draft.provider.clone());
     }
     if let Some(name) = req.name {
         active_model.name = Set(name);
     }
     if let Some(allowed_domains) = req.allowed_domains {
+        let mut allowed_domains = allowed_domains
+            .into_iter()
+            .map(|domain| domain.trim().trim_start_matches('@').to_ascii_lowercase())
+            .filter(|domain| !domain.is_empty())
+            .collect::<Vec<_>>();
+        allowed_domains.sort();
+        allowed_domains.dedup();
         active_model.allowed_domains = Set(allowed_domains);
     }
     if let Some(client_id) = req.client_id {
@@ -370,14 +511,14 @@ pub async fn update_sso_provider_by_id(
     if let Some(is_enabled) = req.is_enabled {
         active_model.is_enabled = Set(is_enabled);
     }
-    if let Some(issuer_url) = req.issuer_url {
-        active_model.issuer_url = Set(issuer_url);
+    if req.issuer_url.is_some() {
+        active_model.issuer_url = Set(draft.issuer_url.clone());
     }
     if req.redirect_url.is_some() || req.frontend_hosted_url.is_some() {
         active_model.redirect_url = Set(draft.redirect_url.clone());
     }
-    if let Some(tenant_id) = req.tenant_id {
-        active_model.tenant_id = Set(Some(tenant_id));
+    if req.tenant_id.is_some() {
+        active_model.tenant_id = Set(draft.tenant_id.clone());
     }
     if let Some(client_secret) = req.client_secret {
         active_model.client_secret = Set(encrypt_key(
@@ -392,6 +533,17 @@ pub async fn update_sso_provider_by_id(
     if let Some(jit_provisioning) = req.jit_provisioning {
         active_model.jit_provisioning = Set(jit_provisioning);
     }
+    if let Some(configuration) = req.configuration {
+        configuration
+            .validate_for_provider(&draft.provider)
+            .map_err(|_| AuthError::InvalidProvider {
+                provider: Some(draft.provider.clone()),
+            })?;
+        active_model.configuration = Set(Some(
+            serde_json::to_value(configuration)
+                .map_err(|_| AuthError::InvalidCallbackParameters)?,
+        ));
+    }
     active_model.updated_at = Set(Utc::now());
     let updated_model = active_model
         .update(&app_state.database)
@@ -400,6 +552,9 @@ pub async fn update_sso_provider_by_id(
             eprintln!("Db update error {:?}", e);
             AuthError::DbTimeout
         })?;
+    if original_provider != updated_model.provider {
+        app_state.remove_oidc_provider(&original_provider).await;
+    }
     if let Ok(client_secret) = decrypt_key(
         &app_state.settings.auth.app_key,
         &updated_model.client_secret,
@@ -423,28 +578,15 @@ pub async fn update_sso_provider_by_id(
                 updated_model.jit_provisioning,
             )
             .await;
-        let _ = app_state.refresh_oidc_client(&updated_model.provider).await;
     }
-    let grengin_proxy_available = grengin_proxy_available_for_provider(&updated_model.provider);
-    let response = SsoProvider {
-        id: updated_model.id,
-        provider: updated_model.provider,
-        name: updated_model.name,
-        client_id: updated_model.client_id,
-        client_secret: app_state
-            .get_decrypted_api_key_preview(&Some(updated_model.client_secret))
-            .unwrap_or("<empty>".to_string()),
-        issuer_url: updated_model.issuer_url,
-        redirect_url: updated_model.redirect_url,
-        tenant_id: updated_model.tenant_id,
-        allowed_domains: updated_model.allowed_domains,
-        is_enabled: updated_model.is_enabled,
-        use_grengin_proxy: updated_model.use_grengin_proxy,
-        jit_provisioning: updated_model.jit_provisioning,
-        grengin_proxy_available,
-        created_at: updated_model.created_at,
-        updated_at: updated_model.updated_at,
-    };
+    app_state
+        .refresh_oidc_client(&updated_model.provider)
+        .await
+        .map_err(|error| {
+            eprintln!("OIDC provider cache refresh failed: {error:?}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
+    let response = provider_response(&app_state, updated_model);
     Ok((StatusCode::OK, Json(response)))
 }
 
@@ -546,7 +688,13 @@ pub async fn quick_setup_grengin_proxy(
             saved.jit_provisioning,
         )
         .await;
-    let _ = app_state.refresh_oidc_client(&saved.provider).await;
+    app_state
+        .refresh_oidc_client(&saved.provider)
+        .await
+        .map_err(|error| {
+            eprintln!("OIDC proxy provider cache refresh failed: {error:?}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
 
     Ok(StatusCode::OK)
 }

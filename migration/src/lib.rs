@@ -69,6 +69,8 @@ mod m20260810_000001_add_plugin_config_to_ai_engines;
 mod m20260810_000001_create_provider_plugins;
 mod m20260814_000001_reconcile_provider_plugin_storage;
 mod m20260816_000001_add_pinned_to_conversations;
+mod m20260819_000001_add_identities_to_users;
+mod m20260827_000001_add_configuration_to_sso_providers;
 
 pub struct Migrator;
 
@@ -142,6 +144,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260810_000001_add_plugin_config_to_ai_engines::Migration),
             Box::new(m20260814_000001_reconcile_provider_plugin_storage::Migration),
             Box::new(m20260816_000001_add_pinned_to_conversations::Migration),
+            Box::new(m20260819_000001_add_identities_to_users::Migration),
+            Box::new(m20260827_000001_add_configuration_to_sso_providers::Migration),
         ]
     }
 }
@@ -163,7 +167,7 @@ mod tests {
         assert_eq!(names.len(), names.iter().collect::<HashSet<_>>().len());
         assert_eq!(
             names.last().map(String::as_str),
-            Some("m20260816_000001_add_pinned_to_conversations")
+            Some("m20260827_000001_add_configuration_to_sso_providers")
         );
     }
 }
