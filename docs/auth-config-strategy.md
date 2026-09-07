@@ -118,6 +118,24 @@ Adapters:
 The adapter enum is closed in a release, while provider records are open at runtime. This permits
 arbitrary OIDC vendors today without pretending that OIDC JSON can safely implement LDAP or SAML.
 
+## Social Provider Compatibility
+
+Provider tests must follow the vendor's published metadata and authorization contract. A generic
+OIDC mock must not be used to claim support for a provider whose real protocol differs.
+
+- Okta is supported through the generic OIDC adapter. Use an org or custom authorization-server
+  issuer, authorization code with S256 PKCE, and the `openid`, `email`, and `profile` scopes.
+- LinkedIn is supported through the generic OIDC adapter. Use the live discovery issuer
+  `https://www.linkedin.com/oauth` and the `openid`, `profile`, and `email` scopes. The email
+  claim is optional; when LinkedIn omits it, Grengin uses a provider-scoped synthetic address and
+  must not link the identity to an existing account by an unverified fallback.
+- Sign in with Apple is not yet production-ready. Its OIDC core uses issuer
+  `https://appleid.apple.com`, scopes `openid`, `email`, and `name`, and `response_mode=form_post`.
+  Real web login also requires an HTTPS callback, a URL-encoded POST callback body, and a
+  developer-signed client-secret JWT that must be rotated. Apple does not advertise PKCE support,
+  while the current runtime requires PKCE for every OIDC provider. The current callback handoff,
+  secret lifecycle, and mandatory-PKCE policy do not satisfy that full contract.
+
 ## LibreChat Parity Roadmap
 
 The next schema is a singleton `auth_settings` policy record, separate from provider credentials:
@@ -181,12 +199,14 @@ profiles at once. The focused OIDC smoke cases in this slice are:
 - `/auth0`
 - `/okta`
 - `/keycloak`
+- `/linkedin`
 - `/apple`
 
 Google OIDC and Microsoft Entra ID / Azure AD are already covered elsewhere and are intentionally
 skipped here. Each issuer gets its own discovery document, token endpoint, and JWKS. Auth0, Okta,
-and Keycloak use this standard OIDC path in production. The Apple profile only proves that an
-OIDC-shaped issuer with its requested scopes and authorization parameters works; it does not prove
-Sign in with Apple's client-secret JWT/form-post behavior. GitHub is covered separately by its
-native OAuth2 adapter tests. Vendor-native SDKs, Graph/Admin APIs, native mobile login behavior,
-and other provider-specific edges require separate integration tests.
+Keycloak, and LinkedIn use this standard OIDC path in production. The Apple mock must exercise
+`form_post` and current Apple scopes, but it still cannot prove Apple's developer-signed
+client-secret JWT, HTTPS registration, or behavior when a client sends unadvertised PKCE
+parameters. GitHub is covered separately by its native OAuth2 adapter tests. Vendor-native SDKs,
+Graph/Admin APIs, native mobile login behavior, and other provider-specific edges require separate
+integration tests.

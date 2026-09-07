@@ -1480,6 +1480,7 @@ dependencies = [
  "openidconnect",
  "openssl",
  "pdf-extract",
+ "quick-xml",
  "reqwest",
  "rmcp",
  "rust_decimal",

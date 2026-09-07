@@ -44,6 +44,9 @@ calamine = "0.36"
 flate2 = "1"
 pdf-extract = "0.12"
 
+[dev-dependencies]
+quick-xml = "0.41"
+
 [profile.release]
 opt-level = 3
 lto = true

@@ -446,7 +446,7 @@ mod mock_oidc_matrix_tests {
             "subject_types_supported": ["public"],
             "id_token_signing_alg_values_supported": ["RS256"],
             "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
-            "scopes_supported": ["openid", "email", "profile", "groups", "offline_access"],
+            "scopes_supported": ["openid", "email", "profile", "name", "groups", "offline_access"],
         }))
     }
 
@@ -541,8 +541,17 @@ mod mock_oidc_matrix_tests {
                 userinfo_email: None,
             },
             ProviderCase {
-                slug: "apple",
+                slug: "linkedin",
                 scopes: &["email", "profile"],
+                authorization_params: &[],
+                subject: "linkedin-user-01",
+                display_name: "LinkedIn User",
+                id_token_email: Some("linkedin.user@example.com"),
+                userinfo_email: None,
+            },
+            ProviderCase {
+                slug: "apple",
+                scopes: &["email", "name"],
                 authorization_params: &[("response_mode", "form_post")],
                 subject: "apple-user-01",
                 display_name: "Apple User",
@@ -553,11 +562,7 @@ mod mock_oidc_matrix_tests {
     }
 
     fn requested_scopes(case: &ProviderCase) -> Vec<String> {
-        let mut scopes = vec![
-            "openid".to_string(),
-            "email".to_string(),
-            "profile".to_string(),
-        ];
+        let mut scopes = vec!["openid".to_string()];
         for scope in case.scopes {
             if !scopes.iter().any(|existing| existing == scope) {
                 scopes.push(scope.to_string());
