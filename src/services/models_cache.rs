@@ -8,7 +8,10 @@ use tokio::sync::{OnceCell, RwLock};
 
 use crate::dto::models::{ModelInfo, ModelType, ProviderInfo};
 
-const PROVIDERS_URL: &str = "https://meta.grengin.com/providers.json";
+const PROVIDERS_URLS: [&str; 2] = [
+    "https://meta.grengin.com/ai-providers.json",
+    "https://meta.grengin.com/providers.json",
+];
 const TITLE_GENERATORS_URL: &str = "https://meta.grengin.com/common/title_generators.json";
 
 #[derive(Clone)]
@@ -110,7 +113,7 @@ async fn fetch_all(req_client: &reqwest::Client) -> Result<FetchedData, Error> {
 async fn fetch_providers(
     req_client: &reqwest::Client,
 ) -> Result<(Vec<ProviderInfo>, HashMap<String, String>), Error> {
-    let providers_value = fetch_json(req_client, PROVIDERS_URL).await?;
+    let providers_value = fetch_json_candidates(req_client, &PROVIDERS_URLS).await?;
     let providers_array = providers_value
         .as_array()
         .ok_or_else(|| anyhow!("providers.json root is not an array"))?;
@@ -226,6 +229,20 @@ async fn fetch_json(req_client: &reqwest::Client, url: &str) -> Result<Value, Er
     let response = req_client.get(url).send().await?.error_for_status()?;
     let value = response.json::<Value>().await?;
     Ok(value)
+}
+
+async fn fetch_json_candidates(
+    req_client: &reqwest::Client,
+    urls: &[&str],
+) -> Result<Value, Error> {
+    let mut last_error = None;
+    for url in urls {
+        match fetch_json(req_client, url).await {
+            Ok(value) => return Ok(value),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("no catalog URLs configured")))
 }
 
 struct ProviderStub {
@@ -457,9 +474,39 @@ fn get_str(value: &Value, field: &str) -> Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
+    use axum::{Json, Router, routing::get};
     use serde_json::json;
+    use tokio::net::TcpListener;
 
     use super::*;
+
+    #[tokio::test]
+    async fn falls_back_to_legacy_catalog_path_during_rollout() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind catalog fixture");
+        let base_url = format!("http://{}", listener.local_addr().expect("fixture address"));
+        let router = Router::new().route(
+            "/providers.json",
+            get(|| async { Json(serde_json::json!([{"key": "fallback-provider"}])) }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve catalog fixture");
+        });
+
+        let primary = format!("{base_url}/ai-providers.json");
+        let fallback = format!("{base_url}/providers.json");
+        let value = fetch_json_candidates(
+            &reqwest::Client::new(),
+            &[primary.as_str(), fallback.as_str()],
+        )
+        .await
+        .expect("legacy catalog fallback");
+
+        assert_eq!(value[0]["key"], "fallback-provider");
+    }
 
     #[test]
     fn parses_text_catalog_capabilities_limits_and_pricing() {
