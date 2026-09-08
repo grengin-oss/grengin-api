@@ -110,6 +110,7 @@ use utoipa::OpenApi;
         oidc::list_auth_providers,
         oidc::oidc_oauth_callback_get,
         oidc::oidc_oauth_callback_post,
+        oidc::apple_oauth_callback_form,
         oidc::azure_mobile_oauth_callback_get,
         oidc::azure_mobile_oauth_callback_post,
         chat::get_chat_by_id,

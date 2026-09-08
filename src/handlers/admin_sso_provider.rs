@@ -8,7 +8,8 @@ use crate::{
         error::{AuthError, Error},
         permissions::{PERMISSION_SSO_PROVIDERS_MANAGE, PERMISSION_SSO_PROVIDERS_VIEW},
         provider_config::{
-            OidcProviderConfiguration, normalize_provider_slug, validate_provider_url,
+            OidcProviderConfiguration, normalize_provider_slug, validate_issuer_url_for_provider,
+            validate_redirect_url_for_provider,
         },
         sso_provider::is_editable,
     },
@@ -147,11 +148,15 @@ pub async fn create_sso_provider(
         normalize_provider_slug(&req.provider).map_err(|_| AuthError::InvalidProvider {
             provider: Some(req.provider.clone()),
         })?;
-    validate_provider_url(&req.issuer_url, true).map_err(|_| AuthError::InvalidProvider {
-        provider: Some(provider.clone()),
+    validate_issuer_url_for_provider(&provider, &req.issuer_url).map_err(|_| {
+        AuthError::InvalidProvider {
+            provider: Some(provider.clone()),
+        }
     })?;
-    validate_provider_url(&req.redirect_url, true).map_err(|_| AuthError::InvalidRedirectUri {
-        redirect_uri: Some(req.redirect_url.clone()),
+    validate_redirect_url_for_provider(&provider, &req.redirect_url).map_err(|_| {
+        AuthError::InvalidRedirectUri {
+            redirect_uri: Some(req.redirect_url.clone()),
+        }
     })?;
     req.configuration
         .validate_for_provider(&provider)

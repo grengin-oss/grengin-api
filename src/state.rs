@@ -7,7 +7,10 @@ use crate::{
         encryption::decrypt_key,
         github::GitHubOAuthAdapter,
         google::build_google_client,
-        provider_config::{OidcProviderConfiguration, build_discovered_oidc_client},
+        provider_config::{
+            OidcProviderConfiguration, build_discovered_oidc_client,
+            validate_issuer_url_for_provider, validate_redirect_url_for_provider,
+        },
     },
     config::setting::{ConfigError, OidcClient, Settings},
     dto::oauth::AuthProvider,
@@ -265,6 +268,8 @@ impl AppState {
             model.configuration.as_ref(),
             &model.provider,
         )?;
+        validate_issuer_url_for_provider(&model.provider, &model.issuer_url)?;
+        validate_redirect_url_for_provider(&model.provider, &model.redirect_url)?;
         let client = if !model.is_enabled || model.use_grengin_proxy {
             None
         } else {

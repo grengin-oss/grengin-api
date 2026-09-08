@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::auth::provider_config::{OidcProviderConfiguration, build_discovered_oidc_client};
+use crate::auth::provider_config::{
+    OidcProviderConfiguration, PkceMode, build_discovered_oidc_client,
+};
 use anyhow::{Context, Result, anyhow, bail};
 use openidconnect::{
     AuthorizationCode, CsrfToken, Nonce, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
@@ -37,7 +39,7 @@ struct PendingAuthorization {
     http_client: ReqwestClient,
     code: String,
     nonce: Nonce,
-    pkce_verifier: String,
+    pkce_verifier: Option<String>,
     redirect_uri: String,
     authorization_url: Url,
 }
@@ -92,6 +94,11 @@ fn configuration(profile: &ProviderProfile) -> Result<OidcProviderConfiguration>
             .map(|scope| scope.to_string())
             .collect(),
         authorization_params,
+        pkce: if matches!(profile.callback_mode, CallbackMode::FormPost) {
+            PkceMode::Disabled
+        } else {
+            PkceMode::S256
+        },
         ..Default::default()
     };
     configuration.validate_for_provider(profile.issuer_id)?;
@@ -174,14 +181,18 @@ async fn begin_authorization(profile: &ProviderProfile) -> Result<PendingAuthori
     )
     .await?;
     let configuration = configuration(profile)?;
-    let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-    let mut authorization = client
-        .authorize_url(
-            CoreAuthenticationFlow::AuthorizationCode,
-            CsrfToken::new_random,
-            Nonce::new_random,
-        )
-        .set_pkce_challenge(pkce_challenge);
+    let mut authorization = client.authorize_url(
+        CoreAuthenticationFlow::AuthorizationCode,
+        CsrfToken::new_random,
+        Nonce::new_random,
+    );
+    let pkce_verifier = if configuration.uses_pkce() {
+        let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+        authorization = authorization.set_pkce_challenge(pkce_challenge);
+        Some(pkce_verifier.secret().to_string())
+    } else {
+        None
+    };
     for scope in configuration.scopes {
         if scope != "openid" {
             authorization = authorization.add_scope(Scope::new(scope));
@@ -251,7 +262,7 @@ async fn begin_authorization(profile: &ProviderProfile) -> Result<PendingAuthori
         http_client,
         code,
         nonce,
-        pkce_verifier: pkce_verifier.secret().to_string(),
+        pkce_verifier,
         redirect_uri: profile.redirect_uri.to_string(),
         authorization_url,
     })
@@ -259,13 +270,15 @@ async fn begin_authorization(profile: &ProviderProfile) -> Result<PendingAuthori
 
 async fn run_flow(profile: ProviderProfile) -> Result<()> {
     let pending = begin_authorization(&profile).await?;
-    let token_response = pending
+    let mut token_request = pending
         .client
         .exchange_code(AuthorizationCode::new(pending.code.clone()))?
-        .set_pkce_verifier(PkceCodeVerifier::new(pending.pkce_verifier.clone()))
-        .set_redirect_uri(Cow::Owned(RedirectUrl::new(pending.redirect_uri.clone())?))
-        .request_async(&pending.http_client)
-        .await?;
+        .set_redirect_uri(Cow::Owned(RedirectUrl::new(pending.redirect_uri.clone())?));
+    if let Some(pkce_verifier) = pending.pkce_verifier.as_ref() {
+        token_request =
+            token_request.set_pkce_verifier(PkceCodeVerifier::new(pkce_verifier.clone()));
+    }
+    let token_response = token_request.request_async(&pending.http_client).await?;
     let id_token = token_response
         .id_token()
         .context("mock token response has no ID token")?;
@@ -281,13 +294,14 @@ async fn run_flow(profile: ProviderProfile) -> Result<()> {
         bail!("{} email is not verified", profile.issuer_id);
     }
 
-    let replay = pending
+    let mut replay_request = pending
         .client
         .exchange_code(AuthorizationCode::new(pending.code))?
-        .set_pkce_verifier(PkceCodeVerifier::new(pending.pkce_verifier))
-        .set_redirect_uri(Cow::Owned(RedirectUrl::new(pending.redirect_uri)?))
-        .request_async(&pending.http_client)
-        .await;
+        .set_redirect_uri(Cow::Owned(RedirectUrl::new(pending.redirect_uri)?));
+    if let Some(pkce_verifier) = pending.pkce_verifier {
+        replay_request = replay_request.set_pkce_verifier(PkceCodeVerifier::new(pkce_verifier));
+    }
+    let replay = replay_request.request_async(&pending.http_client).await;
     if replay.is_ok() {
         return Err(anyhow!(
             "{} authorization code was replayable",
@@ -295,10 +309,14 @@ async fn run_flow(profile: ProviderProfile) -> Result<()> {
         ));
     }
 
-    assert!(query_value(&pending.authorization_url, "code_challenge").is_some());
+    let expected_pkce = matches!(profile.callback_mode, CallbackMode::Query);
+    assert_eq!(
+        query_value(&pending.authorization_url, "code_challenge").is_some(),
+        expected_pkce
+    );
     assert_eq!(
         query_value(&pending.authorization_url, "code_challenge_method").as_deref(),
-        Some("S256")
+        expected_pkce.then_some("S256")
     );
     Ok(())
 }

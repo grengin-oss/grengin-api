@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MOCK_OAUTH2_IMAGE="${MOCK_OAUTH2_IMAGE:-ghcr.io/navikt/mock-oauth2-server:6.0.2}"
 CONTAINER_NAME="grengin-social-mock-oauth2-$$"
-JSON_CONFIG='{"interactiveLogin":false,"tokenCallbacks":[{"issuerId":"linkedin","requestMappings":[{"requestParam":"code","match":"*","claims":{"sub":"linkedin-user-123","email":"linkedin.user@example.com","email_verified":true,"name":"LinkedIn User","picture":"https://cdn.example.com/linkedin-user.png"}}]},{"issuerId":"apple","requestMappings":[{"requestParam":"code","match":"*","claims":{"sub":"apple-user-123","email":"apple.user@privaterelay.appleid.com","email_verified":true,"name":"Apple User","is_private_email":true}}]}]}'
+JSON_CONFIG='{"interactiveLogin":false,"tokenCallbacks":[{"issuerId":"linkedin","requestMappings":[{"requestParam":"code","match":"*","claims":{"sub":"linkedin-user-123","email":"linkedin.user@example.com","email_verified":true,"name":"LinkedIn User","picture":"https://cdn.example.com/linkedin-user.png"}}]},{"issuerId":"apple","requestMappings":[{"requestParam":"code","match":"*","claims":{"sub":"apple-user-123","email":"apple.user@privaterelay.appleid.com","email_verified":true,"is_private_email":true}}]}]}'
 
 cleanup() {
   docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true

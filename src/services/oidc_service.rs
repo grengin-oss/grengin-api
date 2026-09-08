@@ -34,8 +34,52 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, TryIntoModel, sea_query::Expr,
 };
+use serde::Deserialize;
 use std::borrow::Cow;
 use uuid::Uuid;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppleCallbackUser {
+    name: Option<AppleCallbackName>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppleCallbackName {
+    first_name: Option<String>,
+    last_name: Option<String>,
+}
+
+fn clean_apple_name_part(value: Option<String>) -> Option<String> {
+    let value = value?.trim().to_string();
+    if value.is_empty()
+        || value.chars().count() > 100
+        || value
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '<' | '>' | '&'))
+    {
+        return None;
+    }
+    Some(value)
+}
+
+fn apple_callback_display_name(value: Option<&str>) -> Option<String> {
+    let value = value?;
+    if value.len() > 4096 {
+        return None;
+    }
+    let user: AppleCallbackUser = serde_json::from_str(value).ok()?;
+    let name = user.name?;
+    let parts = [
+        clean_apple_name_part(name.first_name),
+        clean_apple_name_part(name.last_name),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
 
 pub async fn build_azure_public_client_for_redirect(
     app_state: &SharedState,
@@ -86,6 +130,10 @@ pub async fn oidc_oauth_callback(
     app_state: SharedState,
     exchange_mode: CallbackExchangeMode,
 ) -> Result<(StatusCode, Json<AuthToken>), AuthError> {
+    let apple_display_name = provider
+        .eq_ignore_ascii_case("apple")
+        .then(|| apple_callback_display_name(cb.user.as_deref()))
+        .flatten();
     if let Some(error) = cb.error {
         eprintln!("OAuth error: {} - {:?}", error, cb.error_description);
         return Err(AuthError::InvalidCallbackParameters);
@@ -199,11 +247,18 @@ pub async fn oidc_oauth_callback(
                     }
                 }
             };
-            let token_resp = oidc_client
+            let mut token_request = oidc_client
                 .exchange_code(AuthorizationCode::new(code))
-                .expect("Failed to get token response")
-                .set_pkce_verifier(PkceCodeVerifier::new(sess.pkce_verifier.clone()))
-                .set_redirect_uri(Cow::Owned(redirect_uri))
+                .map_err(|error| {
+                    eprintln!("OIDC token request construction failed: {error:?}");
+                    AuthError::ServiceTemporarilyUnavailable
+                })?
+                .set_redirect_uri(Cow::Owned(redirect_uri));
+            if runtime.configuration.uses_pkce() {
+                token_request = token_request
+                    .set_pkce_verifier(PkceCodeVerifier::new(sess.pkce_verifier.clone()));
+            }
+            let token_resp = token_request
                 .request_async(&app_state.req_client)
                 .await
                 .map_err(|e| {
@@ -265,9 +320,9 @@ pub async fn oidc_oauth_callback(
             };
             let subject = claims.subject().as_str().to_string();
             let mut email = claims.email().map(|e| e.as_str().to_string());
-            let mut email_verified = claims
-                .email_verified()
-                .unwrap_or_else(|| provider.eq_ignore_ascii_case("azure"));
+            let mut email_verified = claims.email_verified().unwrap_or_else(|| {
+                provider.eq_ignore_ascii_case("azure") || provider.eq_ignore_ascii_case("apple")
+            });
             let picture = claims
                 .picture()
                 .and_then(|pic_claim| pic_claim.get(None))
@@ -278,18 +333,21 @@ pub async fn oidc_oauth_callback(
                 .map(|url| url.as_str().to_owned());
             let mut display_name = claims
                 .name()
-                .and_then(|n| n.get(None).map(|s| s.to_string()));
+                .and_then(|n| n.get(None).map(|s| s.to_string()))
+                .or(apple_display_name);
             if email.is_none() {
-                let info: CoreUserInfoClaims = oidc_client
-                    .user_info(token_resp.access_token().to_owned(), None)
-                    .expect("userinfo req")
-                    .request_async(&app_state.req_client)
-                    .await
-                    .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
-                email = info.email().map(|e| e.as_str().to_string());
-                email_verified = info.email_verified().unwrap_or(email_verified);
-                if display_name.is_none() {
-                    display_name = info.name().and_then(|n| n.get(None).map(|s| s.to_string()));
+                if let Ok(request) =
+                    oidc_client.user_info(token_resp.access_token().to_owned(), None)
+                {
+                    let info: CoreUserInfoClaims = request
+                        .request_async(&app_state.req_client)
+                        .await
+                        .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
+                    email = info.email().map(|e| e.as_str().to_string());
+                    email_verified = info.email_verified().unwrap_or(email_verified);
+                    if display_name.is_none() {
+                        display_name = info.name().and_then(|n| n.get(None).map(|s| s.to_string()));
+                    }
                 }
             }
             VerifiedIdentity {
@@ -622,5 +680,26 @@ mod tests {
 
         assert_eq!(second.len(), 1);
         assert_eq!(second["okta"].subject, "new-subject");
+    }
+
+    #[test]
+    fn apple_callback_name_is_parsed_without_trusting_other_user_fields() {
+        let payload = serde_json::json!({
+            "name": {"firstName": " Ada ", "lastName": "Lovelace"},
+            "email": "attacker-controlled@example.com"
+        })
+        .to_string();
+
+        assert_eq!(
+            apple_callback_display_name(Some(&payload)),
+            Some("Ada Lovelace".to_string())
+        );
+        assert_eq!(
+            apple_callback_display_name(Some(
+                r#"{"name":{"firstName":"<script>","lastName":"User"}}"#
+            )),
+            Some("User".to_string())
+        );
+        assert!(apple_callback_display_name(Some("not-json")).is_none());
     }
 }

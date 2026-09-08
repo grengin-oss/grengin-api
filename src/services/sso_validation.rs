@@ -9,7 +9,7 @@ use crate::{
         github::{GitHubAdapterError, GitHubOAuthAdapter},
         provider_config::{
             OidcProviderConfiguration, build_discovered_oidc_client, normalize_provider_slug,
-            validate_provider_url,
+            validate_issuer_url_for_provider, validate_redirect_url_for_provider,
         },
     },
     models::sso_providers,
@@ -74,13 +74,6 @@ fn extract_frontend_origin(frontend_hosted_url: &str) -> Result<String, AuthErro
     Ok(format!("{}://{host}{port}", parsed.scheme()))
 }
 
-fn ensure_valid_url(url: &str) -> Result<(), AuthError> {
-    Url::parse(url).map_err(|_| AuthError::InvalidRedirectUri {
-        redirect_uri: Some(url.to_string()),
-    })?;
-    Ok(())
-}
-
 fn normalize_secret_for_compare(value: &str) -> String {
     if value == EMPTY_VALUE {
         String::new()
@@ -95,9 +88,10 @@ fn resolve_redirect_url(
     frontend_hosted_url: Option<&String>,
     existing_redirect_url: &str,
 ) -> Result<String, AuthError> {
+    let is_apple = provider.eq_ignore_ascii_case("apple");
     let derived_from_frontend = if let Some(frontend_hosted_url) = frontend_hosted_url {
         let origin = extract_frontend_origin(frontend_hosted_url)?;
-        Some(format!("{origin}/auth/{provider}/callback"))
+        (!is_apple).then(|| format!("{origin}/auth/{provider}/callback"))
     } else {
         None
     };
@@ -116,7 +110,11 @@ fn resolve_redirect_url(
     } else {
         existing_redirect_url.to_string()
     };
-    ensure_valid_url(&redirect_url)?;
+    validate_redirect_url_for_provider(provider, &redirect_url).map_err(|_| {
+        AuthError::InvalidRedirectUri {
+            redirect_uri: Some(redirect_url.clone()),
+        }
+    })?;
     Ok(redirect_url)
 }
 
@@ -152,8 +150,10 @@ pub fn build_draft_config(
     let issuer_url = issuer_url
         .cloned()
         .unwrap_or_else(|| model.issuer_url.clone());
-    validate_provider_url(&issuer_url, true).map_err(|_| AuthError::InvalidProvider {
-        provider: Some(provider.clone()),
+    validate_issuer_url_for_provider(&provider, &issuer_url).map_err(|_| {
+        AuthError::InvalidProvider {
+            provider: Some(provider.clone()),
+        }
     })?;
     let configuration = configuration.cloned().unwrap_or(
         OidcProviderConfiguration::from_value_for_provider(model.configuration.as_ref(), &provider)
@@ -477,5 +477,18 @@ mod tests {
             "https://app.example.com/auth/keycloak/callback",
         );
         assert!(matches!(error, Err(AuthError::InvalidRedirectUri { .. })));
+    }
+
+    #[test]
+    fn apple_keeps_api_callback_when_frontend_origin_is_supplied() {
+        let redirect = resolve_redirect_url(
+            "apple",
+            Some(&"https://api.example.com/auth/apple/callback".to_string()),
+            Some(&"https://chat.example.com/login".to_string()),
+            "https://api.example.com/auth/apple/callback",
+        )
+        .expect("Apple API callback");
+
+        assert_eq!(redirect, "https://api.example.com/auth/apple/callback");
     }
 }

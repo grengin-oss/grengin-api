@@ -23,8 +23,9 @@ supports GitHub OAuth Apps through a native, typed OAuth 2.0 social adapter.
 - GitHub uses fixed GitHub authorization, token, user, and verified-email endpoints. Provider
   JSON may configure its presentation and least-privilege scopes, but may not replace those
   endpoints.
-- PKCE S256, state, nonce, ID token signature verification, issuer validation, and exact callback
-  redirects remain mandatory.
+- PKCE S256 remains mandatory except for the typed Apple web profile, whose published metadata
+  does not advertise PKCE. State, nonce, ID token signature verification, issuer validation, and
+  exact callback redirects remain mandatory for every OIDC profile.
 - Returning users resolve by provider slug plus OIDC subject. The legacy Google and Entra ID
   columns are retained as a migration fallback.
 - Email account linking is allowed only for verified provider email claims and can be disabled
@@ -48,11 +49,12 @@ The `configuration` JSON document is versioned independently from the database s
 
 ```json
 {
-  "version": "1.0",
+  "version": "1.1",
   "scopes": ["openid", "email", "profile", "groups"],
   "authorizationParams": {
     "prompt": "select_account"
   },
+  "pkce": "s256",
   "emailLinking": "verifiedEmail",
   "autoRedirect": false
 }
@@ -61,7 +63,10 @@ The `configuration` JSON document is versioned independently from the database s
 Rules:
 
 - `openid` is mandatory for OIDC providers. The GitHub OAuth profile instead requires exactly
-  `read:user` and `user:email`. PKCE cannot be disabled for either protocol.
+  `read:user` and `user:email`.
+- Configuration `1.0` remains accepted and implies `pkce: "s256"`. Configuration `1.1` makes the
+  mode explicit. Only the `apple` profile may select `pkce: "disabled"`; GitHub and every generic
+  OIDC provider still require `s256`.
 - Reserved OAuth parameters such as `redirect_uri`, `client_id`, `state`, `nonce`, `scope`, and
   `code_challenge` cannot be overridden.
 - HTTPS is mandatory except for loopback development URLs.
@@ -79,7 +84,10 @@ Rules:
    provider.
 4. `GET /auth/providers` makes all configured providers and their enabled state discoverable to
    clients.
-5. `GET /auth/{provider}` starts login and `/auth/{provider}/callback` completes it.
+5. `GET /auth/{provider}` starts login and `/auth/{provider}/callback` completes it. Apple posts
+   its URL-encoded callback to the API, which completes the exchange and redirects to the
+   configured frontend callback with Grengin tokens in the URL fragment. The frontend removes
+   the fragment before making a network request.
 
 An admin must not be able to enable a new or materially changed provider without validating the
 same draft. Deleting a provider disables credentials and evicts it from runtime state; linked
@@ -129,12 +137,13 @@ OIDC mock must not be used to claim support for a provider whose real protocol d
   `https://www.linkedin.com/oauth` and the `openid`, `profile`, and `email` scopes. The email
   claim is optional; when LinkedIn omits it, Grengin uses a provider-scoped synthetic address and
   must not link the identity to an existing account by an unverified fallback.
-- Sign in with Apple is not yet production-ready. Its OIDC core uses issuer
-  `https://appleid.apple.com`, scopes `openid`, `email`, and `name`, and `response_mode=form_post`.
-  Real web login also requires an HTTPS callback, a URL-encoded POST callback body, and a
-  developer-signed client-secret JWT that must be rotated. Apple does not advertise PKCE support,
-  while the current runtime requires PKCE for every OIDC provider. The current callback handoff,
-  secret lifecycle, and mandatory-PKCE policy do not satisfy that full contract.
+- Sign in with Apple is supported for web clients through the typed `apple` profile. It uses
+  issuer `https://appleid.apple.com`, scopes `openid`, `email`, and `name`,
+  `response_mode=form_post`, and `pkce=disabled`. The registered HTTPS redirect URI points to the
+  Grengin API callback, which validates the single-use state and nonce, exchanges and verifies the
+  token, then redirects to the configured frontend callback. The client secret is Apple's
+  developer-signed JWT; administrators must generate and rotate it before expiration. Native
+  Apple SDK behavior remains outside this server-side OIDC profile.
 
 ## LibreChat Parity Roadmap
 
@@ -166,7 +175,8 @@ References:
   external identity.
 - Automatic email linking requires a verified claim. Disabled linking requires an explicit admin
   or authenticated-user linking flow.
-- Callback state is single-use and expires after 15 minutes. PKCE and nonce are mandatory.
+- Callback state is single-use and expires after 15 minutes. Nonce is mandatory. PKCE S256 is
+  mandatory except for the versioned Apple profile.
 - Redirects are exact configured values; arbitrary request redirects are rejected.
 - Provider configuration changes are permission checked and audit logged.
 - The public provider catalog exposes documented issuer patterns only. It never exposes configured
@@ -205,8 +215,9 @@ profiles at once. The focused OIDC smoke cases in this slice are:
 Google OIDC and Microsoft Entra ID / Azure AD are already covered elsewhere and are intentionally
 skipped here. Each issuer gets its own discovery document, token endpoint, and JWKS. Auth0, Okta,
 Keycloak, and LinkedIn use this standard OIDC path in production. The Apple mock must exercise
-`form_post` and current Apple scopes, but it still cannot prove Apple's developer-signed
-client-secret JWT, HTTPS registration, or behavior when a client sends unadvertised PKCE
-parameters. GitHub is covered separately by its native OAuth2 adapter tests. Vendor-native SDKs,
+`form_post`, current Apple scopes, an authorization request without PKCE, URL-encoded callback
+parsing, and the API-to-frontend fragment handoff. It cannot prove Apple's developer-signed
+client-secret JWT or Apple Developer HTTPS registration. GitHub is covered separately by its
+native OAuth2 adapter tests. Vendor-native SDKs,
 Graph/Admin APIs, native mobile login behavior, and other provider-specific edges require separate
 integration tests.

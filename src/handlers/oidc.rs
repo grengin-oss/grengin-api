@@ -4,7 +4,7 @@
 use crate::{
     auth::{
         error::{AuthError, Error},
-        provider_config::OidcProviderConfiguration,
+        provider_config::{OidcProviderConfiguration, validate_provider_url},
         sso_proxy::build_proxy_authorize_url,
     },
     dto::{
@@ -19,7 +19,7 @@ use crate::{
     utils::uri::is_azure_mobile_redirect_uri,
 };
 use axum::{
-    Json,
+    Form, Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::Redirect,
@@ -30,6 +30,25 @@ use openidconnect::{
 };
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, QueryOrder};
 use std::borrow::Cow;
+
+fn apple_frontend_callback_url(
+    frontend_base: &str,
+    fragment_pairs: &[(&str, &str)],
+) -> Result<String, AuthError> {
+    let mut callback_url =
+        validate_provider_url(frontend_base, true).map_err(|_| AuthError::InvalidRedirectUri {
+            redirect_uri: Some(frontend_base.to_string()),
+        })?;
+    callback_url.set_path("/auth/apple/callback");
+    callback_url.set_query(None);
+
+    let mut fragment = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in fragment_pairs {
+        fragment.append_pair(key, value);
+    }
+    callback_url.set_fragment(Some(&fragment.finish()));
+    Ok(callback_url.to_string())
+}
 
 fn auth_provider_summary(model: sso_providers::Model) -> AuthProviderSummary {
     let configuration = OidcProviderConfiguration::from_value_for_provider(
@@ -169,17 +188,23 @@ pub async fn oidc_login_start(
     let client = runtime.client.ok_or(AuthError::SsoProviderNotConfigured {
         provider: Some(provider.clone()),
     })?;
+    let uses_pkce = runtime.configuration.uses_pkce();
     let (auth_url, state, nonce, pkce_verifier) = match client {
         AuthProtocolClient::Oidc(oidc_client) => {
-            let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
             let mut authorization = oidc_client
                 .authorize_url(
                     CoreAuthenticationFlow::AuthorizationCode,
                     CsrfToken::new_random,
                     Nonce::new_random,
                 )
-                .set_redirect_uri(Cow::Owned(redirect_uri.clone()))
-                .set_pkce_challenge(pkce_challenge);
+                .set_redirect_uri(Cow::Owned(redirect_uri.clone()));
+            let pkce_verifier = if uses_pkce {
+                let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+                authorization = authorization.set_pkce_challenge(pkce_challenge);
+                pkce_verifier.secret().to_string()
+            } else {
+                "not-used".to_string()
+            };
             for scope in runtime.configuration.scopes {
                 if scope != "openid" {
                     authorization = authorization.add_scope(Scope::new(scope));
@@ -193,7 +218,7 @@ pub async fn oidc_login_start(
                 auth_url,
                 state.secret().to_string(),
                 nonce.secret().to_string(),
-                pkce_verifier.secret().to_string(),
+                pkce_verifier,
             )
         }
         AuthProtocolClient::GitHub(adapter) => {
@@ -296,6 +321,47 @@ pub async fn oidc_oauth_callback_post(
 }
 
 #[utoipa::path(
+    post,
+    path = "/auth/apple/callback",
+    tag = "auth",
+    operation_id = "appleAuthCallback",
+    request_body(content = AuthCallback, content_type = "application/x-www-form-urlencoded", description = "Sign in with Apple form_post callback"),
+    responses(
+        (status = 303, description = "Authentication result returned to the configured frontend callback"),
+        (status = 400, content_type = "application/json", body = Error, description = "Frontend callback configuration is invalid"),
+    )
+)]
+pub async fn apple_oauth_callback_form(
+    State(app_state): State<SharedState>,
+    Form(cb): Form<AuthCallback>,
+) -> Result<Redirect, AuthError> {
+    let callback = oidc_oauth_callback(
+        "apple".to_string(),
+        cb,
+        app_state.clone(),
+        CallbackExchangeMode::Auto,
+    )
+    .await;
+    let callback_url = match callback {
+        Ok((_, Json(token))) => {
+            let mut pairs = vec![("access_token", token.access_token.as_str())];
+            if let Some(refresh_token) = token.refresh_token.as_deref() {
+                pairs.push(("refresh_token", refresh_token));
+            }
+            apple_frontend_callback_url(&app_state.settings.auth.redirect_url, &pairs)?
+        }
+        Err(error) => {
+            eprintln!("Apple OAuth callback failed: {error:?}");
+            apple_frontend_callback_url(
+                &app_state.settings.auth.redirect_url,
+                &[("error", "oauth_callback_failed")],
+            )?
+        }
+    };
+    Ok(Redirect::to(&callback_url))
+}
+
+#[utoipa::path(
     get,
     path = "/auth/azure/mobile/callback",
     tag = "auth",
@@ -357,6 +423,7 @@ pub async fn azure_mobile_oauth_callback_post(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dto::auth::TokenType;
     use uuid::Uuid;
 
     #[test]
@@ -397,6 +464,59 @@ mod tests {
                 "is_enabled": false,
                 "auto_redirect": true
             })
+        );
+    }
+
+    #[test]
+    fn apple_handoff_uses_fragment_and_clears_frontend_url_parts() {
+        let token = AuthToken {
+            access_token: "access value".to_string(),
+            token_type: TokenType::Bearer,
+            expires_in: 3600,
+            refresh_token: Some("refresh value".to_string()),
+            user: None,
+        };
+        let callback = apple_frontend_callback_url(
+            "https://chat.example.com/old/path?untrusted=value",
+            &[
+                ("access_token", token.access_token.as_str()),
+                (
+                    "refresh_token",
+                    token.refresh_token.as_deref().expect("refresh token"),
+                ),
+            ],
+        )
+        .expect("Apple frontend callback");
+        let parsed = reqwest::Url::parse(&callback).expect("callback URL");
+
+        assert_eq!(parsed.path(), "/auth/apple/callback");
+        assert!(parsed.query().is_none());
+        let fragment: std::collections::HashMap<_, _> = parsed
+            .fragment()
+            .map(|fragment| url::form_urlencoded::parse(fragment.as_bytes()))
+            .into_iter()
+            .flatten()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        assert_eq!(
+            fragment.get("access_token"),
+            Some(&"access value".to_string())
+        );
+        assert_eq!(
+            fragment.get("refresh_token"),
+            Some(&"refresh value".to_string())
+        );
+
+        let failure = apple_frontend_callback_url(
+            "https://chat.example.com",
+            &[("error", "oauth_callback_failed")],
+        )
+        .expect("Apple failure callback");
+        assert_eq!(
+            reqwest::Url::parse(&failure)
+                .expect("failure URL")
+                .fragment(),
+            Some("error=oauth_callback_failed")
         );
     }
 }
