@@ -42,7 +42,7 @@ use crate::{
         admin_sso_provider::{
             create_sso_provider, delete_sso_provider_by_id, get_sso_provider_by_id,
             get_sso_providers, quick_setup_grengin_proxy, update_sso_provider_by_id,
-            validate_sso_provider_by_id,
+            validate_grengin_proxy_setup, validate_sso_provider_by_id,
         },
         admin_system::get_system_metrics,
         admin_users::{
@@ -118,6 +118,10 @@ pub fn admin_routes() -> Router<SharedState> {
         .route(
             "/admin/sso-providers/{provider_id}/quick-setup",
             post(quick_setup_grengin_proxy),
+        )
+        .route(
+            "/admin/sso-providers/{provider_id}/quick-setup/validate",
+            post(validate_grengin_proxy_setup),
         )
         .route(
             "/admin/sso-providers/{provider_id}",

@@ -44,6 +44,14 @@ pub struct SsoProvider {
 pub struct GrenginProxySetupRequest {
     pub allowed_domains: Vec<String>,
     pub tenant_id: Option<String>,
+    pub validation_token: Option<String>,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GrenginProxySetupValidationRequest {
+    pub allowed_domains: Vec<String>,
+    pub tenant_id: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]

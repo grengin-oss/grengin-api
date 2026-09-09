@@ -36,7 +36,7 @@ with pgvector.
 - **Multi-provider AI**: OpenAI, Anthropic, Mistral, and Gemini chat and image models
 - **LLM provider plugins**: declarative JSON integrations for hosted and self-hosted providers without recompiling Grengin
 - **Streaming chat**: server-sent events, tool execution, attachments, and artifacts
-- **Configurable authentication**: JWT sessions and runtime-configured OIDC providers, including Google, Microsoft Entra ID, Keycloak, Authentik, and Okta
+- **Configurable authentication**: JWT sessions, runtime-configured OIDC, GitHub OAuth, LinkedIn, and Sign in with Apple for web clients
 - **Authorization**: roles, permissions, departments, scoped assignments, and model policies
 - **Projects and RAG**: project sources, semantic retrieval, summaries, skills, and full-text search
 - **MCP integration**: HTTP, SSE, and stdio servers with OAuth and per-tool access rules
@@ -64,7 +64,7 @@ rules.
 ## Configurable Authentication
 
 OIDC providers are configured at runtime through the SSO administration API.
-Provider credentials are encrypted, PKCE and token verification stay in typed
+Provider credentials are encrypted, PKCE policy and token verification stay in typed
 Rust code, and clients can discover enabled login methods through
 `GET /auth/providers`. See the [authentication strategy](docs/auth-config-strategy.md)
 for the configuration format, security contract, APIs, and LDAP/SAML roadmap.

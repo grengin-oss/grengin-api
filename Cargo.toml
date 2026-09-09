@@ -37,12 +37,16 @@ futures-util = "0.3.31"
 llm-plugin = { path = "llm-plugin" }
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 utoipa = { version = "5.4.0", features = ["axum_extras", "chrono", "url", "uuid"] }
+url = "2.5"
 aes-gcm = "0.10.3"
 rmcp = { version = "0.15.0", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 sysinfo = "0.37.2"
 calamine = "0.36"
 flate2 = "1"
 pdf-extract = "0.12"
+
+[dev-dependencies]
+quick-xml = "0.41"
 
 [profile.release]
 opt-level = 3

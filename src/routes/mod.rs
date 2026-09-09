@@ -6,6 +6,7 @@ pub mod artifacts;
 pub mod auth;
 pub mod branding;
 pub mod chat;
+pub mod discovery;
 pub mod file;
 pub mod mcp;
 pub mod me;

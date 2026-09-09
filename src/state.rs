@@ -3,15 +3,19 @@
 
 use crate::{
     auth::{
-        azure::build_azure_client,
+        azure::{AzureMultitenantValidation, build_azure_client},
         encryption::decrypt_key,
         github::GitHubOAuthAdapter,
         google::build_google_client,
-        provider_config::{OidcProviderConfiguration, build_discovered_oidc_client},
+        provider_config::{
+            OidcProviderConfiguration, build_discovered_oidc_client,
+            validate_issuer_url_for_provider, validate_redirect_url_for_provider,
+        },
     },
     config::setting::{ConfigError, OidcClient, Settings},
     dto::oauth::AuthProvider,
     models::{mcp_servers, sso_providers},
+    services::discovery_catalog::DiscoveryCatalog,
     services::live_models_cache::LiveModelsCache,
     services::mcp_client::McpServerClient,
     services::notifications::NotificationEvent,
@@ -26,6 +30,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 use tokio::sync::{Notify, RwLock, broadcast};
 use uuid::Uuid;
@@ -40,11 +45,13 @@ pub struct AppState {
     pub stream_cancellations: RwLock<HashMap<Uuid, Arc<StreamCancel>>>,
     pub provider_registry: ProviderRegistry,
     pub live_models_cache: LiveModelsCache,
+    pub discovery_catalog: DiscoveryCatalog,
 }
 
 #[derive(Clone)]
 pub struct OidcProviderRuntime {
     pub client: Option<AuthProtocolClient>,
+    pub azure_multitenant_validation: Option<AzureMultitenantValidation>,
     pub redirect_url: String,
     pub allowed_domains: Vec<String>,
     pub is_enabled: bool,
@@ -92,6 +99,7 @@ impl AppState {
     pub async fn from_settings(mut settings: Settings) -> Result<SharedState, ConfigError> {
         let req_client = reqwest::ClientBuilder::new()
             .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(15))
             .build()
             .map_err(|e| ConfigError::ReqwestClientBuildError(e.to_string()))?;
         let database = Database::connect(&settings.auth.database_url)
@@ -110,6 +118,8 @@ impl AppState {
             .await
             .map_err(|e| eprintln!("Loading embedding config from db error: {e}"));
         let (notification_hub, _) = broadcast::channel(256);
+        let discovery_catalog = DiscoveryCatalog::from_env(req_client.clone())
+            .map_err(|error| ConfigError::Custom(error.to_string()))?;
         let state = Self {
             database,
             oidc_providers: RwLock::new(HashMap::new()),
@@ -120,6 +130,7 @@ impl AppState {
             stream_cancellations: RwLock::new(HashMap::new()),
             provider_registry: ProviderRegistry::new(),
             live_models_cache: LiveModelsCache::new(),
+            discovery_catalog,
         };
         state.reload_oidc_providers().await?;
         let _ = state.load_mcp_servers_from_db().await;
@@ -265,14 +276,17 @@ impl AppState {
             model.configuration.as_ref(),
             &model.provider,
         )?;
-        let client = if !model.is_enabled || model.use_grengin_proxy {
-            None
+        validate_issuer_url_for_provider(&model.provider, &model.issuer_url)?;
+        validate_redirect_url_for_provider(&model.provider, &model.redirect_url)?;
+        let (client, azure_multitenant_validation) = if !model.is_enabled || model.use_grengin_proxy
+        {
+            (None, None)
         } else {
             let client_secret = decrypt_key(&self.settings.auth.app_key, &model.client_secret)
                 .map_err(|error| anyhow::anyhow!("OIDC client secret decrypt failed: {error:?}"))?;
-            let client = match model.provider.as_str() {
-                "azure" => AuthProtocolClient::Oidc(
-                    build_azure_client(
+            match model.provider.as_str() {
+                "azure" => {
+                    let azure = build_azure_client(
                         &self.req_client,
                         model.client_id.clone(),
                         client_secret,
@@ -282,42 +296,51 @@ impl AppState {
                             .clone()
                             .unwrap_or_else(|| "common".to_string()),
                     )
-                    .await?,
-                ),
-                "google" => AuthProtocolClient::Oidc(
-                    build_google_client(
+                    .await?;
+                    (
+                        Some(AuthProtocolClient::Oidc(azure.client)),
+                        azure.multitenant_validation,
+                    )
+                }
+                "google" => {
+                    let client = build_google_client(
                         &self.req_client,
                         model.client_id.clone(),
                         client_secret,
                         model.redirect_url.clone(),
                     )
-                    .await?,
-                ),
+                    .await?;
+                    (Some(AuthProtocolClient::Oidc(client)), None)
+                }
                 "github" => {
                     if !GitHubOAuthAdapter::supports_issuer(&model.issuer_url) {
                         return Err(anyhow::anyhow!("GitHub issuer must be https://github.com"));
                     }
-                    AuthProtocolClient::GitHub(GitHubOAuthAdapter::new(
-                        model.client_id.clone(),
-                        client_secret,
-                        model.redirect_url.clone(),
-                    )?)
+                    (
+                        Some(AuthProtocolClient::GitHub(GitHubOAuthAdapter::new(
+                            model.client_id.clone(),
+                            client_secret,
+                            model.redirect_url.clone(),
+                        )?)),
+                        None,
+                    )
                 }
-                _ => AuthProtocolClient::Oidc(
-                    build_discovered_oidc_client(
+                _ => {
+                    let client = build_discovered_oidc_client(
                         &self.req_client,
                         &model.issuer_url,
                         model.client_id.clone(),
                         client_secret,
                         model.redirect_url.clone(),
                     )
-                    .await?,
-                ),
-            };
-            Some(client)
+                    .await?;
+                    (Some(AuthProtocolClient::Oidc(client)), None)
+                }
+            }
         };
         Ok(OidcProviderRuntime {
             client,
+            azure_multitenant_validation,
             redirect_url: model.redirect_url.clone(),
             allowed_domains: model.allowed_domains.clone(),
             is_enabled: model.is_enabled,

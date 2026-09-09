@@ -3,7 +3,7 @@
 
 use serde::Deserialize;
 
-// Response envelope from https://meta.grengin.com/providers/{provider}/text_embedders.json
+// Response envelope from https://meta.grengin.com/ai-providers/{provider}/text_embedders.json
 #[derive(Debug, Deserialize)]
 pub struct EmbeddersResponse {
     pub models: Vec<EmbedderModelMeta>,

@@ -27,6 +27,7 @@ pub struct AuthCallback {
     pub code: Option<String>,
     pub state: String,
     pub assertion: Option<String>,
+    pub user: Option<String>,
     pub error: Option<String>,
     pub error_description: Option<String>,
 }

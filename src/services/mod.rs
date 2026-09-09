@@ -15,6 +15,7 @@ pub mod budget_allocation;
 pub mod chat_helpers;
 pub mod department_helpers;
 pub mod department_policies;
+pub mod discovery_catalog;
 pub mod embedders_cache;
 pub mod embedding_helpers;
 pub mod image_gen_helpers;

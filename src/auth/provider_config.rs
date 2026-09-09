@@ -10,7 +10,8 @@ use utoipa::ToSchema;
 
 use crate::config::setting::OidcClient;
 
-pub const OIDC_PROVIDER_CONFIG_VERSION: &str = "1.0";
+pub const OIDC_PROVIDER_CONFIG_VERSION: &str = "1.1";
+const LEGACY_OIDC_PROVIDER_CONFIG_VERSION: &str = "1.0";
 
 const RESERVED_AUTHORIZATION_PARAMS: &[&str] = &[
     "client_id",
@@ -31,12 +32,21 @@ pub enum EmailLinkingMode {
     VerifiedEmail,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum PkceMode {
+    Disabled,
+    #[default]
+    S256,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct OidcProviderConfiguration {
     pub version: String,
     pub scopes: Vec<String>,
     pub authorization_params: BTreeMap<String, String>,
+    pub pkce: PkceMode,
     pub email_linking: EmailLinkingMode,
     pub auto_redirect: bool,
 }
@@ -51,6 +61,7 @@ impl Default for OidcProviderConfiguration {
                 "profile".to_string(),
             ],
             authorization_params: BTreeMap::new(),
+            pkce: PkceMode::S256,
             email_linking: EmailLinkingMode::VerifiedEmail,
             auto_redirect: false,
         }
@@ -86,10 +97,22 @@ impl OidcProviderConfiguration {
     }
 
     pub fn validate_for_provider(&self, provider: &str) -> Result<(), ProviderConfigError> {
-        if self.version != OIDC_PROVIDER_CONFIG_VERSION {
+        if self.version != OIDC_PROVIDER_CONFIG_VERSION
+            && self.version != LEGACY_OIDC_PROVIDER_CONFIG_VERSION
+        {
             return Err(ProviderConfigError::UnsupportedVersion(
                 self.version.clone(),
             ));
+        }
+        let is_apple = provider.eq_ignore_ascii_case("apple");
+        if is_apple {
+            if self.version != OIDC_PROVIDER_CONFIG_VERSION
+                || !matches!(self.pkce, PkceMode::Disabled)
+            {
+                return Err(ProviderConfigError::InvalidPkceMode);
+            }
+        } else if !matches!(self.pkce, PkceMode::S256) {
+            return Err(ProviderConfigError::InvalidPkceMode);
         }
         if self.scopes.is_empty() || self.scopes.len() > 32 {
             return Err(ProviderConfigError::InvalidScopes);
@@ -110,6 +133,20 @@ impl OidcProviderConfiguration {
             if seen.len() != 2 || !seen.contains("read:user") || !seen.contains("user:email") {
                 return Err(ProviderConfigError::InvalidScopes);
             }
+        } else if is_apple {
+            if !seen.contains("openid")
+                || !seen.contains("email")
+                || seen
+                    .iter()
+                    .any(|scope| !matches!(scope.as_str(), "openid" | "email" | "name"))
+                || self
+                    .authorization_params
+                    .get("response_mode")
+                    .map(String::as_str)
+                    != Some("form_post")
+            {
+                return Err(ProviderConfigError::InvalidAppleProfile);
+            }
         } else if !seen.contains("openid") {
             return Err(ProviderConfigError::MissingOpenIdScope);
         }
@@ -128,6 +165,10 @@ impl OidcProviderConfiguration {
         }
         Ok(())
     }
+
+    pub fn uses_pkce(&self) -> bool {
+        matches!(self.pkce, PkceMode::S256)
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -144,6 +185,10 @@ pub enum ProviderConfigError {
     InvalidScopes,
     #[error("OIDC providers must request the openid scope")]
     MissingOpenIdScope,
+    #[error("PKCE mode is invalid for this provider configuration version")]
+    InvalidPkceMode,
+    #[error("Apple requires its published scopes and form_post authorization response")]
+    InvalidAppleProfile,
     #[error("provider configuration version '{0}' is unsupported")]
     UnsupportedVersion(String),
 }
@@ -181,6 +226,36 @@ pub fn validate_provider_url(
         return Err(ProviderConfigError::InvalidUrl);
     }
     if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return Err(ProviderConfigError::InvalidUrl);
+    }
+    Ok(url)
+}
+
+pub fn validate_redirect_url_for_provider(
+    provider: &str,
+    value: &str,
+) -> Result<Url, ProviderConfigError> {
+    let url = validate_provider_url(value, true)?;
+    if provider.eq_ignore_ascii_case("apple") {
+        let host = url.host_str().ok_or(ProviderConfigError::InvalidUrl)?;
+        if url.scheme() != "https"
+            || host.eq_ignore_ascii_case("localhost")
+            || host.parse::<std::net::IpAddr>().is_ok()
+            || url.path() != "/auth/apple/callback"
+            || url.query().is_some()
+        {
+            return Err(ProviderConfigError::InvalidUrl);
+        }
+    }
+    Ok(url)
+}
+
+pub fn validate_issuer_url_for_provider(
+    provider: &str,
+    value: &str,
+) -> Result<Url, ProviderConfigError> {
+    let url = validate_provider_url(value, true)?;
+    if provider.eq_ignore_ascii_case("apple") && url.as_str() != "https://appleid.apple.com/" {
         return Err(ProviderConfigError::InvalidUrl);
     }
     Ok(url)
@@ -276,12 +351,138 @@ mod tests {
     }
 
     #[test]
+    fn legacy_configuration_keeps_pkce_s256() {
+        let configuration: OidcProviderConfiguration = serde_json::from_value(serde_json::json!({
+            "version": "1.0",
+            "scopes": ["openid", "email"],
+            "authorizationParams": {},
+            "emailLinking": "verifiedEmail",
+            "autoRedirect": false
+        }))
+        .expect("legacy provider configuration");
+
+        assert_eq!(configuration.pkce, PkceMode::S256);
+        assert!(configuration.validate_for_provider("keycloak").is_ok());
+    }
+
+    #[test]
+    fn only_versioned_apple_profile_can_disable_pkce() {
+        let apple = OidcProviderConfiguration {
+            scopes: vec![
+                "openid".to_string(),
+                "email".to_string(),
+                "name".to_string(),
+            ],
+            authorization_params: BTreeMap::from([(
+                "response_mode".to_string(),
+                "form_post".to_string(),
+            )]),
+            pkce: PkceMode::Disabled,
+            ..Default::default()
+        };
+        assert!(apple.validate_for_provider("apple").is_ok());
+
+        let mut generic = apple.clone();
+        assert_eq!(
+            generic.validate_for_provider("keycloak"),
+            Err(ProviderConfigError::InvalidPkceMode)
+        );
+
+        generic.version = LEGACY_OIDC_PROVIDER_CONFIG_VERSION.to_string();
+        assert_eq!(
+            generic.validate_for_provider("apple"),
+            Err(ProviderConfigError::InvalidPkceMode)
+        );
+
+        let apple_with_pkce = OidcProviderConfiguration {
+            scopes: vec![
+                "openid".to_string(),
+                "email".to_string(),
+                "name".to_string(),
+            ],
+            authorization_params: BTreeMap::from([(
+                "response_mode".to_string(),
+                "form_post".to_string(),
+            )]),
+            ..Default::default()
+        };
+        assert_eq!(
+            apple_with_pkce.validate_for_provider("apple"),
+            Err(ProviderConfigError::InvalidPkceMode)
+        );
+    }
+
+    #[test]
     fn provider_urls_require_https_except_loopback() {
         assert!(validate_provider_url("https://id.example.com/realms/acme", true).is_ok());
         assert!(validate_provider_url("http://localhost:5556/dex", true).is_ok());
         assert!(validate_provider_url("http://id.example.com", true).is_err());
         assert!(validate_provider_url("https://user:pass@id.example.com", true).is_err());
         assert!(validate_provider_url("https://id.example.com/#fragment", true).is_err());
+    }
+
+    #[test]
+    fn apple_redirect_requires_https_domain_and_api_callback_path() {
+        assert!(
+            validate_redirect_url_for_provider(
+                "apple",
+                "https://api.example.com/auth/apple/callback"
+            )
+            .is_ok()
+        );
+        for value in [
+            "http://localhost:8080/auth/apple/callback",
+            "https://127.0.0.1/auth/apple/callback",
+            "https://app.example.com/auth/apple/callback?next=/admin",
+            "https://api.example.com/auth/google/callback",
+        ] {
+            assert!(
+                validate_redirect_url_for_provider("apple", value).is_err(),
+                "accepted {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn apple_profile_requires_exact_issuer_scopes_and_form_post() {
+        assert!(validate_issuer_url_for_provider("apple", "https://appleid.apple.com").is_ok());
+        for value in [
+            "https://appleid.apple.com/tenant",
+            "https://apple.example.com",
+            "http://localhost:8080/apple",
+        ] {
+            assert!(
+                validate_issuer_url_for_provider("apple", value).is_err(),
+                "accepted {value}"
+            );
+        }
+
+        let mut configuration = OidcProviderConfiguration {
+            scopes: vec![
+                "openid".to_string(),
+                "email".to_string(),
+                "name".to_string(),
+            ],
+            authorization_params: BTreeMap::from([(
+                "response_mode".to_string(),
+                "form_post".to_string(),
+            )]),
+            pkce: PkceMode::Disabled,
+            ..Default::default()
+        };
+        assert!(configuration.validate_for_provider("apple").is_ok());
+
+        configuration.scopes.push("profile".to_string());
+        assert_eq!(
+            configuration.validate_for_provider("apple"),
+            Err(ProviderConfigError::InvalidAppleProfile)
+        );
+        configuration.scopes.pop();
+        configuration.authorization_params.clear();
+        assert_eq!(
+            configuration.validate_for_provider("apple"),
+            Err(ProviderConfigError::InvalidAppleProfile)
+        );
     }
 }
 
@@ -315,8 +516,10 @@ mod mock_oidc_matrix_tests {
         slug: &'static str,
         scopes: &'static [&'static str],
         authorization_params: &'static [(&'static str, &'static str)],
+        pkce: PkceMode,
         subject: &'static str,
         display_name: &'static str,
+        id_token_name: Option<&'static str>,
         id_token_email: Option<&'static str>,
         userinfo_email: Option<&'static str>,
     }
@@ -446,7 +649,7 @@ mod mock_oidc_matrix_tests {
             "subject_types_supported": ["public"],
             "id_token_signing_alg_values_supported": ["RS256"],
             "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
-            "scopes_supported": ["openid", "email", "profile", "groups", "offline_access"],
+            "scopes_supported": ["openid", "email", "profile", "name", "groups", "offline_access"],
         }))
     }
 
@@ -479,7 +682,7 @@ mod mock_oidc_matrix_tests {
             nonce: &nonce,
             email: fixture.case.id_token_email,
             email_verified: true,
-            name: Some(fixture.case.display_name),
+            name: fixture.case.id_token_name,
             preferred_username: Some(fixture.case.display_name),
         };
         let mut header = Header::new(Algorithm::RS256);
@@ -517,8 +720,10 @@ mod mock_oidc_matrix_tests {
                 slug: "auth0",
                 scopes: &["email", "profile", "offline_access"],
                 authorization_params: &[("audience", "https://api.example.com")],
+                pkce: PkceMode::S256,
                 subject: "auth0-user-01",
                 display_name: "Auth0 User",
+                id_token_name: Some("Auth0 User"),
                 id_token_email: Some("auth0.user@example.com"),
                 userinfo_email: None,
             },
@@ -526,8 +731,10 @@ mod mock_oidc_matrix_tests {
                 slug: "okta",
                 scopes: &["email", "profile", "groups"],
                 authorization_params: &[("prompt", "login")],
+                pkce: PkceMode::S256,
                 subject: "okta-user-01",
                 display_name: "Okta User",
+                id_token_name: Some("Okta User"),
                 id_token_email: Some("okta.user@example.com"),
                 userinfo_email: None,
             },
@@ -535,17 +742,32 @@ mod mock_oidc_matrix_tests {
                 slug: "keycloak",
                 scopes: &["email", "profile", "groups"],
                 authorization_params: &[("kc_idp_hint", "corporate")],
+                pkce: PkceMode::S256,
                 subject: "keycloak-user-01",
                 display_name: "Keycloak User",
+                id_token_name: Some("Keycloak User"),
                 id_token_email: Some("keycloak.user@example.com"),
                 userinfo_email: None,
             },
             ProviderCase {
-                slug: "apple",
+                slug: "linkedin",
                 scopes: &["email", "profile"],
+                authorization_params: &[],
+                pkce: PkceMode::S256,
+                subject: "linkedin-user-01",
+                display_name: "LinkedIn User",
+                id_token_name: Some("LinkedIn User"),
+                id_token_email: Some("linkedin.user@example.com"),
+                userinfo_email: None,
+            },
+            ProviderCase {
+                slug: "apple",
+                scopes: &["email", "name"],
                 authorization_params: &[("response_mode", "form_post")],
+                pkce: PkceMode::Disabled,
                 subject: "apple-user-01",
                 display_name: "Apple User",
+                id_token_name: None,
                 id_token_email: Some("apple.user@example.com"),
                 userinfo_email: None,
             },
@@ -553,11 +775,7 @@ mod mock_oidc_matrix_tests {
     }
 
     fn requested_scopes(case: &ProviderCase) -> Vec<String> {
-        let mut scopes = vec![
-            "openid".to_string(),
-            "email".to_string(),
-            "profile".to_string(),
-        ];
+        let mut scopes = vec!["openid".to_string()];
         for scope in case.scopes {
             if !scopes.iter().any(|existing| existing == scope) {
                 scopes.push(scope.to_string());
@@ -595,7 +813,6 @@ mod mock_oidc_matrix_tests {
             .await
             .unwrap_or_else(|error| panic!("{} discovery failed: {error}", case.slug));
 
-            let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
             let mut authorization = client
                 .authorize_url(
                     CoreAuthenticationFlow::AuthorizationCode,
@@ -604,8 +821,14 @@ mod mock_oidc_matrix_tests {
                 )
                 .set_redirect_uri(Cow::Owned(
                     openidconnect::RedirectUrl::new(redirect_url).expect("redirect url"),
-                ))
-                .set_pkce_challenge(pkce_challenge);
+                ));
+            let pkce_verifier = if matches!(case.pkce, PkceMode::S256) {
+                let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+                authorization = authorization.set_pkce_challenge(pkce_challenge);
+                Some(pkce_verifier)
+            } else {
+                None
+            };
             for scope in requested_scopes(&case) {
                 authorization = authorization.add_scope(Scope::new(scope));
             }
@@ -644,13 +867,23 @@ mod mock_oidc_matrix_tests {
                 case.slug
             );
 
-            let token_response = client
+            let mut token_request = client
                 .exchange_code(AuthorizationCode::new("mock-code".to_string()))
-                .expect("token request")
-                .set_pkce_verifier(pkce_verifier)
+                .expect("token request");
+            if let Some(pkce_verifier) = pkce_verifier {
+                token_request = token_request.set_pkce_verifier(pkce_verifier);
+            }
+            let token_response = token_request
                 .request_async(&req_client)
                 .await
                 .unwrap_or_else(|error| panic!("{} token exchange failed: {error}", case.slug));
+
+            assert_eq!(
+                query_value(&auth_url, "code_challenge").is_some(),
+                matches!(case.pkce, PkceMode::S256),
+                "unexpected PKCE authorization behavior for {}",
+                case.slug
+            );
 
             let id_token = token_response.id_token().expect("id token");
             let claims = id_token
@@ -668,7 +901,7 @@ mod mock_oidc_matrix_tests {
                 claims
                     .name()
                     .and_then(|name| name.get(None).map(|value| value.to_string())),
-                Some(case.display_name.to_string())
+                case.id_token_name.map(str::to_string)
             );
 
             if case.id_token_email.is_none() {

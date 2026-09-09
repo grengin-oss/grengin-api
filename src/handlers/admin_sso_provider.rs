@@ -8,13 +8,14 @@ use crate::{
         error::{AuthError, Error},
         permissions::{PERMISSION_SSO_PROVIDERS_MANAGE, PERMISSION_SSO_PROVIDERS_VIEW},
         provider_config::{
-            OidcProviderConfiguration, normalize_provider_slug, validate_provider_url,
+            OidcProviderConfiguration, normalize_provider_slug, validate_issuer_url_for_provider,
+            validate_redirect_url_for_provider,
         },
         sso_provider::is_editable,
     },
     dto::admin_sso_providers::{
-        EditableField, GrenginProxySetupRequest, SsoProvider, SsoProviderCreate,
-        SsoProviderEditable, SsoProviderUpdate, SsoProviderValidationRequest,
+        EditableField, GrenginProxySetupRequest, GrenginProxySetupValidationRequest, SsoProvider,
+        SsoProviderCreate, SsoProviderEditable, SsoProviderUpdate, SsoProviderValidationRequest,
         SsoProviderValidationResponse,
     },
     models::sso_providers,
@@ -24,8 +25,9 @@ use crate::{
             EMPTY_VALUE, ensure_sso_providers_from_env, grengin_proxy_available_for_provider,
         },
         sso_validation::{
-            build_draft_config, config_hash, has_sensitive_changes, issue_validation_token,
-            validate_sso_draft, validate_validation_token,
+            build_draft_config, config_hash, grengin_proxy_config_hash, has_sensitive_changes,
+            issue_validation_token, issue_validation_token_for_hash, normalize_allowed_domains,
+            validate_grengin_proxy, validate_sso_draft, validate_validation_token,
         },
     },
     state::SharedState,
@@ -35,7 +37,7 @@ use axum::{
     extract::{Path, State},
 };
 use chrono::Utc;
-use reqwest::StatusCode;
+use reqwest::{StatusCode, Url};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
 };
@@ -72,6 +74,54 @@ fn provider_response(app_state: &SharedState, model: sso_providers::Model) -> Ss
         created_at: model.created_at,
         updated_at: model.updated_at,
     }
+}
+
+fn grengin_proxy_setup_values(
+    model: &sso_providers::Model,
+    allowed_domains: &[String],
+    tenant_id: Option<&str>,
+) -> Result<(String, Option<String>, Vec<String>), AuthError> {
+    if !grengin_proxy_available_for_provider(&model.provider) {
+        return Err(AuthError::InvalidProvider {
+            provider: Some(model.provider.clone()),
+        });
+    }
+    let app_redirect_url =
+        std::env::var("REDIRECT_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
+    let proxy_redirect_url = format!(
+        "{}/auth/{}/callback",
+        app_redirect_url.trim_end_matches('/'),
+        model.provider
+    );
+    let parsed = Url::parse(&proxy_redirect_url).map_err(|_| AuthError::InvalidRedirectUri {
+        redirect_uri: Some(proxy_redirect_url.clone()),
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(AuthError::InvalidRedirectUri {
+            redirect_uri: Some(proxy_redirect_url),
+        });
+    }
+    let tenant_id = match model.provider.as_str() {
+        "azure" => Some(
+            tenant_id
+                .map(str::trim)
+                .filter(|tenant| !tenant.is_empty())
+                .unwrap_or("common")
+                .to_string(),
+        ),
+        _ => None,
+    };
+    Ok((
+        parsed.to_string(),
+        tenant_id,
+        normalize_allowed_domains(allowed_domains),
+    ))
+}
+
+fn require_validation_token(token: Option<&str>) -> Result<&str, AuthError> {
+    token
+        .filter(|token| !token.trim().is_empty())
+        .ok_or(AuthError::InvalidToken)
 }
 
 #[utoipa::path(
@@ -147,11 +197,15 @@ pub async fn create_sso_provider(
         normalize_provider_slug(&req.provider).map_err(|_| AuthError::InvalidProvider {
             provider: Some(req.provider.clone()),
         })?;
-    validate_provider_url(&req.issuer_url, true).map_err(|_| AuthError::InvalidProvider {
-        provider: Some(provider.clone()),
+    validate_issuer_url_for_provider(&provider, &req.issuer_url).map_err(|_| {
+        AuthError::InvalidProvider {
+            provider: Some(provider.clone()),
+        }
     })?;
-    validate_provider_url(&req.redirect_url, true).map_err(|_| AuthError::InvalidRedirectUri {
-        redirect_uri: Some(req.redirect_url.clone()),
+    validate_redirect_url_for_provider(&provider, &req.redirect_url).map_err(|_| {
+        AuthError::InvalidRedirectUri {
+            redirect_uri: Some(req.redirect_url.clone()),
+        }
     })?;
     req.configuration
         .validate_for_provider(&provider)
@@ -592,6 +646,71 @@ pub async fn update_sso_provider_by_id(
 
 // ─── Grengin SSO Proxy ────────────────────────────────────────────────────────
 
+#[utoipa::path(
+    post,
+    path = "/admin/sso-providers/{provider_id}/quick-setup/validate",
+    tag = "admin",
+    request_body = GrenginProxySetupValidationRequest,
+    responses(
+       (status = 200, body = SsoProviderValidationResponse),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+       (status = 404, content_type = "application/json", body = Error, description = "SSO provider not found"),
+       (status = 503, content_type = "application/json", body = Error, description = "Validation service unavailable"),
+    )
+)]
+pub async fn validate_grengin_proxy_setup(
+    claims: Claims,
+    Path(provider_id): Path<Uuid>,
+    State(app_state): State<SharedState>,
+    Json(body): Json<GrenginProxySetupValidationRequest>,
+) -> Result<(StatusCode, Json<SsoProviderValidationResponse>), AuthError> {
+    let authz = AuthorizationService::new(&app_state.database);
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_SSO_PROVIDERS_MANAGE,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            Some(provider_id),
+        )
+        .await?;
+    let model = sso_providers::Entity::find_by_id(provider_id)
+        .one(&app_state.database)
+        .await
+        .map_err(|error| {
+            eprintln!("db error fetching provider for proxy validation: {error:?}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+    let (redirect_url, tenant_id, allowed_domains) =
+        grengin_proxy_setup_values(&model, &body.allowed_domains, body.tenant_id.as_deref())?;
+    let expected_hash = grengin_proxy_config_hash(
+        &model.provider,
+        tenant_id.as_deref(),
+        &redirect_url,
+        &allowed_domains,
+    );
+    let (valid, message) = validate_grengin_proxy(&app_state).await?;
+    let (validation_token, validation_token_expires_at) = if valid {
+        let (token, expires_at) =
+            issue_validation_token_for_hash(provider_id, claims.user_id, expected_hash);
+        (Some(token), Some(expires_at))
+    } else {
+        (None, None)
+    };
+
+    Ok((
+        StatusCode::OK,
+        Json(SsoProviderValidationResponse {
+            valid,
+            message,
+            redirect_url,
+            validation_token,
+            validation_token_expires_at,
+        }),
+    ))
+}
+
 /// POST /admin/sso-providers/:provider_id/quick-setup
 ///
 /// Activate the Grengin SSO proxy for a provider. The instance does not need
@@ -601,6 +720,19 @@ pub async fn update_sso_provider_by_id(
 /// The admin only needs to supply:
 ///   - `allowed_domains` — email domains permitted to sign in (e.g. ["acme.com"])
 ///   - `tenant_id`       — Azure only: the directory tenant (defaults to "common")
+///   - `validation_token` — token returned by the matching quick-setup validation request
+#[utoipa::path(
+    post,
+    path = "/admin/sso-providers/{provider_id}/quick-setup",
+    tag = "admin",
+    request_body = GrenginProxySetupRequest,
+    responses(
+       (status = 200, description = "Grengin SSO proxy enabled"),
+       (status = 401, content_type = "application/json", body = Error, description = "Missing, expired, or configuration-mismatched validation token"),
+       (status = 404, content_type = "application/json", body = Error, description = "SSO provider not found"),
+       (status = 503, content_type = "application/json", body = Error, description = "Database or validation service unavailable"),
+    )
+)]
 pub async fn quick_setup_grengin_proxy(
     claims: Claims,
     Path(provider_id): Path<Uuid>,
@@ -627,6 +759,21 @@ pub async fn quick_setup_grengin_proxy(
         })?
         .ok_or(AuthError::ResourceNotFound)?;
 
+    let (proxy_redirect_url, tenant_id, allowed_domains) =
+        grengin_proxy_setup_values(&model, &body.allowed_domains, body.tenant_id.as_deref())?;
+    let expected_hash = grengin_proxy_config_hash(
+        &model.provider,
+        tenant_id.as_deref(),
+        &proxy_redirect_url,
+        &allowed_domains,
+    );
+    validate_validation_token(
+        require_validation_token(body.validation_token.as_deref())?,
+        provider_id,
+        claims.user_id,
+        &expected_hash,
+    )?;
+
     let proxy_client_id = "managed-by-grengin-proxy".to_string();
     let proxy_client_secret_plain = "managed-by-grengin-proxy".to_string();
 
@@ -639,29 +786,12 @@ pub async fn quick_setup_grengin_proxy(
         AuthError::ServiceTemporarilyUnavailable
     })?;
 
-    let app_redirect_url =
-        std::env::var("REDIRECT_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
-    let proxy_redirect_url = format!(
-        "{}/auth/{}/callback",
-        app_redirect_url.trim_end_matches('/'),
-        model.provider
-    );
-
-    let tenant_id = match model.provider.as_str() {
-        "azure" => Some(
-            body.tenant_id
-                .clone()
-                .unwrap_or_else(|| "common".to_string()),
-        ),
-        _ => None,
-    };
-
     let now = Utc::now();
     let mut active = model.into_active_model();
     active.client_id = Set(proxy_client_id);
     active.client_secret = Set(proxy_secret_encrypted);
     active.redirect_url = Set(proxy_redirect_url.clone());
-    active.allowed_domains = Set(body.allowed_domains.clone());
+    active.allowed_domains = Set(allowed_domains.clone());
     active.is_enabled = Set(true);
     active.use_grengin_proxy = Set(true);
     active.updated_at = Set(now);
@@ -683,7 +813,7 @@ pub async fn quick_setup_grengin_proxy(
             proxy_redirect_url,
             tenant_id,
             true,
-            body.allowed_domains,
+            allowed_domains,
             true,
             saved.jit_provisioning,
         )
@@ -697,4 +827,27 @@ pub async fn quick_setup_grengin_proxy(
         })?;
 
     Ok(StatusCode::OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    #[test]
+    fn proxy_setup_requires_a_non_empty_validation_token() {
+        let missing_token = require_validation_token(None).expect_err("missing token");
+        assert_eq!(
+            missing_token.into_response().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(matches!(
+            require_validation_token(Some("  ")),
+            Err(AuthError::InvalidToken)
+        ));
+        assert_eq!(
+            require_validation_token(Some("validated-token")).expect("validation token"),
+            "validated-token"
+        );
+    }
 }
