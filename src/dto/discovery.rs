@@ -34,6 +34,7 @@ pub struct DiscoveryProviderSummary {
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct DiscoveryListResponse {
+    pub distribution_version: String,
     pub catalog_type: String,
     pub catalog_version: String,
     pub providers: Vec<DiscoveryProviderSummary>,
@@ -41,6 +42,7 @@ pub struct DiscoveryListResponse {
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct AuthProviderDiscoveryResponse {
+    pub distribution_version: String,
     pub id: String,
     pub version: String,
     pub schema_version: String,
@@ -52,6 +54,7 @@ pub struct AuthProviderDiscoveryResponse {
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct AiProviderDiscoveryResponse {
+    pub distribution_version: String,
     pub id: String,
     pub version: String,
     pub manifest_version: String,

@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use llm_plugin::{ProviderManifestV1, SUPPORTED_MANIFEST_VERSION};
+use llm_plugin::ProviderManifestV1;
 use openssl::sha::sha256;
 use reqwest::{Client, StatusCode, Url, header::IF_NONE_MATCH};
 use serde::Deserialize;
@@ -17,7 +17,7 @@ use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    auth::provider_config::{OIDC_PROVIDER_CONFIG_VERSION, OidcProviderConfiguration},
+    auth::provider_config::OidcProviderConfiguration,
     dto::discovery::{
         AiProviderDiscoveryResponse, AuthProviderDiscoveryResponse, DiscoveryListResponse,
         DiscoveryProviderSummary, DiscoveryVersion,
@@ -31,8 +31,8 @@ const CATALOG_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const CATALOG_REQUEST_TIMEOUT: Duration = Duration::from_millis(200);
 const MAX_CATALOG_BYTES: usize = 2 * 1024 * 1024;
-const SUPPORTED_CATALOG_SCHEMA_VERSION: &str = "1.0";
-const SUPPORTED_AUTH_TEMPLATE_SCHEMA_VERSION: &str = "1.0";
+const SUPPORTED_DISTRIBUTION_FORMAT_VERSION: &str = "1.0";
+#[cfg(test)]
 const LEGACY_OIDC_CONFIGURATION_VERSION: &str = "1.0";
 
 #[derive(Debug, Error)]
@@ -58,20 +58,31 @@ struct CachedDocument {
 pub struct DiscoveryCatalog {
     client: Client,
     base_url: Url,
+    distribution_version: String,
     documents: Arc<RwLock<HashMap<String, CachedDocument>>>,
     fetch_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApiDistribution {
+    format_version: String,
+    grengin_api_version: String,
+    grengin_api_commit: String,
+    catalog_commit: String,
+    auth_providers: CatalogIndex,
+    ai_providers: CatalogIndex,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CatalogIndex {
-    schema_version: String,
     catalog_version: String,
     providers: Vec<CatalogProvider>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CatalogProvider {
     id: String,
     name: String,
@@ -82,12 +93,12 @@ struct CatalogProvider {
     icon: Option<String>,
     #[serde(default)]
     icon_dark: Option<String>,
-    #[serde(default)]
+    default_version: String,
     versions: Vec<CatalogArtifactVersion>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CatalogArtifactVersion {
     version: String,
     schema_version: String,
@@ -132,13 +143,6 @@ impl CatalogKind {
         }
     }
 
-    fn index_path(&self) -> &'static str {
-        match self {
-            Self::Auth => "auth-providers/index.json",
-            Self::Ai => "ai-providers/index.json",
-        }
-    }
-
     fn artifact_path(&self, provider: &str, version: &str) -> String {
         match self {
             Self::Auth => {
@@ -148,24 +152,10 @@ impl CatalogKind {
         }
     }
 
-    fn supports(&self, version: &CatalogArtifactVersion) -> bool {
+    fn index<'a>(&self, distribution: &'a ApiDistribution) -> &'a CatalogIndex {
         match self {
-            Self::Auth => {
-                version.schema_version == SUPPORTED_AUTH_TEMPLATE_SCHEMA_VERSION
-                    && version
-                        .configuration_version
-                        .as_deref()
-                        .is_some_and(|candidate| {
-                            matches!(
-                                candidate,
-                                LEGACY_OIDC_CONFIGURATION_VERSION | OIDC_PROVIDER_CONFIG_VERSION
-                            )
-                        })
-            }
-            Self::Ai => {
-                version.schema_version == SUPPORTED_CATALOG_SCHEMA_VERSION
-                    && version.manifest_version.as_deref() == Some(SUPPORTED_MANIFEST_VERSION)
-            }
+            Self::Auth => &distribution.auth_providers,
+            Self::Ai => &distribution.ai_providers,
         }
     }
 
@@ -181,10 +171,19 @@ impl DiscoveryCatalog {
     pub fn from_env(client: Client) -> Result<Self, DiscoveryError> {
         let base_url = std::env::var("GRENGIN_METADATA_BASE_URL")
             .unwrap_or_else(|_| DEFAULT_METADATA_BASE_URL.to_string());
-        Self::new(client, &base_url)
+        let distribution_version = configured_distribution_version();
+        Self::new_for_version(client, &base_url, &distribution_version)
     }
 
     pub fn new(client: Client, base_url: &str) -> Result<Self, DiscoveryError> {
+        Self::new_for_version(client, base_url, env!("CARGO_PKG_VERSION"))
+    }
+
+    pub fn new_for_version(
+        client: Client,
+        base_url: &str,
+        distribution_version: &str,
+    ) -> Result<Self, DiscoveryError> {
         let mut base_url = Url::parse(base_url)
             .map_err(|error| DiscoveryError::InvalidCatalog(error.to_string()))?;
         let host = base_url.host_str().ok_or_else(|| {
@@ -211,9 +210,11 @@ impl DiscoveryCatalog {
         if !base_url.path().ends_with('/') {
             base_url.set_path(&format!("{}/", base_url.path()));
         }
+        validate_distribution_version(distribution_version)?;
         Ok(Self {
             client,
             base_url,
+            distribution_version: distribution_version.to_string(),
             documents: Arc::new(RwLock::new(HashMap::new())),
             fetch_locks: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -254,6 +255,7 @@ impl DiscoveryCatalog {
                 .map_err(|error| DiscoveryError::InvalidCatalog(error.to_string()))?;
             validate_auth_template(&provider.id, &version, &template)?;
             return Ok(AuthProviderDiscoveryResponse {
+                distribution_version: self.distribution_version.clone(),
                 id: provider.id,
                 version: version.version,
                 schema_version: version.schema_version,
@@ -292,6 +294,7 @@ impl DiscoveryCatalog {
             let plugin: Value = serde_json::from_slice(&bytes)
                 .map_err(|error| DiscoveryError::InvalidCatalog(error.to_string()))?;
             return Ok(AiProviderDiscoveryResponse {
+                distribution_version: self.distribution_version.clone(),
                 id: provider.id,
                 version: version.version,
                 manifest_version: version.manifest_version.unwrap_or_default(),
@@ -308,10 +311,11 @@ impl DiscoveryCatalog {
         requested_version: Option<&str>,
     ) -> Result<DiscoveryListResponse, DiscoveryError> {
         let selector = parse_selector(requested_version)?;
-        let index = self.load_index(&kind).await?;
+        let distribution = self.load_distribution().await?;
+        let index = kind.index(&distribution).clone();
         let mut providers = Vec::new();
         for provider in index.providers {
-            let compatible = compatible_versions(&kind, &provider, &selector)?;
+            let compatible = compatible_versions(&provider, &selector)?;
             let Some(selected) = compatible.first() else {
                 continue;
             };
@@ -341,6 +345,7 @@ impl DiscoveryCatalog {
         }
         providers.sort_by(|left, right| left.id.cmp(&right.id));
         Ok(DiscoveryListResponse {
+            distribution_version: self.distribution_version.clone(),
             catalog_type: kind.label().to_string(),
             catalog_version: index.catalog_version,
             providers,
@@ -355,38 +360,31 @@ impl DiscoveryCatalog {
     ) -> Result<(CatalogProvider, Vec<CatalogArtifactVersion>), DiscoveryError> {
         let provider_id = validate_provider_id(provider_id)?;
         let selector = parse_selector(requested_version)?;
-        let index = self.load_index(kind).await?;
+        let distribution = self.load_distribution().await?;
+        let index = kind.index(&distribution);
         let provider = index
             .providers
-            .into_iter()
+            .iter()
             .find(|provider| provider.id == provider_id)
+            .cloned()
             .ok_or(DiscoveryError::NotFound)?;
-        let candidates = compatible_versions(kind, &provider, &selector)?;
+        let candidates = compatible_versions(&provider, &selector)?;
         if candidates.is_empty() {
             return Err(DiscoveryError::NotFound);
         }
         Ok((provider, candidates))
     }
 
-    async fn load_index(&self, kind: &CatalogKind) -> Result<CatalogIndex, DiscoveryError> {
-        let bytes = self.fetch_document(kind.index_path()).await?;
-        let index: CatalogIndex = serde_json::from_slice(&bytes)
+    async fn load_distribution(&self) -> Result<ApiDistribution, DiscoveryError> {
+        let path = format!(
+            "distributions/grengin-api/{}/index.json",
+            self.distribution_version
+        );
+        let bytes = self.fetch_document(&path).await?;
+        let distribution: ApiDistribution = serde_json::from_slice(&bytes)
             .map_err(|error| DiscoveryError::InvalidCatalog(error.to_string()))?;
-        if index.schema_version != SUPPORTED_CATALOG_SCHEMA_VERSION {
-            return Err(DiscoveryError::InvalidCatalog(format!(
-                "unsupported catalog schema {}",
-                index.schema_version
-            )));
-        }
-        let mut ids = HashSet::new();
-        if index.providers.iter().any(|provider| {
-            validate_provider_id(&provider.id).is_err() || !ids.insert(provider.id.clone())
-        }) {
-            return Err(DiscoveryError::InvalidCatalog(
-                "catalog contains an invalid or duplicate provider ID".to_string(),
-            ));
-        }
-        Ok(index)
+        validate_distribution(&distribution, &self.distribution_version)?;
+        Ok(distribution)
     }
 
     async fn fetch_document(&self, path: &str) -> Result<Arc<Vec<u8>>, DiscoveryError> {
@@ -485,6 +483,138 @@ impl DiscoveryCatalog {
     }
 }
 
+fn configured_distribution_version() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(version) = std::env::var("GRENGIN_PROVIDER_DISTRIBUTION_VERSION") {
+        return version;
+    }
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+fn validate_distribution_version(value: &str) -> Result<(), DiscoveryError> {
+    if value.split('.').count() != 3 || parse_release_version(value).is_err() {
+        return Err(DiscoveryError::InvalidCatalog(
+            "provider distribution version must be MAJOR.MINOR.PATCH".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_full_git_commit(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_distribution(
+    distribution: &ApiDistribution,
+    expected_version: &str,
+) -> Result<(), DiscoveryError> {
+    if distribution.format_version != SUPPORTED_DISTRIBUTION_FORMAT_VERSION {
+        return Err(DiscoveryError::InvalidCatalog(format!(
+            "unsupported provider distribution format {}",
+            distribution.format_version
+        )));
+    }
+    if distribution.grengin_api_version != expected_version {
+        return Err(DiscoveryError::InvalidCatalog(
+            "provider distribution does not match this grengin-api version".to_string(),
+        ));
+    }
+    if !is_full_git_commit(&distribution.grengin_api_commit)
+        || !is_full_git_commit(&distribution.catalog_commit)
+    {
+        return Err(DiscoveryError::InvalidCatalog(
+            "provider distribution contains invalid source commits".to_string(),
+        ));
+    }
+    validate_catalog_index(&CatalogKind::Auth, &distribution.auth_providers)?;
+    validate_catalog_index(&CatalogKind::Ai, &distribution.ai_providers)?;
+    Ok(())
+}
+
+fn validate_catalog_index(kind: &CatalogKind, index: &CatalogIndex) -> Result<(), DiscoveryError> {
+    if validate_distribution_version(&index.catalog_version).is_err() || index.providers.is_empty()
+    {
+        return Err(DiscoveryError::InvalidCatalog(
+            "distribution contains an invalid or empty provider catalog".to_string(),
+        ));
+    }
+    let mut provider_ids = HashSet::new();
+    for provider in &index.providers {
+        if validate_provider_id(&provider.id).is_err() || !provider_ids.insert(provider.id.clone())
+        {
+            return Err(DiscoveryError::InvalidCatalog(
+                "distribution contains an invalid or duplicate provider ID".to_string(),
+            ));
+        }
+        if provider.name.trim().is_empty()
+            || provider.status.trim().is_empty()
+            || provider.versions.is_empty()
+        {
+            return Err(DiscoveryError::InvalidCatalog(
+                "distribution contains incomplete provider metadata".to_string(),
+            ));
+        }
+
+        let mut versions = HashSet::new();
+        for version in &provider.versions {
+            parse_release_version(&version.version).map_err(|_| {
+                DiscoveryError::InvalidCatalog(
+                    "distribution contains an invalid package version".to_string(),
+                )
+            })?;
+            parse_release_version(&version.schema_version).map_err(|_| {
+                DiscoveryError::InvalidCatalog(
+                    "distribution contains an invalid package schema version".to_string(),
+                )
+            })?;
+            if !versions.insert(version.version.clone()) {
+                return Err(DiscoveryError::InvalidCatalog(
+                    "distribution contains a duplicate package version".to_string(),
+                ));
+            }
+            if !is_sha256(&version.sha256) {
+                return Err(DiscoveryError::InvalidCatalog(
+                    "distribution contains an invalid SHA-256 digest".to_string(),
+                ));
+            }
+            match kind {
+                CatalogKind::Auth
+                    if version.configuration_version.is_none()
+                        || version.manifest_version.is_some() =>
+                {
+                    return Err(DiscoveryError::InvalidCatalog(
+                        "auth package is missing its configuration contract".to_string(),
+                    ));
+                }
+                CatalogKind::Ai
+                    if version.manifest_version.is_none()
+                        || version.configuration_version.is_some() =>
+                {
+                    return Err(DiscoveryError::InvalidCatalog(
+                        "AI package is missing its manifest contract".to_string(),
+                    ));
+                }
+                _ => {}
+            }
+            let contract_version = kind.contract_version(version);
+            parse_release_version(contract_version).map_err(|_| {
+                DiscoveryError::InvalidCatalog(
+                    "distribution contains an invalid package contract version".to_string(),
+                )
+            })?;
+        }
+        if !versions.contains(&provider.default_version) {
+            return Err(DiscoveryError::InvalidCatalog(
+                "provider default version is not present in its package list".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_provider_id(value: &str) -> Result<String, DiscoveryError> {
     let valid = !value.is_empty()
         && value.len() <= 63
@@ -533,32 +663,31 @@ fn parse_selector(value: Option<&str>) -> Result<VersionSelector, DiscoveryError
 }
 
 fn compatible_versions(
-    kind: &CatalogKind,
     provider: &CatalogProvider,
     selector: &VersionSelector,
 ) -> Result<Vec<CatalogArtifactVersion>, DiscoveryError> {
+    let default_version = match selector {
+        VersionSelector::Latest => Some(parse_release_version(&provider.default_version)?),
+        _ => None,
+    };
     let mut versions = provider
         .versions
         .iter()
-        .filter(|version| kind.supports(version))
         .map(|version| Ok((parse_release_version(&version.version)?, version.clone())))
         .collect::<Result<Vec<_>, DiscoveryError>>()?;
     versions.retain(|(version, _)| match selector {
-        VersionSelector::Latest => true,
+        VersionSelector::Latest => default_version
+            .as_ref()
+            .is_some_and(|default| version.0[0] == default.0[0] && version <= default),
         VersionSelector::Major(major) => version.0[0] == *major,
         VersionSelector::Exact(expected) => version == expected,
     });
     versions.sort_by(|left, right| right.0.cmp(&left.0));
-    if matches!(selector, VersionSelector::Latest)
-        && let Some(latest_major) = versions.first().map(|(version, _)| version.0[0])
-    {
-        versions.retain(|(version, _)| version.0[0] == latest_major);
-    }
     Ok(versions.into_iter().map(|(_, version)| version).collect())
 }
 
 fn verify_digest(bytes: &[u8], expected: &str) -> Result<(), DiscoveryError> {
-    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !is_sha256(expected) {
         return Err(DiscoveryError::InvalidCatalog(
             "catalog contains an invalid SHA-256 digest".to_string(),
         ));
@@ -570,6 +699,13 @@ fn verify_digest(bytes: &[u8], expected: &str) -> Result<(), DiscoveryError> {
         ));
     }
     Ok(())
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -633,6 +769,12 @@ mod tests {
     };
     use tokio::{net::TcpListener, time::sleep};
 
+    const TEST_DISTRIBUTION_PATH: &str = concat!(
+        "/distributions/grengin-api/",
+        env!("CARGO_PKG_VERSION"),
+        "/index.json"
+    );
+
     async fn serve(router: Router) -> String {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -673,18 +815,39 @@ mod tests {
         .expect("auth template")
     }
 
-    fn auth_index(id: &str, versions: Value) -> Vec<u8> {
+    fn auth_distribution(id: &str, default_version: &str, versions: Value) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
-            "schemaVersion": "1.0",
-            "catalogVersion": "1.0.0",
-            "providers": [{
-                "id": id,
-                "name": "Test provider",
-                "status": "stable",
-                "versions": versions
-            }]
+            "formatVersion": "1.0",
+            "grenginApiVersion": env!("CARGO_PKG_VERSION"),
+            "grenginApiCommit": "a".repeat(40),
+            "catalogCommit": "b".repeat(40),
+            "authProviders": {
+                "catalogVersion": "1.0.0",
+                "providers": [{
+                    "id": id,
+                    "name": "Test provider",
+                    "status": "stable",
+                    "defaultVersion": default_version,
+                    "versions": versions
+                }]
+            },
+            "aiProviders": {
+                "catalogVersion": "1.0.0",
+                "providers": [{
+                    "id": "test-ai",
+                    "name": "Test AI",
+                    "status": "stable",
+                    "defaultVersion": "1.0",
+                    "versions": [{
+                        "version": "1.0",
+                        "schemaVersion": "1.0",
+                        "manifestVersion": "1.0",
+                        "sha256": "0".repeat(64)
+                    }]
+                }]
+            }
         }))
-        .expect("auth index")
+        .expect("provider distribution")
     }
 
     fn version(
@@ -702,7 +865,7 @@ mod tests {
         }
     }
 
-    fn provider(versions: Vec<CatalogArtifactVersion>) -> CatalogProvider {
+    fn provider(default_version: &str, versions: Vec<CatalogArtifactVersion>) -> CatalogProvider {
         CatalogProvider {
             id: "example".to_string(),
             name: "Example".to_string(),
@@ -710,33 +873,61 @@ mod tests {
             status: "stable".to_string(),
             icon: None,
             icon_dark: None,
+            default_version: default_version.to_string(),
             versions,
         }
     }
 
     #[test]
     fn major_selector_returns_newest_compatible_release_without_crossing_major() {
-        let provider = provider(vec![
-            version("1.0.0", "1.0", None, Some("1.0")),
-            version("1.2.0", "1.0", None, Some("1.0")),
-            version("2.0.0", "1.0", None, Some("2.0")),
-        ]);
-        let selected = compatible_versions(&CatalogKind::Ai, &provider, &VersionSelector::Major(1))
+        let provider = provider(
+            "1.2.0",
+            vec![
+                version("1.0.0", "1.0", None, Some("1.0")),
+                version("1.2.0", "1.0", None, Some("1.0")),
+                version("2.0.0", "1.0", None, Some("2.0")),
+            ],
+        );
+        let selected = compatible_versions(&provider, &VersionSelector::Major(1))
             .expect("compatible versions");
         assert_eq!(selected[0].version, "1.2.0");
         assert_eq!(selected[1].version, "1.0.0");
     }
 
     #[test]
-    fn unsupported_contract_versions_are_filtered() {
-        let provider = provider(vec![
-            version("1.0.0", "1.0", Some("1.0"), None),
-            version("1.1.0", "1.0", Some("1.1"), None),
-            version("1.2.0", "1.0", Some("1.2"), None),
-            version("2.0.0", "2.0", Some("1.1"), None),
-        ]);
-        let selected = compatible_versions(&CatalogKind::Auth, &provider, &VersionSelector::Latest)
-            .expect("compatible versions");
+    fn distribution_membership_replaces_hardcoded_contract_filtering() {
+        let provider = provider(
+            "1.2.0",
+            vec![
+                version("1.0.0", "1.0", Some("1.0"), None),
+                version("1.1.0", "1.0", Some("1.1"), None),
+                version("1.2.0", "1.0", Some("1.2"), None),
+                version("2.0.0", "2.0", Some("1.1"), None),
+            ],
+        );
+        let selected = compatible_versions(&provider, &VersionSelector::Major(1))
+            .expect("distribution versions");
+        assert_eq!(
+            selected
+                .iter()
+                .map(|version| version.version.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1.2.0", "1.1.0", "1.0.0"]
+        );
+    }
+
+    #[test]
+    fn default_selector_never_moves_past_the_distribution_pin() {
+        let provider = provider(
+            "1.1.0",
+            vec![
+                version("1.0.0", "1.0", None, Some("1.0")),
+                version("1.1.0", "1.0", None, Some("1.0")),
+                version("1.2.0", "1.0", None, Some("1.0")),
+            ],
+        );
+        let selected =
+            compatible_versions(&provider, &VersionSelector::Latest).expect("pinned versions");
         assert_eq!(
             selected
                 .iter()
@@ -748,12 +939,14 @@ mod tests {
 
     #[test]
     fn exact_version_does_not_fall_across_releases() {
-        let provider = provider(vec![
-            version("1.0.0", "1.0", None, Some("1.0")),
-            version("1.1.0", "1.0", None, Some("1.0")),
-        ]);
+        let provider = provider(
+            "1.1.0",
+            vec![
+                version("1.0.0", "1.0", None, Some("1.0")),
+                version("1.1.0", "1.0", None, Some("1.0")),
+            ],
+        );
         let selected = compatible_versions(
-            &CatalogKind::Ai,
             &provider,
             &VersionSelector::Exact(ReleaseVersion([1, 0, 0])),
         )
@@ -764,13 +957,16 @@ mod tests {
 
     #[test]
     fn latest_selector_fallback_stays_within_latest_major() {
-        let provider = provider(vec![
-            version("1.9.0", "1.0", None, Some("1.0")),
-            version("2.0.0", "1.0", None, Some("1.0")),
-            version("2.1.0", "1.0", None, Some("1.0")),
-        ]);
-        let selected = compatible_versions(&CatalogKind::Ai, &provider, &VersionSelector::Latest)
-            .expect("compatible versions");
+        let provider = provider(
+            "2.1.0",
+            vec![
+                version("1.9.0", "1.0", None, Some("1.0")),
+                version("2.0.0", "1.0", None, Some("1.0")),
+                version("2.1.0", "1.0", None, Some("1.0")),
+            ],
+        );
+        let selected =
+            compatible_versions(&provider, &VersionSelector::Latest).expect("compatible versions");
         assert_eq!(
             selected
                 .iter()
@@ -784,6 +980,77 @@ mod tests {
     fn digest_mismatch_fails_closed() {
         assert!(verify_digest(b"artifact", &"0".repeat(64)).is_err());
         assert!(verify_digest(b"artifact", &sha256_hex(b"artifact")).is_ok());
+    }
+
+    #[test]
+    fn distribution_metadata_must_match_the_backend_release() {
+        let versions = serde_json::json!([{
+            "version": "1.0.0",
+            "schemaVersion": "1.0",
+            "configurationVersion": "1.0",
+            "sha256": "0".repeat(64)
+        }]);
+        let valid: ApiDistribution =
+            serde_json::from_slice(&auth_distribution("example", "1.0.0", versions))
+                .expect("distribution fixture");
+
+        let mut wrong_format = valid.clone();
+        wrong_format.format_version = "2.0".to_string();
+        assert!(matches!(
+            validate_distribution(&wrong_format, env!("CARGO_PKG_VERSION")),
+            Err(DiscoveryError::InvalidCatalog(_))
+        ));
+
+        let mut wrong_release = valid.clone();
+        wrong_release.grengin_api_version = "9.9.9".to_string();
+        assert!(matches!(
+            validate_distribution(&wrong_release, env!("CARGO_PKG_VERSION")),
+            Err(DiscoveryError::InvalidCatalog(_))
+        ));
+
+        let mut abbreviated_commit = valid;
+        abbreviated_commit.catalog_commit = "deadbeef".to_string();
+        assert!(matches!(
+            validate_distribution(&abbreviated_commit, env!("CARGO_PKG_VERSION")),
+            Err(DiscoveryError::InvalidCatalog(_))
+        ));
+    }
+
+    #[test]
+    fn malformed_package_lists_fail_closed() {
+        let versions = serde_json::json!([{
+            "version": "1.0.0",
+            "schemaVersion": "1.0",
+            "configurationVersion": "1.0",
+            "sha256": "0".repeat(64)
+        }]);
+        let valid: ApiDistribution =
+            serde_json::from_slice(&auth_distribution("example", "1.0.0", versions))
+                .expect("distribution fixture");
+
+        let mut missing_default = valid.clone();
+        missing_default.auth_providers.providers[0].default_version = "1.1.0".to_string();
+        assert!(matches!(
+            validate_distribution(&missing_default, env!("CARGO_PKG_VERSION")),
+            Err(DiscoveryError::InvalidCatalog(_))
+        ));
+
+        let mut duplicate_version = valid.clone();
+        let package = duplicate_version.auth_providers.providers[0].versions[0].clone();
+        duplicate_version.auth_providers.providers[0]
+            .versions
+            .push(package);
+        assert!(matches!(
+            validate_distribution(&duplicate_version, env!("CARGO_PKG_VERSION")),
+            Err(DiscoveryError::InvalidCatalog(_))
+        ));
+
+        let mut malformed_digest = valid;
+        malformed_digest.auth_providers.providers[0].versions[0].sha256 = "ABC".repeat(21);
+        assert!(matches!(
+            validate_distribution(&malformed_digest, env!("CARGO_PKG_VERSION")),
+            Err(DiscoveryError::InvalidCatalog(_))
+        ));
     }
 
     #[test]
@@ -871,8 +1138,9 @@ mod tests {
     #[tokio::test]
     async fn missing_latest_artifact_falls_back_within_requested_major() {
         let fallback = auth_template("example", "1.0.0");
-        let index = auth_index(
+        let index = auth_distribution(
             "example",
+            "1.1.0",
             serde_json::json!([
                 {
                     "version": "1.1.0",
@@ -891,7 +1159,7 @@ mod tests {
         let base_url = serve(
             Router::new()
                 .route(
-                    "/auth-providers/index.json",
+                    TEST_DISTRIBUTION_PATH,
                     get({
                         let index = index.clone();
                         move || {
@@ -915,22 +1183,81 @@ mod tests {
             .auth_provider("example", Some("1"))
             .await
             .expect("same-major fallback");
+        assert_eq!(resolved.distribution_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(resolved.version, "1.0.0");
     }
 
     #[tokio::test]
-    async fn duplicate_provider_ids_and_upstream_failures_fail_closed() {
-        let duplicate_index = serde_json::to_vec(&serde_json::json!({
+    async fn missing_distribution_never_falls_back_to_another_backend_release() {
+        let old_path = "/distributions/grengin-api/9.9.8/index.json";
+        let base_url = serve(Router::new().route(old_path, get(|| async { "{}" }))).await;
+        let catalog =
+            DiscoveryCatalog::new_for_version(test_client(), &base_url, "9.9.9").expect("catalog");
+
+        assert!(matches!(
+            catalog.list_auth(None).await,
+            Err(DiscoveryError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn digest_valid_but_unparseable_ai_package_fails_closed() {
+        let invalid_plugin = b"{}".to_vec();
+        let versions = serde_json::json!([{
+            "version": "1.0.0",
             "schemaVersion": "1.0",
-            "catalogVersion": "1.0.0",
-            "providers": [
-                {"id": "duplicate", "name": "One", "status": "stable", "versions": []},
-                {"id": "duplicate", "name": "Two", "status": "stable", "versions": []}
-            ]
-        }))
-        .unwrap();
+            "configurationVersion": "1.0",
+            "sha256": "0".repeat(64)
+        }]);
+        let mut distribution: Value =
+            serde_json::from_slice(&auth_distribution("example", "1.0.0", versions))
+                .expect("distribution fixture");
+        distribution["aiProviders"]["providers"][0]["versions"][0]["sha256"] =
+            Value::String(sha256_hex(&invalid_plugin));
+        let distribution = serde_json::to_vec(&distribution).expect("serialize distribution");
+
+        let base_url = serve(
+            Router::new()
+                .route(
+                    TEST_DISTRIBUTION_PATH,
+                    get(move || {
+                        let distribution = distribution.clone();
+                        async move { distribution }
+                    }),
+                )
+                .route(
+                    "/ai-providers/test-ai/versions/1.0/plugin.json",
+                    get(move || {
+                        let invalid_plugin = invalid_plugin.clone();
+                        async move { invalid_plugin }
+                    }),
+                ),
+        )
+        .await;
+        let catalog = DiscoveryCatalog::new(test_client(), &base_url).expect("catalog");
+
+        assert!(matches!(
+            catalog.ai_provider("test-ai", None).await,
+            Err(DiscoveryError::InvalidCatalog(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn duplicate_provider_ids_and_upstream_failures_fail_closed() {
+        let versions = serde_json::json!([{
+            "version": "1.0.0",
+            "schemaVersion": "1.0",
+            "configurationVersion": "1.0",
+            "sha256": "0".repeat(64)
+        }]);
+        let mut duplicate_index: Value =
+            serde_json::from_slice(&auth_distribution("duplicate", "1.0.0", versions)).unwrap();
+        let provider = duplicate_index["authProviders"]["providers"][0].clone();
+        duplicate_index["authProviders"]["providers"] =
+            serde_json::json!([provider.clone(), provider]);
+        let duplicate_index = serde_json::to_vec(&duplicate_index).unwrap();
         let duplicate_base = serve(Router::new().route(
-            "/auth-providers/index.json",
+            TEST_DISTRIBUTION_PATH,
             get(move || {
                 let duplicate_index = duplicate_index.clone();
                 async move { duplicate_index }
@@ -945,7 +1272,7 @@ mod tests {
         ));
 
         let failure_base = serve(Router::new().route(
-            "/auth-providers/index.json",
+            TEST_DISTRIBUTION_PATH,
             get(|| async { StatusCode::BAD_GATEWAY }),
         ))
         .await;
@@ -959,7 +1286,7 @@ mod tests {
     #[tokio::test]
     async fn stalled_upstream_is_bounded_by_request_timeout() {
         let base_url = serve(Router::new().route(
-            "/auth-providers/index.json",
+            TEST_DISTRIBUTION_PATH,
             get(|| async {
                 sleep(Duration::from_secs(1)).await;
                 "{}"
@@ -1011,5 +1338,57 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 0, "no auth templates were checked");
+    }
+
+    #[test]
+    #[ignore = "cross-repository contract test; run from grengin-list CI"]
+    fn every_distribution_package_matches_the_runtime_contract() {
+        let root = std::env::var("GRENGIN_PROVIDER_CATALOG_ROOT")
+            .expect("GRENGIN_PROVIDER_CATALOG_ROOT must point to master-data");
+        let path = Path::new(&root)
+            .join("distributions/grengin-api")
+            .join(env!("CARGO_PKG_VERSION"))
+            .join("index.json");
+        let mut checked_packages = 0;
+
+        let bytes = fs::read(&path).expect("read matching grengin-api distribution");
+        let distribution: ApiDistribution =
+            serde_json::from_slice(&bytes).expect("parse distribution");
+        validate_distribution(&distribution, env!("CARGO_PKG_VERSION"))
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+
+        for provider in &distribution.auth_providers.providers {
+            for version in &provider.versions {
+                let artifact = Path::new(&root)
+                    .join(CatalogKind::Auth.artifact_path(&provider.id, &version.version));
+                let bytes = fs::read(&artifact).expect("read auth package");
+                verify_digest(&bytes, &version.sha256)
+                    .unwrap_or_else(|error| panic!("{}: {error}", artifact.display()));
+                let template: Value = serde_json::from_slice(&bytes).expect("parse auth package");
+                validate_auth_template(&provider.id, version, &template)
+                    .unwrap_or_else(|error| panic!("{}: {error}", artifact.display()));
+                checked_packages += 1;
+            }
+        }
+
+        for provider in &distribution.ai_providers.providers {
+            for version in &provider.versions {
+                let artifact = Path::new(&root)
+                    .join(CatalogKind::Ai.artifact_path(&provider.id, &version.version));
+                let bytes = fs::read(&artifact).expect("read AI package");
+                verify_digest(&bytes, &version.sha256)
+                    .unwrap_or_else(|error| panic!("{}: {error}", artifact.display()));
+                let manifest = ProviderManifestV1::from_json(&bytes)
+                    .unwrap_or_else(|error| panic!("{}: {error}", artifact.display()));
+                assert_eq!(manifest.id, provider.id, "{}", artifact.display());
+                assert_eq!(manifest.version, version.version, "{}", artifact.display());
+                checked_packages += 1;
+            }
+        }
+
+        assert!(
+            checked_packages > 0,
+            "no distribution packages were checked"
+        );
     }
 }
