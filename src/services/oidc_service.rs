@@ -800,7 +800,6 @@ mod tests {
 
         assert_eq!(claims.subject().as_str(), "azure-subject");
         assert_eq!(tenant_id.expect("tenant ID").to_string(), TEST_TENANT_ID);
-        assert_eq!(claims.subject().as_str(), "azure-subject");
     }
 
     #[test]

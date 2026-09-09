@@ -16,6 +16,7 @@ use reqwest::Client as ReqwestClient;
 use serde::Deserialize;
 use std::{
     collections::HashMap,
+    future::Future,
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
@@ -24,7 +25,11 @@ use uuid::Uuid;
 
 const AZURE_METADATA_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const AZURE_METADATA_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
+#[cfg(not(test))]
 const AZURE_METADATA_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const AZURE_METADATA_REQUEST_TIMEOUT: Duration = Duration::from_millis(200);
+const AZURE_METADATA_MAX_BYTES: usize = 1024 * 1024;
 const AZURE_CONSUMER_TENANT_ID: &str = "9188040d-6c67-4c5b-b112-36a304b66dad";
 const AZURE_MULTITENANT_ISSUER: &str = "https://login.microsoftonline.com/{tenantid}/v2.0";
 
@@ -190,13 +195,7 @@ async fn fetch_multitenant_provider_metadata(
     authority: &str,
 ) -> Result<AzureMetadataSnapshot, Error> {
     let (issuer, auth, token, jwks_url, userinfo) = mk_urls(authority)?;
-    let response = req_client
-        .get(jwks_url.as_str())
-        .timeout(AZURE_METADATA_REQUEST_TIMEOUT)
-        .send()
-        .await?
-        .error_for_status()?;
-    let document = response.json::<serde_json::Value>().await?;
+    let document = fetch_jwks_document(req_client, jwks_url.as_str()).await?;
     let jwks: CoreJsonWebKeySet = serde_json::from_value(document.clone())?;
     if jwks.keys().is_empty() {
         anyhow::bail!("Azure returned an empty JSON Web Key Set");
@@ -219,12 +218,40 @@ async fn fetch_multitenant_provider_metadata(
     })
 }
 
-async fn cached_multitenant_provider_metadata(
+async fn fetch_jwks_document(
     req_client: &ReqwestClient,
-    tenant_id: &str,
-) -> Result<AzureMetadataSnapshot, Error> {
-    let authority = normalized_authority(tenant_id);
-    let cache = AZURE_METADATA_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    url: &str,
+) -> Result<serde_json::Value, Error> {
+    let mut response = req_client
+        .get(url)
+        .timeout(AZURE_METADATA_REQUEST_TIMEOUT)
+        .send()
+        .await?
+        .error_for_status()?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > AZURE_METADATA_MAX_BYTES as u64)
+    {
+        anyhow::bail!("Azure JWKS document exceeds size limit");
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > AZURE_METADATA_MAX_BYTES {
+            anyhow::bail!("Azure JWKS document exceeds size limit");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(serde_json::from_slice(&body)?)
+}
+
+async fn cached_metadata_fetch<F>(
+    cache: &Mutex<HashMap<String, AzureMetadataCacheEntry>>,
+    authority: String,
+    fetch: F,
+) -> Result<AzureMetadataSnapshot, Error>
+where
+    F: Future<Output = Result<AzureMetadataSnapshot, Error>>,
+{
     let cached = {
         let cache = cache.lock().await;
         cache
@@ -232,13 +259,10 @@ async fn cached_multitenant_provider_metadata(
             .and_then(|entry| entry.cached_result(Instant::now()))
     };
     if let Some(result) = cached {
-        match result {
-            Ok(snapshot) => return Ok(snapshot),
-            Err(message) => anyhow::bail!(message),
-        }
+        return result.map_err(Error::msg);
     }
 
-    let fetched = fetch_multitenant_provider_metadata(req_client, &authority).await;
+    let fetched = fetch.await;
     let mut cache = cache.lock().await;
     match fetched {
         Ok(snapshot) => {
@@ -263,6 +287,20 @@ async fn cached_multitenant_provider_metadata(
             Err(anyhow::anyhow!(message))
         }
     }
+}
+
+async fn cached_multitenant_provider_metadata(
+    req_client: &ReqwestClient,
+    tenant_id: &str,
+) -> Result<AzureMetadataSnapshot, Error> {
+    let authority = normalized_authority(tenant_id);
+    let cache = AZURE_METADATA_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    cached_metadata_fetch(
+        cache,
+        authority.clone(),
+        fetch_multitenant_provider_metadata(req_client, &authority),
+    )
+    .await
 }
 
 pub async fn invalidate_azure_multitenant_cache(tenant_id: &str) {
@@ -412,7 +450,25 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Router, routing::get};
     use std::str::FromStr;
+    use tokio::{net::TcpListener, time::sleep};
+
+    async fn serve(router: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Azure fixture");
+        let url = format!(
+            "http://{}/jwks",
+            listener.local_addr().expect("fixture address")
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve Azure fixture");
+        });
+        url
+    }
 
     fn test_multitenant_metadata() -> AzureMetadataSnapshot {
         let document = serde_json::json!({
@@ -580,5 +636,48 @@ mod tests {
                 .cached_result(now + AZURE_METADATA_FAILURE_BACKOFF)
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn stalled_jwks_response_is_bounded_by_request_timeout() {
+        let url = serve(Router::new().route(
+            "/jwks",
+            get(|| async {
+                sleep(Duration::from_secs(1)).await;
+                "{}"
+            }),
+        ))
+        .await;
+        let client = ReqwestClient::new();
+        let started = Instant::now();
+        let result = fetch_jwks_document(&client, &url).await;
+
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn slow_authority_does_not_hold_global_cache_lock() {
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let slow_cache = cache.clone();
+        let slow = tokio::spawn(async move {
+            cached_metadata_fetch(slow_cache.as_ref(), "slow".to_string(), async {
+                sleep(Duration::from_millis(300)).await;
+                Ok(test_multitenant_metadata())
+            })
+            .await
+        });
+        sleep(Duration::from_millis(20)).await;
+
+        let fast = tokio::time::timeout(
+            Duration::from_millis(100),
+            cached_metadata_fetch(cache.as_ref(), "fast".to_string(), async {
+                Ok(test_multitenant_metadata())
+            }),
+        )
+        .await;
+
+        assert!(matches!(fast, Ok(Ok(_))));
+        assert!(slow.await.expect("slow cache task").is_ok());
     }
 }

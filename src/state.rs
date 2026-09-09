@@ -3,7 +3,7 @@
 
 use crate::{
     auth::{
-        azure::build_azure_client,
+        azure::{AzureMultitenantValidation, build_azure_client},
         encryption::decrypt_key,
         github::GitHubOAuthAdapter,
         google::build_google_client,
@@ -15,6 +15,7 @@ use crate::{
     config::setting::{ConfigError, OidcClient, Settings},
     dto::oauth::AuthProvider,
     models::{mcp_servers, sso_providers},
+    services::discovery_catalog::DiscoveryCatalog,
     services::live_models_cache::LiveModelsCache,
     services::mcp_client::McpServerClient,
     services::notifications::NotificationEvent,
@@ -44,6 +45,7 @@ pub struct AppState {
     pub stream_cancellations: RwLock<HashMap<Uuid, Arc<StreamCancel>>>,
     pub provider_registry: ProviderRegistry,
     pub live_models_cache: LiveModelsCache,
+    pub discovery_catalog: DiscoveryCatalog,
 }
 
 #[derive(Clone)]
@@ -116,6 +118,8 @@ impl AppState {
             .await
             .map_err(|e| eprintln!("Loading embedding config from db error: {e}"));
         let (notification_hub, _) = broadcast::channel(256);
+        let discovery_catalog = DiscoveryCatalog::from_env(req_client.clone())
+            .map_err(|error| ConfigError::Custom(error.to_string()))?;
         let state = Self {
             database,
             oidc_providers: RwLock::new(HashMap::new()),
@@ -126,6 +130,7 @@ impl AppState {
             stream_cancellations: RwLock::new(HashMap::new()),
             provider_registry: ProviderRegistry::new(),
             live_models_cache: LiveModelsCache::new(),
+            discovery_catalog,
         };
         state.reload_oidc_providers().await?;
         let _ = state.load_mcp_servers_from_db().await;

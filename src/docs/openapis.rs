@@ -46,6 +46,10 @@ use crate::dto::chat::{
 };
 use crate::dto::chat_stream::{ChatInput, ChatStream};
 use crate::dto::common::{PaginationQuery, SortRule};
+use crate::dto::discovery::{
+    AiProviderDiscoveryResponse, AuthProviderDiscoveryResponse, DiscoveryListResponse,
+    DiscoveryProviderSummary, DiscoveryVersion,
+};
 use crate::dto::files::{Attachment, File, FileResponse, FileUploadRequest};
 use crate::dto::mcp::{
     BulkToolAccessUpdate, BulkToolAccessUpdateResponse, McpAccessRule, McpAccessRuleInput,
@@ -90,8 +94,8 @@ use crate::handlers::{
     admin_ai, admin_ai_plugins, admin_analytics, admin_audit, admin_department,
     admin_department_budgets, admin_embedding, admin_mcp, admin_prompts, admin_reconfigure,
     admin_roles, admin_sso_provider, admin_system, admin_users, auth, branding, chat, chat_stream,
-    file, mcp, me, me_prompts, me_skills, message, models, notifications, oidc, open_error,
-    projects, skills,
+    discovery, file, mcp, me, me_prompts, me_skills, message, models, notifications, oidc,
+    open_error, projects, skills,
 };
 use crate::models::departments::{ActionOnExceed, BudgetPeriod};
 use crate::models::mcp_access_policies::{McpAccessType, McpPermission};
@@ -114,6 +118,10 @@ use utoipa::OpenApi;
         oidc::apple_oauth_callback_form,
         oidc::azure_mobile_oauth_callback_get,
         oidc::azure_mobile_oauth_callback_post,
+        discovery::list_auth_provider_templates,
+        discovery::get_auth_provider_template,
+        discovery::list_ai_provider_plugins,
+        discovery::get_ai_provider_plugin,
         chat::get_chat_by_id,
         chat::get_chats,
         chat::delete_chat_by_id,
@@ -472,6 +480,11 @@ use utoipa::OpenApi;
             AIEnginePluginValidationRequest,
             AIEnginePluginValidationResponse,
             AIEngineConnectionTest,
+            DiscoveryVersion,
+            DiscoveryProviderSummary,
+            DiscoveryListResponse,
+            AuthProviderDiscoveryResponse,
+            AiProviderDiscoveryResponse,
         )
     ),
     tags(
@@ -483,6 +496,7 @@ use utoipa::OpenApi;
         (name = "root", description = "Root / health"),
         (name = "skills", description = "Skills management & conversation skill links"),
         (name = "artifacts", description = "Chat artifact retrieval & deletion"),
+        (name = "discovery", description = "Compatible provider setup catalogs"),
     ),
     modifiers(
         &ApiSecurityAddon

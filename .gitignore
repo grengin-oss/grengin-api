@@ -9,4 +9,5 @@ CLAUDE.md
 /tests/*
 !/tests/auth/
 !/tests/auth/*.sh
+!/tests/discovery_api.sh
 /llm-plugin/HANDOFF.md

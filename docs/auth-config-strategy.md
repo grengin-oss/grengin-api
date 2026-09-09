@@ -50,11 +50,11 @@ installation with its name, slug, login path, enabled state, and auto-redirect p
 never returns client IDs, secrets, issuers, domains, or internal policy. Clients must only present
 an enabled provider as an available login method.
 
-Provider setup discovery is a separate, credential-free catalog. Frontends fetch the versioned
-templates directly from `https://meta.grengin.com/auth-providers/index.json`. The catalog describes
-provider names, icons, documented issuer patterns, required/recommended scopes, and safe
-configuration defaults. It is never used to determine which login methods are configured or
-enabled on an installation.
+Provider setup discovery is a separate, credential-free catalog exposed through
+`GET /discovery/auth-providers` and `GET /discovery/auth-providers/{provider}`. The API filters the
+public metadata catalog to contracts supported by this backend, resolves major or exact versions,
+and verifies immutable templates before returning them. It is never used to determine which login
+methods are configured or enabled on an installation.
 
 ## Provider Configuration
 
