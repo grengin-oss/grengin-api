@@ -188,6 +188,7 @@ mod tests {
     #[tokio::test]
     async fn response_etag_supports_conditional_get() {
         let value = DiscoveryListResponse {
+            distribution_version: env!("CARGO_PKG_VERSION").to_string(),
             catalog_type: "auth_providers".to_string(),
             catalog_version: "1.0.0".to_string(),
             providers: Vec::new(),
