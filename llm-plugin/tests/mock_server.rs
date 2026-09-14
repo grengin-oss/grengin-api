@@ -863,6 +863,53 @@ async fn every_catalog_manifest_streams_against_the_mock_provider() {
     }
 }
 
+#[tokio::test]
+#[ignore = "requires GRENGIN_PROVIDER_CATALOG_DIR pointing at grengin-list/master-data/ai-providers"]
+async fn groq_catalog_ignores_intermediate_empty_search_results() {
+    let catalog = std::env::var("GRENGIN_PROVIDER_CATALOG_DIR")
+        .expect("set GRENGIN_PROVIDER_CATALOG_DIR to master-data/ai-providers");
+    let manifest = fs::read(std::path::Path::new(&catalog).join("groq/plugin.json"))
+        .expect("read Groq catalog manifest");
+    let server = mock_server!();
+    let provider = server.provider(&manifest, |_| {});
+    let mut chat = request(
+        "groq/compound-mini",
+        "groq compound search for the current Rust version",
+        Vec::new(),
+    );
+    chat.web_search = true;
+    let mut session = provider
+        .chat()
+        .expect("Groq chat capability")
+        .start(chat)
+        .await
+        .expect("Groq request preflight");
+    let events = drain(&mut session.stream().await.expect("Groq stream start")).await;
+
+    let starts = events
+        .iter()
+        .filter(|event| matches!(event, ProviderEvent::ServerToolStart { .. }))
+        .count();
+    let results = events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::ServerToolResult { results, .. } => Some(results),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        starts, 2,
+        "expected both Groq execution snapshots: {events:?}"
+    );
+    assert_eq!(
+        results.len(),
+        1,
+        "empty intermediate result leaked: {events:?}"
+    );
+    assert_eq!(results[0].len(), 1);
+    assert_eq!(results[0][0].url, "https://releases.rs/");
+}
+
 // ---------------------------------------------------------------------------
 // Non-streaming operations and error mapping
 // ---------------------------------------------------------------------------

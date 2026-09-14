@@ -289,14 +289,17 @@ struct PendingServerTools {
 
 impl PendingServerTools {
     fn start_id(&mut self, provider_id: Option<ToolCallId>, name: &str) -> String {
-        let id = provider_id.map_or_else(
-            || {
+        let id = match provider_id {
+            Some(id) => id.to_string(),
+            None => {
+                if let Some(id) = self.ids_by_name.get(name) {
+                    return id.clone();
+                }
                 let id = format!("plugin-web-search-{}", self.next_id);
                 self.next_id = self.next_id.saturating_add(1);
                 id
-            },
-            |id| id.to_string(),
-        );
+            }
+        };
         self.ids_by_name.insert(name.to_string(), id.clone());
         id
     }
@@ -684,6 +687,20 @@ mod tests {
         else {
             panic!("expected a web-search start");
         };
+
+        let StreamParseResult::WebSearchAction {
+            tool_id: Some(repeated_start_id),
+            ..
+        } = parser.provider_event(ProviderEvent::ServerToolStart {
+            id: None,
+            name: "web_search".to_string(),
+            query: None,
+            queries: Vec::new(),
+        })
+        else {
+            panic!("expected a repeated web-search start");
+        };
+        assert_eq!(repeated_start_id, id);
 
         let StreamParseResult::ToolInput(delta) =
             parser.provider_event(ProviderEvent::ServerToolQueryDelta {
