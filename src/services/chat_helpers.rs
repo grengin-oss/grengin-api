@@ -7,3 +7,39 @@ pub fn resolve_web_search_enabled(metadata: Option<&serde_json::Value>) -> bool 
         .and_then(|value| value.as_bool())
         .unwrap_or(false)
 }
+
+pub fn effective_native_web_search(requested: bool, model_supports_web_search: bool) -> bool {
+    requested && model_supports_web_search
+}
+
+pub fn effective_max_tokens(requested: Option<u32>, model_max: Option<u32>) -> Option<u32> {
+    requested.map(|requested| model_max.map_or(requested, |model_max| requested.min(model_max)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{effective_max_tokens, effective_native_web_search};
+
+    #[test]
+    fn native_web_search_requires_request_and_model_support() {
+        assert!(effective_native_web_search(true, true));
+        assert!(!effective_native_web_search(true, false));
+        assert!(!effective_native_web_search(false, true));
+        assert!(!effective_native_web_search(false, false));
+    }
+
+    #[test]
+    fn omitted_max_tokens_uses_the_provider_default() {
+        assert_eq!(effective_max_tokens(None, Some(128_000)), None);
+    }
+
+    #[test]
+    fn requested_max_tokens_is_capped_by_the_model_limit() {
+        assert_eq!(
+            effective_max_tokens(Some(2_048), Some(128_000)),
+            Some(2_048)
+        );
+        assert_eq!(effective_max_tokens(Some(8_192), Some(4_096)), Some(4_096));
+        assert_eq!(effective_max_tokens(Some(2_048), None), Some(2_048));
+    }
+}

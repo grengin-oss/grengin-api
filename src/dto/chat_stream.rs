@@ -218,6 +218,7 @@ pub struct ChatInput {
     pub conversation_id: Option<Uuid>,
     pub messages: Vec<MessageRequest>,
     pub temperature: Option<f32>,
+    pub max_tokens: Option<u32>,
     pub image_count: Option<u8>,
 }
 

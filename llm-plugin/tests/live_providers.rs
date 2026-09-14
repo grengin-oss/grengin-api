@@ -82,7 +82,8 @@ async fn smoke(provider: LiveProvider) {
                 },
             ],
             temperature: Some(0.2),
-            max_tokens: Some(128),
+            // Match the application default: let the provider choose its normal output limit.
+            max_tokens: None,
             tools: Vec::new(),
             tool_choice: None,
             web_search: false,

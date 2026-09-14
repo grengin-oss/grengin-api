@@ -35,6 +35,7 @@ use crate::{
             content_type_to_ext,
         },
         budget_allocation::{get_department_budget_status, refresh_department_budget_available},
+        chat_helpers::{effective_max_tokens, effective_native_web_search},
         department_policies::check_model_allowed,
         mcp_helpers::{
             McpOauthErrorPayload, McpOauthPrompt, McpOauthRequiredEvent, build_mcp_oauth_prompt,
@@ -574,6 +575,9 @@ pub async fn handle_chat_stream(
     };
     let plugin_is_image_only =
         provider_config.images().is_some() && provider_config.chat().is_none();
+    let model_supports_web_search = plugin_model_info
+        .as_ref()
+        .is_some_and(|model| model.supports_web_search);
     let (
         input_rate,
         output_rate,
@@ -652,6 +656,10 @@ pub async fn handle_chat_stream(
             )
         }
     };
+    let max_tokens = effective_max_tokens(
+        req.max_tokens,
+        max_output_tokens.and_then(|value| u32::try_from(value).ok()),
+    );
     if let Some(conversation_id) = req.conversation_id {
         chat_id = Some(Path(conversation_id));
     }
@@ -1058,7 +1066,8 @@ pub async fn handle_chat_stream(
     let artifact_enabled = active_skills
         .iter()
         .any(|s| s.identifier == "artifact-create");
-    let web_search = web_search || skill_web_search;
+    let web_search =
+        effective_native_web_search(web_search || skill_web_search, model_supports_web_search);
     let selected_mcp_servers = {
         let mut merged = selected_mcp_servers;
         for id in skill_mcp_server_ids {
@@ -1126,7 +1135,7 @@ pub async fn handle_chat_stream(
             model_name.clone(),
             previous_prompts,
             req.temperature,
-            max_output_tokens.and_then(|value| u32::try_from(value).ok()),
+            max_tokens,
             &mcp_tool_lookup,
             web_search,
             req.config.clone().unwrap_or(Value::Null),

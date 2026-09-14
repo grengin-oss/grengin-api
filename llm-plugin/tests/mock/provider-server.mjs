@@ -136,6 +136,38 @@ function openaiWebSearchFrames() {
   ];
 }
 
+function groqWebSearchFrames() {
+  const tool = (fields) => ({
+    id: 'chatcmpl-groq-mock',
+    choices: [{ index: 0, delta: { executed_tools: [fields] } }],
+  });
+  return [
+    data(tool({
+      index: 0,
+      type: 'web_search',
+      arguments: { query: 'current Rust stable version' },
+      search_results: { results: [] },
+    })),
+    data({ id: 'chatcmpl-groq-mock', choices: [{ index: 0, delta: { content: 'Rust 1.90' } }] }),
+    data(tool({
+      index: 0,
+      type: 'web_search',
+      arguments: { query: 'current Rust stable version' },
+      output: 'Search completed',
+      search_results: {
+        results: [{
+          title: 'Rust Releases',
+          url: 'https://releases.rs/',
+          content: 'Current stable Rust release information.',
+          score: 0.99,
+        }],
+      },
+    })),
+    data({ id: 'chatcmpl-groq-mock', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+    'data: [DONE]\n\n',
+  ];
+}
+
 // ---------------------------------------------------------------------------
 // Anthropic: POST /v1/messages
 // ---------------------------------------------------------------------------
@@ -332,6 +364,7 @@ const server = createServer((request, response) => {
         const prompt = lastUserText(body).toLowerCase();
         if (hasToolResult(body)) return writeFrames(response, openaiToolAnswerFrames(body));
         if (prompt.includes('reasoning')) return writeFrames(response, openaiReasoningFrames());
+        if (prompt.includes('groq compound search')) return writeFrames(response, groqWebSearchFrames());
         if (prompt.includes('search')) return writeFrames(response, openaiWebSearchFrames());
         if (prompt.includes('weather') && (body.tools ?? []).length > 0) {
           return writeFrames(response, openaiToolCallFrames(clientToolName(body, 'openai')));
