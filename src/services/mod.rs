@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod ai_engine_catalog;
 pub mod ai_engine_helpers;
 pub mod ai_plugin;
 pub mod analytics;

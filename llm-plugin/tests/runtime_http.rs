@@ -746,6 +746,31 @@ async fn rejects_chat_responses_that_are_not_event_streams() {
 }
 
 #[tokio::test]
+async fn accepts_sse_framing_when_the_provider_omits_content_type() {
+    let wire = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+    );
+    let (base_url, _) = serve_once("200 OK", "", wire.as_bytes().to_vec()).await;
+    let provider = provider(
+        base_url,
+        json!({"chat": {"streaming": true}}),
+        openai_chat_operations(Value::Null),
+    );
+
+    let events = collect_chat(&provider, "chat-1").await;
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ProviderEvent::TextDelta { text } if text == "OK"
+    )));
+    assert!(matches!(
+        events.last(),
+        Some(ProviderEvent::Completed { .. })
+    ));
+}
+
+#[tokio::test]
 async fn rejects_operation_paths_that_climb_out_of_the_base_url() {
     // Nothing is served: the traversal must be refused before a connection is attempted.
     let base_url = "http://127.0.0.1:1/v1/".to_string();

@@ -42,6 +42,10 @@ pub fn model_type(model: &ProviderModel) -> ModelType {
     }
 }
 
+pub fn is_chat_selectable_model(model: &ModelInfo) -> bool {
+    model.model_type != ModelType::TextEmbedder
+}
+
 pub fn to_model_info(provider_key: &str, model: ProviderModel) -> ModelInfo {
     let chat = model.capabilities.chat.as_ref();
     let resolved_model_type = model_type(&model);
@@ -104,6 +108,49 @@ mod tests {
     use llm_plugin::{ModelId, ProviderCapabilities, ProviderModel};
 
     use super::*;
+
+    fn model_info(model_type: ModelType) -> ModelInfo {
+        ModelInfo {
+            key: "model-1".to_string(),
+            name: "Model 1".to_string(),
+            engine: "example".to_string(),
+            model_type,
+            comment: None,
+            input_token_rate: None,
+            output_token_rate: None,
+            image_input_token_rate: None,
+            image_cached_input_token_rate: None,
+            image_output_token_rate: None,
+            cached_input_token_rate: None,
+            cache_creation_token_rate: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            supports_streaming: false,
+            supports_tools: false,
+            supports_reasoning: false,
+            supports_vision: false,
+            supports_audio: false,
+            supports_pdf_native: false,
+            supports_web_search: false,
+            supports_multiple_images: false,
+            max_images: None,
+            dimensions: None,
+            price_per_image: None,
+        }
+    }
+
+    #[test]
+    fn chat_model_endpoints_exclude_only_embedding_models() {
+        assert!(is_chat_selectable_model(&model_info(
+            ModelType::TextGenerator
+        )));
+        assert!(is_chat_selectable_model(&model_info(
+            ModelType::ImageGenerator
+        )));
+        assert!(!is_chat_selectable_model(&model_info(
+            ModelType::TextEmbedder
+        )));
+    }
 
     #[test]
     fn canonical_model_type_wins_for_multi_capability_provider() {

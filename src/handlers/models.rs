@@ -8,10 +8,11 @@ use std::collections::HashSet;
 
 use crate::{
     auth::claims::Claims,
-    dto::models::{ModelInfo, ModelType, ModelsResponse, ProviderInfo},
+    dto::models::{ModelInfo, ModelsResponse, ProviderInfo},
     models::users,
     services::{
         department_policies::effective_allowed_models, models_cache::load_providers_cached,
+        provider_models::is_chat_selectable_model,
     },
     state::SharedState,
 };
@@ -81,7 +82,7 @@ pub async fn get_list_models(
         let mut models = provider
             .models
             .into_iter()
-            .filter(|model| model.model_type != ModelType::TextEmbedder)
+            .filter(is_chat_selectable_model)
             .filter(|model| whitelist.contains(&model.name) || whitelist.contains(&model.key))
             .collect::<Vec<ModelInfo>>();
         if let Some(allowed) = &allowed_set {
@@ -132,7 +133,7 @@ pub async fn get_list_models(
         let mut models = plugin_models
             .into_iter()
             .map(|model| crate::services::provider_models::to_model_info(&provider_key, model))
-            .filter(|model| model.model_type != ModelType::TextEmbedder)
+            .filter(is_chat_selectable_model)
             .collect::<Vec<_>>();
         if let Some(allowed) = &allowed_set {
             models.retain(|model| {

@@ -162,6 +162,9 @@ impl SseEventMapper {
                 let Some(selected) = value.pointer(pointer) else {
                     continue;
                 };
+                if selected.is_null() {
+                    continue;
+                }
                 let items = selected.as_array().ok_or_else(|| {
                     ProviderError::ResponseMapping(format!(
                         "response rule {} forEach pointer is not an array",
@@ -1468,6 +1471,27 @@ mod tests {
             ]
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn null_for_each_values_are_treated_as_empty_provider_arrays() {
+        let response: ChatResponseSpec = serde_json::from_value(json!({
+            "rules": [{
+                "id": "tool_start",
+                "forEach": "/choices/0/delta/tool_calls",
+                "when": {"pointer": "/id", "exists": true},
+                "emit": "toolCallStart",
+                "fields": {"id": "/id", "name": "/function/name", "index": "/index"}
+            }]
+        }))
+        .unwrap();
+        let mut mapper = SseEventMapper::new(response);
+
+        let events = mapper
+            .map(&event(r#"{"choices":[{"delta":{"tool_calls":null}}]}"#))
+            .unwrap();
+
+        assert!(events.is_empty());
     }
 
     #[test]

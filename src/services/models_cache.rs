@@ -195,7 +195,7 @@ async fn fetch_text_models(
     let arr = models_value
         .as_array()
         .ok_or_else(|| anyhow!("models json root is not an array for {url}"))?;
-    arr.iter().map(parse_text_model).collect()
+    parse_catalog_models_newest_first(arr, parse_text_model)
 }
 
 async fn fetch_image_models(
@@ -206,7 +206,30 @@ async fn fetch_image_models(
     let arr = models_value
         .as_array()
         .ok_or_else(|| anyhow!("image models json root is not an array for {url}"))?;
-    arr.iter().map(parse_image_model).collect()
+    parse_catalog_models_newest_first(arr, parse_image_model)
+}
+
+fn parse_catalog_models_newest_first(
+    values: &[Value],
+    parser: fn(&Value) -> Result<ModelInfo, Error>,
+) -> Result<Vec<ModelInfo>, Error> {
+    let mut sorted = values.iter().collect::<Vec<_>>();
+    sorted.sort_by(|left, right| {
+        let left_date = left.get("launchDate").and_then(Value::as_str);
+        let right_date = right.get("launchDate").and_then(Value::as_str);
+        match (left_date, right_date) {
+            (Some(left), Some(right)) => right.cmp(left),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+        .then_with(|| {
+            let left_key = left.get("key").and_then(Value::as_str).unwrap_or_default();
+            let right_key = right.get("key").and_then(Value::as_str).unwrap_or_default();
+            left_key.cmp(right_key)
+        })
+    });
+    sorted.into_iter().map(parser).collect()
 }
 
 async fn fetch_embed_models(
@@ -532,6 +555,36 @@ mod tests {
         assert!(model.supports_audio);
         assert!(model.supports_web_search);
         assert_eq!(model.comment.as_deref(), Some("Reviewed model"));
+    }
+
+    #[test]
+    fn catalog_models_are_sorted_newest_first_with_stable_ties() {
+        let values = vec![
+            json!({"key": "undated-z", "name": "Undated Z", "engine": "example"}),
+            json!({"key": "same-b", "name": "Same B", "engine": "example", "launchDate": "2026-08"}),
+            json!({"key": "older", "name": "Older", "engine": "example", "launchDate": "2025-12"}),
+            json!({"key": "same-a", "name": "Same A", "engine": "example", "launchDate": "2026-08"}),
+            json!({"key": "newest", "name": "Newest", "engine": "example", "launchDate": "2026-09-10"}),
+            json!({"key": "undated-a", "name": "Undated A", "engine": "example"}),
+        ];
+
+        let models = parse_catalog_models_newest_first(&values, parse_text_model).unwrap();
+        let keys = models
+            .iter()
+            .map(|model| model.key.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            keys,
+            [
+                "newest",
+                "same-a",
+                "same-b",
+                "older",
+                "undated-a",
+                "undated-z"
+            ]
+        );
     }
 
     #[test]

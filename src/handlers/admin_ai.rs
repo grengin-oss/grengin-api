@@ -22,7 +22,7 @@ use crate::{
     services::{
         authorization::{AuthorizationService, PermissionScopeMode},
         provider_manifests,
-        provider_models::to_model_info,
+        provider_models::{is_chat_selectable_model, to_model_info},
         provider_runtime::{
             ProviderLoadError, build_provider, compile_provider, parse_manifest,
             parse_plugin_config, provider_plugin_version, unregister_provider,
@@ -41,8 +41,7 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
     QueryOrder, TryIntoModel,
 };
-use std::{collections::HashSet, sync::Arc};
-use uuid::Uuid;
+use std::sync::Arc;
 
 #[utoipa::path(
     get,
@@ -78,81 +77,6 @@ pub async fn get_ai_engines(
             eprintln!("db error get all {e}");
             AuthError::DbTimeout
         })?;
-    let mut existing_keys: HashSet<String> = ai_engines
-        .iter()
-        .map(|engine| engine.engine_key.clone())
-        .collect();
-    let mut to_insert: Vec<(ai_engines::ActiveModel, Option<String>, Vec<String>)> = Vec::new();
-    for provider in &ai_models.providers {
-        if existing_keys.contains(&provider.key) {
-            continue;
-        }
-        let api_key = app_state
-            .settings
-            .get_ai_engine_api_key(&provider.key)
-            .await;
-        let api_key_encrypted = api_key.clone().map(|k| {
-            encrypt_key(&app_state.settings.auth.app_key, k.as_bytes())
-                .expect("Failed to encrypt the api key")
-        });
-        let whitelist_models = provider
-            .models
-            .iter()
-            .map(|model| model.key.clone())
-            .collect::<Vec<String>>();
-        to_insert.push((
-            ai_engines::ActiveModel {
-                id: Set(Uuid::new_v4()),
-                display_name: Set(provider.name.clone()),
-                is_enabled: Set(api_key_encrypted.is_some()),
-                engine_key: Set(provider.key.clone()),
-                api_key_status: Set(if api_key_encrypted.is_some() {
-                    ApiKeyStatus::NotValidated
-                } else {
-                    ApiKeyStatus::NotConfigured
-                }),
-                api_key: Set(api_key_encrypted.clone()),
-                whitelist_models: Set(whitelist_models.clone()),
-                default_model: Set(String::from("<empty>")),
-                default_image_gen_model: Set(None),
-                plugin_config: Set(None),
-                api_key_validated_at: Set(None),
-                created_at: Set(Utc::now()),
-                updated_at: Set(Utc::now()),
-            },
-            api_key,
-            whitelist_models,
-        ));
-        existing_keys.insert(provider.key.clone());
-    }
-
-    if !to_insert.is_empty() {
-        ai_engines::Entity::insert_many(to_insert.iter().map(|(model, _, _)| model.clone()))
-            .exec(&app_state.database)
-            .await
-            .map_err(|e| {
-                eprintln!("db insert many error {:?}", e);
-                AuthError::DbTimeout
-            })?;
-        for (active_model, api_key, whitelist_models) in to_insert {
-            let model = active_model.try_into_model().unwrap();
-            let engine_key = model.engine_key.clone();
-            let is_enabled = model.is_enabled.clone();
-            let _ = app_state
-                .settings
-                .load_ai_engine_in_state(engine_key, api_key, is_enabled, whitelist_models)
-                .await;
-        }
-        ai_engines = ai_engines::Entity::find()
-            .order_by_desc(ai_engines::Column::CreatedAt)
-            .all(&app_state.database)
-            .await
-            .map_err(|e| {
-                eprintln!("db error get all {e}");
-                AuthError::DbTimeout
-            })?;
-    }
-
     sort_engines_by_readiness(&mut ai_engines);
 
     let catalog_keys: Vec<String> = ai_engines
@@ -315,12 +239,14 @@ pub async fn get_ai_engine_models_by_key(
             .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
         response.models = models
             .into_iter()
+            .map(|model| to_model_info(&ai_engine.engine_key, model))
+            .filter(is_chat_selectable_model)
             .map(|model| {
                 let is_whitelisted = ai_engine
                     .whitelist_models
                     .iter()
-                    .any(|model_id| model_id == model.id.as_str() || model_id == &model.name);
-                ai_model_from_info(to_model_info(&ai_engine.engine_key, model), is_whitelisted)
+                    .any(|model_id| model_id == &model.key || model_id == &model.name);
+                ai_model_from_info(model, is_whitelisted)
             })
             .collect();
         return Ok((StatusCode::OK, Json(response)));
@@ -331,6 +257,9 @@ pub async fn get_ai_engine_models_by_key(
             continue;
         }
         for model in provider.models {
+            if !is_chat_selectable_model(&model) {
+                continue;
+            }
             let is_whitelisted = ai_engine.whitelist_models.contains(&model.key)
                 || ai_engine.whitelist_models.contains(&model.name);
             response
@@ -713,16 +642,9 @@ pub async fn validate_ai_engines_by_key(
     .await
     {
         Ok(provider) => match provider.models() {
-            Some(models) => match models.list_models().await {
-                Ok(models) => (ApiKeyStatus::Valid, models.len() as i64),
-                Err(ProviderError::QuotaExhausted)
-                | Err(ProviderError::HttpStatus { status: 429, .. }) => (ApiKeyStatus::Valid, 0),
-                Err(ProviderError::MissingCredential(_)) => (ApiKeyStatus::NotConfigured, 0),
-                Err(ProviderError::HttpStatus {
-                    status: 401 | 403, ..
-                }) => (ApiKeyStatus::Invalid, 0),
-                Err(_) => (ApiKeyStatus::NotValidated, 0),
-            },
+            Some(models) => {
+                classify_model_validation(models.list_models().await.map(|models| models.len()))
+            }
             None => (ApiKeyStatus::NotValidated, 0),
         },
         Err(ProviderLoadError::CredentialDecryption) => return Err(AuthError::DbTimeout),
@@ -759,4 +681,49 @@ pub async fn validate_ai_engines_by_key(
         models_available,
     };
     Ok((StatusCode::OK, Json(response)))
+}
+
+fn classify_model_validation(result: Result<usize, ProviderError>) -> (ApiKeyStatus, i64) {
+    match result {
+        Ok(models) => (ApiKeyStatus::Valid, models as i64),
+        Err(ProviderError::QuotaExhausted | ProviderError::PaymentRequired)
+        | Err(ProviderError::HttpStatus { status: 429, .. }) => (ApiKeyStatus::Valid, 0),
+        Err(ProviderError::MissingCredential(_)) => (ApiKeyStatus::NotConfigured, 0),
+        Err(ProviderError::HttpStatus {
+            status: 401 | 403, ..
+        }) => (ApiKeyStatus::Invalid, 0),
+        Err(_) => (ApiKeyStatus::NotValidated, 0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use llm_plugin::ProviderError;
+
+    use crate::models::ai_engines::ApiKeyStatus;
+
+    use super::classify_model_validation;
+
+    #[test]
+    fn exhausted_credit_still_proves_the_api_key_is_accepted() {
+        assert_eq!(
+            classify_model_validation(Err(ProviderError::PaymentRequired)),
+            (ApiKeyStatus::Valid, 0)
+        );
+        assert_eq!(
+            classify_model_validation(Err(ProviderError::QuotaExhausted)),
+            (ApiKeyStatus::Valid, 0)
+        );
+    }
+
+    #[test]
+    fn authentication_failures_mark_the_api_key_invalid() {
+        assert_eq!(
+            classify_model_validation(Err(ProviderError::HttpStatus {
+                status: 401,
+                message: "Unauthorized".to_string(),
+            })),
+            (ApiKeyStatus::Invalid, 0)
+        );
+    }
 }
