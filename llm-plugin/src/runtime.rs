@@ -358,6 +358,8 @@ impl DeclarativeProvider {
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
+        // Some compatible gateways omit this header; the bounded SSE decoder still
+        // validates framing and event payloads before emitting canonical events.
         if !content_type.is_empty()
             && !content_type
                 .to_ascii_lowercase()

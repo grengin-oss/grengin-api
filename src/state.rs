@@ -15,6 +15,7 @@ use crate::{
     config::setting::{ConfigError, OidcClient, Settings},
     dto::oauth::AuthProvider,
     models::{mcp_servers, sso_providers},
+    services::ai_engine_catalog::reconcile_catalog_ai_engines,
     services::discovery_catalog::DiscoveryCatalog,
     services::live_models_cache::LiveModelsCache,
     services::mcp_client::McpServerClient,
@@ -105,6 +106,11 @@ impl AppState {
         let database = Database::connect(&settings.auth.database_url)
             .await
             .map_err(|e| ConfigError::DbError(e.to_string()))?;
+        let discovery_catalog = DiscoveryCatalog::from_env(req_client.clone())
+            .map_err(|error| ConfigError::Custom(error.to_string()))?;
+        let _ = reconcile_catalog_ai_engines(&database, &discovery_catalog)
+            .await
+            .map_err(|error| eprintln!("Catalog AI engine reconciliation failed: {error:#}"));
         let _ = settings
             .load_ai_engines_from_db(&database)
             .await
@@ -118,8 +124,6 @@ impl AppState {
             .await
             .map_err(|e| eprintln!("Loading embedding config from db error: {e}"));
         let (notification_hub, _) = broadcast::channel(256);
-        let discovery_catalog = DiscoveryCatalog::from_env(req_client.clone())
-            .map_err(|error| ConfigError::Custom(error.to_string()))?;
         let state = Self {
             database,
             oidc_providers: RwLock::new(HashMap::new()),

@@ -642,16 +642,9 @@ pub async fn validate_ai_engines_by_key(
     .await
     {
         Ok(provider) => match provider.models() {
-            Some(models) => match models.list_models().await {
-                Ok(models) => (ApiKeyStatus::Valid, models.len() as i64),
-                Err(ProviderError::QuotaExhausted)
-                | Err(ProviderError::HttpStatus { status: 429, .. }) => (ApiKeyStatus::Valid, 0),
-                Err(ProviderError::MissingCredential(_)) => (ApiKeyStatus::NotConfigured, 0),
-                Err(ProviderError::HttpStatus {
-                    status: 401 | 403, ..
-                }) => (ApiKeyStatus::Invalid, 0),
-                Err(_) => (ApiKeyStatus::NotValidated, 0),
-            },
+            Some(models) => {
+                classify_model_validation(models.list_models().await.map(|models| models.len()))
+            }
             None => (ApiKeyStatus::NotValidated, 0),
         },
         Err(ProviderLoadError::CredentialDecryption) => return Err(AuthError::DbTimeout),
@@ -688,4 +681,49 @@ pub async fn validate_ai_engines_by_key(
         models_available,
     };
     Ok((StatusCode::OK, Json(response)))
+}
+
+fn classify_model_validation(result: Result<usize, ProviderError>) -> (ApiKeyStatus, i64) {
+    match result {
+        Ok(models) => (ApiKeyStatus::Valid, models as i64),
+        Err(ProviderError::QuotaExhausted | ProviderError::PaymentRequired)
+        | Err(ProviderError::HttpStatus { status: 429, .. }) => (ApiKeyStatus::Valid, 0),
+        Err(ProviderError::MissingCredential(_)) => (ApiKeyStatus::NotConfigured, 0),
+        Err(ProviderError::HttpStatus {
+            status: 401 | 403, ..
+        }) => (ApiKeyStatus::Invalid, 0),
+        Err(_) => (ApiKeyStatus::NotValidated, 0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use llm_plugin::ProviderError;
+
+    use crate::models::ai_engines::ApiKeyStatus;
+
+    use super::classify_model_validation;
+
+    #[test]
+    fn exhausted_credit_still_proves_the_api_key_is_accepted() {
+        assert_eq!(
+            classify_model_validation(Err(ProviderError::PaymentRequired)),
+            (ApiKeyStatus::Valid, 0)
+        );
+        assert_eq!(
+            classify_model_validation(Err(ProviderError::QuotaExhausted)),
+            (ApiKeyStatus::Valid, 0)
+        );
+    }
+
+    #[test]
+    fn authentication_failures_mark_the_api_key_invalid() {
+        assert_eq!(
+            classify_model_validation(Err(ProviderError::HttpStatus {
+                status: 401,
+                message: "Unauthorized".to_string(),
+            })),
+            (ApiKeyStatus::Invalid, 0)
+        );
+    }
 }

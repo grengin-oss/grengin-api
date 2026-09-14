@@ -81,7 +81,7 @@ async fn smoke(provider: LiveProvider) {
                     tool_result: None,
                 },
             ],
-            temperature: Some(0.0),
+            temperature: Some(0.2),
             max_tokens: Some(128),
             tools: Vec::new(),
             tool_choice: None,
@@ -142,6 +142,58 @@ async fn smoke(provider: LiveProvider) {
         }),
         "{} emitted invalid total token usage",
         provider.descriptor().id
+    );
+}
+
+async fn model_list_smoke(provider: LiveProvider) {
+    if !enabled() {
+        eprintln!(
+            "skipping {} model listing: GRENGIN_LIVE_PROVIDER_TESTS is not enabled",
+            provider.name
+        );
+        return;
+    }
+    let Some(api_key) = env::var(provider.key_env)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        eprintln!(
+            "skipping {} model listing: {} is not configured",
+            provider.name, provider.key_env
+        );
+        return;
+    };
+    let mut manifest = ProviderManifestV1::from_json(&provider.manifest).unwrap();
+    if let Some(base_url) = provider.base_url {
+        manifest.base_url = base_url.to_string();
+    }
+    let runtime = ProviderRuntimeConfig {
+        credentials: BTreeMap::from([("api_key".to_string(), api_key)]),
+        default_timeout_ms: 30_000,
+        max_response_bytes: 2 * 1024 * 1024,
+        ..Default::default()
+    };
+    let provider_runtime = DeclarativeProvider::new(manifest, runtime).unwrap();
+    let models = provider_runtime
+        .models()
+        .expect("catalog provider must expose model listing")
+        .list_models()
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "{} model listing failed: {}",
+                provider_runtime.descriptor().id,
+                error_class(&error)
+            )
+        });
+
+    assert!(!models.is_empty(), "provider returned no models");
+    assert!(
+        models
+            .iter()
+            .any(|model| model.id.as_str() == provider.model),
+        "provider model listing omitted {}",
+        provider.model
     );
 }
 
@@ -485,6 +537,27 @@ macro_rules! catalog_web_search_test {
     };
 }
 
+macro_rules! catalog_model_list_test {
+    ($name:ident, $display:literal, $key:literal, $provider:literal, $model:literal) => {
+        #[tokio::test]
+        #[ignore = "requires GRENGIN_LIVE_PROVIDER_TESTS=1, GRENGIN_PROVIDER_CATALOG_DIR, and a provider credential"]
+        async fn $name() {
+            let catalog = env::var("GRENGIN_PROVIDER_CATALOG_DIR")
+                .expect("set GRENGIN_PROVIDER_CATALOG_DIR to master-data/ai-providers");
+            let manifest = std::fs::read(format!("{catalog}/{}/plugin.json", $provider))
+                .expect("catalog provider manifest");
+            model_list_smoke(LiveProvider {
+                name: $display,
+                key_env: $key,
+                base_url: None,
+                model: $model,
+                manifest,
+            })
+            .await;
+        }
+    };
+}
+
 macro_rules! live_embedding_test {
     ($name:ident, $display:literal, $key:literal, $base:literal, $model:literal) => {
         #[tokio::test]
@@ -553,6 +626,34 @@ catalog_live_test!(
     "TINKER_API_KEY",
     "tinker",
     "thinkingmachines/Inkling-Small"
+);
+catalog_live_test!(
+    minimax_chat_smoke,
+    "MiniMax",
+    "MINIMAX_API_KEY",
+    "minimax",
+    "MiniMax-M3"
+);
+catalog_live_test!(
+    sakana_chat_smoke,
+    "Sakana AI",
+    "SAKANA_API_KEY",
+    "sakana",
+    "sakana-namazu"
+);
+catalog_model_list_test!(
+    minimax_model_list_smoke,
+    "MiniMax",
+    "MINIMAX_API_KEY",
+    "minimax",
+    "MiniMax-M3"
+);
+catalog_model_list_test!(
+    sakana_model_list_smoke,
+    "Sakana AI",
+    "SAKANA_API_KEY",
+    "sakana",
+    "sakana-namazu"
 );
 
 catalog_web_search_test!(glm_web_search_smoke, "GLM", "GLM_API_KEY", "glm", "glm-4.7");
