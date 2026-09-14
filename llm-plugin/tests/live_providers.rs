@@ -82,7 +82,7 @@ async fn smoke(provider: LiveProvider) {
                 },
             ],
             temperature: Some(0.0),
-            max_tokens: Some(16),
+            max_tokens: Some(128),
             tools: Vec::new(),
             tool_choice: None,
             web_search: false,
@@ -96,26 +96,18 @@ async fn smoke(provider: LiveProvider) {
                 error_class(&error)
             )
         });
-    let mut stream = session.stream().await.unwrap_or_else(|error| {
-        panic!(
-            "{} request failed: {}",
-            provider.descriptor().id,
-            error_class(&error)
-        )
-    });
+    let mut stream = session
+        .stream()
+        .await
+        .unwrap_or_else(|error| panic!("{} request failed: {error}", provider.descriptor().id));
     let mut received_text = false;
     let mut completed = false;
     let mut input_tokens = None;
     let mut output_tokens = None;
     let mut total_tokens = None;
     while let Some(event) = stream.next().await {
-        let event = event.unwrap_or_else(|error| {
-            panic!(
-                "{} stream failed: {}",
-                provider.descriptor().id,
-                error_class(&error)
-            )
-        });
+        let event = event
+            .unwrap_or_else(|error| panic!("{} stream failed: {error}", provider.descriptor().id));
         received_text |= matches!(event, ProviderEvent::TextDelta { .. });
         completed |= matches!(event, ProviderEvent::Completed { .. });
         if let ProviderEvent::Usage { usage } = event {
@@ -233,6 +225,100 @@ async fn embedding_smoke(provider: LiveProvider) {
             "provider returned invalid embedding token usage"
         );
     }
+}
+
+async fn web_search_smoke(provider: LiveProvider) {
+    if !enabled() {
+        eprintln!(
+            "skipping {} web search: GRENGIN_LIVE_PROVIDER_TESTS is not enabled",
+            provider.name
+        );
+        return;
+    }
+    let Some(api_key) = env::var(provider.key_env)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        eprintln!(
+            "skipping {} web search: {} is not configured",
+            provider.name, provider.key_env
+        );
+        return;
+    };
+    let model = provider.model;
+    let manifest = ProviderManifestV1::from_json(&provider.manifest).unwrap();
+    let provider = DeclarativeProvider::new(
+        manifest,
+        ProviderRuntimeConfig {
+            credentials: BTreeMap::from([("api_key".to_string(), api_key)]),
+            default_timeout_ms: 90_000,
+            max_response_bytes: 4 * 1024 * 1024,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let provider_id = provider.descriptor().id.to_string();
+    let mut session = provider
+        .chat()
+        .unwrap()
+        .start(ChatRequest {
+            model: ModelId::new(model),
+            messages: vec![ChatMessage {
+                role: ChatRole::User,
+                content: vec![ContentPart::Text {
+                    text: "What is the current stable Rust version? Use web search and cite one source."
+                        .to_string(),
+                }],
+                tool_calls: Vec::new(),
+                tool_result: None,
+            }],
+            temperature: Some(0.0),
+            max_tokens: Some(512),
+            tools: Vec::new(),
+            tool_choice: None,
+            web_search: true,
+            options: Value::Null,
+        })
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "{provider_id} web-search setup failed: {}",
+                error_class(&error)
+            )
+        });
+    let mut stream = session.stream().await.unwrap_or_else(|error| {
+        panic!(
+            "{provider_id} web-search request failed: {}",
+            error_class(&error)
+        )
+    });
+    let mut received_text = false;
+    let mut completed = false;
+    let mut citation_count = 0usize;
+    while let Some(event) = stream.next().await {
+        match event.unwrap_or_else(|error| {
+            panic!(
+                "{provider_id} web-search stream failed: {}",
+                error_class(&error)
+            )
+        }) {
+            ProviderEvent::TextDelta { .. } => received_text = true,
+            ProviderEvent::ServerToolResult { results, .. } => {
+                citation_count += results
+                    .iter()
+                    .filter(|result| !result.url.trim().is_empty())
+                    .count();
+            }
+            ProviderEvent::Completed { .. } => completed = true,
+            _ => {}
+        }
+    }
+    assert!(received_text, "{provider_id} web search emitted no text");
+    assert!(completed, "{provider_id} web search emitted no completion");
+    assert!(
+        citation_count > 0,
+        "{provider_id} web search emitted no citations"
+    );
 }
 
 fn error_class(error: &llm_plugin::ProviderError) -> &'static str {
@@ -378,6 +464,27 @@ macro_rules! catalog_live_test {
     };
 }
 
+macro_rules! catalog_web_search_test {
+    ($name:ident, $display:literal, $key:literal, $provider:literal, $model:literal) => {
+        #[tokio::test]
+        #[ignore = "requires GRENGIN_LIVE_PROVIDER_TESTS=1, GRENGIN_PROVIDER_CATALOG_DIR, and a provider credential"]
+        async fn $name() {
+            let catalog = env::var("GRENGIN_PROVIDER_CATALOG_DIR")
+                .expect("set GRENGIN_PROVIDER_CATALOG_DIR to master-data/ai-providers");
+            let manifest = std::fs::read(format!("{catalog}/{}/plugin.json", $provider))
+                .expect("catalog provider manifest");
+            web_search_smoke(LiveProvider {
+                name: $display,
+                key_env: $key,
+                base_url: None,
+                model: $model,
+                manifest,
+            })
+            .await;
+        }
+    };
+}
+
 macro_rules! live_embedding_test {
     ($name:ident, $display:literal, $key:literal, $base:literal, $model:literal) => {
         #[tokio::test]
@@ -401,6 +508,74 @@ catalog_live_test!(
     "OPENAI_API_KEY",
     "openai",
     "gpt-5.4-nano"
+);
+catalog_live_test!(kimi_chat_smoke, "Kimi", "KIMI_API_KEY", "kimi", "kimi-k3");
+catalog_live_test!(glm_chat_smoke, "GLM", "GLM_API_KEY", "glm", "glm-5.3");
+catalog_live_test!(
+    qwen_chat_smoke,
+    "Qwen",
+    "QWEN_API_KEY",
+    "qwen",
+    "qwen3.8-max"
+);
+catalog_live_test!(
+    deepseek_catalog_chat_smoke,
+    "DeepSeek",
+    "DEEPSEEK_API_KEY",
+    "deepseek",
+    "deepseek-flash"
+);
+catalog_live_test!(
+    cerebras_catalog_chat_smoke,
+    "Cerebras",
+    "CEREBRAS_API_KEY",
+    "cerebras",
+    "gpt-oss-120b"
+);
+catalog_live_test!(xai_chat_smoke, "xAI", "GROK_API_KEY", "xai", "grok-4.6");
+catalog_live_test!(
+    groq_catalog_chat_smoke,
+    "Groq",
+    "GROQ_API_KEY",
+    "groq",
+    "groq/compound-mini"
+);
+catalog_live_test!(
+    sarvam_chat_smoke,
+    "Sarvam",
+    "SARVAM_API_KEY",
+    "sarvam",
+    "sarvam-105b"
+);
+catalog_live_test!(
+    tinker_chat_smoke,
+    "Tinker",
+    "TINKER_API_KEY",
+    "tinker",
+    "thinkingmachines/Inkling-Small"
+);
+
+catalog_web_search_test!(glm_web_search_smoke, "GLM", "GLM_API_KEY", "glm", "glm-4.7");
+catalog_web_search_test!(
+    qwen_web_search_smoke,
+    "Qwen",
+    "QWEN_API_KEY",
+    "qwen",
+    "qwen3.7-flash"
+);
+catalog_web_search_test!(
+    groq_web_search_smoke,
+    "Groq",
+    "GROQ_API_KEY",
+    "groq",
+    "groq/compound-mini"
+);
+catalog_web_search_test!(
+    xai_web_search_smoke,
+    "xAI",
+    "GROK_API_KEY",
+    "xai",
+    "grok-4.20-0309-non-reasoning"
 );
 live_test!(
     groq_chat_smoke,
