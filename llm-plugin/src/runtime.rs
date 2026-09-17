@@ -1063,12 +1063,14 @@ fn validate_model_chat_request(
     if has_images && !capabilities.vision {
         return Err(ProviderError::UnsupportedCapability("vision"));
     }
+    // Absent metadata means unknown, not unsupported: providers that discover their models
+    // live return catalog-free entries, so only an explicit false rejects the request.
     if request.web_search
         && !model
             .metadata
             .get("supportsWebSearch")
             .and_then(Value::as_bool)
-            .unwrap_or(false)
+            .unwrap_or(true)
     {
         return Err(ProviderError::UnsupportedCapability("web_search"));
     }

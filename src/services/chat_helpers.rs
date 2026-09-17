@@ -12,13 +12,37 @@ pub fn effective_native_web_search(requested: bool, model_supports_web_search: b
     requested && model_supports_web_search
 }
 
+pub fn supports_native_web_search(
+    provider_key: &str,
+    plugin_model_support: bool,
+    catalog_model_support: bool,
+) -> bool {
+    matches!(provider_key, "openai" | "anthropic" | "mistral" | "gemini")
+        || plugin_model_support
+        || catalog_model_support
+}
+
 pub fn effective_max_tokens(requested: Option<u32>, model_max: Option<u32>) -> Option<u32> {
     requested.map(|requested| model_max.map_or(requested, |model_max| requested.min(model_max)))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_max_tokens, effective_native_web_search};
+    use super::{effective_max_tokens, effective_native_web_search, supports_native_web_search};
+
+    #[test]
+    fn embedded_providers_keep_native_web_search_without_live_model_metadata() {
+        for provider in ["openai", "anthropic", "mistral", "gemini"] {
+            assert!(supports_native_web_search(provider, false, false));
+        }
+    }
+
+    #[test]
+    fn unsupported_provider_remains_disabled() {
+        assert!(!supports_native_web_search("tinker", false, false));
+        assert!(supports_native_web_search("custom", true, false));
+        assert!(supports_native_web_search("custom", false, true));
+    }
 
     #[test]
     fn native_web_search_requires_request_and_model_support() {

@@ -35,7 +35,9 @@ use crate::{
             content_type_to_ext,
         },
         budget_allocation::{get_department_budget_status, refresh_department_budget_available},
-        chat_helpers::{effective_max_tokens, effective_native_web_search},
+        chat_helpers::{
+            effective_max_tokens, effective_native_web_search, supports_native_web_search,
+        },
         department_policies::check_model_allowed,
         mcp_helpers::{
             McpOauthErrorPayload, McpOauthPrompt, McpOauthRequiredEvent, build_mcp_oauth_prompt,
@@ -575,9 +577,10 @@ pub async fn handle_chat_stream(
     };
     let plugin_is_image_only =
         provider_config.images().is_some() && provider_config.chat().is_none();
-    let model_supports_web_search = plugin_model_info
+    let plugin_model_supports_web_search = plugin_model_info
         .as_ref()
         .is_some_and(|model| model.supports_web_search);
+    let mut catalog_model_supports_web_search = false;
     let (
         input_rate,
         output_rate,
@@ -589,17 +592,20 @@ pub async fn handle_chat_stream(
         is_image_gen,
         supports_multiple_images,
     ) = match get_model_info_cached(&app_state.req_client, &model_name).await {
-        Ok(Some(model)) => (
-            model.input_token_rate,
-            model.output_token_rate,
-            model.image_input_token_rate,
-            model.image_output_token_rate,
-            model.cached_input_token_rate,
-            model.cache_creation_token_rate,
-            model.max_output_tokens,
-            model.model_type == ModelType::ImageGenerator,
-            model.supports_multiple_images,
-        ),
+        Ok(Some(model)) => {
+            catalog_model_supports_web_search = model.supports_web_search;
+            (
+                model.input_token_rate,
+                model.output_token_rate,
+                model.image_input_token_rate,
+                model.image_output_token_rate,
+                model.cached_input_token_rate,
+                model.cache_creation_token_rate,
+                model.max_output_tokens,
+                model.model_type == ModelType::ImageGenerator,
+                model.supports_multiple_images,
+            )
+        }
         Ok(None) => plugin_model_info.as_ref().map_or(
             (
                 None,
@@ -656,6 +662,11 @@ pub async fn handle_chat_stream(
             )
         }
     };
+    let model_supports_web_search = supports_native_web_search(
+        &provider_key,
+        plugin_model_supports_web_search,
+        catalog_model_supports_web_search,
+    );
     let max_tokens = effective_max_tokens(
         req.max_tokens,
         max_output_tokens.and_then(|value| u32::try_from(value).ok()),
