@@ -10,7 +10,10 @@ use std::{
 use anyhow::{Error, anyhow};
 use llm_plugin::ProviderManifestV1;
 
-use crate::{models::ai_engines::PluginConfig, services::models_cache::load_plugin_urls_cached};
+use crate::{
+    models::ai_engines::{PluginConfig, PluginConfigSource},
+    services::discovery_catalog::DiscoveryCatalog,
+};
 
 // std RwLock, not tokio: the read side is called from sync fns such as
 // provider_plugin_version that sit inside non-async response mapping.
@@ -53,13 +56,13 @@ pub fn invalidate(engine_key: &str) {
 }
 
 pub async fn catalog_plugin_config(
-    req_client: &reqwest::Client,
+    catalog: &DiscoveryCatalog,
     engine_key: &str,
 ) -> Result<PluginConfig, Error> {
     if let Some(config) = cached_plugin_config(engine_key) {
         return Ok(config);
     }
-    let config = fetch_plugin_config(req_client, engine_key).await?;
+    let config = fetch_plugin_config(catalog, engine_key, None).await?;
     write_cache().get_or_insert_with(HashMap::new).insert(
         engine_key.to_string(),
         CacheEntry {
@@ -70,7 +73,7 @@ pub async fn catalog_plugin_config(
     Ok(config)
 }
 
-pub async fn prefetch(req_client: &reqwest::Client, engine_keys: &[String]) {
+pub async fn prefetch(catalog: &DiscoveryCatalog, engine_keys: &[String]) {
     let pending: Vec<&String> = engine_keys
         .iter()
         .filter(|key| cached_plugin_config(key).is_none())
@@ -78,11 +81,10 @@ pub async fn prefetch(req_client: &reqwest::Client, engine_keys: &[String]) {
     if pending.is_empty() {
         return;
     }
-    let fetched =
-        futures_util::future::join_all(pending.iter().map(|key| async move {
-            (key.to_string(), fetch_plugin_config(req_client, key).await)
-        }))
-        .await;
+    let fetched = futures_util::future::join_all(pending.iter().map(|key| async move {
+        (key.to_string(), fetch_plugin_config(catalog, key, None).await)
+    }))
+    .await;
 
     let mut guard = write_cache();
     let cache = guard.get_or_insert_with(HashMap::new);
@@ -119,34 +121,42 @@ mod tests {
     }
 }
 
-async fn fetch_plugin_config(
-    req_client: &reqwest::Client,
+// Resolves through the versioned, digest-verified distribution index rather than
+// the unversioned `plugin.json` mirror: the mirror always serves whatever was
+// last published, which can be newer than the major.minor this grengin-api
+// release's distribution pins, silently drifting a running provider onto an
+// unvetted manifest. `requested_version` is `None` for normal resolution (the
+// distribution's pinned default) and `Some(v)` only for an explicit admin
+// upgrade/rollback to a specific compatible version.
+pub async fn fetch_plugin_config(
+    catalog: &DiscoveryCatalog,
     engine_key: &str,
+    requested_version: Option<&str>,
 ) -> Result<PluginConfig, Error> {
-    let url = load_plugin_urls_cached(req_client)
-        .await?
-        .remove(engine_key)
-        .ok_or_else(|| anyhow!("provider catalog declares no plugin url for {engine_key}"))?;
-    let bytes = req_client
-        .get(&url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-    let manifest = ProviderManifestV1::from_json(&bytes)
-        .map_err(|error| anyhow!("catalog manifest at {url} is invalid: {error}"))?;
+    let package = catalog
+        .ai_provider(engine_key, requested_version)
+        .await
+        .map_err(|error| anyhow!("catalog manifest for {engine_key} unavailable: {error}"))?;
+    let manifest = ProviderManifestV1::from_json(
+        serde_json::to_string(&package.plugin)
+            .map_err(|error| anyhow!("catalog manifest for {engine_key} is malformed: {error}"))?
+            .as_bytes(),
+    )
+    .map_err(|error| anyhow!("catalog manifest for {engine_key} is invalid: {error}"))?;
     if manifest.id != engine_key {
         return Err(anyhow!(
-            "catalog manifest at {url} declares id {} but is served for {engine_key}",
+            "catalog manifest for {engine_key} declares id {} instead",
             manifest.id
         ));
     }
     Ok(PluginConfig {
-        manifest: serde_json::to_value(&manifest)?,
+        manifest: package.plugin,
         configuration: serde_json::json!({}),
         base_url_override: None,
         allow_insecure_http: false,
         allow_private_network: false,
+        source: PluginConfigSource::Catalog,
+        version: Some(package.version),
+        sha256: Some(package.sha256),
     })
 }

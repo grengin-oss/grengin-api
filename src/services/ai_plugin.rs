@@ -143,7 +143,7 @@ pub async fn test_engine_connection(
     engine: ai_engines::Model,
 ) -> Result<AIEngineConnectionTest, AuthError> {
     let provider =
-        match build_provider(&state.settings.auth.app_key, &state.req_client, &engine).await {
+        match build_provider(&state.settings.auth.app_key, &state.discovery_catalog, &engine).await {
             Ok(provider) => provider,
             Err(error) => {
                 update_validation(state, engine, false).await?;

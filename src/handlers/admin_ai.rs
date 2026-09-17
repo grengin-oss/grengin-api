@@ -84,7 +84,7 @@ pub async fn get_ai_engines(
         .filter(|engine| engine.plugin_config.is_none())
         .map(|engine| engine.engine_key.clone())
         .collect();
-    provider_manifests::prefetch(&app_state.req_client, &catalog_keys).await;
+    provider_manifests::prefetch(&app_state.discovery_catalog, &catalog_keys).await;
 
     let response = ai_engines
         .into_iter()
@@ -225,7 +225,7 @@ pub async fn get_ai_engine_models_by_key(
     if ai_engine.plugin_config.is_some() {
         let provider = build_provider(
             &app_state.settings.auth.app_key,
-            &app_state.req_client,
+            &app_state.discovery_catalog,
             &ai_engine,
         )
         .await
@@ -407,7 +407,7 @@ pub async fn update_ai_engines_by_key(
         Some(
             build_provider(
                 &app_state.settings.auth.app_key,
-                &app_state.req_client,
+                &app_state.discovery_catalog,
                 &model,
             )
             .await
@@ -636,7 +636,7 @@ pub async fn validate_ai_engines_by_key(
         .ok_or(AuthError::ResourceNotFound)?;
     let validation = match build_provider(
         &app_state.settings.auth.app_key,
-        &app_state.req_client,
+        &app_state.discovery_catalog,
         &ai_engine,
     )
     .await

@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::{
     auth::encryption::decrypt_key,
-    models::ai_engines::{self, PluginConfig},
+    models::ai_engines::{self, PluginConfig, PluginConfigSource},
     services::provider_manifests,
     state::AppState,
 };
@@ -148,11 +148,14 @@ pub fn embedded_plugin_config(engine_key: &str) -> Result<Option<PluginConfig>, 
         base_url_override: None,
         allow_insecure_http: false,
         allow_private_network: false,
+        source: PluginConfigSource::Embedded,
+        version: None,
+        sha256: None,
     }))
 }
 
 pub async fn plugin_config_for(
-    req_client: &reqwest::Client,
+    catalog: &crate::services::discovery_catalog::DiscoveryCatalog,
     engine: &ai_engines::Model,
 ) -> Result<PluginConfig, ProviderLoadError> {
     if let Some(value) = engine.plugin_config.as_ref() {
@@ -161,7 +164,7 @@ pub async fn plugin_config_for(
     if let Some(config) = embedded_plugin_config(&engine.engine_key)? {
         return Ok(config);
     }
-    provider_manifests::catalog_plugin_config(req_client, &engine.engine_key)
+    provider_manifests::catalog_plugin_config(catalog, &engine.engine_key)
         .await
         .map_err(|error| {
             eprintln!(
@@ -204,10 +207,10 @@ pub fn compile_provider(
 
 pub async fn build_provider(
     app_key: &[u8; 32],
-    req_client: &reqwest::Client,
+    catalog: &crate::services::discovery_catalog::DiscoveryCatalog,
     engine: &ai_engines::Model,
 ) -> Result<DeclarativeProvider, ProviderLoadError> {
-    let config = plugin_config_for(req_client, engine).await?;
+    let config = plugin_config_for(catalog, engine).await?;
     let api_key = engine
         .api_key
         .as_ref()
@@ -236,7 +239,8 @@ pub async fn register_provider(
     state: &AppState,
     engine: &ai_engines::Model,
 ) -> Result<(), ProviderLoadError> {
-    let provider = build_provider(&state.settings.auth.app_key, &state.req_client, engine).await?;
+    let provider =
+        build_provider(&state.settings.auth.app_key, &state.discovery_catalog, engine).await?;
     state.provider_registry.register(Arc::new(provider)).await;
     Ok(())
 }
@@ -259,7 +263,7 @@ pub async fn load_enabled_providers(state: &AppState) -> Result<(), ProviderLoad
         .filter(|engine| engine.plugin_config.is_none())
         .map(|engine| engine.engine_key.clone())
         .collect();
-    provider_manifests::prefetch(&state.req_client, &catalog_keys).await;
+    provider_manifests::prefetch(&state.discovery_catalog, &catalog_keys).await;
     for engine in engines {
         if let Err(error) = register_provider(state, &engine).await {
             eprintln!(

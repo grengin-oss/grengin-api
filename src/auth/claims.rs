@@ -34,9 +34,13 @@ pub trait Claiming: Serialize + for<'a> Deserialize<'a> {
     }
 }
 
+// deny_unknown_fields: an access token carries `name`/`refresh` that a refresh
+// token doesn't, so without this an access token decodes fine as RefreshClaims
+// (extra fields silently ignored) and can mint new access tokens via /auth/refresh
+// forever, defeating the shorter access-token lifetime.
 #[derive(Debug, Serialize, Deserialize, ToSchema, IntoParams)]
+#[serde(deny_unknown_fields)]
 pub struct RefreshClaims {
-    pub refresh: bool,
     pub sub: String,   // Email Subject (user identifier)
     pub user_id: Uuid, //user id
     pub exp: usize,    // Expiration time
@@ -53,19 +57,23 @@ impl RefreshClaims {
             + 3600 * 24 * 7;
         Self {
             sub: sub.into(),
-            refresh: true,
             user_id,
             exp: exp as usize,
         }
     }
 }
 
+// deny_unknown_fields: a refresh token has no `refresh` field, so it fails the
+// required field instead of silently decoding as an access token. Kept for
+// symmetry with RefreshClaims so neither shape can be coerced into the other.
 #[derive(Debug, Serialize, Deserialize, ToSchema, IntoParams)]
+#[serde(deny_unknown_fields)]
 pub struct Claims {
     pub sub: String, // Email Subject (user identifier)
     pub name: Option<String>,
     pub user_id: Uuid, //user id
     pub exp: usize,    // Expiration time
+    pub refresh: bool,
 }
 
 impl Claiming for Claims {}
@@ -82,6 +90,7 @@ impl Claims {
             name: name.map(|v| v.into()),
             user_id,
             exp: exp as usize,
+            refresh:false,
         }
     }
 
@@ -91,6 +100,7 @@ impl Claims {
             name: None,
             user_id: Uuid::new_v4(),
             exp: 0,
+            refresh: false,
         }
     }
 }

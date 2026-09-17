@@ -19,18 +19,21 @@ use crate::{
     },
     utils::ltree::ltree_label_from_uuid,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use migration::{Alias, BinOper, Func};
 use rust_decimal::Decimal;
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::Set,
-    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect,
-    sea_query::Expr,
+    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityName as _,
+    EntityTrait, QueryFilter, QuerySelect, Statement,
+    sea_query::{Expr, PostgresQueryBuilder, Query as SqlQuery, SimpleExpr},
     sqlx::postgres::types::{PgLTree, PgLTreeLabel},
 };
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
+
+use crate::models::departments::ActionOnExceed;
 
 pub fn build_ltree_path(parent_path: Option<&str>, id: Uuid) -> Result<String, AuthError> {
     let mut tree = if let Some(p) = parent_path {
@@ -429,4 +432,248 @@ pub async fn department_budget_snapshot(
         budget_available.to_string().parse().unwrap_or(0.0),
         budget_used.to_string().parse().unwrap_or(0.0),
     ))
+}
+
+/// Resolves the admin-assignment plan for a newly created department: strips the
+/// creator from any explicitly requested admin list (they're assigned separately
+/// when not a super admin) and de-duplicates.
+pub fn department_admin_plan(
+    requested_admin_ids: Option<&[Uuid]>,
+    creator_id: Uuid,
+    is_super_admin: bool,
+) -> (Vec<Uuid>, bool) {
+    let mut requested = requested_admin_ids.unwrap_or_default().to_vec();
+    requested.retain(|user_id| *user_id != creator_id);
+    requested.sort_unstable();
+    requested.dedup();
+    (requested, !is_super_admin)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_department_row(
+    db: &DatabaseConnection,
+    id: Uuid,
+    name: &str,
+    description: &str,
+    parent_id: Option<Uuid>,
+    depth: i32,
+    path: &str,
+    retention_days: Option<i32>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+) -> Result<(), AuthError> {
+    let insert = SqlQuery::insert()
+        .into_table(departments::Entity)
+        .columns([
+            departments::Column::Id,
+            departments::Column::Name,
+            departments::Column::Description,
+            departments::Column::ParentId,
+            departments::Column::Depth,
+            departments::Column::Path,
+            departments::Column::RetentionDays,
+            departments::Column::CreatedAt,
+            departments::Column::UpdatedAt,
+        ])
+        .values_panic([
+            id.into(),
+            name.into(),
+            description.into(),
+            parent_id.into(),
+            depth.into(),
+            Expr::val(path).cast_as(Alias::new("ltree")).into(),
+            retention_days.into(),
+            created_at.into(),
+            updated_at.into(),
+        ])
+        .to_owned();
+    let (sql, values) = insert.build(PostgresQueryBuilder);
+    db.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        sql,
+        values,
+    ))
+    .await
+    .map_err(|e| {
+        eprintln!("insert department error: {e}");
+        AuthError::DbTimeout
+    })?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_department_row(
+    db: &DatabaseConnection,
+    department_id: Uuid,
+    name: &str,
+    description: &str,
+    parent_id: Option<Uuid>,
+    depth: i32,
+    path: &str,
+    retention_days: Option<i32>,
+    budget_allocated: Decimal,
+    budget_period: BudgetPeriod,
+    action_on_exceed: ActionOnExceed,
+    updated_at: DateTime<Utc>,
+) -> Result<(), AuthError> {
+    let stmt = SqlQuery::update()
+        .table(departments::Entity)
+        .values([
+            (departments::Column::Name, name.into()),
+            (departments::Column::Description, description.into()),
+            (departments::Column::ParentId, parent_id.into()),
+            (departments::Column::Depth, depth.into()),
+            (
+                departments::Column::Path,
+                Expr::val(path).cast_as(Alias::new("ltree")).into(),
+            ),
+            (departments::Column::RetentionDays, retention_days.into()),
+            (
+                departments::Column::BudgetAllocated,
+                budget_allocated.into(),
+            ),
+            (departments::Column::BudgetPeriod, budget_period.into()),
+            (departments::Column::ActionOnExceed, action_on_exceed.into()),
+            (departments::Column::UpdatedAt, updated_at.into()),
+        ])
+        .and_where(Expr::col(departments::Column::Id).eq(department_id))
+        .to_owned();
+    let (sql, values) = stmt.build(PostgresQueryBuilder);
+    db.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        sql,
+        values,
+    ))
+    .await
+    .map_err(|e| {
+        eprintln!("update department error: {e}");
+        AuthError::DbTimeout
+    })?;
+    Ok(())
+}
+
+pub async fn reparent_department(
+    db: &DatabaseConnection,
+    department_id: Uuid,
+    new_parent_id: Uuid,
+    updated_at: DateTime<Utc>,
+) -> Result<(), AuthError> {
+    let stmt = SqlQuery::update()
+        .table(departments::Entity)
+        .values([
+            (departments::Column::ParentId, new_parent_id.into()),
+            (departments::Column::UpdatedAt, updated_at.into()),
+        ])
+        .and_where(Expr::col(departments::Column::Id).eq(department_id))
+        .to_owned();
+    let (sql, values) = stmt.build(PostgresQueryBuilder);
+    db.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        sql,
+        values,
+    ))
+    .await
+    .map_err(|e| {
+        eprintln!("reparent department error: {e}");
+        AuthError::DbTimeout
+    })?;
+    Ok(())
+}
+
+/// Shifts an entire subtree's depth and rewrites the `ltree` path prefix after a
+/// move. `old_path`/`new_path` are bound as query parameters (not interpolated
+/// into the SQL text) even though both are already validated ltree strings built
+/// only from UUID labels — ORM can't express `replace(path::text, ...)::ltree`,
+/// so this is the raw-SQL exception per the raw-SQL rule, but the values still
+/// go through `cust_with_values` rather than `format!` so this stays safe even
+/// if `ltree_label_from_uuid` or its callers ever change.
+pub async fn move_department_subtree(
+    db: &DatabaseConnection,
+    old_path: &str,
+    new_path: &str,
+    depth_delta: i32,
+    updated_at: DateTime<Utc>,
+) -> Result<(), AuthError> {
+    let subtree_stmt = SqlQuery::update()
+        .table(departments::Entity)
+        .values([
+            (
+                departments::Column::Depth,
+                Expr::col(departments::Column::Depth)
+                    .add(depth_delta)
+                    .into(),
+            ),
+            (
+                departments::Column::Path,
+                Expr::cust_with_values(
+                    "replace(path::text, ?, ?)::ltree",
+                    [old_path, new_path],
+                )
+                .into(),
+            ),
+            (departments::Column::UpdatedAt, updated_at.into()),
+        ])
+        .and_where(Expr::col(departments::Column::Path).binary(
+            BinOper::Custom("<@".into()),
+            Expr::val(old_path).cast_as(Alias::new("ltree")),
+        ))
+        .to_owned();
+    let (sql, values) = subtree_stmt.build(PostgresQueryBuilder);
+    db.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        sql,
+        values,
+    ))
+    .await
+    .map_err(|e| {
+        eprintln!("move department subtree error: {e}");
+        AuthError::DbTimeout
+    })?;
+    Ok(())
+}
+
+pub async fn reassign_users_out_of_department(
+    db: &DatabaseConnection,
+    department_id: Uuid,
+    user_ids: &[Uuid],
+    force_to_parent: bool,
+    updated_at: DateTime<Utc>,
+) -> Result<(), AuthError> {
+    let users_t = Alias::new(users::Entity.table_name());
+    let depts_t = Alias::new(departments::Entity.table_name());
+
+    let parent_select = SqlQuery::select()
+        .column((depts_t.clone(), departments::Column::ParentId))
+        .from(depts_t.clone())
+        .and_where(Expr::col((depts_t.clone(), departments::Column::Id)).eq(department_id))
+        .to_owned();
+
+    let parent_subexpr: SimpleExpr =
+        SimpleExpr::SubQuery(None, Box::new(parent_select.into_sub_query_statement()));
+
+    let new_dept_expr: SimpleExpr = if force_to_parent {
+        parent_subexpr
+    } else {
+        Expr::value(Option::<Uuid>::None).into()
+    };
+
+    let update_stmt = SqlQuery::update()
+        .table(users_t.clone())
+        .value(users::Column::DepartmentId, new_dept_expr)
+        .value(users::Column::UpdatedAt, Expr::value(updated_at))
+        .and_where(Expr::col((users_t.clone(), users::Column::Id)).is_in(user_ids.to_vec()))
+        .and_where(Expr::col((users_t.clone(), users::Column::DepartmentId)).eq(department_id))
+        .to_owned();
+    let (sql, values) = update_stmt.build(PostgresQueryBuilder);
+    db.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        sql,
+        values,
+    ))
+    .await
+    .map_err(|e| {
+        eprintln!("reassign users out of department error: {e}");
+        AuthError::DbTimeout
+    })?;
+    Ok(())
 }

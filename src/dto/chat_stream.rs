@@ -220,6 +220,17 @@ pub struct ChatInput {
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
     pub image_count: Option<u8>,
+    // Both offer the model an image-generation tool it can call mid-chat; the
+    // tool is offered regardless of whether either is set. image_model_provider
+    // pins the exact engine (skips scanning every enabled engine's whitelist —
+    // useful if the same model id is ever whitelisted on more than one engine).
+    // image_model pins the exact model. Any combination is valid: both set
+    // resolves directly; either alone narrows the search; neither falls back
+    // to auto-selecting an enabled engine with a defaultImageGenModel configured.
+    #[serde(default)]
+    pub image_model_provider: Option<String>,
+    #[serde(default)]
+    pub image_model: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema, IntoParams)]

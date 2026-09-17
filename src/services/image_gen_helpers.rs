@@ -4,16 +4,103 @@
 use anyhow::{Context, anyhow};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use chrono::Utc;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use serde_json::json;
 use std::{fs, io::Write};
 use uuid::Uuid;
 
 use crate::{
     handlers::file::LOCAL_FOLDER,
-    models::files::{self, FileUploadStatus},
+    models::{ai_engines, files::{self, FileUploadStatus}},
     state::SharedState,
 };
+
+/// Name the LLM sees and calls; must match the `name` field the provider echoes
+/// back on a tool call, so the chat_stream dispatch loop can recognize it before
+/// it ever reaches MCP-specific dispatch (which assumes a real `server_id`).
+pub const IMAGE_GENERATION_TOOL_NAME: &str = "generate_image";
+
+pub fn image_generation_tool_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "A detailed, self-contained description of the image to generate."
+            },
+            "count": {
+                "type": "integer",
+                "description": "How many image variations to generate, if the model supports more than one.",
+                "minimum": 1,
+                "maximum": 4
+            }
+        },
+        "required": ["prompt"]
+    })
+}
+
+/// Resolves which (engine_key, model) services the image-generation tool call.
+/// Four combinations, all valid:
+/// - provider + model: look up that exact engine, verify it's enabled and the
+///   model is whitelisted on it. No scan, no ambiguity if the same model id
+///   ever ends up whitelisted on more than one engine.
+/// - model only: scan enabled engines for one whitelisting that model (the
+///   prior behavior, kept for callers that only know the model).
+/// - provider only: use that engine's own `defaultImageGenModel`, if set.
+/// - neither: auto-select the first enabled engine with `defaultImageGenModel`
+///   configured, so the tool still works without the caller naming anything.
+pub async fn resolve_image_tool_target(
+    db: &DatabaseConnection,
+    requested_provider: Option<&str>,
+    requested_model: Option<&str>,
+) -> anyhow::Result<Option<(String, String)>> {
+    if let Some(provider) = requested_provider {
+        let Some(engine) = ai_engines::Entity::find()
+            .filter(ai_engines::Column::EngineKey.eq(provider))
+            .filter(ai_engines::Column::IsEnabled.eq(true))
+            .one(db)
+            .await
+            .context("load the requested image engine")?
+        else {
+            return Ok(None);
+        };
+        return Ok(match requested_model {
+            Some(model) if engine.whitelist_models.iter().any(|id| id == model) => {
+                Some((engine.engine_key, model.to_string()))
+            }
+            Some(_) => None,
+            None => engine
+                .default_image_gen_model
+                .clone()
+                .map(|model| (engine.engine_key, model)),
+        });
+    }
+
+    if let Some(model) = requested_model {
+        let engines = ai_engines::Entity::find()
+            .filter(ai_engines::Column::IsEnabled.eq(true))
+            .all(db)
+            .await
+            .context("load enabled AI engines to resolve the requested image model")?;
+        return Ok(engines
+            .into_iter()
+            .find(|engine| engine.whitelist_models.iter().any(|id| id == model))
+            .map(|engine| (engine.engine_key, model.to_string())));
+    }
+
+    let engines = ai_engines::Entity::find()
+        .filter(ai_engines::Column::IsEnabled.eq(true))
+        .filter(ai_engines::Column::DefaultImageGenModel.is_not_null())
+        .all(db)
+        .await
+        .context("load enabled AI engines to auto-select an image model")?;
+    Ok(engines.into_iter().find_map(|engine| {
+        engine
+            .default_image_gen_model
+            .clone()
+            .map(|model| (engine.engine_key, model))
+    }))
+}
 
 pub async fn generate_and_save(
     app_state: &SharedState,

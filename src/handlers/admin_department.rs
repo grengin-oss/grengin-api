@@ -31,10 +31,12 @@ use crate::{
             sum_department_cost_in_range,
         },
         department_helpers::{
-            build_ltree_path, department_budget_snapshot, departments_base_select,
-            departments_tree_select, ensure_department_admin_assignment,
-            load_department_admin_ids_map, max_subtree_depth, sync_department_admin_assignments,
-            sync_department_allowed_models,
+            build_ltree_path, department_admin_plan, department_budget_snapshot,
+            departments_base_select, departments_tree_select, ensure_department_admin_assignment,
+            insert_department_row, load_department_admin_ids_map, max_subtree_depth,
+            move_department_subtree, reassign_users_out_of_department, reparent_department,
+            sync_department_admin_assignments, sync_department_allowed_models,
+            update_department_row,
         },
         department_policies::{
             load_allowed_models_map, validate_allowed_models_subset, validate_retention_days,
@@ -49,31 +51,16 @@ use axum::{
     extract::{Path, Query, State},
 };
 use chrono::Utc;
-use migration::{Alias, BinOper, Func, SimpleExpr, extension::postgres::PgExpr};
+use migration::{Alias, BinOper, Func, extension::postgres::PgExpr};
 use reqwest::StatusCode;
 use rust_decimal::Decimal;
+use sea_orm::{ColumnTrait, EntityTrait as _, QueryFilter};
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait as _, QueryFilter, Statement,
-};
-use sea_orm::{
-    Condition, EntityName as _, JoinType, Order, PaginatorTrait, QueryOrder, QuerySelect,
-    RelationTrait,
-    sea_query::{Expr, PostgresQueryBuilder, Query as SqlQuery},
+    Condition, JoinType, Order, PaginatorTrait, QueryOrder, QuerySelect, RelationTrait,
+    sea_query::Expr,
 };
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
-
-fn department_admin_plan(
-    requested_admin_ids: Option<&[Uuid]>,
-    creator_id: Uuid,
-    is_super_admin: bool,
-) -> (Vec<Uuid>, bool) {
-    let mut requested = requested_admin_ids.unwrap_or_default().to_vec();
-    requested.retain(|user_id| *user_id != creator_id);
-    requested.sort_unstable();
-    requested.dedup();
-    (requested, !is_super_admin)
-}
 
 #[utoipa::path(
     post,
@@ -153,46 +140,19 @@ pub async fn create_department(
         return Err(AuthError::ServiceTemporarilyUnavailable);
     }
 
-    let insert = SqlQuery::insert()
-        .into_table(departments::Entity)
-        .columns([
-            departments::Column::Id,
-            departments::Column::Name,
-            departments::Column::Description,
-            departments::Column::ParentId,
-            departments::Column::Depth,
-            departments::Column::Path,
-            departments::Column::RetentionDays,
-            departments::Column::CreatedAt,
-            departments::Column::UpdatedAt,
-        ])
-        .values_panic([
-            id.into(),
-            req.name.clone().into(),
-            req.description.clone().into(),
-            req.parent_id.into(),
-            depth.into(),
-            Expr::val(path_str.clone())
-                .cast_as(Alias::new("ltree"))
-                .into(),
-            req.retention_days.into(),
-            created_at.into(),
-            updated_at.into(),
-        ])
-        .to_owned();
-    let (sql, values) = insert.build(PostgresQueryBuilder);
-    app_state
-        .database
-        .execute(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            sql,
-            values,
-        ))
-        .await
-        .map_err(|e| {
-            eprintln!("insert error: {e}");
-            AuthError::DbTimeout
-        })?;
+    insert_department_row(
+        &app_state.database,
+        id,
+        &req.name,
+        &req.description,
+        req.parent_id,
+        depth,
+        &path_str,
+        req.retention_days,
+        created_at,
+        updated_at,
+    )
+    .await?;
 
     sync_department_allowed_models(&app_state.database, id, req.allowed_models.as_deref()).await?;
 
@@ -934,44 +894,21 @@ pub async fn update_department(
 
     let updated_at = Utc::now();
 
-    // ✅ SeaQuery UPDATE with CAST(... AS ltree)
-    let stmt = SqlQuery::update()
-        .table(departments::Entity)
-        .values([
-            (departments::Column::Name, name.into()),
-            (departments::Column::Description, description.into()),
-            (departments::Column::ParentId, parent_id.into()),
-            (departments::Column::Depth, depth.into()),
-            (
-                departments::Column::Path,
-                Expr::val(path.clone()).cast_as(Alias::new("ltree")).into(),
-            ),
-            (departments::Column::RetentionDays, retention_days.into()),
-            (
-                departments::Column::BudgetAllocated,
-                budget_allocated.into(),
-            ),
-            (departments::Column::BudgetPeriod, budget_period.into()),
-            (departments::Column::ActionOnExceed, action_on_exceed.into()),
-            (departments::Column::UpdatedAt, updated_at.into()),
-        ])
-        .and_where(Expr::col(departments::Column::Id).eq(department_id))
-        .to_owned();
-
-    let (sql, values) = stmt.build(PostgresQueryBuilder);
-
-    app_state
-        .database
-        .execute(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            sql,
-            values,
-        ))
-        .await
-        .map_err(|e| {
-            eprintln!("update error: {e}");
-            AuthError::DbTimeout
-        })?;
+    update_department_row(
+        &app_state.database,
+        department_id,
+        &name,
+        &description,
+        parent_id,
+        depth,
+        &path,
+        retention_days,
+        budget_allocated,
+        budget_period,
+        action_on_exceed,
+        updated_at,
+    )
+    .await?;
 
     if req.allowed_models.is_some() {
         sync_department_allowed_models(
@@ -1117,69 +1054,22 @@ pub async fn move_department(
     let depth_delta = new_depth - dept.depth;
     let updated_at = Utc::now();
 
-    // Update the root department's parent reference.
-    let parent_stmt = SqlQuery::update()
-        .table(departments::Entity)
-        .values([
-            (departments::Column::ParentId, req.new_parent_id.into()),
-            (departments::Column::UpdatedAt, updated_at.into()),
-        ])
-        .and_where(Expr::col(departments::Column::Id).eq(department_id))
-        .to_owned();
+    reparent_department(
+        &app_state.database,
+        department_id,
+        req.new_parent_id,
+        updated_at,
+    )
+    .await?;
 
-    let (parent_sql, parent_values) = parent_stmt.build(PostgresQueryBuilder);
-    app_state
-        .database
-        .execute(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            parent_sql,
-            parent_values,
-        ))
-        .await
-        .map_err(|e| {
-            eprintln!("db update error: {e}");
-            AuthError::DbTimeout
-        })?;
-
-    // Update the entire subtree's path + depth using a prefix replace.
-    let subtree_stmt = SqlQuery::update()
-        .table(departments::Entity)
-        .values([
-            (
-                departments::Column::Depth,
-                Expr::col(departments::Column::Depth)
-                    .add(depth_delta)
-                    .into(),
-            ),
-            (
-                departments::Column::Path,
-                Expr::cust(format!(
-                    "replace(path::text, '{}', '{}')::ltree",
-                    dept.path, new_path
-                ))
-                .into(),
-            ),
-            (departments::Column::UpdatedAt, updated_at.into()),
-        ])
-        .and_where(Expr::col(departments::Column::Path).binary(
-            BinOper::Custom("<@".into()),
-            Expr::val(dept.path.clone()).cast_as(Alias::new("ltree")),
-        ))
-        .to_owned();
-
-    let (subtree_sql, subtree_values) = subtree_stmt.build(PostgresQueryBuilder);
-    app_state
-        .database
-        .execute(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            subtree_sql,
-            subtree_values,
-        ))
-        .await
-        .map_err(|e| {
-            eprintln!("db subtree update error: {e}");
-            AuthError::DbTimeout
-        })?;
+    move_department_subtree(
+        &app_state.database,
+        &dept.path,
+        &new_path,
+        depth_delta,
+        updated_at,
+    )
+    .await?;
 
     let _ = authz
         .recompute_effective_permissions_for_department_scope(department_id)
@@ -1328,50 +1218,14 @@ pub async fn remove_users_from_department(
         .await?;
     let force = query.force.unwrap_or(false);
 
-    let users_t = Alias::new(users::Entity.table_name());
-    let depts_t = Alias::new(departments::Entity.table_name());
-
-    // SELECT parent_id FROM departments WHERE id = ?
-    let parent_select = SqlQuery::select()
-        .column((depts_t.clone(), departments::Column::ParentId))
-        .from(depts_t.clone())
-        .and_where(Expr::col((depts_t.clone(), departments::Column::Id)).eq(department_id))
-        .to_owned();
-
-    let parent_subexpr: SimpleExpr =
-        SimpleExpr::SubQuery(None, Box::new(parent_select.into_sub_query_statement()));
-
-    let new_dept_expr: SimpleExpr = if force {
-        parent_subexpr
-    } else {
-        // department_id = NULL
-        Expr::value(Option::<Uuid>::None).into()
-    };
-
-    // UPDATE users SET department_id = (subquery or NULL) WHERE ...
-    let update_stmt = SqlQuery::update()
-        .table(users_t.clone())
-        .value(users::Column::DepartmentId, new_dept_expr)
-        .value(users::Column::UpdatedAt, Expr::value(Utc::now()))
-        .and_where(Expr::col((users_t.clone(), users::Column::Id)).is_in(user_ids.clone()))
-        .and_where(Expr::col((users_t.clone(), users::Column::DepartmentId)).eq(department_id))
-        .to_owned();
-
-    // execute (no manual SQL text; SQL is generated + values bound)
-    let (sql, values) = update_stmt.build(PostgresQueryBuilder);
-
-    app_state
-        .database
-        .execute(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            sql,
-            values,
-        ))
-        .await
-        .map_err(|e| {
-            eprintln!("db update error: {e}");
-            AuthError::DbTimeout
-        })?;
+    reassign_users_out_of_department(
+        &app_state.database,
+        department_id,
+        &user_ids,
+        force,
+        Utc::now(),
+    )
+    .await?;
     let _ = authz
         .recompute_effective_permissions_for_users(&user_ids)
         .await;
