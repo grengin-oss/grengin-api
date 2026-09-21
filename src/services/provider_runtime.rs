@@ -62,6 +62,10 @@ fn manifest_value(manifest: &ProviderManifestV1) -> Result<serde_json::Value, Pr
 
 // Ok(None) means the engine has no compiled-in manifest and must come from the
 // provider catalog; only the four originally hardcoded engines are embedded.
+pub fn is_embedded_provider(engine_key: &str) -> bool {
+    matches!(engine_key, "anthropic" | "openai" | "mistral" | "gemini")
+}
+
 pub fn embedded_plugin_config(engine_key: &str) -> Result<Option<PluginConfig>, ProviderLoadError> {
     let bytes = match engine_key {
         "anthropic" => {
@@ -152,7 +156,7 @@ pub fn embedded_plugin_config(engine_key: &str) -> Result<Option<PluginConfig>, 
 }
 
 pub async fn plugin_config_for(
-    req_client: &reqwest::Client,
+    catalog: &crate::services::discovery_catalog::DiscoveryCatalog,
     engine: &ai_engines::Model,
 ) -> Result<PluginConfig, ProviderLoadError> {
     if let Some(value) = engine.plugin_config.as_ref() {
@@ -161,7 +165,7 @@ pub async fn plugin_config_for(
     if let Some(config) = embedded_plugin_config(&engine.engine_key)? {
         return Ok(config);
     }
-    provider_manifests::catalog_plugin_config(req_client, &engine.engine_key)
+    provider_manifests::catalog_plugin_config(catalog, &engine.engine_key)
         .await
         .map_err(|error| {
             eprintln!(
@@ -204,10 +208,18 @@ pub fn compile_provider(
 
 pub async fn build_provider(
     app_key: &[u8; 32],
-    req_client: &reqwest::Client,
+    catalog: &crate::services::discovery_catalog::DiscoveryCatalog,
     engine: &ai_engines::Model,
 ) -> Result<DeclarativeProvider, ProviderLoadError> {
-    let config = plugin_config_for(req_client, engine).await?;
+    let config = plugin_config_for(catalog, engine).await?;
+    compile_provider_for_engine(app_key, engine, config)
+}
+
+pub fn compile_provider_for_engine(
+    app_key: &[u8; 32],
+    engine: &ai_engines::Model,
+    config: PluginConfig,
+) -> Result<DeclarativeProvider, ProviderLoadError> {
     let api_key = engine
         .api_key
         .as_ref()
@@ -236,7 +248,12 @@ pub async fn register_provider(
     state: &AppState,
     engine: &ai_engines::Model,
 ) -> Result<(), ProviderLoadError> {
-    let provider = build_provider(&state.settings.auth.app_key, &state.req_client, engine).await?;
+    let provider = build_provider(
+        &state.settings.auth.app_key,
+        &state.discovery_catalog,
+        engine,
+    )
+    .await?;
     state.provider_registry.register(Arc::new(provider)).await;
     Ok(())
 }
@@ -256,10 +273,12 @@ pub async fn load_enabled_providers(state: &AppState) -> Result<(), ProviderLoad
         .map_err(|_| ProviderLoadError::Database)?;
     let catalog_keys: Vec<String> = engines
         .iter()
-        .filter(|engine| engine.plugin_config.is_none())
+        .filter(|engine| {
+            engine.plugin_config.is_none() && !is_embedded_provider(&engine.engine_key)
+        })
         .map(|engine| engine.engine_key.clone())
         .collect();
-    provider_manifests::prefetch(&state.req_client, &catalog_keys).await;
+    provider_manifests::prefetch(&state.discovery_catalog, &catalog_keys).await;
     for engine in engines {
         if let Err(error) = register_provider(state, &engine).await {
             eprintln!(

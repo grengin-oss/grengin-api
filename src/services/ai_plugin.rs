@@ -142,19 +142,24 @@ pub async fn test_engine_connection(
     state: &SharedState,
     engine: ai_engines::Model,
 ) -> Result<AIEngineConnectionTest, AuthError> {
-    let provider =
-        match build_provider(&state.settings.auth.app_key, &state.req_client, &engine).await {
-            Ok(provider) => provider,
-            Err(error) => {
-                update_validation(state, engine, false).await?;
-                return Ok(AIEngineConnectionTest {
-                    valid: false,
-                    mode: "configuration".to_string(),
-                    models_available: None,
-                    error_class: Some(load_error_class(&error).to_string()),
-                });
-            }
-        };
+    let provider = match build_provider(
+        &state.settings.auth.app_key,
+        &state.discovery_catalog,
+        &engine,
+    )
+    .await
+    {
+        Ok(provider) => provider,
+        Err(error) => {
+            update_validation(state, engine, false).await?;
+            return Ok(AIEngineConnectionTest {
+                valid: false,
+                mode: "configuration".to_string(),
+                models_available: None,
+                error_class: Some(load_error_class(&error).to_string()),
+            });
+        }
+    };
     // A provider with no model-listing operation cannot be probed, so a compiled
     // manifest is the strongest signal available for it.
     let (valid, mode, models_available, error_class) = match provider.models() {

@@ -40,6 +40,7 @@ pub mod provider_models;
 pub mod provider_resolver;
 pub mod provider_runtime;
 pub mod provider_stream;
+pub mod provider_updates;
 pub mod rag;
 pub mod reconfigure;
 pub mod search;

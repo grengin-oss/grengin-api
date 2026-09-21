@@ -437,7 +437,10 @@ GRENGIN_LIVE_EMBEDDING_TESTS=1 cargo test -p llm-plugin \
   supported in v1.
 - Plugins are JSON manifests, not executable packages.
 - The AI-engine API supports one credential slot per custom plugin.
-- The active plugin version is exposed as `plugin_version`, but update history,
-  rollback, package signing, and automatic remote updates are future work.
+- The active plugin version is exposed as `plugin_version`. Enabled official
+  discovery-backed providers refresh from the running backend's compatibility
+  distribution and are replaced only after digest verification and successful
+  compilation. Update history, rollback, and package signing remain future
+  work.
 - A remote plugin must be reviewed and installed by an administrator; Grengin
   does not automatically execute or activate manifests from a URL.

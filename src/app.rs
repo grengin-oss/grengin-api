@@ -15,6 +15,7 @@ use crate::{
     services::{
         analytics_cache::spawn_analytics_cache_refresh,
         audit_logs::spawn_audit_log_retention_worker,
+        provider_updates::spawn_provider_plugin_refresh,
     },
     state::AppState,
 };
@@ -46,6 +47,7 @@ pub async fn init_app() -> Result<(), Error> {
     let app_state = AppState::from_settings(settings).await?;
     spawn_analytics_cache_refresh(app_state.database.clone());
     spawn_audit_log_retention_worker(app_state.database.clone());
+    spawn_provider_plugin_refresh(app_state.clone());
     let configured_origins = std::env::var("CORS_ALLOWED_ORIGINS")
         .or_else(|_| std::env::var("REDIRECT_URL"))
         .ok();

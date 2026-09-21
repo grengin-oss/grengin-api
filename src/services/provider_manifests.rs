@@ -4,22 +4,25 @@
 use std::{
     collections::HashMap,
     sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
-    time::{Duration, Instant},
 };
 
 use anyhow::{Error, anyhow};
 use llm_plugin::ProviderManifestV1;
 
-use crate::{models::ai_engines::PluginConfig, services::models_cache::load_plugin_urls_cached};
+use crate::{models::ai_engines::PluginConfig, services::discovery_catalog::DiscoveryCatalog};
 
 // std RwLock, not tokio: the read side is called from sync fns such as
 // provider_plugin_version that sit inside non-async response mapping.
-const MANIFEST_TTL: Duration = Duration::from_secs(300);
+#[derive(Clone)]
+pub struct CatalogPlugin {
+    pub config: PluginConfig,
+    pub version: String,
+    pub sha256: String,
+}
 
 #[derive(Clone)]
 struct CacheEntry {
-    config: PluginConfig,
-    fetched_at: Instant,
+    plugin: CatalogPlugin,
 }
 
 static MANIFEST_CACHE: RwLock<Option<HashMap<String, CacheEntry>>> = RwLock::new(None);
@@ -37,40 +40,42 @@ fn write_cache() -> RwLockWriteGuard<'static, Option<HashMap<String, CacheEntry>
 }
 
 pub fn cached_plugin_config(engine_key: &str) -> Option<PluginConfig> {
-    let cache = read_cache();
-    let entry = cache.as_ref()?.get(engine_key)?;
-    is_fresh(entry.fetched_at, Instant::now()).then(|| entry.config.clone())
+    cached_catalog_plugin(engine_key).map(|plugin| plugin.config)
 }
 
-fn is_fresh(fetched_at: Instant, now: Instant) -> bool {
-    now.saturating_duration_since(fetched_at) < MANIFEST_TTL
+pub fn cached_catalog_plugin(engine_key: &str) -> Option<CatalogPlugin> {
+    read_cache()
+        .as_ref()?
+        .get(&engine_key.to_ascii_lowercase())
+        .map(|entry| entry.plugin.clone())
+}
+
+pub fn install_catalog_plugin(engine_key: &str, plugin: CatalogPlugin) {
+    write_cache()
+        .get_or_insert_with(HashMap::new)
+        .insert(engine_key.to_ascii_lowercase(), CacheEntry { plugin });
 }
 
 pub fn invalidate(engine_key: &str) {
     if let Some(cache) = write_cache().as_mut() {
-        cache.remove(engine_key);
+        cache.remove(&engine_key.to_ascii_lowercase());
     }
 }
 
 pub async fn catalog_plugin_config(
-    req_client: &reqwest::Client,
+    catalog: &DiscoveryCatalog,
     engine_key: &str,
 ) -> Result<PluginConfig, Error> {
     if let Some(config) = cached_plugin_config(engine_key) {
         return Ok(config);
     }
-    let config = fetch_plugin_config(req_client, engine_key).await?;
-    write_cache().get_or_insert_with(HashMap::new).insert(
-        engine_key.to_string(),
-        CacheEntry {
-            config: config.clone(),
-            fetched_at: Instant::now(),
-        },
-    );
+    let plugin = fetch_catalog_plugin(catalog, engine_key).await?;
+    let config = plugin.config.clone();
+    install_catalog_plugin(engine_key, plugin);
     Ok(config)
 }
 
-pub async fn prefetch(req_client: &reqwest::Client, engine_keys: &[String]) {
+pub async fn prefetch(catalog: &DiscoveryCatalog, engine_keys: &[String]) {
     let pending: Vec<&String> = engine_keys
         .iter()
         .filter(|key| cached_plugin_config(key).is_none())
@@ -78,75 +83,44 @@ pub async fn prefetch(req_client: &reqwest::Client, engine_keys: &[String]) {
     if pending.is_empty() {
         return;
     }
-    let fetched =
-        futures_util::future::join_all(pending.iter().map(|key| async move {
-            (key.to_string(), fetch_plugin_config(req_client, key).await)
-        }))
-        .await;
+    let fetched = futures_util::future::join_all(
+        pending
+            .iter()
+            .map(|key| async move { (key.to_string(), fetch_catalog_plugin(catalog, key).await) }),
+    )
+    .await;
 
-    let mut guard = write_cache();
-    let cache = guard.get_or_insert_with(HashMap::new);
     for (key, result) in fetched {
         match result {
-            Ok(config) => {
-                cache.insert(
-                    key,
-                    CacheEntry {
-                        config,
-                        fetched_at: Instant::now(),
-                    },
-                );
-            }
+            Ok(plugin) => install_catalog_plugin(&key, plugin),
             Err(error) => eprintln!("catalog manifest for AI engine {key} was not loaded: {error}"),
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::time::{Duration, Instant};
-
-    use super::{MANIFEST_TTL, is_fresh};
-
-    #[test]
-    fn catalog_manifest_cache_expires_at_the_ttl() {
-        let fetched_at = Instant::now();
-        assert!(is_fresh(
-            fetched_at,
-            fetched_at + MANIFEST_TTL - Duration::from_millis(1)
-        ));
-        assert!(!is_fresh(fetched_at, fetched_at + MANIFEST_TTL));
-    }
-}
-
-async fn fetch_plugin_config(
-    req_client: &reqwest::Client,
+pub async fn fetch_catalog_plugin(
+    catalog: &DiscoveryCatalog,
     engine_key: &str,
-) -> Result<PluginConfig, Error> {
-    let url = load_plugin_urls_cached(req_client)
-        .await?
-        .remove(engine_key)
-        .ok_or_else(|| anyhow!("provider catalog declares no plugin url for {engine_key}"))?;
-    let bytes = req_client
-        .get(&url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
+) -> Result<CatalogPlugin, Error> {
+    let package = catalog.ai_provider(engine_key, None).await?;
+    let bytes = serde_json::to_vec(&package.plugin)?;
     let manifest = ProviderManifestV1::from_json(&bytes)
-        .map_err(|error| anyhow!("catalog manifest at {url} is invalid: {error}"))?;
+        .map_err(|error| anyhow!("catalog manifest for {engine_key} is invalid: {error}"))?;
     if manifest.id != engine_key {
         return Err(anyhow!(
-            "catalog manifest at {url} declares id {} but is served for {engine_key}",
+            "catalog manifest for {engine_key} declares id {}",
             manifest.id
         ));
     }
-    Ok(PluginConfig {
-        manifest: serde_json::to_value(&manifest)?,
-        configuration: serde_json::json!({}),
-        base_url_override: None,
-        allow_insecure_http: false,
-        allow_private_network: false,
+    Ok(CatalogPlugin {
+        config: PluginConfig {
+            manifest: package.plugin,
+            configuration: serde_json::json!({}),
+            base_url_override: None,
+            allow_insecure_http: false,
+            allow_private_network: false,
+        },
+        version: package.version,
+        sha256: package.sha256,
     })
 }

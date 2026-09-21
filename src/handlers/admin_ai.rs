@@ -24,8 +24,8 @@ use crate::{
         provider_manifests,
         provider_models::{is_chat_selectable_model, to_model_info},
         provider_runtime::{
-            ProviderLoadError, build_provider, compile_provider, parse_manifest,
-            parse_plugin_config, provider_plugin_version, unregister_provider,
+            ProviderLoadError, build_provider, compile_provider, is_embedded_provider,
+            parse_manifest, parse_plugin_config, provider_plugin_version, unregister_provider,
         },
     },
     state::SharedState,
@@ -81,10 +81,12 @@ pub async fn get_ai_engines(
 
     let catalog_keys: Vec<String> = ai_engines
         .iter()
-        .filter(|engine| engine.plugin_config.is_none())
+        .filter(|engine| {
+            engine.plugin_config.is_none() && !is_embedded_provider(&engine.engine_key)
+        })
         .map(|engine| engine.engine_key.clone())
         .collect();
-    provider_manifests::prefetch(&app_state.req_client, &catalog_keys).await;
+    provider_manifests::prefetch(&app_state.discovery_catalog, &catalog_keys).await;
 
     let response = ai_engines
         .into_iter()
@@ -225,7 +227,7 @@ pub async fn get_ai_engine_models_by_key(
     if ai_engine.plugin_config.is_some() {
         let provider = build_provider(
             &app_state.settings.auth.app_key,
-            &app_state.req_client,
+            &app_state.discovery_catalog,
             &ai_engine,
         )
         .await
@@ -407,7 +409,7 @@ pub async fn update_ai_engines_by_key(
         Some(
             build_provider(
                 &app_state.settings.auth.app_key,
-                &app_state.req_client,
+                &app_state.discovery_catalog,
                 &model,
             )
             .await
@@ -636,7 +638,7 @@ pub async fn validate_ai_engines_by_key(
         .ok_or(AuthError::ResourceNotFound)?;
     let validation = match build_provider(
         &app_state.settings.auth.app_key,
-        &app_state.req_client,
+        &app_state.discovery_catalog,
         &ai_engine,
     )
     .await
