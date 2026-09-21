@@ -74,7 +74,25 @@ mod m20260827_000001_add_configuration_to_sso_providers;
 
 pub struct Migrator;
 
-pub const MIGRATION_HEAD: &str = "m20260827_000001_add_configuration_to_sso_providers";
+pub fn migration_head() -> &'static str {
+    include_str!("../HEAD").trim()
+}
+
+pub async fn applied_migration_head<C>(db: &C) -> Result<Option<String>, DbErr>
+where
+    C: ConnectionTrait,
+{
+    use sea_orm_migration::{
+        sea_orm::{EntityTrait, QueryOrder},
+        seaql_migrations,
+    };
+
+    seaql_migrations::Entity::find()
+        .order_by_desc(seaql_migrations::Column::Version)
+        .one(db)
+        .await
+        .map(|row| row.map(|migration| migration.version))
+}
 
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
@@ -167,6 +185,6 @@ mod tests {
         assert!(names.contains(&"m20260810_000001_create_provider_plugins".to_owned()));
         assert!(names.contains(&"m20260810_000001_add_plugin_config_to_ai_engines".to_owned()));
         assert_eq!(names.len(), names.iter().collect::<HashSet<_>>().len());
-        assert_eq!(names.last().map(String::as_str), Some(MIGRATION_HEAD));
+        assert_eq!(names.last().map(String::as_str), Some(migration_head()));
     }
 }

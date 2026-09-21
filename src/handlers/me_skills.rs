@@ -116,8 +116,7 @@ pub async fn create_my_skill(
             claims.user_id,
             attachment,
         )
-        .await
-        .unwrap_or_default()
+        .await?
     } else {
         vec![]
     };
@@ -155,8 +154,7 @@ pub async fn update_my_skill(
             claims.user_id,
             attachment,
         )
-        .await
-        .unwrap_or_default()
+        .await?
     } else {
         get_skill_knowledge_info(&app_state.database, skill.id).await
     };

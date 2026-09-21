@@ -39,6 +39,7 @@ use crate::{
             effective_max_tokens, effective_native_web_search, supports_native_web_search,
         },
         department_policies::check_model_allowed,
+        file_storage::{FileWrite, read_attachment_for_user, safe_file_name, store_file_bytes},
         mcp_helpers::{
             McpOauthErrorPayload, McpOauthPrompt, McpOauthRequiredEvent, build_mcp_oauth_prompt,
             build_mcp_server_context, resolve_mcp_oauth_token, resolve_mcp_tool_descriptor,
@@ -83,21 +84,26 @@ use sea_orm::{
     QueryOrder, QuerySelect, prelude::Decimal,
 };
 use serde_json::{Value, json};
-use std::{collections::HashMap, convert::Infallible, path::Path as FsPath};
+use std::{collections::HashMap, convert::Infallible};
 use tokio::time::Instant;
 use uuid::Uuid;
 
-fn hydrate_files(
+async fn hydrate_files(
     files: &mut [File],
     user_id: Uuid,
-    file_storage_root: &FsPath,
+    app_state: &SharedState,
 ) -> Result<(), AppError> {
     for file in files {
         if file.base64.is_some() {
             continue;
         }
-        let attachment = crate::handlers::file::get_file_binary(file_storage_root, file, &user_id)
-            .map_err(|_| AppError::ResourceNotFound)?;
+        let attachment = read_attachment_for_user(
+            &app_state.database,
+            &app_state.settings.file_storage_root,
+            user_id,
+            file.id,
+        )
+        .await?;
         file.base64 = attachment.get_base64();
         if file.base64.is_none() {
             return Err(AppError::ResourceNotFound);
@@ -106,13 +112,13 @@ fn hydrate_files(
     Ok(())
 }
 
-fn hydrate_prompt_files(
+async fn hydrate_prompt_files(
     prompts: &mut [Prompt],
     user_id: Uuid,
-    file_storage_root: &FsPath,
+    app_state: &SharedState,
 ) -> Result<(), AppError> {
     for prompt in prompts {
-        hydrate_files(&mut prompt.files, user_id, file_storage_root)?;
+        hydrate_files(&mut prompt.files, user_id, app_state).await?;
     }
     Ok(())
 }
@@ -825,12 +831,9 @@ pub async fn handle_chat_stream(
         let mut first_message_files = first_message.files.clone();
         // Best-effort: title generation is non-fatal, so a hydration failure just
         // falls back to a text-only title instead of failing the whole request.
-        if hydrate_files(
-            &mut first_message_files,
-            claims.user_id,
-            &app_state.settings.file_storage_root,
-        )
-        .is_err()
+        if hydrate_files(&mut first_message_files, claims.user_id, &app_state)
+            .await
+            .is_err()
         {
             first_message_files.clear();
         }
@@ -1153,11 +1156,7 @@ pub async fn handle_chat_stream(
         );
     }
     if !is_image_gen {
-        hydrate_prompt_files(
-            &mut previous_prompts,
-            claims.user_id,
-            &app_state.settings.file_storage_root,
-        )?;
+        hydrate_prompt_files(&mut previous_prompts, claims.user_id, &app_state).await?;
     }
     let provider_request = if !is_image_gen {
         let mut provider_request = build_plugin_chat_request(
@@ -2627,36 +2626,26 @@ pub async fn handle_chat_stream(
                            other => other,
                        }).collect::<String>();
                        let filename = format!("{}.{}", safe_title, ext);
-                       let user_folder = app_state.settings.file_storage_root
-                           .join(claims.user_id.to_string())
-                           .join("artifact")
-                           .join(file_id.to_string());
-                       let local_path = user_folder.join(&filename);
-                       if let Err(e) = tokio::fs::create_dir_all(&user_folder).await {
-                           eprintln!("artifact dir create error: {e}");
+                       if safe_file_name(&filename).is_none() {
+                           eprintln!("artifact file name is invalid");
                            continue;
                        }
-                       if let Err(e) = tokio::fs::write(&local_path, acc.content.as_bytes()).await {
-                           eprintln!("artifact file write error: {e}");
-                           continue;
-                       }
-                       let file_size = acc.content.len() as i64;
-                       let new_file = crate::models::files::ActiveModel {
-                           id: Set(file_id),
-                           user_id: Set(claims.user_id),
-                           name: Set(filename.clone()),
-                           content_type: Set(acc.content_type.clone()),
-                           size: Set(file_size),
-                           local_path: Set(local_path.to_string_lossy().into_owned()),
-                           description: Set(Some(format!("Artifact: {}", acc.title))),
-                           url: Set(None),
-                           status: Set(crate::models::files::FileUploadStatus::Uploaded),
-                           created_at: Set(Utc::now()),
-                           updated_at: Set(Utc::now()),
-                           metadata: Set(None),
-                       };
-                       if let Err(e) = new_file.insert(&app_state.database).await {
-                           eprintln!("artifact file db insert error: {e}");
+                       let stored_file = store_file_bytes(
+                           &app_state.database,
+                           &app_state.settings.file_storage_root,
+                           claims.user_id,
+                           FileWrite {
+                               id: file_id,
+                               category: "artifact",
+                               name: &filename,
+                               content_type: &acc.content_type,
+                               bytes: acc.content.as_bytes(),
+                               description: Some(format!("Artifact: {}", acc.title)),
+                               metadata: None,
+                           },
+                       ).await;
+                       if let Err(e) = stored_file {
+                           eprintln!("artifact file save error: {e:?}");
                            continue;
                        }
                        let new_artifact = crate::models::artifacts::ActiveModel {

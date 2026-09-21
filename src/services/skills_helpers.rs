@@ -15,7 +15,8 @@ use uuid::Uuid;
 use crate::{
     auth::error::AuthError,
     dto::skills::{KnowledgeAttachment, SkillKnowledgeInfo, SkillResponse, SkillToolsConfig},
-    models::{conversation_skills, files, files::FileUploadStatus, skill_knowledge, skills},
+    models::{conversation_skills, skill_knowledge, skills},
+    services::file_storage::{FileWrite, store_file_bytes},
 };
 
 pub fn skill_to_response(skill: skills::Model) -> SkillResponse {
@@ -233,7 +234,7 @@ pub async fn process_skill_knowledge(
 
     // Persist the raw upload to disk and record it in the files table.
     let file_id =
-        save_knowledge_file_to_disk(db, file_storage_root, user_id, &bytes, &attachment).await;
+        save_knowledge_file_to_disk(db, file_storage_root, user_id, &bytes, &attachment).await?;
 
     // Replace all existing knowledge for this skill before inserting new rows.
     skill_knowledge::Entity::delete_many()
@@ -253,7 +254,7 @@ pub async fn process_skill_knowledge(
         let row = skill_knowledge::ActiveModel {
             id: Set(Uuid::new_v4()),
             skill_id: Set(skill_id),
-            file_id: Set(file_id),
+            file_id: Set(Some(file_id)),
             file_name: Set(file_name.clone()),
             content: Set(content),
             char_count: Set(char_count),
@@ -277,54 +278,41 @@ pub async fn process_skill_knowledge(
 }
 
 /// Write the raw file bytes below the configured file storage root and
-/// insert a row into the `files` table. Returns the file id on success, None on
-/// any I/O or DB error (non-fatal — knowledge text extraction still proceeds).
+/// insert a row into the `files` table.
 async fn save_knowledge_file_to_disk(
     db: &DatabaseConnection,
     file_storage_root: &Path,
     user_id: Uuid,
     bytes: &[u8],
     attachment: &KnowledgeAttachment,
-) -> Option<Uuid> {
+) -> Result<Uuid, AuthError> {
     let file_id = Uuid::new_v4();
-    let folder = file_storage_root
-        .join(user_id.to_string())
-        .join("skill")
-        .join(file_id.to_string());
-    if let Err(e) = tokio::fs::create_dir_all(&folder).await {
-        eprintln!("skill knowledge dir create error: {e}");
-        return None;
-    }
-    let file_name = crate::services::file_storage::safe_file_name(&attachment.file_name)?;
-    let local_path = folder.join(file_name);
-    if let Err(e) = tokio::fs::write(&local_path, bytes).await {
-        eprintln!("skill knowledge file write error: {e}");
-        return None;
-    }
-
-    let now = Utc::now();
-    let row = files::ActiveModel {
-        id: Set(file_id),
-        user_id: Set(user_id),
-        name: Set(attachment.file_name.clone()),
-        content_type: Set(attachment.content_type.clone()),
-        size: Set(bytes.len() as i64),
-        local_path: Set(local_path.to_string_lossy().into_owned()),
-        description: Set(Some("skill knowledge attachment".to_string())),
-        url: Set(None),
-        status: Set(FileUploadStatus::Uploaded),
-        created_at: Set(now),
-        updated_at: Set(now),
-        metadata: Set(None),
-    };
-
-    match row.insert(db).await {
-        Ok(saved) => Some(saved.id),
-        Err(e) => {
-            eprintln!("db insert skill knowledge file record error: {e}");
-            None
+    store_file_bytes(
+        db,
+        file_storage_root,
+        user_id,
+        FileWrite {
+            id: file_id,
+            category: "skill",
+            name: &attachment.file_name,
+            content_type: &attachment.content_type,
+            bytes,
+            description: Some("skill knowledge attachment".to_string()),
+            metadata: None,
+        },
+    )
+    .await
+    .map(|saved| saved.id)
+    .map_err(|error| match error {
+        crate::error::AppError::DbUnavailable | crate::error::AppError::DbTimeout => {
+            AuthError::DbTimeout
         }
-    }
+        crate::error::AppError::ValidationMissingField { .. }
+        | crate::error::AppError::ValidationEmptyField { .. } => AuthError::InvalidRequest {
+            field: "knowledge_attachment.file_name",
+        },
+        _ => AuthError::ServiceTemporarilyUnavailable,
+    })
 }
 
 /// Extract (file_name, text_content) pairs from raw bytes.

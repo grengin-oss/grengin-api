@@ -33,7 +33,7 @@ jobs:
         run: |
           set -euo pipefail
           version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "grengin-api") | .version')"
-          migration_head="$(sed -n 's/^pub const MIGRATION_HEAD: &str = "\([^"]*\)";/\1/p' migration/src/lib.rs)"
+          migration_head="$(tr -d '\r\n' < migration/HEAD)"
           test -n "$version"
           test -n "$migration_head"
           if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
