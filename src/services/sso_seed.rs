@@ -5,18 +5,103 @@ use crate::{
     auth::{
         encryption::{decrypt_key, encrypt_key},
         error::AuthError,
+        provider_config::OidcProviderConfiguration,
         sso_provider::sso_providers_list,
     },
-    dto::admin_sso_providers::SsoProviderTemplate,
+    dto::{admin_sso_providers::SsoProviderTemplate, oauth::AuthProviderSummary},
     models::sso_providers,
     state::SharedState,
 };
 use chrono::Utc;
 use sea_orm::ActiveValue::Set;
-use sea_orm::{ActiveModelTrait, EntityTrait, IntoActiveModel};
+use sea_orm::{ActiveModelTrait, EntityTrait, IntoActiveModel, QueryOrder};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 pub const EMPTY_VALUE: &str = "<empty>";
+
+pub fn auth_provider_summary(model: sso_providers::Model) -> AuthProviderSummary {
+    let configuration = OidcProviderConfiguration::from_value_for_provider(
+        model.configuration.as_ref(),
+        &model.provider,
+    )
+    .unwrap_or_default();
+    AuthProviderSummary {
+        login_path: format!("/auth/{}", model.provider),
+        provider: model.provider,
+        name: model.name,
+        is_enabled: model.is_enabled,
+        auto_redirect: configuration.auto_redirect,
+    }
+}
+
+pub async fn list_effective_auth_providers(
+    app_state: &SharedState,
+) -> Result<Vec<AuthProviderSummary>, AuthError> {
+    let models = sso_providers::Entity::find()
+        .order_by_asc(sso_providers::Column::Name)
+        .all(&app_state.database)
+        .await
+        .map_err(|error| {
+            eprintln!("configured auth provider lookup failed: {error:?}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
+    let mut configured = HashSet::with_capacity(models.len());
+    let mut providers = Vec::with_capacity(models.len() + 2);
+    for model in models {
+        configured.insert(model.provider.trim().to_ascii_lowercase());
+        let mut summary = auth_provider_summary(model);
+        summary.is_enabled = app_state
+            .oidc_provider(&summary.provider)
+            .await
+            .is_some_and(|runtime| runtime.is_enabled);
+        providers.push(summary);
+    }
+
+    for template in sso_providers_list() {
+        let provider = template.provider.trim().to_ascii_lowercase();
+        if configured.contains(&provider) || !matches!(provider.as_str(), "google" | "azure") {
+            continue;
+        }
+        let Some(runtime) = app_state.oidc_provider(&provider).await else {
+            continue;
+        };
+        providers.push(AuthProviderSummary {
+            login_path: format!("/auth/{provider}"),
+            provider,
+            name: template.name,
+            is_enabled: runtime.is_enabled,
+            auto_redirect: runtime.configuration.auto_redirect,
+        });
+    }
+    providers.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(providers)
+}
+
+pub fn ensure_provider_disable_keeps_login(
+    providers: &[sso_providers::Model],
+    provider_id: Uuid,
+) -> Result<(), AuthError> {
+    let target_is_enabled = providers
+        .iter()
+        .find(|provider| provider.id == provider_id)
+        .is_some_and(|provider| provider.is_enabled);
+    let another_provider_is_enabled = providers
+        .iter()
+        .any(|provider| provider.id != provider_id && provider.is_enabled);
+    if provider_disable_would_lock_out(target_is_enabled, another_provider_is_enabled) {
+        Err(AuthError::SsoProviderLockoutPrevented)
+    } else {
+        Ok(())
+    }
+}
+
+fn provider_disable_would_lock_out(
+    target_is_enabled: bool,
+    another_provider_is_enabled: bool,
+) -> bool {
+    target_is_enabled && !another_provider_is_enabled
+}
 
 pub struct SsoProviderSeed {
     pub provider: String,
@@ -320,4 +405,61 @@ pub async fn ensure_sso_providers_from_env(
 
 pub fn grengin_proxy_available_for_provider(provider: &str) -> bool {
     matches!(provider, "google" | "azure")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ensure_provider_disable_keeps_login, provider_disable_would_lock_out};
+    use crate::{auth::error::AuthError, models::sso_providers};
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    #[test]
+    fn final_database_enabled_provider_cannot_be_disabled() {
+        assert!(provider_disable_would_lock_out(true, false));
+        assert!(!provider_disable_would_lock_out(true, true));
+        assert!(!provider_disable_would_lock_out(false, false));
+    }
+
+    #[test]
+    fn database_models_enforce_one_enabled_provider() {
+        let google = provider_model("google", true);
+        let azure = provider_model("azure", false);
+        assert!(matches!(
+            ensure_provider_disable_keeps_login(&[google.clone(), azure.clone()], google.id),
+            Err(AuthError::SsoProviderLockoutPrevented)
+        ));
+
+        let enabled_azure = sso_providers::Model {
+            is_enabled: true,
+            ..azure
+        };
+        assert!(
+            ensure_provider_disable_keeps_login(&[google.clone(), enabled_azure], google.id)
+                .is_ok()
+        );
+        assert!(ensure_provider_disable_keeps_login(&[google], Uuid::new_v4()).is_ok());
+    }
+
+    fn provider_model(provider: &str, is_enabled: bool) -> sso_providers::Model {
+        let now = Utc::now();
+        sso_providers::Model {
+            id: Uuid::new_v4(),
+            provider: provider.to_string(),
+            name: provider.to_string(),
+            tenant_id: None,
+            client_id: "client-id".to_string(),
+            client_secret: "encrypted-secret".to_string(),
+            issuer_url: "https://identity.example.com".to_string(),
+            redirect_url: format!("https://chat.example.com/auth/{provider}/callback"),
+            allowed_domains: Vec::new(),
+            is_enabled,
+            is_default: false,
+            use_grengin_proxy: false,
+            jit_provisioning: true,
+            configuration: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
 }

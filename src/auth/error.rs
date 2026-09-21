@@ -56,6 +56,7 @@ pub enum AuthErrorCode {
     SsoProviderNotConfigured = 6400,
     SsoProviderDisabledByAdmin = 6401,
     SsoJitProvisioningDisabled = 6402,
+    SsoProviderLockoutPrevented = 6403,
 }
 
 impl Serialize for AuthErrorCode {
@@ -133,6 +134,7 @@ pub enum AuthError {
     SsoProviderNotConfigured { provider: Option<String> },
     SsoProviderDisabledByAdmin { provider: Option<String> },
     SsoJitProvisioningDisabled { provider: Option<String> },
+    SsoProviderLockoutPrevented,
 
     EmailDomainNotAllowed { domain: Option<String> },
     McpServerNameConflict { name: Option<String> },
@@ -813,6 +815,28 @@ impl AuthError {
                     StatusCode::FORBIDDEN,
                     ErrorDetail {
                         code: AuthErrorCode::SsoJitProvisioningDisabled,
+                        description: Self::render(description_tpl, &params),
+                        solution: Self::render(solution_tpl, &params),
+                        description_key,
+                        solution_key,
+                        params,
+                        external_code: None,
+                    },
+                )
+            }
+
+            AuthError::SsoProviderLockoutPrevented => {
+                let params = Self::base_params();
+                let description_key = "error.auth.sso.lockout_prevented.description".to_string();
+                let solution_key = "error.auth.sso.lockout_prevented.solution".to_string();
+                let description_tpl = "At least one SSO provider must remain enabled for {app}.";
+                let solution_tpl =
+                    "Enable another SSO provider before disabling or deleting this one.";
+
+                (
+                    StatusCode::CONFLICT,
+                    ErrorDetail {
+                        code: AuthErrorCode::SsoProviderLockoutPrevented,
                         description: Self::render(description_tpl, &params),
                         solution: Self::render(solution_tpl, &params),
                         description_key,

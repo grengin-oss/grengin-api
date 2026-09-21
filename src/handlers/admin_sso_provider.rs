@@ -22,7 +22,8 @@ use crate::{
     services::{
         authorization::{AuthorizationService, PermissionScopeMode},
         sso_seed::{
-            EMPTY_VALUE, ensure_sso_providers_from_env, grengin_proxy_available_for_provider,
+            EMPTY_VALUE, ensure_provider_disable_keeps_login, ensure_sso_providers_from_env,
+            grengin_proxy_available_for_provider,
         },
         sso_validation::{
             build_draft_config, config_hash, grengin_proxy_config_hash, has_sensitive_changes,
@@ -40,6 +41,7 @@ use chrono::Utc;
 use reqwest::{StatusCode, Url};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
+    QuerySelect, TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -453,15 +455,25 @@ pub async fn delete_sso_provider_by_id(
             Some(provider_id),
         )
         .await?;
-    let model = sso_providers::Entity::find_by_id(provider_id)
-        .one(&app_state.database)
+    let transaction = app_state.database.begin().await.map_err(|error| {
+        eprintln!("SSO delete transaction start failed: {error}");
+        AuthError::DbTimeout
+    })?;
+    let providers = sso_providers::Entity::find()
+        .lock_exclusive()
+        .all(&transaction)
         .await
-        .map_err(|e| {
-            eprintln!("Db get one error: {}", e);
+        .map_err(|error| {
+            eprintln!("SSO provider lock failed: {error}");
             AuthError::DbTimeout
-        })?
+        })?;
+    let model = providers
+        .iter()
+        .find(|provider| provider.id == provider_id)
+        .cloned()
         .ok_or(AuthError::ResourceNotFound)?;
     let provider = model.provider.clone();
+    ensure_provider_disable_keeps_login(&providers, provider_id)?;
     let mut active_model = model.into_active_model();
     active_model.client_id = Set("<empty>".to_string());
     active_model.client_secret = Set("<empty>".to_string());
@@ -469,14 +481,21 @@ pub async fn delete_sso_provider_by_id(
     active_model.is_default = Set(false);
     active_model.is_enabled = Set(false);
     active_model.tenant_id = Set(None);
-    active_model
-        .update(&app_state.database)
+    active_model.update(&transaction).await.map_err(|e| {
+        eprintln!("Db get one error: {}", e);
+        AuthError::DbTimeout
+    })?;
+    transaction.commit().await.map_err(|error| {
+        eprintln!("SSO delete transaction commit failed: {error}");
+        AuthError::DbTimeout
+    })?;
+    app_state
+        .refresh_oidc_client(&provider)
         .await
-        .map_err(|e| {
-            eprintln!("Db get one error: {}", e);
-            AuthError::DbTimeout
+        .map_err(|error| {
+            eprintln!("OIDC provider fallback refresh failed: {error:?}");
+            AuthError::ServiceTemporarilyUnavailable
         })?;
-    app_state.remove_oidc_provider(&provider).await;
     Ok((StatusCode::OK, "Deleted successfully"))
 }
 
@@ -507,15 +526,27 @@ pub async fn update_sso_provider_by_id(
             Some(provider_id),
         )
         .await?;
-    let model = sso_providers::Entity::find_by_id(provider_id)
-        .one(&app_state.database)
+    let transaction = app_state.database.begin().await.map_err(|error| {
+        eprintln!("SSO update transaction start failed: {error}");
+        AuthError::DbTimeout
+    })?;
+    let providers = sso_providers::Entity::find()
+        .lock_exclusive()
+        .all(&transaction)
         .await
-        .map_err(|e| {
-            eprintln!("Db get one error: {}", e);
+        .map_err(|error| {
+            eprintln!("SSO provider lock failed: {error}");
             AuthError::DbTimeout
-        })?
+        })?;
+    let model = providers
+        .iter()
+        .find(|provider| provider.id == provider_id)
+        .cloned()
         .ok_or(AuthError::DbNotFound)?;
     let original_provider = model.provider.clone();
+    if req.is_enabled == Some(false) && model.is_enabled {
+        ensure_provider_disable_keeps_login(&providers, provider_id)?;
+    }
     let draft = build_draft_config(
         &app_state,
         &model,
@@ -599,15 +630,22 @@ pub async fn update_sso_provider_by_id(
         ));
     }
     active_model.updated_at = Set(Utc::now());
-    let updated_model = active_model
-        .update(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("Db update error {:?}", e);
-            AuthError::DbTimeout
-        })?;
+    let updated_model = active_model.update(&transaction).await.map_err(|e| {
+        eprintln!("Db update error {:?}", e);
+        AuthError::DbTimeout
+    })?;
+    transaction.commit().await.map_err(|error| {
+        eprintln!("SSO update transaction commit failed: {error}");
+        AuthError::DbTimeout
+    })?;
     if original_provider != updated_model.provider {
-        app_state.remove_oidc_provider(&original_provider).await;
+        app_state
+            .refresh_oidc_client(&original_provider)
+            .await
+            .map_err(|error| {
+                eprintln!("Previous OIDC provider cache refresh failed: {error:?}");
+                AuthError::ServiceTemporarilyUnavailable
+            })?;
     }
     if let Ok(client_secret) = decrypt_key(
         &app_state.settings.auth.app_key,

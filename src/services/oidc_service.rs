@@ -88,11 +88,14 @@ pub async fn build_azure_public_client_for_redirect(
     app_state: &SharedState,
     redirect_uri: &str,
 ) -> Result<AzureOidcClient, AuthError> {
-    let azure = app_state.settings.azure.read().await.clone().ok_or(
-        AuthError::SsoProviderNotConfigured {
+    let azure = app_state
+        .get_oidc_provider_runtime(&"azure".to_string())
+        .await
+        .ok()
+        .and_then(|runtime| runtime.azure_public_client)
+        .ok_or(AuthError::SsoProviderNotConfigured {
             provider: Some("azure".to_string()),
-        },
-    )?;
+        })?;
     build_azure_public_client(
         &app_state.req_client,
         azure.client_id,

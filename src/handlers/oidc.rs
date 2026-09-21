@@ -4,7 +4,7 @@
 use crate::{
     auth::{
         error::{AuthError, Error},
-        provider_config::{OidcProviderConfiguration, validate_provider_url},
+        provider_config::validate_provider_url,
         sso_proxy::build_proxy_authorize_url,
     },
     dto::{
@@ -13,8 +13,11 @@ use crate::{
             AuthCallback, AuthProvider, AuthProviderSummary, CallbackExchangeMode, StartParams,
         },
     },
-    models::{oauth_sessions, sso_providers},
-    services::{oidc_proxy::provider_uses_proxy, oidc_service::oidc_oauth_callback},
+    models::oauth_sessions,
+    services::{
+        oidc_proxy::provider_uses_proxy, oidc_service::oidc_oauth_callback,
+        sso_seed::list_effective_auth_providers,
+    },
     state::{AuthProtocolClient, SharedState},
     utils::uri::is_azure_mobile_redirect_uri,
 };
@@ -28,7 +31,7 @@ use chrono::Utc;
 use openidconnect::{
     CsrfToken, Nonce, PkceCodeChallenge, RedirectUrl, Scope, core::CoreAuthenticationFlow,
 };
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, QueryOrder};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set};
 use std::borrow::Cow;
 
 fn apple_frontend_callback_url(
@@ -50,21 +53,6 @@ fn apple_frontend_callback_url(
     Ok(callback_url.to_string())
 }
 
-fn auth_provider_summary(model: sso_providers::Model) -> AuthProviderSummary {
-    let configuration = OidcProviderConfiguration::from_value_for_provider(
-        model.configuration.as_ref(),
-        &model.provider,
-    )
-    .unwrap_or_default();
-    AuthProviderSummary {
-        login_path: format!("/auth/{}", model.provider),
-        provider: model.provider,
-        name: model.name,
-        is_enabled: model.is_enabled,
-        auto_redirect: configuration.auto_redirect,
-    }
-}
-
 #[utoipa::path(
     get,
     path = "/auth/providers",
@@ -77,15 +65,7 @@ fn auth_provider_summary(model: sso_providers::Model) -> AuthProviderSummary {
 pub async fn list_auth_providers(
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode, Json<Vec<AuthProviderSummary>>), AuthError> {
-    let models = sso_providers::Entity::find()
-        .order_by_asc(sso_providers::Column::Name)
-        .all(&app_state.database)
-        .await
-        .map_err(|error| {
-            eprintln!("configured auth provider lookup failed: {error:?}");
-            AuthError::ServiceTemporarilyUnavailable
-        })?;
-    let providers = models.into_iter().map(auth_provider_summary).collect();
+    let providers = list_effective_auth_providers(&app_state).await?;
     Ok((StatusCode::OK, Json(providers)))
 }
 
@@ -423,7 +403,9 @@ pub async fn azure_mobile_oauth_callback_post(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dto::auth::TokenType;
+    use crate::{
+        dto::auth::TokenType, models::sso_providers, services::sso_seed::auth_provider_summary,
+    };
     use uuid::Uuid;
 
     #[test]
