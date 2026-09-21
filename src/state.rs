@@ -12,7 +12,7 @@ use crate::{
             validate_issuer_url_for_provider, validate_redirect_url_for_provider,
         },
     },
-    config::setting::{ConfigError, OidcClient, Settings},
+    config::setting::{AzureSettings, ConfigError, GoogleSettings, OidcClient, Settings},
     dto::oauth::AuthProvider,
     models::{mcp_servers, sso_providers},
     services::ai_engine_catalog::reconcile_catalog_ai_engines,
@@ -68,6 +68,10 @@ pub enum AuthProtocolClient {
 }
 
 pub type SharedState = Arc<AppState>;
+
+fn database_sso_is_authoritative(direct_environment_login: bool, database_enabled: bool) -> bool {
+    database_enabled || !direct_environment_login
+}
 
 pub struct StreamCancel {
     cancelled: AtomicBool,
@@ -254,11 +258,21 @@ impl AppState {
             .all(&self.database)
             .await
             .map_err(|error| ConfigError::DbError(error.to_string()))?;
-        let mut runtimes = HashMap::new();
+        let mut runtimes = self.environment_oidc_providers().await;
         for model in models {
+            let provider = model.provider.trim().to_ascii_lowercase();
+            let direct_environment_login = runtimes
+                .get(&provider)
+                .is_some_and(|runtime| runtime.is_enabled && !runtime.use_grengin_proxy);
+            if !database_sso_is_authoritative(direct_environment_login, model.is_enabled) {
+                continue;
+            }
+            // Once a database row is authoritative, invalid configuration must
+            // fail closed instead of silently falling back to environment SSO.
+            runtimes.remove(&provider);
             match self.build_oidc_provider_runtime(&model).await {
                 Ok(runtime) => {
-                    runtimes.insert(model.provider.trim().to_ascii_lowercase(), runtime);
+                    runtimes.insert(provider, runtime);
                 }
                 Err(error) => {
                     eprintln!(
@@ -270,6 +284,89 @@ impl AppState {
         }
         *self.oidc_providers.write().await = runtimes;
         Ok(())
+    }
+
+    async fn environment_oidc_providers(&self) -> HashMap<String, OidcProviderRuntime> {
+        let mut runtimes = HashMap::new();
+        if let Some(settings) = self.settings.google.read().await.clone() {
+            match self.build_google_environment_runtime(settings).await {
+                Ok(runtime) => {
+                    runtimes.insert("google".to_string(), runtime);
+                }
+                Err(error) => eprintln!("Skipping invalid Google environment SSO: {error:#}"),
+            }
+        }
+        if let Some(settings) = self.settings.azure.read().await.clone() {
+            match self.build_azure_environment_runtime(settings).await {
+                Ok(runtime) => {
+                    runtimes.insert("azure".to_string(), runtime);
+                }
+                Err(error) => eprintln!("Skipping invalid Azure environment SSO: {error:#}"),
+            }
+        }
+        runtimes
+    }
+
+    async fn build_google_environment_runtime(
+        &self,
+        settings: GoogleSettings,
+    ) -> Result<OidcProviderRuntime, Error> {
+        let client = if !settings.is_enabled || settings.use_grengin_proxy {
+            None
+        } else {
+            Some(AuthProtocolClient::Oidc(
+                build_google_client(
+                    &self.req_client,
+                    settings.client_id,
+                    settings.client_secret,
+                    settings.redirect_url.clone(),
+                )
+                .await?,
+            ))
+        };
+        Ok(OidcProviderRuntime {
+            client,
+            azure_multitenant_validation: None,
+            redirect_url: settings.redirect_url,
+            allowed_domains: settings.allowed_domains,
+            is_enabled: settings.is_enabled,
+            use_grengin_proxy: settings.use_grengin_proxy,
+            jit_provisioning: settings.jit_provisioning,
+            configuration: OidcProviderConfiguration::from_value_for_provider(None, "google")?,
+        })
+    }
+
+    async fn build_azure_environment_runtime(
+        &self,
+        settings: AzureSettings,
+    ) -> Result<OidcProviderRuntime, Error> {
+        let (client, azure_multitenant_validation) =
+            if !settings.is_enabled || settings.use_grengin_proxy {
+                (None, None)
+            } else {
+                let azure = build_azure_client(
+                    &self.req_client,
+                    settings.client_id,
+                    settings.client_secret,
+                    settings.redirect_url.clone(),
+                    settings.tenant_id,
+                )
+                .await?;
+                (
+                    Some(AuthProtocolClient::Oidc(azure.client)),
+                    azure.multitenant_validation,
+                )
+            };
+        Ok(OidcProviderRuntime {
+            client,
+            azure_multitenant_validation,
+            redirect_url: settings.redirect_url,
+            allowed_domains: settings.allowed_domains,
+            is_enabled: settings.is_enabled,
+            use_grengin_proxy: settings.use_grengin_proxy,
+            jit_provisioning: settings.jit_provisioning,
+            configuration: OidcProviderConfiguration::from_value_for_provider(None, "azure")?,
+        })
     }
 
     async fn build_oidc_provider_runtime(
@@ -429,5 +526,22 @@ impl AppState {
     pub async fn remove_mcp_client(&self, server_id: &Uuid) {
         let mut clients = self.mcp_clients.write().await;
         clients.remove(server_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::database_sso_is_authoritative;
+
+    #[test]
+    fn direct_environment_credentials_override_a_disabled_database_row() {
+        assert!(!database_sso_is_authoritative(true, false));
+    }
+
+    #[test]
+    fn enabled_database_or_absent_direct_environment_remains_authoritative() {
+        assert!(database_sso_is_authoritative(true, true));
+        assert!(database_sso_is_authoritative(false, false));
+        assert!(database_sso_is_authoritative(false, true));
     }
 }

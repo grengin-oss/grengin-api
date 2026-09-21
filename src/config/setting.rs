@@ -588,7 +588,7 @@ pub enum ConfigError {
 
 #[cfg(test)]
 mod tests {
-    use super::{EmbeddingSettings, RagSettings};
+    use super::{AzureSettings, EmbeddingSettings, GoogleSettings, RagSettings};
     use std::sync::{LazyLock, Mutex};
 
     static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -609,6 +609,89 @@ mod tests {
             std::env::remove_var("RAG_SUMMARY_LLM_MODEL");
             std::env::remove_var("RAG_SUMMARY_MODEL_OPENAI");
             std::env::remove_var("RAG_SUMMARY_MODEL_ANTHROPIC");
+        }
+    }
+
+    fn clear_sso_env() {
+        // SAFETY: tests serialize env mutations with ENV_LOCK.
+        unsafe {
+            for name in [
+                "GOOGLE_CLIENT_ID",
+                "GOOGLE_CLIENT",
+                "GOOGLE_CLIENT_SECRET",
+                "AZURE_CLIENT_ID",
+                "AZURE_CLIENT_SECRET",
+                "AZURE_TENANT_ID",
+                "SSO_PROXY_AUTO_ENABLE",
+                "SSO_PROXY_ENABLED",
+                "GRENGIN_PROXY_GOOGLE_CLIENT_ID",
+                "GRENGIN_PROXY_GOOGLE_CLIENT_SECRET",
+                "GRENGIN_PROXY_AZURE_CLIENT_ID",
+                "GRENGIN_PROXY_AZURE_CLIENT_SECRET",
+                "GRENGIN_PROXY_AZURE_TENANT_ID",
+            ] {
+                std::env::remove_var(name);
+            }
+        }
+    }
+
+    #[test]
+    fn google_environment_credentials_enable_direct_oidc() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_sso_env();
+        let previous_redirect_url = std::env::var("REDIRECT_URL").ok();
+        // SAFETY: tests serialize env mutations with ENV_LOCK.
+        unsafe {
+            std::env::set_var("GOOGLE_CLIENT_ID", "google-client");
+            std::env::set_var("GOOGLE_CLIENT_SECRET", "google-secret");
+            std::env::set_var("REDIRECT_URL", "http://localhost:5173");
+        }
+
+        let settings = GoogleSettings::from_env().expect("Google environment settings");
+        assert!(settings.is_enabled);
+        assert!(!settings.use_grengin_proxy);
+        assert_eq!(
+            settings.redirect_url,
+            "http://localhost:5173/auth/google/callback"
+        );
+        clear_sso_env();
+        // SAFETY: tests serialize env mutations with ENV_LOCK.
+        unsafe {
+            match previous_redirect_url {
+                Some(value) => std::env::set_var("REDIRECT_URL", value),
+                None => std::env::remove_var("REDIRECT_URL"),
+            }
+        }
+    }
+
+    #[test]
+    fn azure_environment_credentials_enable_direct_multitenant_oidc() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_sso_env();
+        let previous_redirect_url = std::env::var("REDIRECT_URL").ok();
+        // SAFETY: tests serialize env mutations with ENV_LOCK.
+        unsafe {
+            std::env::set_var("AZURE_CLIENT_ID", "azure-client");
+            std::env::set_var("AZURE_CLIENT_SECRET", "azure-secret");
+            std::env::set_var("AZURE_TENANT_ID", "common");
+            std::env::set_var("REDIRECT_URL", "http://localhost:5173");
+        }
+
+        let settings = AzureSettings::from_env().expect("Azure environment settings");
+        assert!(settings.is_enabled);
+        assert!(!settings.use_grengin_proxy);
+        assert_eq!(settings.tenant_id, "common");
+        assert_eq!(
+            settings.redirect_url,
+            "http://localhost:5173/auth/azure/callback"
+        );
+        clear_sso_env();
+        // SAFETY: tests serialize env mutations with ENV_LOCK.
+        unsafe {
+            match previous_redirect_url {
+                Some(value) => std::env::set_var("REDIRECT_URL", value),
+                None => std::env::remove_var("REDIRECT_URL"),
+            }
         }
     }
 

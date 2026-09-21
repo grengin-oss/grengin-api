@@ -18,6 +18,12 @@ Microsoft Entra ID, Keycloak, Authentik, Okta, Dex, and compatible self-hosted s
 supports GitHub OAuth Apps through a native, typed OAuth 2.0 social adapter.
 
 - `sso_providers` is the source of truth; credentials remain encrypted with `APP_KEY`.
+  Complete direct `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` or
+  `AZURE_CLIENT_ID`/`AZURE_CLIENT_SECRET` environment configuration is a
+  deployment-level compatibility override: it enables that provider even when
+  its database row is disabled. Remove those variables to return enable/disable
+  control to the administrative record. Public discovery reports the effective
+  runtime state rather than the stale row value.
 - `AppState` loads enabled providers into a runtime registry keyed by a validated provider slug.
 - Google and Entra keep their compatibility adapters. Other providers use OIDC discovery.
 - GitHub uses fixed GitHub authorization, token, user, and verified-email endpoints. Provider

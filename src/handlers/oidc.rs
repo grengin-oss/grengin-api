@@ -85,7 +85,14 @@ pub async fn list_auth_providers(
             eprintln!("configured auth provider lookup failed: {error:?}");
             AuthError::ServiceTemporarilyUnavailable
         })?;
-    let providers = models.into_iter().map(auth_provider_summary).collect();
+    let mut providers = Vec::with_capacity(models.len());
+    for model in models {
+        let mut summary = auth_provider_summary(model);
+        if let Some(runtime) = app_state.oidc_provider(&summary.provider).await {
+            summary.is_enabled = runtime.is_enabled;
+        }
+        providers.push(summary);
+    }
     Ok((StatusCode::OK, Json(providers)))
 }
 
