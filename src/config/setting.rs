@@ -588,10 +588,59 @@ pub enum ConfigError {
 
 #[cfg(test)]
 mod tests {
-    use super::{EmbeddingSettings, RagSettings};
+    use super::{AzureSettings, EmbeddingSettings, GoogleSettings, RagSettings};
     use std::sync::{LazyLock, Mutex};
 
     static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct EnvRestore(Vec<(&'static str, Option<String>)>);
+
+    impl EnvRestore {
+        fn cleared(names: &[&'static str]) -> Self {
+            let saved = names
+                .iter()
+                .map(|name| (*name, std::env::var(name).ok()))
+                .collect();
+            // SAFETY: tests serialize env mutations with ENV_LOCK.
+            unsafe {
+                for name in names {
+                    std::env::remove_var(name);
+                }
+            }
+            Self(saved)
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            // SAFETY: tests serialize env mutations with ENV_LOCK.
+            unsafe {
+                for (name, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+
+    const SSO_ENV_NAMES: &[&str] = &[
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT",
+        "GOOGLE_CLIENT_SECRET",
+        "AZURE_CLIENT_ID",
+        "AZURE_CLIENT_SECRET",
+        "AZURE_TENANT_ID",
+        "REDIRECT_URL",
+        "SSO_PROXY_AUTO_ENABLE",
+        "SSO_PROXY_ENABLED",
+        "GRENGIN_PROXY_GOOGLE_CLIENT_ID",
+        "GRENGIN_PROXY_GOOGLE_CLIENT_SECRET",
+        "GRENGIN_PROXY_AZURE_CLIENT_ID",
+        "GRENGIN_PROXY_AZURE_CLIENT_SECRET",
+        "GRENGIN_PROXY_AZURE_TENANT_ID",
+    ];
 
     fn clear_embedding_env() {
         // SAFETY: tests serialize env mutations with ENV_LOCK.
@@ -610,6 +659,48 @@ mod tests {
             std::env::remove_var("RAG_SUMMARY_MODEL_OPENAI");
             std::env::remove_var("RAG_SUMMARY_MODEL_ANTHROPIC");
         }
+    }
+
+    #[test]
+    fn direct_google_environment_credentials_are_enabled_without_the_proxy() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _restore = EnvRestore::cleared(SSO_ENV_NAMES);
+        // SAFETY: tests serialize env mutations with ENV_LOCK.
+        unsafe {
+            std::env::set_var("GOOGLE_CLIENT_ID", "google-client");
+            std::env::set_var("GOOGLE_CLIENT_SECRET", "google-secret");
+            std::env::set_var("REDIRECT_URL", "http://localhost:5173");
+        }
+
+        let settings = GoogleSettings::from_env().expect("Google environment settings");
+        assert!(settings.is_enabled);
+        assert!(!settings.use_grengin_proxy);
+        assert_eq!(
+            settings.redirect_url,
+            "http://localhost:5173/auth/google/callback"
+        );
+    }
+
+    #[test]
+    fn direct_azure_environment_credentials_are_enabled_without_the_proxy() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _restore = EnvRestore::cleared(SSO_ENV_NAMES);
+        // SAFETY: tests serialize env mutations with ENV_LOCK.
+        unsafe {
+            std::env::set_var("AZURE_CLIENT_ID", "azure-client");
+            std::env::set_var("AZURE_CLIENT_SECRET", "azure-secret");
+            std::env::set_var("AZURE_TENANT_ID", "common");
+            std::env::set_var("REDIRECT_URL", "http://localhost:5173");
+        }
+
+        let settings = AzureSettings::from_env().expect("Azure environment settings");
+        assert!(settings.is_enabled);
+        assert!(!settings.use_grengin_proxy);
+        assert_eq!(settings.tenant_id, "common");
+        assert_eq!(
+            settings.redirect_url,
+            "http://localhost:5173/auth/azure/callback"
+        );
     }
 
     #[test]

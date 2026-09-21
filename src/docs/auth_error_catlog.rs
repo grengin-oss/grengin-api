@@ -63,6 +63,7 @@ pub fn build_auth_error_catalog() -> Vec<AuthErrorCatalogItem> {
         AuthError::AccountDeactivated,
         AuthError::BudgetExceedsParentAvailable,
         AuthError::SuperAdminSelfStatusConflict,
+        AuthError::SsoProviderLockoutPrevented,
     ] {
         let (status, detail) = e.to_detail();
         items.push(AuthErrorCatalogItem::from_detail(status, detail));

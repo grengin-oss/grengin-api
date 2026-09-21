@@ -18,6 +18,10 @@ Microsoft Entra ID, Keycloak, Authentik, Okta, Dex, and compatible self-hosted s
 supports GitHub OAuth Apps through a native, typed OAuth 2.0 social adapter.
 
 - `sso_providers` is the source of truth; credentials remain encrypted with `APP_KEY`.
+  Complete direct Google or Azure credentials supplied through deployment environment variables
+  are an availability fallback: an absent or disabled database row cannot disable that login path.
+  An enabled database row remains authoritative, while a fallback keeps the row's domain allowlist,
+  JIT policy, scopes, and authorization parameters.
 - `AppState` loads enabled providers into a runtime registry keyed by a validated provider slug.
 - Google and Entra keep their compatibility adapters. Other providers use OIDC discovery.
 - GitHub uses fixed GitHub authorization, token, user, and verified-email endpoints. Provider
@@ -109,8 +113,10 @@ passes the returned token to `POST /admin/sso-providers/{id}/quick-setup`. That 
 the admin, provider ID, normalized domains, tenant, and exact callback URL.
 
 An admin must not be able to enable a new or materially changed provider without validating the
-same draft. Deleting a provider disables credentials and evicts it from runtime state; linked
-identity history remains on users for audit and safe re-enablement.
+same draft. Disabling or deleting the final administratively enabled SSO provider is rejected to
+prevent an administrative lockout. Deleting a provider disables its database credentials; a direct
+Google or Azure deployment fallback remains available. Linked identity history remains on users
+for audit and safe re-enablement.
 
 ## Target Architecture
 

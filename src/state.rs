@@ -12,7 +12,7 @@ use crate::{
             validate_issuer_url_for_provider, validate_redirect_url_for_provider,
         },
     },
-    config::setting::{ConfigError, OidcClient, Settings},
+    config::setting::{AzureSettings, ConfigError, GoogleSettings, OidcClient, Settings},
     dto::oauth::AuthProvider,
     models::{mcp_servers, sso_providers},
     services::ai_engine_catalog::reconcile_catalog_ai_engines,
@@ -26,7 +26,7 @@ use llm_plugin::ProviderRegistry;
 use reqwest::Client as ReqwestClient;
 use sea_orm::{ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -47,6 +47,8 @@ pub struct AppState {
     pub provider_registry: ProviderRegistry,
     pub live_models_cache: LiveModelsCache,
     pub discovery_catalog: DiscoveryCatalog,
+    deployment_google: Option<GoogleSettings>,
+    deployment_azure: Option<AzureSettings>,
 }
 
 #[derive(Clone)]
@@ -59,6 +61,13 @@ pub struct OidcProviderRuntime {
     pub use_grengin_proxy: bool,
     pub jit_provisioning: bool,
     pub configuration: OidcProviderConfiguration,
+    pub azure_public_client: Option<AzurePublicClientConfig>,
+}
+
+#[derive(Clone)]
+pub struct AzurePublicClientConfig {
+    pub client_id: String,
+    pub tenant_id: String,
 }
 
 #[derive(Clone)]
@@ -98,6 +107,18 @@ impl StreamCancel {
 
 impl AppState {
     pub async fn from_settings(mut settings: Settings) -> Result<SharedState, ConfigError> {
+        let deployment_google = settings
+            .google
+            .read()
+            .await
+            .clone()
+            .filter(|settings| settings.is_enabled && !settings.use_grengin_proxy);
+        let deployment_azure = settings
+            .azure
+            .read()
+            .await
+            .clone()
+            .filter(|settings| settings.is_enabled && !settings.use_grengin_proxy);
         let req_client = reqwest::ClientBuilder::new()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(15))
@@ -135,6 +156,8 @@ impl AppState {
             provider_registry: ProviderRegistry::new(),
             live_models_cache: LiveModelsCache::new(),
             discovery_catalog,
+            deployment_google,
+            deployment_azure,
         };
         state.reload_oidc_providers().await?;
         let _ = state.load_mcp_servers_from_db().await;
@@ -227,18 +250,24 @@ impl AppState {
         let model = sso_providers::Entity::find()
             .filter(sso_providers::Column::Provider.eq(&provider))
             .one(&self.database)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Unknown provider: {provider}"))?;
-        let runtime = self.build_oidc_provider_runtime(&model).await?;
-        self.oidc_providers.write().await.insert(provider, runtime);
+            .await?;
+        let runtime = self
+            .build_effective_oidc_provider_runtime(&provider, model.as_ref())
+            .await;
+        let mut runtimes = self.oidc_providers.write().await;
+        match runtime {
+            Ok(Some(runtime)) => {
+                runtimes.insert(provider, runtime);
+            }
+            Ok(None) => {
+                runtimes.remove(&provider);
+            }
+            Err(error) => {
+                runtimes.remove(&provider);
+                return Err(error);
+            }
+        }
         Ok(())
-    }
-
-    pub async fn remove_oidc_provider(&self, provider: &str) {
-        self.oidc_providers
-            .write()
-            .await
-            .remove(&provider.trim().to_ascii_lowercase());
     }
 
     pub async fn oidc_provider(&self, provider: &str) -> Option<OidcProviderRuntime> {
@@ -255,11 +284,18 @@ impl AppState {
             .await
             .map_err(|error| ConfigError::DbError(error.to_string()))?;
         let mut runtimes = HashMap::new();
+        let mut database_providers = HashSet::new();
         for model in models {
-            match self.build_oidc_provider_runtime(&model).await {
-                Ok(runtime) => {
-                    runtimes.insert(model.provider.trim().to_ascii_lowercase(), runtime);
+            let provider = model.provider.trim().to_ascii_lowercase();
+            database_providers.insert(provider.clone());
+            match self
+                .build_effective_oidc_provider_runtime(&provider, Some(&model))
+                .await
+            {
+                Ok(Some(runtime)) => {
+                    runtimes.insert(provider, runtime);
                 }
+                Ok(None) => {}
                 Err(error) => {
                     eprintln!(
                         "Skipping invalid OIDC provider '{}': {error:?}",
@@ -268,8 +304,127 @@ impl AppState {
                 }
             }
         }
+        for provider in ["google", "azure"] {
+            if database_providers.contains(provider) {
+                continue;
+            }
+            match self
+                .build_effective_oidc_provider_runtime(provider, None)
+                .await
+            {
+                Ok(Some(runtime)) => {
+                    runtimes.insert(provider.to_string(), runtime);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Skipping invalid deployment OIDC provider '{provider}': {error:?}");
+                }
+            }
+        }
         *self.oidc_providers.write().await = runtimes;
         Ok(())
+    }
+
+    async fn build_effective_oidc_provider_runtime(
+        &self,
+        provider: &str,
+        model: Option<&sso_providers::Model>,
+    ) -> Result<Option<OidcProviderRuntime>, Error> {
+        if let Some(model) = model.filter(|model| model.is_enabled) {
+            return self.build_oidc_provider_runtime(model).await.map(Some);
+        }
+
+        if provider == "google"
+            && let Some(settings) = self.deployment_google.clone()
+        {
+            return self
+                .build_google_environment_runtime(settings, model)
+                .await
+                .map(Some);
+        }
+        if provider == "azure"
+            && let Some(settings) = self.deployment_azure.clone()
+        {
+            return self
+                .build_azure_environment_runtime(settings, model)
+                .await
+                .map(Some);
+        }
+        match model {
+            Some(model) => self.build_oidc_provider_runtime(model).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    async fn build_google_environment_runtime(
+        &self,
+        settings: GoogleSettings,
+        policy: Option<&sso_providers::Model>,
+    ) -> Result<OidcProviderRuntime, Error> {
+        let configuration = OidcProviderConfiguration::from_value_for_provider(
+            policy.and_then(|model| model.configuration.as_ref()),
+            "google",
+        )?;
+        let client = build_google_client(
+            &self.req_client,
+            settings.client_id,
+            settings.client_secret,
+            settings.redirect_url.clone(),
+        )
+        .await?;
+        Ok(OidcProviderRuntime {
+            client: Some(AuthProtocolClient::Oidc(client)),
+            azure_multitenant_validation: None,
+            redirect_url: settings.redirect_url,
+            allowed_domains: policy
+                .map(|model| model.allowed_domains.clone())
+                .unwrap_or(settings.allowed_domains),
+            is_enabled: true,
+            use_grengin_proxy: false,
+            jit_provisioning: policy
+                .map(|model| model.jit_provisioning)
+                .unwrap_or(settings.jit_provisioning),
+            configuration,
+            azure_public_client: None,
+        })
+    }
+
+    async fn build_azure_environment_runtime(
+        &self,
+        settings: AzureSettings,
+        policy: Option<&sso_providers::Model>,
+    ) -> Result<OidcProviderRuntime, Error> {
+        let configuration = OidcProviderConfiguration::from_value_for_provider(
+            policy.and_then(|model| model.configuration.as_ref()),
+            "azure",
+        )?;
+        let public_client = AzurePublicClientConfig {
+            client_id: settings.client_id.clone(),
+            tenant_id: settings.tenant_id.clone(),
+        };
+        let azure = build_azure_client(
+            &self.req_client,
+            settings.client_id,
+            settings.client_secret,
+            settings.redirect_url.clone(),
+            settings.tenant_id,
+        )
+        .await?;
+        Ok(OidcProviderRuntime {
+            client: Some(AuthProtocolClient::Oidc(azure.client)),
+            azure_multitenant_validation: azure.multitenant_validation,
+            redirect_url: settings.redirect_url,
+            allowed_domains: policy
+                .map(|model| model.allowed_domains.clone())
+                .unwrap_or(settings.allowed_domains),
+            is_enabled: true,
+            use_grengin_proxy: false,
+            jit_provisioning: policy
+                .map(|model| model.jit_provisioning)
+                .unwrap_or(settings.jit_provisioning),
+            configuration,
+            azure_public_client: Some(public_client),
+        })
     }
 
     async fn build_oidc_provider_runtime(
@@ -282,28 +437,34 @@ impl AppState {
         )?;
         validate_issuer_url_for_provider(&model.provider, &model.issuer_url)?;
         validate_redirect_url_for_provider(&model.provider, &model.redirect_url)?;
-        let (client, azure_multitenant_validation) = if !model.is_enabled || model.use_grengin_proxy
+        let (client, azure_multitenant_validation, azure_public_client) = if !model.is_enabled
+            || model.use_grengin_proxy
         {
-            (None, None)
+            (None, None, None)
         } else {
             let client_secret = decrypt_key(&self.settings.auth.app_key, &model.client_secret)
                 .map_err(|error| anyhow::anyhow!("OIDC client secret decrypt failed: {error:?}"))?;
             match model.provider.as_str() {
                 "azure" => {
+                    let tenant_id = model
+                        .tenant_id
+                        .clone()
+                        .unwrap_or_else(|| "common".to_string());
                     let azure = build_azure_client(
                         &self.req_client,
                         model.client_id.clone(),
                         client_secret,
                         model.redirect_url.clone(),
-                        model
-                            .tenant_id
-                            .clone()
-                            .unwrap_or_else(|| "common".to_string()),
+                        tenant_id.clone(),
                     )
                     .await?;
                     (
                         Some(AuthProtocolClient::Oidc(azure.client)),
                         azure.multitenant_validation,
+                        Some(AzurePublicClientConfig {
+                            client_id: model.client_id.clone(),
+                            tenant_id,
+                        }),
                     )
                 }
                 "google" => {
@@ -314,7 +475,7 @@ impl AppState {
                         model.redirect_url.clone(),
                     )
                     .await?;
-                    (Some(AuthProtocolClient::Oidc(client)), None)
+                    (Some(AuthProtocolClient::Oidc(client)), None, None)
                 }
                 "github" => {
                     if !GitHubOAuthAdapter::supports_issuer(&model.issuer_url) {
@@ -327,6 +488,7 @@ impl AppState {
                             model.redirect_url.clone(),
                         )?)),
                         None,
+                        None,
                     )
                 }
                 _ => {
@@ -338,7 +500,7 @@ impl AppState {
                         model.redirect_url.clone(),
                     )
                     .await?;
-                    (Some(AuthProtocolClient::Oidc(client)), None)
+                    (Some(AuthProtocolClient::Oidc(client)), None, None)
                 }
             }
         };
@@ -351,6 +513,7 @@ impl AppState {
             use_grengin_proxy: model.use_grengin_proxy,
             jit_provisioning: model.jit_provisioning,
             configuration,
+            azure_public_client,
         })
     }
 
