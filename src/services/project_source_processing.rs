@@ -400,19 +400,33 @@ pub fn spawn_process_source(
     });
 }
 
-pub fn build_file_path(user_id: Uuid, file_uuid: Uuid, filename: &str) -> String {
-    format!("/data/files/{user_id}/file/{file_uuid}/{filename}")
+pub fn build_file_path(
+    file_storage_root: &std::path::Path,
+    user_id: Uuid,
+    file_uuid: Uuid,
+    filename: &str,
+) -> Result<String, AppError> {
+    let filename = crate::services::file_storage::safe_file_name(filename)
+        .ok_or(AppError::ValidationEmptyField { field: "file_name" })?;
+    Ok(file_storage_root
+        .join(user_id.to_string())
+        .join("file")
+        .join(file_uuid.to_string())
+        .join(filename)
+        .to_string_lossy()
+        .into_owned())
 }
 
 pub async fn write_artifact_file(
     db: &DatabaseConnection,
+    file_storage_root: &std::path::Path,
     user_id: Uuid,
     filename: &str,
     content_type: &str,
     content: &str,
 ) -> Result<(Uuid, String), AppError> {
     let file_uuid = Uuid::new_v4();
-    let local_path = build_file_path(user_id, file_uuid, filename);
+    let local_path = build_file_path(file_storage_root, user_id, file_uuid, filename)?;
 
     if let Some(parent) = std::path::Path::new(&local_path).parent() {
         fs::create_dir_all(parent).await.map_err(|e| {
@@ -449,4 +463,39 @@ pub async fn write_artifact_file(
     })?;
 
     Ok((file_uuid, local_path))
+}
+
+#[cfg(test)]
+mod storage_path_tests {
+    use super::build_file_path;
+    use std::path::Path;
+    use uuid::Uuid;
+
+    #[test]
+    fn project_file_path_uses_the_configured_storage_root() {
+        let user_id =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("valid user id");
+        let file_id =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000002").expect("valid file id");
+
+        assert_eq!(
+            build_file_path(
+                Path::new("/mnt/grengin/files"),
+                user_id,
+                file_id,
+                "source.md"
+            )
+            .expect("safe path"),
+            format!("/mnt/grengin/files/{user_id}/file/{file_id}/source.md")
+        );
+        assert!(
+            build_file_path(
+                Path::new("/mnt/grengin/files"),
+                user_id,
+                file_id,
+                "/etc/passwd"
+            )
+            .is_err()
+        );
+    }
 }

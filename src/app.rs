@@ -29,7 +29,11 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 async fn sample_root() -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::OK,
-        Json(json!({"status":"Okay","version":env!("CARGO_PKG_VERSION")})),
+        Json(json!({
+            "status": "Okay",
+            "version": env!("CARGO_PKG_VERSION"),
+            "migration_head": migration::MIGRATION_HEAD,
+        })),
     )
 }
 
@@ -38,10 +42,10 @@ pub async fn init_app() -> Result<(), Error> {
     let settings = Settings::from_env()?;
     let address = format!("{}:{}", settings.server.host, settings.server.port);
 
-    // Run migrations BEFORE creating app state (which loads data from DB)
-    let database = sea_orm::Database::connect(&settings.auth.database_url).await?;
-    migration::Migrator::up(&database, None).await?;
-    drop(database); // Close this connection, AppState will create its own
+    if settings.auth.auto_migrate {
+        let database = sea_orm::Database::connect(&settings.auth.database_url).await?;
+        migration::Migrator::up(&database, None).await?;
+    }
 
     let app_state = AppState::from_settings(settings).await?;
     spawn_analytics_cache_refresh(app_state.database.clone());
@@ -90,4 +94,21 @@ pub async fn init_app() -> Result<(), Error> {
     println!("Started listening to {}", address);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sample_root;
+    use axum::Json;
+    use reqwest::StatusCode;
+
+    #[tokio::test]
+    async fn health_response_identifies_the_release_and_schema() {
+        let (status, Json(body)) = sample_root().await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "Okay");
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["migration_head"], migration::MIGRATION_HEAD);
+    }
 }

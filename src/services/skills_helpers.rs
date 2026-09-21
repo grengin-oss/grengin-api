@@ -9,6 +9,7 @@ use sea_orm::{
     PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
 };
 use std::collections::HashMap;
+use std::path::Path;
 use uuid::Uuid;
 
 use crate::{
@@ -204,31 +205,35 @@ pub async fn get_skill_knowledge_info(
         .collect()
 }
 
-const FILE_STORAGE_ROOT: &str = "/data/files";
-
 /// Decode and store a knowledge attachment for a skill, replacing any existing
 /// knowledge rows for that skill. The raw file is persisted to disk and recorded
 /// in the `files` table as a backup. Supports `text/markdown` (single .md) and
 /// `application/zip` (multiple .md files). Returns stored knowledge info on success.
 pub async fn process_skill_knowledge(
     db: &DatabaseConnection,
+    file_storage_root: &Path,
     skill_id: Uuid,
     user_id: Uuid,
     attachment: KnowledgeAttachment,
 ) -> Result<Vec<SkillKnowledgeInfo>, AuthError> {
+    let storage_file_name = crate::services::file_storage::safe_file_name(&attachment.file_name)
+        .ok_or(AuthError::InvalidRequest {
+            field: "knowledge_attachment.file_name",
+        })?;
     let bytes = BASE64_STANDARD
         .decode(attachment.data.trim())
         .map_err(|_| AuthError::InvalidRequest {
             field: "knowledge_attachment.data",
         })?;
 
-    let extracted = extract_knowledge_text(&bytes, &attachment.content_type, &attachment.file_name)
+    let extracted = extract_knowledge_text(&bytes, &attachment.content_type, storage_file_name)
         .map_err(|_| AuthError::InvalidRequest {
             field: "knowledge_attachment",
         })?;
 
     // Persist the raw upload to disk and record it in the files table.
-    let file_id = save_knowledge_file_to_disk(db, user_id, &bytes, &attachment).await;
+    let file_id =
+        save_knowledge_file_to_disk(db, file_storage_root, user_id, &bytes, &attachment).await;
 
     // Replace all existing knowledge for this skill before inserting new rows.
     skill_knowledge::Entity::delete_many()
@@ -271,22 +276,27 @@ pub async fn process_skill_knowledge(
     Ok(inserted)
 }
 
-/// Write the raw file bytes to `/data/files/{user_id}/skill/{file_id}/{name}` and
+/// Write the raw file bytes below the configured file storage root and
 /// insert a row into the `files` table. Returns the file id on success, None on
 /// any I/O or DB error (non-fatal — knowledge text extraction still proceeds).
 async fn save_knowledge_file_to_disk(
     db: &DatabaseConnection,
+    file_storage_root: &Path,
     user_id: Uuid,
     bytes: &[u8],
     attachment: &KnowledgeAttachment,
 ) -> Option<Uuid> {
     let file_id = Uuid::new_v4();
-    let folder = format!("{}/{}/skill/{}", FILE_STORAGE_ROOT, user_id, file_id);
+    let folder = file_storage_root
+        .join(user_id.to_string())
+        .join("skill")
+        .join(file_id.to_string());
     if let Err(e) = tokio::fs::create_dir_all(&folder).await {
         eprintln!("skill knowledge dir create error: {e}");
         return None;
     }
-    let local_path = format!("{}/{}", folder, attachment.file_name);
+    let file_name = crate::services::file_storage::safe_file_name(&attachment.file_name)?;
+    let local_path = folder.join(file_name);
     if let Err(e) = tokio::fs::write(&local_path, bytes).await {
         eprintln!("skill knowledge file write error: {e}");
         return None;
@@ -299,7 +309,7 @@ async fn save_knowledge_file_to_disk(
         name: Set(attachment.file_name.clone()),
         content_type: Set(attachment.content_type.clone()),
         size: Set(bytes.len() as i64),
-        local_path: Set(local_path),
+        local_path: Set(local_path.to_string_lossy().into_owned()),
         description: Set(Some("skill knowledge attachment".to_string())),
         url: Set(None),
         status: Set(FileUploadStatus::Uploaded),

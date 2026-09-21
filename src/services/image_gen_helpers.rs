@@ -10,7 +10,6 @@ use std::{fs, io::Write};
 use uuid::Uuid;
 
 use crate::{
-    handlers::file::LOCAL_FOLDER,
     models::files::{self, FileUploadStatus},
     state::SharedState,
 };
@@ -78,11 +77,16 @@ pub async fn generate_and_save(
             "webp"
         };
         let filename = format!("{file_id}.{ext}");
-        let dir = format!("{LOCAL_FOLDER}/{user_id}/images/{file_id}");
+        let dir = app_state
+            .settings
+            .file_storage_root
+            .join(user_id.to_string())
+            .join("images")
+            .join(file_id.to_string());
 
         fs::create_dir_all(&dir).context("create image dir")?;
 
-        let local_path = format!("{dir}/{filename}");
+        let local_path = dir.join(&filename);
         let mut f = fs::File::create(&local_path).context("create image file")?;
         f.write_all(&result.bytes).context("write image file")?;
 
@@ -92,7 +96,7 @@ pub async fn generate_and_save(
             name: Set(filename),
             content_type: Set(result.content_type.clone()),
             size: Set(result.bytes.len() as i64),
-            local_path: Set(local_path),
+            local_path: Set(local_path.to_string_lossy().into_owned()),
             description: Set(None),
             url: Set(None),
             status: Set(FileUploadStatus::Uploaded),

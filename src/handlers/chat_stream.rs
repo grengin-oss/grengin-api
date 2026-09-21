@@ -83,16 +83,20 @@ use sea_orm::{
     QueryOrder, QuerySelect, prelude::Decimal,
 };
 use serde_json::{Value, json};
-use std::{collections::HashMap, convert::Infallible};
+use std::{collections::HashMap, convert::Infallible, path::Path as FsPath};
 use tokio::time::Instant;
 use uuid::Uuid;
 
-fn hydrate_files(files: &mut [File], user_id: Uuid) -> Result<(), AppError> {
+fn hydrate_files(
+    files: &mut [File],
+    user_id: Uuid,
+    file_storage_root: &FsPath,
+) -> Result<(), AppError> {
     for file in files {
         if file.base64.is_some() {
             continue;
         }
-        let attachment = crate::handlers::file::get_file_binary(file, &user_id)
+        let attachment = crate::handlers::file::get_file_binary(file_storage_root, file, &user_id)
             .map_err(|_| AppError::ResourceNotFound)?;
         file.base64 = attachment.get_base64();
         if file.base64.is_none() {
@@ -102,9 +106,13 @@ fn hydrate_files(files: &mut [File], user_id: Uuid) -> Result<(), AppError> {
     Ok(())
 }
 
-fn hydrate_prompt_files(prompts: &mut [Prompt], user_id: Uuid) -> Result<(), AppError> {
+fn hydrate_prompt_files(
+    prompts: &mut [Prompt],
+    user_id: Uuid,
+    file_storage_root: &FsPath,
+) -> Result<(), AppError> {
     for prompt in prompts {
-        hydrate_files(&mut prompt.files, user_id)?;
+        hydrate_files(&mut prompt.files, user_id, file_storage_root)?;
     }
     Ok(())
 }
@@ -817,7 +825,13 @@ pub async fn handle_chat_stream(
         let mut first_message_files = first_message.files.clone();
         // Best-effort: title generation is non-fatal, so a hydration failure just
         // falls back to a text-only title instead of failing the whole request.
-        if hydrate_files(&mut first_message_files, claims.user_id).is_err() {
+        if hydrate_files(
+            &mut first_message_files,
+            claims.user_id,
+            &app_state.settings.file_storage_root,
+        )
+        .is_err()
+        {
             first_message_files.clear();
         }
         let new_conversation_id = Uuid::new_v4();
@@ -1139,7 +1153,11 @@ pub async fn handle_chat_stream(
         );
     }
     if !is_image_gen {
-        hydrate_prompt_files(&mut previous_prompts, claims.user_id)?;
+        hydrate_prompt_files(
+            &mut previous_prompts,
+            claims.user_id,
+            &app_state.settings.file_storage_root,
+        )?;
     }
     let provider_request = if !is_image_gen {
         let mut provider_request = build_plugin_chat_request(
@@ -2609,8 +2627,11 @@ pub async fn handle_chat_stream(
                            other => other,
                        }).collect::<String>();
                        let filename = format!("{}.{}", safe_title, ext);
-                       let user_folder = format!("/data/files/{}/artifact/{}", claims.user_id, file_id);
-                       let local_path = format!("{}/{}", user_folder, filename);
+                       let user_folder = app_state.settings.file_storage_root
+                           .join(claims.user_id.to_string())
+                           .join("artifact")
+                           .join(file_id.to_string());
+                       let local_path = user_folder.join(&filename);
                        if let Err(e) = tokio::fs::create_dir_all(&user_folder).await {
                            eprintln!("artifact dir create error: {e}");
                            continue;
@@ -2626,7 +2647,7 @@ pub async fn handle_chat_stream(
                            name: Set(filename.clone()),
                            content_type: Set(acc.content_type.clone()),
                            size: Set(file_size),
-                           local_path: Set(local_path),
+                           local_path: Set(local_path.to_string_lossy().into_owned()),
                            description: Set(Some(format!("Artifact: {}", acc.title))),
                            url: Set(None),
                            status: Set(crate::models::files::FileUploadStatus::Uploaded),

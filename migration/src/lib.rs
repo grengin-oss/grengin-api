@@ -74,6 +74,8 @@ mod m20260827_000001_add_configuration_to_sso_providers;
 
 pub struct Migrator;
 
+pub const MIGRATION_HEAD: &str = "m20260827_000001_add_configuration_to_sso_providers";
+
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
@@ -165,9 +167,6 @@ mod tests {
         assert!(names.contains(&"m20260810_000001_create_provider_plugins".to_owned()));
         assert!(names.contains(&"m20260810_000001_add_plugin_config_to_ai_engines".to_owned()));
         assert_eq!(names.len(), names.iter().collect::<HashSet<_>>().len());
-        assert_eq!(
-            names.last().map(String::as_str),
-            Some("m20260827_000001_add_configuration_to_sso_providers")
-        );
+        assert_eq!(names.last().map(String::as_str), Some(MIGRATION_HEAD));
     }
 }

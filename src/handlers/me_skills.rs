@@ -109,9 +109,15 @@ pub async fn create_my_skill(
     let knowledge_attachment = req.knowledge_attachment.take();
     let skill = create_user_skill(&app_state.database, claims.user_id, req).await?;
     let knowledge_files = if let Some(attachment) = knowledge_attachment {
-        process_skill_knowledge(&app_state.database, skill.id, claims.user_id, attachment)
-            .await
-            .unwrap_or_default()
+        process_skill_knowledge(
+            &app_state.database,
+            &app_state.settings.file_storage_root,
+            skill.id,
+            claims.user_id,
+            attachment,
+        )
+        .await
+        .unwrap_or_default()
     } else {
         vec![]
     };
@@ -142,9 +148,15 @@ pub async fn update_my_skill(
     let knowledge_attachment = req.knowledge_attachment.take();
     let skill = update_user_skill(&app_state.database, id, claims.user_id, req).await?;
     let knowledge_files = if let Some(attachment) = knowledge_attachment {
-        process_skill_knowledge(&app_state.database, skill.id, claims.user_id, attachment)
-            .await
-            .unwrap_or_default()
+        process_skill_knowledge(
+            &app_state.database,
+            &app_state.settings.file_storage_root,
+            skill.id,
+            claims.user_id,
+            attachment,
+        )
+        .await
+        .unwrap_or_default()
     } else {
         get_skill_knowledge_info(&app_state.database, skill.id).await
     };

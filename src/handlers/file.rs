@@ -11,6 +11,7 @@ use crate::{
     },
     error::{AppError, ErrorResponse},
     models::files::{self, FileUploadStatus},
+    services::file_storage::safe_file_name,
     state::SharedState,
 };
 use anyhow::Error;
@@ -34,27 +35,72 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const LOCAL_FOLDER: &str = "/data/files";
-
-pub fn get_local_path(file: &FileLocal, user_id: &Uuid) -> PathBuf {
-    let user_folder = format!(
-        "{}/{}/file/{}",
-        LOCAL_FOLDER,
-        user_id.to_string(),
-        file.id.to_string()
-    );
-    let local_path = format!("{}/{}", user_folder, &file.name);
-    PathBuf::from(local_path)
+pub fn get_local_path(
+    root: &std::path::Path,
+    file: &FileLocal,
+    user_id: &Uuid,
+) -> Result<PathBuf, Error> {
+    let name = safe_file_name(&file.name).ok_or_else(|| anyhow::anyhow!("unsafe file name"))?;
+    Ok(root
+        .join(user_id.to_string())
+        .join("file")
+        .join(file.id.to_string())
+        .join(name))
 }
 
-pub fn get_file_binary(file: &FileLocal, user_id: &Uuid) -> Result<Attachment, Error> {
-    let path = get_local_path(file, user_id);
+pub fn get_file_binary(
+    root: &std::path::Path,
+    file: &FileLocal,
+    user_id: &Uuid,
+) -> Result<Attachment, Error> {
+    let path = get_local_path(root, file, user_id)?;
     let buff = fs::read(&path)?;
     Ok(Attachment {
         file: Some(buff),
         name: file.name.clone(),
         content_type: file.content_type.clone(),
     })
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn local_file_path_uses_the_configured_storage_root() {
+        let file = FileLocal {
+            id: Uuid::nil(),
+            size: None,
+            name: "notes.txt".to_string(),
+            content_type: "text/plain".to_string(),
+            openai_id: None,
+            base64: None,
+        };
+        let user_id =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("valid user id");
+
+        assert_eq!(
+            get_local_path(std::path::Path::new("/mnt/grengin/files"), &file, &user_id)
+                .expect("safe path"),
+            PathBuf::from(format!(
+                "/mnt/grengin/files/{user_id}/file/{}/notes.txt",
+                Uuid::nil()
+            ))
+        );
+
+        let unsafe_file = FileLocal {
+            name: "/etc/passwd".to_string(),
+            ..file
+        };
+        assert!(
+            get_local_path(
+                std::path::Path::new("/mnt/grengin/files"),
+                &unsafe_file,
+                &user_id
+            )
+            .is_err()
+        );
+    }
 }
 
 #[utoipa::path(
@@ -73,24 +119,30 @@ pub async fn upload_file(
     State(app_state): State<SharedState>,
     Json(req): Json<FileUploadRequest>,
 ) -> Result<(StatusCode, Json<FileResponse>), AppError> {
+    let storage_name = safe_file_name(&req.attachment.name)
+        .ok_or(AppError::ValidationEmptyField {
+            field: "attachment.name",
+        })?
+        .to_string();
     // Generate a unique local file ID
     let local_file_id = Uuid::new_v4();
-    let user_folder = format!(
-        "{}/{}/file/{}",
-        LOCAL_FOLDER,
-        claims.user_id,
-        local_file_id.to_string()
-    );
+    let user_folder = app_state
+        .settings
+        .file_storage_root
+        .join(claims.user_id.to_string())
+        .join("file")
+        .join(local_file_id.to_string());
     // Ensure user folder exists
     let _ = fs::create_dir_all(&user_folder);
-    let local_path = format!("{}/{}", user_folder, &req.attachment.name);
+    let local_path = user_folder.join(&storage_name);
     // Save file locally with unique ID
     if let Ok(mut file_handle) = File::create(&local_path) {
         if let Some(buffer) = &req.attachment.file {
             if file_handle.write_all(buffer).is_ok() {
                 println!(
                     "Saved file {} locally as {}",
-                    &req.attachment.name, &user_folder
+                    &storage_name,
+                    user_folder.display()
                 )
             }
         }
@@ -99,10 +151,10 @@ pub async fn upload_file(
     let new_file = files::ActiveModel {
         id: Set(local_file_id),
         user_id: Set(claims.user_id),
-        name: Set(req.attachment.name.clone()),
+        name: Set(storage_name),
         content_type: Set(req.attachment.content_type.clone()),
         size: Set(size),
-        local_path: Set(local_path),
+        local_path: Set(local_path.to_string_lossy().into_owned()),
         description: Set(req.description),
         url: Set(None),
         status: Set(FileUploadStatus::Uploaded),
@@ -263,7 +315,7 @@ pub async fn delete_file_by_id(
     get,
     path = "/files",
     tag = "files",
-    
+
     params(
         ("limit" = Option<u64>, Query, description = "Default value : 20"),
         ("offset" = Option<u64>, Query, description = "Default value : 0"),

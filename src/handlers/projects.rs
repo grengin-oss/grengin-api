@@ -1027,6 +1027,7 @@ pub async fn add_project_artifact(
 
     let (file_uuid, _) = write_artifact_file(
         &app_state.database,
+        &app_state.settings.file_storage_root,
         claims.user_id,
         &file_name,
         &content_type,
@@ -1190,6 +1191,7 @@ pub async fn update_project_artifact(
         let file_name = active.file_name.clone().unwrap();
         let (file_uuid, _) = write_artifact_file(
             &app_state.database,
+            &app_state.settings.file_storage_root,
             claims.user_id,
             &file_name,
             &resolved_content_type,
