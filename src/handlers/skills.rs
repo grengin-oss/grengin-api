@@ -5,11 +5,8 @@ use axum::{
     Json,
     extract::{Path, Query, State},
 };
-use chrono::Utc;
 use reqwest::StatusCode;
-use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
-};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use uuid::Uuid;
 
 use crate::{
@@ -114,7 +111,7 @@ pub async fn get_skill(
 pub async fn create_skill(
     claims: Claims,
     State(app_state): State<SharedState>,
-    Json(mut req): Json<SkillCreateRequest>,
+    Json(req): Json<SkillCreateRequest>,
 ) -> Result<(StatusCode, Json<SkillResponse>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
@@ -127,69 +124,13 @@ pub async fn create_skill(
         )
         .await?;
 
-    let knowledge_attachment = req.knowledge_attachment.take();
-
-    let identifier = req.identifier.trim().to_ascii_lowercase();
-    if identifier.is_empty() || identifier.len() > 100 {
-        return Err(AuthError::InvalidRequest {
-            field: "identifier",
-        });
-    }
-    let name = req.name.trim().to_string();
-    if name.is_empty() || name.len() > 100 {
-        return Err(AuthError::InvalidRequest { field: "name" });
-    }
-
-    let conflict = skills::Entity::find()
-        .filter(skills::Column::Identifier.eq(&identifier))
-        .one(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("db skill lookup error: {e}");
-            AuthError::DbTimeout
-        })?;
-    if conflict.is_some() {
-        return Err(AuthError::DbConflict);
-    }
-
-    let tools_json = req
-        .tools_config
-        .map(|c| serde_json::to_value(c).unwrap_or_default());
-
-    let now = Utc::now();
-    let row = skills::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        identifier: Set(identifier),
-        name: Set(name),
-        description: Set(req.description),
-        avatar: Set(req.avatar),
-        instructions: Set(req.instructions),
-        tools_config: Set(tools_json),
-        is_builtin: Set(false),
-        is_active: Set(true),
-        department_id: Set(req.department_id),
-        user_id: Set(None),
-        created_at: Set(now),
-        updated_at: Set(now),
-    };
-
-    let skill = row.insert(&app_state.database).await.map_err(|e| {
-        eprintln!("db create skill error: {e}");
-        AuthError::DbTimeout
-    })?;
-
-    let knowledge_files = if let Some(attachment) = knowledge_attachment {
-        process_skill_knowledge(
-            &app_state.database,
-            &app_state.settings.file_storage_root,
-            skill.id,
-            claims.user_id,
-            attachment,
-        )
-        .await?
-    } else {
-        vec![]
-    };
+    let (skill, knowledge_files) = create_managed_skill_with_knowledge(
+        &app_state.database,
+        &app_state.settings.file_storage_root,
+        claims.user_id,
+        req,
+    )
+    .await?;
 
     Ok((
         StatusCode::CREATED,
@@ -214,7 +155,7 @@ pub async fn update_skill(
     claims: Claims,
     Path(id): Path<Uuid>,
     State(app_state): State<SharedState>,
-    Json(mut req): Json<SkillUpdateRequest>,
+    Json(req): Json<SkillUpdateRequest>,
 ) -> Result<(StatusCode, Json<SkillResponse>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
@@ -227,55 +168,14 @@ pub async fn update_skill(
         )
         .await?;
 
-    let knowledge_attachment = req.knowledge_attachment.take();
-
-    let skill = get_skill_or_404(id, &app_state.database).await?;
-    let mut active: skills::ActiveModel = skill.into_active_model();
-
-    if let Some(name) = req.name {
-        let name = name.trim().to_string();
-        if name.is_empty() || name.len() > 100 {
-            return Err(AuthError::InvalidRequest { field: "name" });
-        }
-        active.name = Set(name);
-    }
-    if let Some(desc) = req.description {
-        active.description = Set(Some(desc));
-    }
-    if let Some(avatar) = req.avatar {
-        active.avatar = Set(Some(avatar));
-    }
-    if let Some(instructions) = req.instructions {
-        active.instructions = Set(Some(instructions));
-    }
-    if let Some(config) = req.tools_config {
-        active.tools_config = Set(Some(serde_json::to_value(config).unwrap_or_default()));
-    }
-    if let Some(is_active) = req.is_active {
-        active.is_active = Set(is_active);
-    }
-    if let Some(dept) = req.department_id {
-        active.department_id = Set(Some(dept));
-    }
-    active.updated_at = Set(Utc::now());
-
-    let skill = active.update(&app_state.database).await.map_err(|e| {
-        eprintln!("db update skill error: {e}");
-        AuthError::DbTimeout
-    })?;
-
-    let knowledge_files = if let Some(attachment) = knowledge_attachment {
-        process_skill_knowledge(
-            &app_state.database,
-            &app_state.settings.file_storage_root,
-            skill.id,
-            claims.user_id,
-            attachment,
-        )
-        .await?
-    } else {
-        get_skill_knowledge_info(&app_state.database, skill.id).await
-    };
+    let (skill, knowledge_files) = update_managed_skill_with_knowledge(
+        &app_state.database,
+        &app_state.settings.file_storage_root,
+        id,
+        claims.user_id,
+        req,
+    )
+    .await?;
 
     Ok((
         StatusCode::OK,

@@ -4,9 +4,11 @@
 use crate::utils::zip::ZipArchive;
 use base64::prelude::*;
 use chrono::Utc;
+use futures_util::future::BoxFuture;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection,
+    DatabaseTransaction, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, TransactionTrait,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -14,9 +16,14 @@ use uuid::Uuid;
 
 use crate::{
     auth::error::AuthError,
-    dto::skills::{KnowledgeAttachment, SkillKnowledgeInfo, SkillResponse, SkillToolsConfig},
-    models::{conversation_skills, skill_knowledge, skills},
-    services::file_storage::{FileWrite, store_file_bytes},
+    dto::skills::{
+        KnowledgeAttachment, SkillCreateRequest, SkillKnowledgeInfo, SkillResponse,
+        SkillToolsConfig, SkillUpdateRequest,
+    },
+    models::{conversation_skills, files, skill_knowledge, skills},
+    services::file_storage::{
+        FileWrite, StorageCategory, remove_model_file, safe_file_name, store_file_bytes,
+    },
 };
 
 pub fn skill_to_response(skill: skills::Model) -> SkillResponse {
@@ -206,37 +213,294 @@ pub async fn get_skill_knowledge_info(
         .collect()
 }
 
-/// Decode and store a knowledge attachment for a skill, replacing any existing
-/// knowledge rows for that skill. The raw file is persisted to disk and recorded
-/// in the `files` table as a backup. Supports `text/markdown` (single .md) and
-/// `application/zip` (multiple .md files). Returns stored knowledge info on success.
-pub async fn process_skill_knowledge(
+struct PreparedSkillKnowledge {
+    file_name: String,
+    content_type: String,
+    bytes: Vec<u8>,
+    extracted: Vec<(String, String)>,
+}
+
+struct PersistedSkillKnowledge {
+    knowledge_files: Vec<SkillKnowledgeInfo>,
+    stored_file: files::Model,
+}
+
+pub async fn create_managed_skill_with_knowledge(
+    db: &DatabaseConnection,
+    file_storage_root: &Path,
+    user_id: Uuid,
+    mut request: SkillCreateRequest,
+) -> Result<(skills::Model, Vec<SkillKnowledgeInfo>), AuthError> {
+    let attachment = request.knowledge_attachment.take();
+    let identifier = request.identifier.trim().to_ascii_lowercase();
+    if identifier.is_empty() || identifier.len() > 100 {
+        return Err(AuthError::InvalidRequest {
+            field: "identifier",
+        });
+    }
+    let name = request.name.trim().to_string();
+    if name.is_empty() || name.len() > 100 {
+        return Err(AuthError::InvalidRequest { field: "name" });
+    }
+
+    let conflict = skills::Entity::find()
+        .filter(skills::Column::Identifier.eq(&identifier))
+        .one(db)
+        .await
+        .map_err(|error| {
+            eprintln!("db skill lookup error: {error}");
+            AuthError::DbTimeout
+        })?;
+    if conflict.is_some() {
+        return Err(AuthError::DbConflict);
+    }
+
+    let tools_config = request
+        .tools_config
+        .map(|config| serde_json::to_value(config).unwrap_or_default());
+    let now = Utc::now();
+    let row = skills::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        identifier: Set(identifier),
+        name: Set(name),
+        description: Set(request.description),
+        avatar: Set(request.avatar),
+        instructions: Set(request.instructions),
+        tools_config: Set(tools_config),
+        is_builtin: Set(false),
+        is_active: Set(true),
+        department_id: Set(request.department_id),
+        user_id: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+    };
+
+    save_skill_with_knowledge(
+        db,
+        file_storage_root,
+        user_id,
+        attachment,
+        move |transaction| {
+            Box::pin(async move {
+                row.insert(transaction).await.map_err(|error| {
+                    eprintln!("db create skill error: {error}");
+                    AuthError::DbTimeout
+                })
+            })
+        },
+    )
+    .await
+}
+
+pub async fn update_managed_skill_with_knowledge(
     db: &DatabaseConnection,
     file_storage_root: &Path,
     skill_id: Uuid,
     user_id: Uuid,
+    mut request: SkillUpdateRequest,
+) -> Result<(skills::Model, Vec<SkillKnowledgeInfo>), AuthError> {
+    let attachment = request.knowledge_attachment.take();
+    let replaces_knowledge = attachment.is_some();
+    let (skill, knowledge_files) = save_skill_with_knowledge(
+        db,
+        file_storage_root,
+        user_id,
+        attachment,
+        move |transaction| {
+            Box::pin(async move {
+                let skill = skills::Entity::find_by_id(skill_id)
+                    .one(transaction)
+                    .await
+                    .map_err(|error| {
+                        eprintln!("db find skill error: {error}");
+                        AuthError::DbTimeout
+                    })?
+                    .ok_or(AuthError::ResourceNotFound)?;
+                let mut active = skill.into_active_model();
+                apply_managed_skill_update(&mut active, request)?;
+                active.update(transaction).await.map_err(|error| {
+                    eprintln!("db update skill error: {error}");
+                    AuthError::DbTimeout
+                })
+            })
+        },
+    )
+    .await?;
+
+    if replaces_knowledge {
+        Ok((skill, knowledge_files))
+    } else {
+        let knowledge_files = get_skill_knowledge_info(db, skill.id).await;
+        Ok((skill, knowledge_files))
+    }
+}
+
+fn apply_managed_skill_update(
+    active: &mut skills::ActiveModel,
+    request: SkillUpdateRequest,
+) -> Result<(), AuthError> {
+    if let Some(name) = request.name {
+        let name = name.trim().to_string();
+        if name.is_empty() || name.len() > 100 {
+            return Err(AuthError::InvalidRequest { field: "name" });
+        }
+        active.name = Set(name);
+    }
+    if let Some(description) = request.description {
+        active.description = Set(Some(description));
+    }
+    if let Some(avatar) = request.avatar {
+        active.avatar = Set(Some(avatar));
+    }
+    if let Some(instructions) = request.instructions {
+        active.instructions = Set(Some(instructions));
+    }
+    if let Some(config) = request.tools_config {
+        active.tools_config = Set(Some(serde_json::to_value(config).unwrap_or_default()));
+    }
+    if let Some(is_active) = request.is_active {
+        active.is_active = Set(is_active);
+    }
+    if let Some(department_id) = request.department_id {
+        active.department_id = Set(Some(department_id));
+    }
+    active.updated_at = Set(Utc::now());
+    Ok(())
+}
+
+pub(crate) async fn save_skill_with_knowledge<F>(
+    db: &DatabaseConnection,
+    file_storage_root: &Path,
+    user_id: Uuid,
+    attachment: Option<KnowledgeAttachment>,
+    save_skill: F,
+) -> Result<(skills::Model, Vec<SkillKnowledgeInfo>), AuthError>
+where
+    F: for<'a> FnOnce(&'a DatabaseTransaction) -> BoxFuture<'a, Result<skills::Model, AuthError>>,
+{
+    let prepared = attachment.map(prepare_skill_knowledge).transpose()?;
+    let transaction = db.begin().await.map_err(|error| {
+        eprintln!("db begin skill transaction error: {error}");
+        AuthError::DbTimeout
+    })?;
+
+    let skill = match save_skill(&transaction).await {
+        Ok(skill) => skill,
+        Err(error) => {
+            if let Err(rollback_error) = transaction.rollback().await {
+                eprintln!("db rollback skill transaction error: {rollback_error}");
+            }
+            return Err(error);
+        }
+    };
+
+    let persisted = if let Some(prepared) = prepared {
+        match persist_skill_knowledge(&transaction, file_storage_root, skill.id, user_id, prepared)
+            .await
+        {
+            Ok(persisted) => Some(persisted),
+            Err(error) => {
+                if let Err(rollback_error) = transaction.rollback().await {
+                    eprintln!("db rollback skill knowledge error: {rollback_error}");
+                }
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
+
+    if let Err(error) = transaction.commit().await {
+        if let Some(persisted) = &persisted {
+            cleanup_skill_file(file_storage_root, &persisted.stored_file).await;
+        }
+        eprintln!("db commit skill transaction error: {error}");
+        return Err(AuthError::DbTimeout);
+    }
+
+    Ok((
+        skill,
+        persisted
+            .map(|persisted| persisted.knowledge_files)
+            .unwrap_or_default(),
+    ))
+}
+
+fn prepare_skill_knowledge(
     attachment: KnowledgeAttachment,
-) -> Result<Vec<SkillKnowledgeInfo>, AuthError> {
-    let storage_file_name = crate::services::file_storage::safe_file_name(&attachment.file_name)
+) -> Result<PreparedSkillKnowledge, AuthError> {
+    let storage_file_name = safe_file_name(&attachment.file_name)
         .ok_or(AuthError::InvalidRequest {
             field: "knowledge_attachment.file_name",
-        })?;
+        })?
+        .to_string();
     let bytes = BASE64_STANDARD
         .decode(attachment.data.trim())
         .map_err(|_| AuthError::InvalidRequest {
             field: "knowledge_attachment.data",
         })?;
 
-    let extracted = extract_knowledge_text(&bytes, &attachment.content_type, storage_file_name)
+    let extracted = extract_knowledge_text(&bytes, &attachment.content_type, &storage_file_name)
         .map_err(|_| AuthError::InvalidRequest {
             field: "knowledge_attachment",
         })?;
 
-    // Persist the raw upload to disk and record it in the files table.
-    let file_id =
-        save_knowledge_file_to_disk(db, file_storage_root, user_id, &bytes, &attachment).await?;
+    Ok(PreparedSkillKnowledge {
+        file_name: storage_file_name,
+        content_type: attachment.content_type,
+        bytes,
+        extracted,
+    })
+}
 
-    // Replace all existing knowledge for this skill before inserting new rows.
+async fn persist_skill_knowledge(
+    transaction: &DatabaseTransaction,
+    file_storage_root: &Path,
+    skill_id: Uuid,
+    user_id: Uuid,
+    prepared: PreparedSkillKnowledge,
+) -> Result<PersistedSkillKnowledge, AuthError> {
+    let stored_file = store_file_bytes(
+        transaction,
+        file_storage_root,
+        user_id,
+        FileWrite {
+            id: Uuid::new_v4(),
+            category: StorageCategory::Skill,
+            name: &prepared.file_name,
+            content_type: &prepared.content_type,
+            bytes: &prepared.bytes,
+            description: Some("skill knowledge attachment".to_string()),
+            metadata: None,
+        },
+    )
+    .await
+    .map_err(map_file_storage_error)?;
+
+    let result =
+        replace_skill_knowledge_rows(transaction, skill_id, stored_file.id, prepared.extracted)
+            .await;
+    match result {
+        Ok(knowledge_files) => Ok(PersistedSkillKnowledge {
+            knowledge_files,
+            stored_file,
+        }),
+        Err(error) => {
+            cleanup_skill_file(file_storage_root, &stored_file).await;
+            Err(error)
+        }
+    }
+}
+
+async fn replace_skill_knowledge_rows<C>(
+    db: &C,
+    skill_id: Uuid,
+    file_id: Uuid,
+    extracted: Vec<(String, String)>,
+) -> Result<Vec<SkillKnowledgeInfo>, AuthError>
+where
+    C: ConnectionTrait,
+{
     skill_knowledge::Entity::delete_many()
         .filter(skill_knowledge::Column::SkillId.eq(skill_id))
         .exec(db)
@@ -247,7 +511,7 @@ pub async fn process_skill_knowledge(
         })?;
 
     let now = Utc::now();
-    let mut inserted: Vec<SkillKnowledgeInfo> = Vec::new();
+    let mut inserted = Vec::with_capacity(extracted.len());
 
     for (file_name, content) in extracted {
         let char_count = content.chars().count() as i32;
@@ -277,33 +541,8 @@ pub async fn process_skill_knowledge(
     Ok(inserted)
 }
 
-/// Write the raw file bytes below the configured file storage root and
-/// insert a row into the `files` table.
-async fn save_knowledge_file_to_disk(
-    db: &DatabaseConnection,
-    file_storage_root: &Path,
-    user_id: Uuid,
-    bytes: &[u8],
-    attachment: &KnowledgeAttachment,
-) -> Result<Uuid, AuthError> {
-    let file_id = Uuid::new_v4();
-    store_file_bytes(
-        db,
-        file_storage_root,
-        user_id,
-        FileWrite {
-            id: file_id,
-            category: "skill",
-            name: &attachment.file_name,
-            content_type: &attachment.content_type,
-            bytes,
-            description: Some("skill knowledge attachment".to_string()),
-            metadata: None,
-        },
-    )
-    .await
-    .map(|saved| saved.id)
-    .map_err(|error| match error {
+fn map_file_storage_error(error: crate::error::AppError) -> AuthError {
+    match error {
         crate::error::AppError::DbUnavailable | crate::error::AppError::DbTimeout => {
             AuthError::DbTimeout
         }
@@ -312,7 +551,13 @@ async fn save_knowledge_file_to_disk(
             field: "knowledge_attachment.file_name",
         },
         _ => AuthError::ServiceTemporarilyUnavailable,
-    })
+    }
+}
+
+async fn cleanup_skill_file(file_storage_root: &Path, stored_file: &files::Model) {
+    if let Err(error) = remove_model_file(file_storage_root, stored_file).await {
+        eprintln!("skill knowledge file rollback failed: {error:?}");
+    }
 }
 
 /// Extract (file_name, text_content) pairs from raw bytes.
@@ -451,4 +696,72 @@ pub async fn list_conversation_skills(
         .collect();
 
     Ok(pairs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{save_skill_with_knowledge, skills};
+    use crate::{auth::error::AuthError, dto::skills::KnowledgeAttachment};
+    use chrono::Utc;
+    use sea_orm::DatabaseConnection;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn invalid_knowledge_is_rejected_before_the_skill_transaction() {
+        let db = DatabaseConnection::Disconnected;
+        let save_called = Arc::new(AtomicBool::new(false));
+        let called = save_called.clone();
+        let result = save_skill_with_knowledge(
+            &db,
+            std::path::Path::new("/unused"),
+            Uuid::new_v4(),
+            Some(knowledge_attachment("../unsafe.md")),
+            move |_| {
+                Box::pin(async move {
+                    called.store(true, Ordering::SeqCst);
+                    Ok(skill_model(Uuid::new_v4()))
+                })
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(AuthError::InvalidRequest {
+                field: "knowledge_attachment.file_name"
+            })
+        ));
+        assert!(!save_called.load(Ordering::SeqCst));
+    }
+
+    fn knowledge_attachment(file_name: &str) -> KnowledgeAttachment {
+        KnowledgeAttachment {
+            file_name: file_name.to_string(),
+            content_type: "text/markdown".to_string(),
+            data: "aGVsbG8=".to_string(),
+        }
+    }
+
+    fn skill_model(id: Uuid) -> skills::Model {
+        let now = Utc::now();
+        skills::Model {
+            id,
+            identifier: format!("skill-{id}"),
+            name: "Skill".to_string(),
+            description: None,
+            avatar: None,
+            instructions: None,
+            tools_config: None,
+            is_builtin: false,
+            is_active: true,
+            department_id: None,
+            user_id: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
 }

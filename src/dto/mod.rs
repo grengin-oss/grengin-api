@@ -18,6 +18,7 @@ pub mod branding;
 pub mod chat;
 pub mod chat_stream;
 pub mod common;
+pub mod deployment;
 pub mod discovery;
 pub mod embeddings;
 pub mod files;

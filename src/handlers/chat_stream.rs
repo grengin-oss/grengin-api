@@ -39,7 +39,9 @@ use crate::{
             effective_max_tokens, effective_native_web_search, supports_native_web_search,
         },
         department_policies::check_model_allowed,
-        file_storage::{FileWrite, read_attachment_for_user, safe_file_name, store_file_bytes},
+        file_storage::{
+            FileWrite, StorageCategory, read_attachments_for_user, safe_file_name, store_file_bytes,
+        },
         mcp_helpers::{
             McpOauthErrorPayload, McpOauthPrompt, McpOauthRequiredEvent, build_mcp_oauth_prompt,
             build_mcp_server_context, resolve_mcp_oauth_token, resolve_mcp_tool_descriptor,
@@ -93,17 +95,33 @@ async fn hydrate_files(
     user_id: Uuid,
     app_state: &SharedState,
 ) -> Result<(), AppError> {
+    let file_ids = files
+        .iter()
+        .filter(|file| file.base64.is_none())
+        .map(|file| file.id)
+        .collect::<Vec<_>>();
+    let attachments = read_attachments_for_user(
+        &app_state.database,
+        &app_state.settings.file_storage_root,
+        user_id,
+        &file_ids,
+    )
+    .await?;
+
+    hydrate_files_from(&attachments, files)
+}
+
+fn hydrate_files_from(
+    attachments: &HashMap<Uuid, crate::dto::files::Attachment>,
+    files: &mut [File],
+) -> Result<(), AppError> {
     for file in files {
         if file.base64.is_some() {
             continue;
         }
-        let attachment = read_attachment_for_user(
-            &app_state.database,
-            &app_state.settings.file_storage_root,
-            user_id,
-            file.id,
-        )
-        .await?;
+        let attachment = attachments
+            .get(&file.id)
+            .ok_or(AppError::ResourceNotFound)?;
         file.base64 = attachment.get_base64();
         if file.base64.is_none() {
             return Err(AppError::ResourceNotFound);
@@ -117,8 +135,22 @@ async fn hydrate_prompt_files(
     user_id: Uuid,
     app_state: &SharedState,
 ) -> Result<(), AppError> {
+    let file_ids = prompts
+        .iter()
+        .flat_map(|prompt| prompt.files.iter())
+        .filter(|file| file.base64.is_none())
+        .map(|file| file.id)
+        .collect::<Vec<_>>();
+    let attachments = read_attachments_for_user(
+        &app_state.database,
+        &app_state.settings.file_storage_root,
+        user_id,
+        &file_ids,
+    )
+    .await?;
+
     for prompt in prompts {
-        hydrate_files(&mut prompt.files, user_id, app_state).await?;
+        hydrate_files_from(&attachments, &mut prompt.files)?;
     }
     Ok(())
 }
@@ -2636,7 +2668,7 @@ pub async fn handle_chat_stream(
                            claims.user_id,
                            FileWrite {
                                id: file_id,
-                               category: "artifact",
+                               category: StorageCategory::Artifact,
                                name: &filename,
                                content_type: &acc.content_type,
                                bytes: acc.content.as_bytes(),

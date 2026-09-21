@@ -1,22 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::dto::deployment::DeploymentHealth;
 use sea_orm::DatabaseConnection;
-use serde::Serialize;
-
-#[derive(Debug, Serialize)]
-pub struct DeploymentHealth {
-    pub status: &'static str,
-    pub version: &'static str,
-    pub migration_head: Option<String>,
-    pub expected_migration_head: &'static str,
-}
-
-impl DeploymentHealth {
-    pub fn is_ready(&self) -> bool {
-        self.status == "Okay"
-    }
-}
 
 pub async fn load_deployment_health(db: &DatabaseConnection) -> DeploymentHealth {
     let expected = migration::migration_head();

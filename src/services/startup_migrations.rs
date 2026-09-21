@@ -9,6 +9,7 @@ const MIGRATION_LOCK_SQL: &str =
 
 pub async fn run_startup_migrations(database: &DatabaseConnection) -> Result<(), DbErr> {
     let transaction = database.begin().await?;
+    // SeaORM has no typed API for PostgreSQL advisory locks.
     transaction.execute_unprepared(MIGRATION_LOCK_SQL).await?;
     Migrator::up(&transaction, None).await?;
     transaction.commit().await

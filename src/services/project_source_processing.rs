@@ -14,7 +14,7 @@ use crate::{
     error::AppError,
     models::{files, project_source_chunks, project_sources, project_sources::ProcessingStatus},
     services::{
-        file_storage::{FileWrite, store_file_bytes},
+        file_storage::{FileWrite, StorageCategory, store_file_bytes},
         provider_chat::{generate_provider_response, provider_error_class},
         provider_resolver::resolve_provider,
         rag::{format_pgvector, generate_embeddings},
@@ -415,7 +415,7 @@ pub async fn write_artifact_file(
         user_id,
         FileWrite {
             id: file_uuid,
-            category: "file",
+            category: StorageCategory::File,
             name: filename,
             content_type,
             bytes: content.as_bytes(),

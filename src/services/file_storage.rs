@@ -8,17 +8,38 @@ use crate::{
 };
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, DbErr, EntityTrait,
-    QueryFilter,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr,
+    EntityTrait, QueryFilter,
 };
+use std::collections::{HashMap, HashSet};
+use std::fmt::{Display, Formatter};
 use std::future::Future;
 use std::path::{Component, Path, PathBuf};
 use tokio::fs;
 use uuid::Uuid;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StorageCategory {
+    File,
+    Artifact,
+    Image,
+    Skill,
+}
+
+impl Display for StorageCategory {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::File => "file",
+            Self::Artifact => "artifact",
+            Self::Image => "images",
+            Self::Skill => "skill",
+        })
+    }
+}
+
 pub struct FileWrite<'a> {
     pub id: Uuid,
-    pub category: &'a str,
+    pub category: StorageCategory,
     pub name: &'a str,
     pub content_type: &'a str,
     pub bytes: &'a [u8],
@@ -37,7 +58,7 @@ pub fn safe_file_name(value: &str) -> Option<&str> {
 pub fn new_file_path(
     root: &Path,
     user_id: Uuid,
-    category: &str,
+    category: StorageCategory,
     file_id: Uuid,
     file_name: &str,
 ) -> Result<PathBuf, AppError> {
@@ -45,7 +66,7 @@ pub fn new_file_path(
         safe_file_name(file_name).ok_or(AppError::ValidationEmptyField { field: "file_name" })?;
     Ok(root
         .join(user_id.to_string())
-        .join(category)
+        .join(category.to_string())
         .join(file_id.to_string())
         .join(file_name))
 }
@@ -86,7 +107,7 @@ pub async fn store_uploaded_file(
         user_id,
         FileWrite {
             id: Uuid::new_v4(),
-            category: "file",
+            category: StorageCategory::File,
             name: &file_name,
             content_type: &request.attachment.content_type,
             bytes: &bytes,
@@ -97,12 +118,15 @@ pub async fn store_uploaded_file(
     .await
 }
 
-pub async fn store_file_bytes(
-    db: &DatabaseConnection,
+pub async fn store_file_bytes<C>(
+    db: &C,
     root: &Path,
     user_id: Uuid,
     input: FileWrite<'_>,
-) -> Result<files::Model, AppError> {
+) -> Result<files::Model, AppError>
+where
+    C: ConnectionTrait,
+{
     store_file_bytes_with(root, user_id, input, |active| active.insert(db)).await
 }
 
@@ -193,18 +217,44 @@ pub async fn read_file_for_user(
     Ok((model, bytes))
 }
 
-pub async fn read_attachment_for_user(
+pub async fn read_attachments_for_user(
     db: &DatabaseConnection,
     root: &Path,
     user_id: Uuid,
-    file_id: Uuid,
-) -> Result<Attachment, AppError> {
-    let (model, bytes) = read_file_for_user(db, root, user_id, file_id).await?;
-    Ok(Attachment {
-        file: Some(bytes),
-        name: model.name,
-        content_type: model.content_type,
-    })
+    file_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Attachment>, AppError> {
+    if file_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let unique_ids = file_ids.iter().copied().collect::<HashSet<_>>();
+    let models = files::Entity::find()
+        .filter(files::Column::Id.is_in(unique_ids.iter().copied()))
+        .filter(files::Column::UserId.eq(user_id))
+        .filter(files::Column::Status.eq(FileUploadStatus::Uploaded))
+        .all(db)
+        .await
+        .map_err(|error| {
+            eprintln!("file metadata batch lookup failed: {error}");
+            AppError::DbTimeout
+        })?;
+    if models.len() != unique_ids.len() {
+        return Err(AppError::ResourceNotFound);
+    }
+
+    let mut attachments = HashMap::with_capacity(models.len());
+    for model in models {
+        let bytes = read_model_bytes(root, &model).await?;
+        attachments.insert(
+            model.id,
+            Attachment {
+                file: Some(bytes),
+                name: model.name,
+                content_type: model.content_type,
+            },
+        );
+    }
+    Ok(attachments)
 }
 
 pub async fn read_model_bytes(root: &Path, model: &files::Model) -> Result<Vec<u8>, AppError> {
@@ -249,8 +299,8 @@ async fn contained_stored_path(root: &Path, model: &files::Model) -> Result<Path
 #[cfg(test)]
 mod tests {
     use super::{
-        FileWrite, new_file_path, prepare_storage_root, read_model_bytes, safe_file_name,
-        store_file_bytes_with, write_file_atomically,
+        FileWrite, StorageCategory, new_file_path, prepare_storage_root, read_model_bytes,
+        safe_file_name, store_file_bytes_with, write_file_atomically,
     };
     use crate::models::files::{FileUploadStatus, Model};
     use chrono::Utc;
@@ -283,7 +333,7 @@ mod tests {
             new_file_path(
                 Path::new("/mnt/grengin/files"),
                 user_id,
-                "file",
+                StorageCategory::File,
                 file_id,
                 "notes.txt"
             )
@@ -296,7 +346,7 @@ mod tests {
             new_file_path(
                 Path::new("/mnt/grengin/files"),
                 user_id,
-                "file",
+                StorageCategory::File,
                 file_id,
                 "../notes.txt"
             )
@@ -370,15 +420,15 @@ mod tests {
         let root = std::env::temp_dir().join(format!("grengin-rollback-test-{}", Uuid::new_v4()));
         let user_id = Uuid::new_v4();
         let file_id = Uuid::new_v4();
-        let expected =
-            new_file_path(&root, user_id, "file", file_id, "notes.txt").expect("expected path");
+        let expected = new_file_path(&root, user_id, StorageCategory::File, file_id, "notes.txt")
+            .expect("expected path");
 
         let result = store_file_bytes_with(
             &root,
             user_id,
             FileWrite {
                 id: file_id,
-                category: "file",
+                category: StorageCategory::File,
                 name: "notes.txt",
                 content_type: "text/plain",
                 bytes: b"content",

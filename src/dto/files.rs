@@ -21,8 +21,8 @@ pub struct Attachment {
 }
 
 impl Attachment {
-    pub fn get_base64(self) -> Option<String> {
-        self.file.map(|buff| BASE64.encode(&buff))
+    pub fn get_base64(&self) -> Option<String> {
+        self.file.as_ref().map(|buff| BASE64.encode(buff))
     }
 }
 

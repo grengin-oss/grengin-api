@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     models::files,
-    services::file_storage::{FileWrite, read_model_bytes, store_file_bytes},
+    services::file_storage::{FileWrite, StorageCategory, read_model_bytes, store_file_bytes},
     state::SharedState,
 };
 
@@ -81,7 +81,7 @@ pub async fn generate_and_save(
             user_id,
             FileWrite {
                 id: file_id,
-                category: "images",
+                category: StorageCategory::Image,
                 name: &filename,
                 content_type: &result.content_type,
                 bytes: &result.bytes,

@@ -651,8 +651,8 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::{
-        AzureSettings, EmbeddingSettings, GoogleSettings, RagSettings,
-        file_storage_root_from_env, parse_bool_setting, validate_file_storage_root,
+        AzureSettings, EmbeddingSettings, GoogleSettings, RagSettings, file_storage_root_from_env,
+        parse_bool_setting, validate_file_storage_root,
     };
     use std::sync::{LazyLock, Mutex};
 

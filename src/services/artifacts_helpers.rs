@@ -27,7 +27,10 @@ pub async fn get_artifact_owned(
         .filter(conversations::Column::UserId.eq(user_id))
         .one(db)
         .await
-        .map_err(|_| AppError::DbTimeout)?;
+        .map_err(|error| {
+            eprintln!("db artifact lookup failed: {error}");
+            AppError::DbTimeout
+        })?;
 
     let artifact = match row {
         Some(a) => a,
@@ -37,7 +40,10 @@ pub async fn get_artifact_owned(
     let file = files::Entity::find_by_id(artifact.file_id)
         .one(db)
         .await
-        .map_err(|_| AppError::DbTimeout)?;
+        .map_err(|error| {
+            eprintln!("db artifact file lookup failed: {error}");
+            AppError::DbTimeout
+        })?;
     let content = match file {
         Some(file) => match read_model_bytes(file_storage_root, &file).await {
             Ok(bytes) => String::from_utf8(bytes).ok(),
@@ -83,7 +89,10 @@ pub async fn delete_artifact_owned(
         .filter(conversations::Column::UserId.eq(user_id))
         .one(db)
         .await
-        .map_err(|_| AppError::DbTimeout)?;
+        .map_err(|error| {
+            eprintln!("db artifact lookup failed: {error}");
+            AppError::DbTimeout
+        })?;
 
     let artifact = match row {
         Some(a) => a,
@@ -93,7 +102,10 @@ pub async fn delete_artifact_owned(
     let file = files::Entity::find_by_id(artifact.file_id)
         .one(db)
         .await
-        .map_err(|_| AppError::DbTimeout)?;
+        .map_err(|error| {
+            eprintln!("db artifact file lookup failed: {error}");
+            AppError::DbTimeout
+        })?;
     if let Some(f) = file {
         match remove_model_file(file_storage_root, &f).await {
             Ok(()) | Err(AppError::ResourceNotFound) => {}
@@ -102,13 +114,19 @@ pub async fn delete_artifact_owned(
         files::Entity::delete_by_id(f.id)
             .exec(db)
             .await
-            .map_err(|_| AppError::DbTimeout)?;
+            .map_err(|error| {
+                eprintln!("db artifact file delete failed: {error}");
+                AppError::DbTimeout
+            })?;
     }
 
     artifacts::Entity::delete_by_id(artifact.id)
         .exec(db)
         .await
-        .map_err(|_| AppError::DbTimeout)?;
+        .map_err(|error| {
+            eprintln!("db artifact delete failed: {error}");
+            AppError::DbTimeout
+        })?;
 
     Ok(Some(artifact))
 }
