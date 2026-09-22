@@ -146,6 +146,8 @@ settings are:
 | `JWT_SECRET` | Token signing secret |
 | `APP_KEY` | Base64-encoded 32-byte encryption key |
 | `REDIRECT_URL` | Public frontend origin and OAuth callback base |
+| `FILE_STORAGE_ROOT` | File root; defaults to `/data/files`, or ephemeral `/tmp/grengin/files` on AWS Lambda |
+| `GRENGIN_AUTO_MIGRATE` | Run pending SeaORM migrations at startup; defaults to `true` |
 
 Provider credentials, SSO settings, RAG controls, and optional maintenance
 settings are documented in [`src/sample.env`](src/sample.env).
@@ -157,7 +159,8 @@ export SWAGGER_UI_OVERWRITE_FOLDER="$PWD/swagger-overrides"
 cargo run --locked
 ```
 
-Pending database migrations run automatically before the server starts.
+Pending database migrations run automatically before the server starts. Startup
+also creates `FILE_STORAGE_ROOT` when needed and verifies that it is writable.
 
 - API root: `http://localhost:8080/`
 - Swagger UI: `http://localhost:8080/swagger-ui`
@@ -181,24 +184,50 @@ Build the static runtime image:
 docker build -t grengin-api .
 ```
 
-Merges to `main` publish the multi-architecture image:
+Merges to `main` publish the multi-architecture development image:
 
 ```text
 ghcr.io/grengin-oss/grengin-api:latest
 ```
 
-The image supports `linux/amd64` and `linux/arm64`.
+Pushing a Git tag that exactly matches `v<Cargo.toml version>` also publishes
+immutable version tags with and without the `v` prefix, for example
+`grengin-api:0.9.3` and `grengin-api:v0.9.3`. The image supports `linux/amd64`
+and `linux/arm64`. Its OCI metadata includes the source revision, backend
+version, and exact SeaORM migration head.
 
 ## Database Migrations
 
-The API applies all pending migrations on startup. For explicit migration
-management:
+The API applies all pending migrations on startup while holding a
+PostgreSQL transaction-scoped advisory lock. Set
+`GRENGIN_AUTO_MIGRATE=false` when an external controller owns migration timing.
+For explicit migration management from source:
 
 ```bash
 cargo run --locked -p migration -- status
 cargo run --locked -p migration -- up
 cargo run --locked -p migration -- down
 ```
+
+The container image ships the same migrator as `/usr/local/bin/grengin-migrate`:
+
+```bash
+docker run --rm -e DATABASE_URL="$DATABASE_URL" \
+  --entrypoint /usr/local/bin/grengin-migrate \
+  ghcr.io/grengin-oss/grengin-api:0.9.3 up
+```
+
+Because the image entrypoint starts the API, controllers should override the
+entrypoint when invoking the migrator. `GET /` returns the backend version, the
+database's applied `migration_head`, and the release's
+`expected_migration_head`. It returns `503` until the heads match.
+
+For AWS Lambda with EFS, set `FILE_STORAGE_ROOT` to a directory below the Lambda
+mount, such as `/mnt/grengin/files`. Existing database rows contain absolute
+paths, so do not change the root for a populated installation without moving
+the corresponding files. Before EFS is enabled, Lambda validation environments
+may use `/tmp/grengin/files`, but that storage is ephemeral and must not be
+presented as durable.
 
 Review migration files before running `down`, `reset`, `refresh`, or `fresh` in
 an environment that contains data.

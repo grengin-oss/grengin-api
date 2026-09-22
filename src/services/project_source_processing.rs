@@ -4,10 +4,9 @@
 use base64::prelude::*;
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseBackend,
-    DatabaseConnection, EntityTrait, QueryFilter, Statement,
+    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, QueryFilter,
+    Statement,
 };
-use tokio::fs;
 use uuid::Uuid;
 
 use crate::{
@@ -15,6 +14,7 @@ use crate::{
     error::AppError,
     models::{files, project_source_chunks, project_sources, project_sources::ProcessingStatus},
     services::{
+        file_storage::{FileWrite, StorageCategory, store_file_bytes},
         provider_chat::{generate_provider_response, provider_error_class},
         provider_resolver::resolve_provider,
         rag::{format_pgvector, generate_embeddings},
@@ -227,14 +227,9 @@ async fn extract_text_via_llm(
 
 async fn extract_text_from_file(
     app_state: &SharedState,
-    local_path: &str,
+    bytes: Vec<u8>,
     content_type: &str,
 ) -> Result<String, AppError> {
-    let bytes = fs::read(local_path).await.map_err(|e| {
-        eprintln!("file read error {local_path}: {e}");
-        AppError::ServiceTemporarilyUnavailable
-    })?;
-
     let mime = effective_mime(&bytes, content_type);
     let text = match mime.as_str() {
         "text/html" | "application/xhtml+xml" => extract_html_text(&bytes),
@@ -345,7 +340,12 @@ pub async fn process_project_source(
             .map_err(|_| AppError::DbTimeout)?
             .ok_or(AppError::ResourceNotFound)?;
 
-        let text = extract_text_from_file(&app_state, &file.local_path, &file.content_type).await?;
+        let bytes = crate::services::file_storage::read_model_bytes(
+            &app_state.settings.file_storage_root,
+            &file,
+        )
+        .await?;
+        let text = extract_text_from_file(&app_state, bytes, &file.content_type).await?;
 
         let embedding_config = app_state
             .settings
@@ -400,53 +400,30 @@ pub fn spawn_process_source(
     });
 }
 
-pub fn build_file_path(user_id: Uuid, file_uuid: Uuid, filename: &str) -> String {
-    format!("/data/files/{user_id}/file/{file_uuid}/{filename}")
-}
-
 pub async fn write_artifact_file(
     db: &DatabaseConnection,
+    file_storage_root: &std::path::Path,
     user_id: Uuid,
     filename: &str,
     content_type: &str,
     content: &str,
 ) -> Result<(Uuid, String), AppError> {
     let file_uuid = Uuid::new_v4();
-    let local_path = build_file_path(user_id, file_uuid, filename);
+    let saved = store_file_bytes(
+        db,
+        file_storage_root,
+        user_id,
+        FileWrite {
+            id: file_uuid,
+            category: StorageCategory::File,
+            name: filename,
+            content_type,
+            bytes: content.as_bytes(),
+            description: None,
+            metadata: None,
+        },
+    )
+    .await?;
 
-    if let Some(parent) = std::path::Path::new(&local_path).parent() {
-        fs::create_dir_all(parent).await.map_err(|e| {
-            eprintln!("mkdir error: {e}");
-            AppError::ServiceTemporarilyUnavailable
-        })?;
-    }
-
-    fs::write(&local_path, content.as_bytes())
-        .await
-        .map_err(|e| {
-            eprintln!("file write error: {e}");
-            AppError::ServiceTemporarilyUnavailable
-        })?;
-
-    let now = Utc::now();
-    let file_row = files::ActiveModel {
-        id: Set(file_uuid),
-        user_id: Set(user_id),
-        name: Set(filename.to_string()),
-        content_type: Set(content_type.to_string()),
-        size: Set(content.len() as i64),
-        local_path: Set(local_path.clone()),
-        description: Set(None),
-        url: Set(None),
-        status: Set(crate::models::files::FileUploadStatus::Uploaded),
-        created_at: Set(now),
-        updated_at: Set(now),
-        metadata: Set(None),
-    };
-    file_row.insert(db).await.map_err(|e| {
-        eprintln!("file row insert error: {e}");
-        AppError::DbTimeout
-    })?;
-
-    Ok((file_uuid, local_path))
+    Ok((file_uuid, saved.local_path))
 }

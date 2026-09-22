@@ -34,6 +34,7 @@ use crate::{
         project_sources, projects, projects::ProjectVisibility, users,
     },
     services::{
+        file_storage::remove_model_file,
         project_helpers::*,
         project_source_processing::{
             delete_source_chunks, spawn_process_source, write_artifact_file,
@@ -1027,6 +1028,7 @@ pub async fn add_project_artifact(
 
     let (file_uuid, _) = write_artifact_file(
         &app_state.database,
+        &app_state.settings.file_storage_root,
         claims.user_id,
         &file_name,
         &content_type,
@@ -1190,6 +1192,7 @@ pub async fn update_project_artifact(
         let file_name = active.file_name.clone().unwrap();
         let (file_uuid, _) = write_artifact_file(
             &app_state.database,
+            &app_state.settings.file_storage_root,
             claims.user_id,
             &file_name,
             &resolved_content_type,
@@ -1268,8 +1271,10 @@ pub async fn delete_project_artifact(
         if let Ok(Some(file)) = crate::models::files::Entity::find_by_id(fid)
             .one(&app_state.database)
             .await
+            && let Err(error) =
+                remove_model_file(&app_state.settings.file_storage_root, &file).await
         {
-            let _ = tokio::fs::remove_file(&file.local_path).await;
+            eprintln!("project artifact file cleanup failed: {error:?}");
         }
     }
 

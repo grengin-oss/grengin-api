@@ -2,9 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
+use std::path::Path;
 use uuid::Uuid;
 
-use crate::models::{artifacts, conversations, files};
+use crate::{
+    error::AppError,
+    models::{artifacts, conversations, files},
+    services::file_storage::{read_model_bytes, remove_model_file},
+};
 
 pub struct ArtifactWithContent {
     pub artifact: artifacts::Model,
@@ -13,22 +18,40 @@ pub struct ArtifactWithContent {
 
 pub async fn get_artifact_owned(
     db: &DatabaseConnection,
+    file_storage_root: &Path,
     artifact_id: Uuid,
     user_id: Uuid,
-) -> Result<Option<ArtifactWithContent>, DbErr> {
+) -> Result<Option<ArtifactWithContent>, AppError> {
     let row = artifacts::Entity::find_by_id(artifact_id)
         .inner_join(conversations::Entity)
         .filter(conversations::Column::UserId.eq(user_id))
         .one(db)
-        .await?;
+        .await
+        .map_err(|error| {
+            eprintln!("db artifact lookup failed: {error}");
+            AppError::DbTimeout
+        })?;
 
     let artifact = match row {
         Some(a) => a,
         None => return Ok(None),
     };
 
-    let file = files::Entity::find_by_id(artifact.file_id).one(db).await?;
-    let content = file.and_then(|f| std::fs::read_to_string(&f.local_path).ok());
+    let file = files::Entity::find_by_id(artifact.file_id)
+        .one(db)
+        .await
+        .map_err(|error| {
+            eprintln!("db artifact file lookup failed: {error}");
+            AppError::DbTimeout
+        })?;
+    let content = match file {
+        Some(file) => match read_model_bytes(file_storage_root, &file).await {
+            Ok(bytes) => String::from_utf8(bytes).ok(),
+            Err(AppError::ResourceNotFound) => None,
+            Err(error) => return Err(error),
+        },
+        None => None,
+    };
 
     Ok(Some(ArtifactWithContent { artifact, content }))
 }
@@ -57,32 +80,53 @@ pub async fn list_conversation_artifacts_owned(
 
 pub async fn delete_artifact_owned(
     db: &DatabaseConnection,
+    file_storage_root: &Path,
     artifact_id: Uuid,
     user_id: Uuid,
-) -> Result<Option<artifacts::Model>, DbErr> {
+) -> Result<Option<artifacts::Model>, AppError> {
     let row = artifacts::Entity::find_by_id(artifact_id)
         .inner_join(conversations::Entity)
         .filter(conversations::Column::UserId.eq(user_id))
         .one(db)
-        .await?;
+        .await
+        .map_err(|error| {
+            eprintln!("db artifact lookup failed: {error}");
+            AppError::DbTimeout
+        })?;
 
     let artifact = match row {
         Some(a) => a,
         None => return Ok(None),
     };
 
-    let file = files::Entity::find_by_id(artifact.file_id).one(db).await?;
+    let file = files::Entity::find_by_id(artifact.file_id)
+        .one(db)
+        .await
+        .map_err(|error| {
+            eprintln!("db artifact file lookup failed: {error}");
+            AppError::DbTimeout
+        })?;
     if let Some(f) = file {
-        let _ = tokio::fs::remove_file(&f.local_path).await;
-        if let Some(parent) = std::path::Path::new(&f.local_path).parent() {
-            let _ = tokio::fs::remove_dir(parent).await;
+        match remove_model_file(file_storage_root, &f).await {
+            Ok(()) | Err(AppError::ResourceNotFound) => {}
+            Err(error) => return Err(error),
         }
-        files::Entity::delete_by_id(f.id).exec(db).await?;
+        files::Entity::delete_by_id(f.id)
+            .exec(db)
+            .await
+            .map_err(|error| {
+                eprintln!("db artifact file delete failed: {error}");
+                AppError::DbTimeout
+            })?;
     }
 
     artifacts::Entity::delete_by_id(artifact.id)
         .exec(db)
-        .await?;
+        .await
+        .map_err(|error| {
+            eprintln!("db artifact delete failed: {error}");
+            AppError::DbTimeout
+        })?;
 
     Ok(Some(artifact))
 }

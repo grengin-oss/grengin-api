@@ -3,15 +3,13 @@
 
 use anyhow::{Context, anyhow};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use chrono::Utc;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
+use sea_orm::EntityTrait;
 use serde_json::json;
-use std::{fs, io::Write};
 use uuid::Uuid;
 
 use crate::{
-    handlers::file::LOCAL_FOLDER,
-    models::files::{self, FileUploadStatus},
+    models::files,
+    services::file_storage::{FileWrite, StorageCategory, read_model_bytes, store_file_bytes},
     state::SharedState,
 };
 
@@ -69,7 +67,6 @@ pub async fn generate_and_save(
         .collect::<Vec<_>>();
 
     let mut saved = Vec::with_capacity(results.len());
-    let now = Utc::now();
     for result in results {
         let file_id = Uuid::new_v4();
         let ext = if result.content_type == "image/png" {
@@ -78,36 +75,26 @@ pub async fn generate_and_save(
             "webp"
         };
         let filename = format!("{file_id}.{ext}");
-        let dir = format!("{LOCAL_FOLDER}/{user_id}/images/{file_id}");
-
-        fs::create_dir_all(&dir).context("create image dir")?;
-
-        let local_path = format!("{dir}/{filename}");
-        let mut f = fs::File::create(&local_path).context("create image file")?;
-        f.write_all(&result.bytes).context("write image file")?;
-
-        let active = files::ActiveModel {
-            id: Set(file_id),
-            user_id: Set(user_id),
-            name: Set(filename),
-            content_type: Set(result.content_type.clone()),
-            size: Set(result.bytes.len() as i64),
-            local_path: Set(local_path),
-            description: Set(None),
-            url: Set(None),
-            status: Set(FileUploadStatus::Uploaded),
-            created_at: Set(now),
-            updated_at: Set(now),
-            metadata: Set(Some(json!({
-                "prompt": prompt,
-                "model": model,
-                "provider": provider_key,
-            }))),
-        };
-        active
-            .insert(&app_state.database)
-            .await
-            .context("db insert image file")?;
+        store_file_bytes(
+            &app_state.database,
+            &app_state.settings.file_storage_root,
+            user_id,
+            FileWrite {
+                id: file_id,
+                category: StorageCategory::Image,
+                name: &filename,
+                content_type: &result.content_type,
+                bytes: &result.bytes,
+                description: None,
+                metadata: Some(json!({
+                    "prompt": prompt,
+                    "model": model,
+                    "provider": provider_key,
+                })),
+            },
+        )
+        .await
+        .map_err(|error| anyhow!("save generated image: {error:?}"))?;
 
         saved.push((
             file_id,
@@ -154,7 +141,9 @@ async fn load_input_images(
         if file.user_id != user_id {
             return Err(anyhow!("input image file not found: {id}"));
         }
-        let bytes = fs::read(&file.local_path).with_context(|| format!("read input image {id}"))?;
+        let bytes = read_model_bytes(&app_state.settings.file_storage_root, &file)
+            .await
+            .map_err(|error| anyhow!("read input image {id}: {error:?}"))?;
         images.push(llm_plugin::InputImage {
             data: BASE64.encode(bytes),
             media_type: file.content_type,

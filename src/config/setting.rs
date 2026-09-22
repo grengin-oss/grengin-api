@@ -11,7 +11,7 @@ use crate::{
 use openidconnect::{EndpointMaybeSet, EndpointNotSet, EndpointSet, core::CoreClient};
 use reqwest::Url;
 use sea_orm::{DatabaseConnection, EntityTrait, QueryOrder};
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 use thiserror::Error;
 use tokio::sync::RwLock;
 
@@ -32,6 +32,7 @@ pub struct Settings {
     pub ai_engines_cache: RwLock<HashMap<String, AiEngineStateCache>>,
     pub embedding: RwLock<Option<EmbeddingSettings>>,
     pub rag: RagSettings,
+    pub file_storage_root: PathBuf,
 }
 
 pub struct ServerSettings {
@@ -44,6 +45,7 @@ pub struct AuthSettings {
     pub app_key: [u8; 32],
     pub redirect_url: String,
     pub database_url: String,
+    pub auto_migrate: bool,
 }
 
 #[derive(Clone)]
@@ -342,8 +344,49 @@ impl Settings {
             ai_engines_cache: RwLock::new(HashMap::new()),
             embedding: RwLock::new(EmbeddingSettings::from_env()),
             rag: RagSettings::from_env(),
+            file_storage_root: file_storage_root_from_env()?,
         })
     }
+}
+
+fn file_storage_root_from_env() -> Result<PathBuf, ConfigError> {
+    let configured = std::env::var("FILE_STORAGE_ROOT").ok();
+    let configured = configured
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match configured {
+        Some(value) => validate_file_storage_root(value),
+        None => validate_file_storage_root(default_file_storage_root()),
+    }
+}
+
+fn default_file_storage_root() -> &'static str {
+    if std::env::var("AWS_LAMBDA_FUNCTION_NAME")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        "/tmp/grengin/files"
+    } else {
+        "/data/files"
+    }
+}
+
+fn validate_file_storage_root(value: &str) -> Result<PathBuf, ConfigError> {
+    let value = value.trim();
+    let path = PathBuf::from(value);
+    if value.is_empty()
+        || !path.is_absolute()
+        || path.parent().is_none()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(ConfigError::Custom(
+            "FILE_STORAGE_ROOT must be an absolute directory below / without '..'".to_string(),
+        ));
+    }
+    Ok(path)
 }
 
 impl ServerSettings {
@@ -373,12 +416,31 @@ impl AuthSettings {
             std::env::var("REDIRECT_URL").map_err(|_| ConfigError::Missing("REDIRECT_URL"))?;
         let database_url =
             std::env::var("DATABASE_URL").map_err(|_| ConfigError::Missing("DATABASE_URL"))?;
+        let auto_migrate = parse_bool_setting(
+            "GRENGIN_AUTO_MIGRATE",
+            std::env::var("GRENGIN_AUTO_MIGRATE").ok().as_deref(),
+            true,
+        )?;
         Ok(Self {
             jwt_secret,
             redirect_url,
             database_url,
+            auto_migrate,
             app_key,
         })
+    }
+}
+
+fn parse_bool_setting(
+    name: &'static str,
+    value: Option<&str>,
+    default: bool,
+) -> Result<bool, ConfigError> {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("") => Ok(default),
+        Some("true" | "1" | "yes" | "on") => Ok(true),
+        Some("false" | "0" | "no" | "off") => Ok(false),
+        Some(_) => Err(ConfigError::ParseError(name)),
     }
 }
 
@@ -588,7 +650,10 @@ pub enum ConfigError {
 
 #[cfg(test)]
 mod tests {
-    use super::{AzureSettings, EmbeddingSettings, GoogleSettings, RagSettings};
+    use super::{
+        AzureSettings, EmbeddingSettings, GoogleSettings, RagSettings, file_storage_root_from_env,
+        parse_bool_setting, validate_file_storage_root,
+    };
     use std::sync::{LazyLock, Mutex};
 
     static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -641,6 +706,84 @@ mod tests {
         "GRENGIN_PROXY_AZURE_CLIENT_SECRET",
         "GRENGIN_PROXY_AZURE_TENANT_ID",
     ];
+
+    #[test]
+    fn file_storage_root_requires_a_scoped_absolute_path() {
+        assert_eq!(
+            validate_file_storage_root("/mnt/grengin/files").expect("valid root"),
+            std::path::PathBuf::from("/mnt/grengin/files")
+        );
+        for invalid in ["", ".", "relative/files", "/", "/mnt/../etc"] {
+            assert!(
+                validate_file_storage_root(invalid).is_err(),
+                "{invalid} must fail"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_file_storage_root_uses_the_default() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let original_root = std::env::var_os("FILE_STORAGE_ROOT");
+        let original_lambda = std::env::var_os("AWS_LAMBDA_FUNCTION_NAME");
+        // SAFETY: this test serializes environment mutation with ENV_LOCK.
+        unsafe {
+            std::env::set_var("FILE_STORAGE_ROOT", "");
+            std::env::remove_var("AWS_LAMBDA_FUNCTION_NAME");
+        };
+        let result = file_storage_root_from_env();
+        // SAFETY: this test serializes environment mutation with ENV_LOCK.
+        unsafe {
+            restore_env("FILE_STORAGE_ROOT", original_root);
+            restore_env("AWS_LAMBDA_FUNCTION_NAME", original_lambda);
+        };
+
+        assert_eq!(
+            result.expect("default storage root"),
+            std::path::PathBuf::from("/data/files")
+        );
+    }
+
+    #[test]
+    fn lambda_uses_ephemeral_storage_until_a_root_is_configured() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let original_root = std::env::var_os("FILE_STORAGE_ROOT");
+        let original_lambda = std::env::var_os("AWS_LAMBDA_FUNCTION_NAME");
+        // SAFETY: this test serializes environment mutation with ENV_LOCK.
+        unsafe {
+            std::env::remove_var("FILE_STORAGE_ROOT");
+            std::env::set_var("AWS_LAMBDA_FUNCTION_NAME", "hatchery-test");
+        };
+        let result = file_storage_root_from_env();
+        // SAFETY: this test serializes environment mutation with ENV_LOCK.
+        unsafe {
+            restore_env("FILE_STORAGE_ROOT", original_root);
+            restore_env("AWS_LAMBDA_FUNCTION_NAME", original_lambda);
+        };
+
+        assert_eq!(
+            result.expect("Lambda storage root"),
+            std::path::PathBuf::from("/tmp/grengin/files")
+        );
+    }
+
+    unsafe fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
+        if let Some(value) = value {
+            // SAFETY: callers hold ENV_LOCK.
+            unsafe { std::env::set_var(name, value) };
+        } else {
+            // SAFETY: callers hold ENV_LOCK.
+            unsafe { std::env::remove_var(name) };
+        }
+    }
+
+    #[test]
+    fn automatic_migration_flag_is_strict_and_defaults_on() {
+        assert!(parse_bool_setting("TEST", None, true).expect("default"));
+        assert!(parse_bool_setting("TEST", Some("yes"), false).expect("enabled"));
+        assert!(!parse_bool_setting("TEST", Some("0"), true).expect("disabled"));
+        assert!(parse_bool_setting("TEST", Some("sometimes"), true).is_err());
+    }
 
     fn clear_embedding_env() {
         // SAFETY: tests serialize env mutations with ENV_LOCK.

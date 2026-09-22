@@ -5,12 +5,10 @@ FROM rust:1.91-alpine AS builder
 ARG TARGETARCH
 
 # sys deps (no openssl needed now)
-RUN apk add --no-cache build-base curl pkgconfig perl clang lld musl-dev ca-certificates
+RUN apk add --no-cache build-base pkgconfig perl clang lld musl-dev ca-certificates
 
-# install rustup + musl target
-ENV CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/root/.rustup PATH=/usr/local/cargo/bin:$PATH
-RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
- && case "$TARGETARCH" in \
+# The pinned Rust image already includes rustup; only install the target architecture.
+RUN case "$TARGETARCH" in \
       amd64) rustup target add x86_64-unknown-linux-musl ;; \
       arm64) rustup target add aarch64-unknown-linux-musl ;; \
       *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
@@ -30,14 +28,14 @@ RUN mkdir -p src llm-plugin/src migration/src sqlx-mcp/src \
  && echo "" > llm-plugin/src/lib.rs \
  && echo "" > migration/src/lib.rs \
  && echo "fn main(){}" > sqlx-mcp/src/main.rs
-RUN cargo fetch
+RUN cargo fetch --locked
 ENV RUSTFLAGS="-C target-feature=+crt-static"
 RUN case "$TARGETARCH" in \
       amd64) RUST_TARGET="x86_64-unknown-linux-musl" ;; \
       arm64) RUST_TARGET="aarch64-unknown-linux-musl" ;; \
       *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac \
- && cargo build --release --target "$RUST_TARGET" -p grengin-api -p sqlx-mcp -j 2
+ && cargo build --release --locked --target "$RUST_TARGET" -p grengin-api -p sqlx-mcp -j 2
 
 # now copy real sources
 COPY src ./src
@@ -54,16 +52,25 @@ RUN case "$TARGETARCH" in \
       arm64) RUST_TARGET="aarch64-unknown-linux-musl" ;; \
       *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac \
- && cargo build --release --target "$RUST_TARGET" -p grengin-api -p sqlx-mcp -j 2 \
+ && cargo build --release --locked --target "$RUST_TARGET" -p grengin-api -p sqlx-mcp -p migration -j 2 \
  && cp "/usr/src/grengin-api/target/$RUST_TARGET/release/grengin-api" /usr/local/bin/grengin-api \
- && cp "/usr/src/grengin-api/target/$RUST_TARGET/release/sqlx-mcp" /usr/local/bin/sqlx-mcp
+ && cp "/usr/src/grengin-api/target/$RUST_TARGET/release/sqlx-mcp" /usr/local/bin/sqlx-mcp \
+ && cp "/usr/src/grengin-api/target/$RUST_TARGET/release/migration" /usr/local/bin/grengin-migrate
 
 # runtime: static binary; only certs if your app makes HTTPS requests
 FROM scratch
-LABEL org.opencontainers.image.licenses="Apache-2.0"
+ARG IMAGE_VERSION=dev
+ARG IMAGE_REVISION=unknown
+ARG MIGRATION_HEAD=unknown
+LABEL org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.source="https://github.com/grengin-oss/grengin-api" \
+      org.opencontainers.image.version="${IMAGE_VERSION}" \
+      org.opencontainers.image.revision="${IMAGE_REVISION}" \
+      io.grengin.migration-head="${MIGRATION_HEAD}"
 # for HTTPS/TLS trust store:
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /usr/local/bin/grengin-api /usr/local/bin/app
 COPY --from=builder /usr/local/bin/sqlx-mcp /usr/local/bin/sqlx-mcp
+COPY --from=builder /usr/local/bin/grengin-migrate /usr/local/bin/grengin-migrate
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/app"]

@@ -16,9 +16,7 @@ use crate::{
     },
     services::{
         me_skills_helpers::*,
-        skills_helpers::{
-            get_skill_knowledge_info, process_skill_knowledge, skill_to_response_with_knowledge,
-        },
+        skills_helpers::{get_skill_knowledge_info, skill_to_response_with_knowledge},
     },
     state::SharedState,
 };
@@ -104,17 +102,15 @@ pub async fn get_my_skill(
 pub async fn create_my_skill(
     claims: Claims,
     State(app_state): State<SharedState>,
-    Json(mut req): Json<UserSkillCreateRequest>,
+    Json(req): Json<UserSkillCreateRequest>,
 ) -> Result<(StatusCode, Json<SkillResponse>), AuthError> {
-    let knowledge_attachment = req.knowledge_attachment.take();
-    let skill = create_user_skill(&app_state.database, claims.user_id, req).await?;
-    let knowledge_files = if let Some(attachment) = knowledge_attachment {
-        process_skill_knowledge(&app_state.database, skill.id, claims.user_id, attachment)
-            .await
-            .unwrap_or_default()
-    } else {
-        vec![]
-    };
+    let (skill, knowledge_files) = create_user_skill_with_knowledge(
+        &app_state.database,
+        &app_state.settings.file_storage_root,
+        claims.user_id,
+        req,
+    )
+    .await?;
     Ok((
         StatusCode::CREATED,
         Json(skill_to_response_with_knowledge(skill, knowledge_files)),
@@ -137,17 +133,16 @@ pub async fn update_my_skill(
     claims: Claims,
     Path(id): Path<Uuid>,
     State(app_state): State<SharedState>,
-    Json(mut req): Json<UserSkillUpdateRequest>,
+    Json(req): Json<UserSkillUpdateRequest>,
 ) -> Result<(StatusCode, Json<SkillResponse>), AuthError> {
-    let knowledge_attachment = req.knowledge_attachment.take();
-    let skill = update_user_skill(&app_state.database, id, claims.user_id, req).await?;
-    let knowledge_files = if let Some(attachment) = knowledge_attachment {
-        process_skill_knowledge(&app_state.database, skill.id, claims.user_id, attachment)
-            .await
-            .unwrap_or_default()
-    } else {
-        get_skill_knowledge_info(&app_state.database, skill.id).await
-    };
+    let (skill, knowledge_files) = update_user_skill_with_knowledge(
+        &app_state.database,
+        &app_state.settings.file_storage_root,
+        id,
+        claims.user_id,
+        req,
+    )
+    .await?;
     Ok((
         StatusCode::OK,
         Json(skill_to_response_with_knowledge(skill, knowledge_files)),

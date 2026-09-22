@@ -5,15 +5,13 @@ use crate::{
     auth::{claims::Claims, error::Error as AuthErrorResponse},
     dto::{
         common::{PaginationQuery, SortRule},
-        files::{
-            Attachment, File as FileLocal, FilePaginatedResponse, FileResponse, FileUploadRequest,
-        },
+        files::{FilePaginatedResponse, FileResponse, FileUploadRequest},
     },
     error::{AppError, ErrorResponse},
     models::files::{self, FileUploadStatus},
+    services::file_storage::{read_file_for_user, store_uploaded_file},
     state::SharedState,
 };
-use anyhow::Error;
 use axum::{
     Json,
     body::Body,
@@ -25,37 +23,9 @@ use migration::extension::postgres::PgExpr;
 use reqwest::StatusCode;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, Order,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TryIntoModel,
-};
-use std::{
-    fs::{self, File},
-    io::Write,
-    path::PathBuf,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
 };
 use uuid::Uuid;
-
-pub const LOCAL_FOLDER: &str = "/data/files";
-
-pub fn get_local_path(file: &FileLocal, user_id: &Uuid) -> PathBuf {
-    let user_folder = format!(
-        "{}/{}/file/{}",
-        LOCAL_FOLDER,
-        user_id.to_string(),
-        file.id.to_string()
-    );
-    let local_path = format!("{}/{}", user_folder, &file.name);
-    PathBuf::from(local_path)
-}
-
-pub fn get_file_binary(file: &FileLocal, user_id: &Uuid) -> Result<Attachment, Error> {
-    let path = get_local_path(file, user_id);
-    let buff = fs::read(&path)?;
-    Ok(Attachment {
-        file: Some(buff),
-        name: file.name.clone(),
-        content_type: file.content_type.clone(),
-    })
-}
 
 #[utoipa::path(
     post,
@@ -73,55 +43,13 @@ pub async fn upload_file(
     State(app_state): State<SharedState>,
     Json(req): Json<FileUploadRequest>,
 ) -> Result<(StatusCode, Json<FileResponse>), AppError> {
-    // Generate a unique local file ID
-    let local_file_id = Uuid::new_v4();
-    let user_folder = format!(
-        "{}/{}/file/{}",
-        LOCAL_FOLDER,
+    let file_model = store_uploaded_file(
+        &app_state.database,
+        &app_state.settings.file_storage_root,
         claims.user_id,
-        local_file_id.to_string()
-    );
-    // Ensure user folder exists
-    let _ = fs::create_dir_all(&user_folder);
-    let local_path = format!("{}/{}", user_folder, &req.attachment.name);
-    // Save file locally with unique ID
-    if let Ok(mut file_handle) = File::create(&local_path) {
-        if let Some(buffer) = &req.attachment.file {
-            if file_handle.write_all(buffer).is_ok() {
-                println!(
-                    "Saved file {} locally as {}",
-                    &req.attachment.name, &user_folder
-                )
-            }
-        }
-    }
-    let size = req.attachment.file.as_ref().map(|f| f.len()).unwrap_or(0) as i64;
-    let new_file = files::ActiveModel {
-        id: Set(local_file_id),
-        user_id: Set(claims.user_id),
-        name: Set(req.attachment.name.clone()),
-        content_type: Set(req.attachment.content_type.clone()),
-        size: Set(size),
-        local_path: Set(local_path),
-        description: Set(req.description),
-        url: Set(None),
-        status: Set(FileUploadStatus::Uploaded),
-        created_at: Set(Utc::now()),
-        updated_at: Set(Utc::now()),
-        metadata: Set(None),
-    };
-    new_file
-        .clone()
-        .insert(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("db insert one error: {e}");
-            AppError::DbTimeout
-        })?;
-    let file_model = new_file.try_into_model().map_err(|e| {
-        eprintln!("file model parse error : {e}");
-        AppError::DbTimeout
-    })?;
+        req,
+    )
+    .await?;
     let response = FileResponse {
         id: file_model.id,
         name: file_model.name,
@@ -153,20 +81,13 @@ pub async fn download_file(
     Path(file_id): Path<Uuid>,
     State(app_state): State<SharedState>,
 ) -> Result<Response<Body>, AppError> {
-    let file_model = files::Entity::find_by_id(file_id)
-        .filter(files::Column::UserId.eq(claims.user_id))
-        .filter(files::Column::Status.eq(FileUploadStatus::Uploaded))
-        .one(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("db get one error: {e}");
-            AppError::DbTimeout
-        })?
-        .ok_or(AppError::ResourceNotFound)?;
-    let file_binary = fs::read(file_model.local_path).map_err(|e| {
-        eprintln!("local storage error : {e}");
-        AppError::DbTimeout
-    })?;
+    let (file_model, file_binary) = read_file_for_user(
+        &app_state.database,
+        &app_state.settings.file_storage_root,
+        claims.user_id,
+        file_id,
+    )
+    .await?;
     let response = Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", file_model.content_type)
@@ -263,7 +184,7 @@ pub async fn delete_file_by_id(
     get,
     path = "/files",
     tag = "files",
-    
+
     params(
         ("limit" = Option<u64>, Query, description = "Default value : 20"),
         ("offset" = Option<u64>, Query, description = "Default value : 0"),

@@ -14,23 +14,39 @@ use crate::{
     },
     services::{
         analytics_cache::spawn_analytics_cache_refresh,
-        audit_logs::spawn_audit_log_retention_worker,
+        audit_logs::spawn_audit_log_retention_worker, deployment_health::load_deployment_health,
+        file_storage::prepare_storage_root, startup_migrations::run_startup_migrations,
     },
-    state::AppState,
+    state::{AppState, SharedState},
 };
 use anyhow::Error;
 use axum::http::HeaderValue;
-use axum::{Json, Router, extract::DefaultBodyLimit, middleware::from_fn_with_state, routing::get};
-use migration::MigratorTrait;
+use axum::{
+    Json, Router,
+    extract::{DefaultBodyLimit, State},
+    middleware::from_fn_with_state,
+    routing::get,
+};
 use reqwest::StatusCode;
 use serde_json::json;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
-async fn sample_root() -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::OK,
-        Json(json!({"status":"Okay","version":env!("CARGO_PKG_VERSION")})),
-    )
+async fn sample_root(
+    State(app_state): State<SharedState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let health = load_deployment_health(&app_state.database).await;
+    let status = if health.is_ready() {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    let body = serde_json::to_value(health).unwrap_or_else(|_| {
+        json!({
+            "status": "Degraded",
+            "version": env!("CARGO_PKG_VERSION"),
+        })
+    });
+    (status, Json(body))
 }
 
 pub async fn init_app() -> Result<(), Error> {
@@ -38,10 +54,14 @@ pub async fn init_app() -> Result<(), Error> {
     let settings = Settings::from_env()?;
     let address = format!("{}:{}", settings.server.host, settings.server.port);
 
-    // Run migrations BEFORE creating app state (which loads data from DB)
-    let database = sea_orm::Database::connect(&settings.auth.database_url).await?;
-    migration::Migrator::up(&database, None).await?;
-    drop(database); // Close this connection, AppState will create its own
+    prepare_storage_root(&settings.file_storage_root)
+        .await
+        .map_err(|error| anyhow::anyhow!("file storage is unavailable: {error:?}"))?;
+
+    if settings.auth.auto_migrate {
+        let database = sea_orm::Database::connect(&settings.auth.database_url).await?;
+        run_startup_migrations(&database).await?;
+    }
 
     let app_state = AppState::from_settings(settings).await?;
     spawn_analytics_cache_refresh(app_state.database.clone());
