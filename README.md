@@ -146,6 +146,7 @@ settings are:
 | `JWT_SECRET` | Token signing secret |
 | `APP_KEY` | Base64-encoded 32-byte encryption key |
 | `REDIRECT_URL` | Public frontend origin and OAuth callback base |
+| `BOOTSTRAP_SUPER_ADMIN_EMAIL` | Optional trusted owner email; when the database has no users, creates this verified Super Admin at startup |
 | `FILE_STORAGE_ROOT` | File root; defaults to `/data/files`, or ephemeral `/tmp/grengin/files` on AWS Lambda |
 | `GRENGIN_AUTO_MIGRATE` | Run pending SeaORM migrations at startup; defaults to `true` |
 
@@ -195,6 +196,12 @@ immutable version tags with and without the `v` prefix, for example
 `grengin-api:0.9.3` and `grengin-api:v0.9.3`. The image supports `linux/amd64`
 and `linux/arm64`. Its OCI metadata includes the source revision, backend
 version, and exact SeaORM migration head.
+
+CI builds each architecture on a matching native GitHub runner (`ubuntu-24.04`
+for amd64 and `ubuntu-24.04-arm` for arm64), avoiding QEMU during Rust
+compilation. BuildKit caches dependency layers separately for each architecture
+between runs. The shared image tags are published only after tests and both
+architecture builds succeed.
 
 ## Database Migrations
 

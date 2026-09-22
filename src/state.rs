@@ -20,6 +20,7 @@ use crate::{
     services::live_models_cache::LiveModelsCache,
     services::mcp_client::McpServerClient,
     services::notifications::NotificationEvent,
+    services::owner_bootstrap::ensure_bootstrap_super_admin,
 };
 use anyhow::Error;
 use llm_plugin::ProviderRegistry;
@@ -127,6 +128,12 @@ impl AppState {
         let database = Database::connect(&settings.auth.database_url)
             .await
             .map_err(|e| ConfigError::DbError(e.to_string()))?;
+        ensure_bootstrap_super_admin(
+            &database,
+            settings.auth.bootstrap_super_admin_email.as_deref(),
+        )
+        .await
+        .map_err(ConfigError::Custom)?;
         let discovery_catalog = DiscoveryCatalog::from_env(req_client.clone())
             .map_err(|error| ConfigError::Custom(error.to_string()))?;
         let _ = reconcile_catalog_ai_engines(&database, &discovery_catalog)

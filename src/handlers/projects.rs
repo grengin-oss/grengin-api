@@ -37,7 +37,7 @@ use crate::{
         file_storage::remove_model_file,
         project_helpers::*,
         project_source_processing::{
-            delete_source_chunks, spawn_process_source, write_artifact_file,
+            delete_source_chunks, process_source_before_response, write_artifact_file,
         },
     },
     state::SharedState,
@@ -603,7 +603,7 @@ pub async fn add_project_source(
     })?;
 
     if let Some(fid) = inserted.file_id {
-        spawn_process_source(app_state, inserted.id, inserted.project_id, fid);
+        process_source_before_response(app_state, inserted.id, inserted.project_id, fid).await;
     }
 
     Ok((StatusCode::CREATED, Json(source_to_response(inserted))))
@@ -1056,7 +1056,7 @@ pub async fn add_project_artifact(
         AuthError::DbTimeout
     })?;
 
-    spawn_process_source(app_state, inserted.id, inserted.project_id, file_uuid);
+    process_source_before_response(app_state, inserted.id, inserted.project_id, file_uuid).await;
 
     Ok((StatusCode::CREATED, Json(source_to_response(inserted))))
 }
@@ -1214,7 +1214,7 @@ pub async fn update_project_artifact(
     })?;
 
     if let Some(fid) = retrigger_file_id {
-        spawn_process_source(app_state, updated.id, updated.project_id, fid);
+        process_source_before_response(app_state, updated.id, updated.project_id, fid).await;
     }
 
     Ok((StatusCode::OK, Json(source_to_response(updated))))

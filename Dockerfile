@@ -3,6 +3,7 @@
 
 FROM rust:1.91-alpine AS builder
 ARG TARGETARCH
+ARG CARGO_BUILD_JOBS=2
 
 # sys deps (no openssl needed now)
 # utoipa-swagger-ui downloads its pinned Swagger UI archive with curl unless
@@ -38,7 +39,7 @@ RUN case "$TARGETARCH" in \
       arm64) RUST_TARGET="aarch64-unknown-linux-musl" ;; \
       *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac \
- && cargo build --release --locked --target "$RUST_TARGET" -p grengin-api -p sqlx-mcp -j 2
+ && cargo build --release --locked --target "$RUST_TARGET" -p grengin-api -p sqlx-mcp -j "$CARGO_BUILD_JOBS"
 
 # now copy real sources
 COPY src ./src
@@ -55,7 +56,7 @@ RUN case "$TARGETARCH" in \
       arm64) RUST_TARGET="aarch64-unknown-linux-musl" ;; \
       *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac \
- && cargo build --release --locked --target "$RUST_TARGET" -p grengin-api -p sqlx-mcp -p migration -j 2 \
+ && cargo build --release --locked --target "$RUST_TARGET" -p grengin-api -p sqlx-mcp -p migration -j "$CARGO_BUILD_JOBS" \
  && cp "/usr/src/grengin-api/target/$RUST_TARGET/release/grengin-api" /usr/local/bin/grengin-api \
  && cp "/usr/src/grengin-api/target/$RUST_TARGET/release/sqlx-mcp" /usr/local/bin/sqlx-mcp \
  && cp "/usr/src/grengin-api/target/$RUST_TARGET/release/migration" /usr/local/bin/grengin-migrate

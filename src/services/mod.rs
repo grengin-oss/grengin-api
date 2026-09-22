@@ -34,6 +34,7 @@ pub mod models_cache;
 pub mod notifications;
 pub mod oidc_proxy;
 pub mod oidc_service;
+pub mod owner_bootstrap;
 pub mod project_helpers;
 pub mod project_source_processing;
 pub mod provider_chat;

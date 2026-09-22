@@ -389,15 +389,18 @@ pub async fn process_project_source(
     }
 }
 
-pub fn spawn_process_source(
+/// Process the source in the request's execution future.
+///
+/// This intentionally does not use `tokio::spawn`: Lambda may freeze the
+/// execution environment as soon as the response is returned, which could
+/// leave a detached indexing task unfinished.
+pub async fn process_source_before_response(
     app_state: SharedState,
     source_id: Uuid,
     project_id: Uuid,
     file_id: Uuid,
 ) {
-    tokio::spawn(async move {
-        process_project_source(app_state, source_id, project_id, file_id).await;
-    });
+    process_project_source(app_state, source_id, project_id, file_id).await;
 }
 
 pub async fn write_artifact_file(
