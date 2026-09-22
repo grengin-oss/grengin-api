@@ -6,22 +6,19 @@ on:
     tags: ["v*.*.*"]
   workflow_dispatch:
 
+env:
+  IMAGE_NAME: ghcr.io/grengin-oss/grengin-api
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build
-        run: cargo build --release --locked --workspace --jobs 2
-      - name: Test
-        run: cargo test --locked --workspace --jobs 2
-
-  build-and-push:
-    runs-on: ubuntu-latest
-    needs: build
     permissions:
       contents: read
-      packages: write
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      migration_head: ${{ steps.release.outputs.migration_head }}
+      tags: ${{ steps.meta.outputs.tags }}
+      labels: ${{ steps.meta.outputs.labels }}
 
     steps:
       - name: Checkout
@@ -47,7 +44,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/grengin-oss/grengin-api
+          images: ${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=manual-${{ github.run_number }},enable=${{ github.event_name == 'workflow_dispatch' }}
@@ -56,8 +53,33 @@ jobs:
           labels: |
             io.grengin.migration-head=${{ steps.release.outputs.migration_head }}
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Build
+        run: cargo build --release --locked --workspace --jobs 2
+
+      - name: Test
+        run: cargo test --locked --workspace --jobs 2
+
+  build-and-push:
+    name: Build image (${{ matrix.arch }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -69,15 +91,91 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Build and push by digest
+        id: image
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          platforms: ${{ matrix.platform }}
+          labels: ${{ needs.build.outputs.labels }}
           build-args: |
-            IMAGE_VERSION=${{ steps.release.outputs.version }}
+            IMAGE_VERSION=${{ needs.build.outputs.version }}
             IMAGE_REVISION=${{ github.sha }}
-            MIGRATION_HEAD=${{ steps.release.outputs.migration_head }}
+            MIGRATION_HEAD=${{ needs.build.outputs.migration_head }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=grengin-api-${{ matrix.arch }}
+          cache-to: type=gha,scope=grengin-api-${{ matrix.arch }},mode=max
+
+      - name: Export digest
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${IMAGE_DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-manifest:
+    name: Publish multi-architecture image
+    needs: [build, build-and-push]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify platforms and publish tags
+        shell: bash
+        env:
+          IMAGE_TAGS: ${{ needs.build.outputs.tags }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          digests=("$RUNNER_TEMP"/digests/*)
+          if [[ ${#digests[@]} -ne 2 ]]; then
+            echo "Expected one digest for each of amd64 and arm64" >&2
+            exit 1
+          fi
+          sources=()
+          for digest in "${digests[@]}"; do
+            digest="${digest##*/}"
+            [[ "$digest" =~ ^[a-f0-9]{64}$ ]]
+            sources+=("$IMAGE_NAME@sha256:$digest")
+          done
+          # Attestation manifests use unknown/unknown; keep them in the index.
+          docker buildx imagetools create --dry-run "${sources[@]}" > "$RUNNER_TEMP/manifest.json"
+          jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | sort == ["amd64", "arm64"]' "$RUNNER_TEMP/manifest.json"
+          tags=()
+          while IFS= read -r tag; do
+            if [[ -n "$tag" ]]; then
+              tags+=(--tag "$tag")
+            fi
+          done <<< "$IMAGE_TAGS"
+          [[ ${#tags[@]} -gt 0 ]]
+          docker buildx imagetools create "${tags[@]}" "${sources[@]}"

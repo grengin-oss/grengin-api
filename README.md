@@ -196,6 +196,12 @@ immutable version tags with and without the `v` prefix, for example
 and `linux/arm64`. Its OCI metadata includes the source revision, backend
 version, and exact SeaORM migration head.
 
+CI builds each architecture on a matching native GitHub runner (`ubuntu-24.04`
+for amd64 and `ubuntu-24.04-arm` for arm64), avoiding QEMU during Rust
+compilation. BuildKit caches dependency layers separately for each architecture
+between runs. The shared image tags are published only after tests and both
+architecture builds succeed.
+
 ## Database Migrations
 
 The API applies all pending migrations on startup while holding a
