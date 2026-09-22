@@ -35,7 +35,7 @@ openssl = { version = "0.10.75", features = ["vendored"] }
 num-traits = "0.2.19"
 futures-util = "0.3.31"
 llm-plugin = { path = "llm-plugin" }
-utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum", "vendored"] }
 utoipa = { version = "5.4.0", features = ["axum_extras", "chrono", "url", "uuid"] }
 url = "2.5"
 aes-gcm = "0.10.3"
