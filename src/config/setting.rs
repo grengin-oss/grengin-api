@@ -46,6 +46,7 @@ pub struct AuthSettings {
     pub redirect_url: String,
     pub database_url: String,
     pub auto_migrate: bool,
+    pub bootstrap_super_admin_email: Option<String>,
 }
 
 #[derive(Clone)]
@@ -427,6 +428,7 @@ impl AuthSettings {
             database_url,
             auto_migrate,
             app_key,
+            bootstrap_super_admin_email: read_non_empty_env(&["BOOTSTRAP_SUPER_ADMIN_EMAIL"]),
         })
     }
 }

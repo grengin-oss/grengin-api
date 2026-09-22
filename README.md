@@ -146,6 +146,7 @@ settings are:
 | `JWT_SECRET` | Token signing secret |
 | `APP_KEY` | Base64-encoded 32-byte encryption key |
 | `REDIRECT_URL` | Public frontend origin and OAuth callback base |
+| `BOOTSTRAP_SUPER_ADMIN_EMAIL` | Optional trusted owner email; when the database has no users, creates this verified Super Admin at startup |
 | `FILE_STORAGE_ROOT` | File root; defaults to `/data/files`, or ephemeral `/tmp/grengin/files` on AWS Lambda |
 | `GRENGIN_AUTO_MIGRATE` | Run pending SeaORM migrations at startup; defaults to `true` |
 
