@@ -185,17 +185,18 @@ Build the static runtime image:
 docker build -t grengin-api .
 ```
 
-Merges to `main` publish the multi-architecture development image:
+Merges to `main` publish the multi-architecture image using the version from
+the workspace `Cargo.toml`:
 
 ```text
 ghcr.io/grengin-oss/grengin-api:latest
+ghcr.io/grengin-oss/grengin-api:<version>
+ghcr.io/grengin-oss/grengin-api:v<version>
 ```
 
-Pushing a Git tag that exactly matches `v<Cargo.toml version>` also publishes
-immutable version tags with and without the `v` prefix, for example
-`grengin-api:0.9.3` and `grengin-api:v0.9.3`. The image supports `linux/amd64`
-and `linux/arm64`. Its OCI metadata includes the source revision, backend
-version, and exact SeaORM migration head.
+Pushing a Git tag must exactly match `v<Cargo.toml version>`. The image supports
+`linux/amd64` and `linux/arm64`. Its OCI metadata includes the source revision,
+backend version, and exact SeaORM migration head.
 
 CI builds each architecture on a matching native GitHub runner (`ubuntu-24.04`
 for amd64 and `ubuntu-24.04-arm` for arm64), avoiding QEMU during Rust

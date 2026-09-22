@@ -47,6 +47,8 @@ jobs:
           images: ${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ steps.release.outputs.version }},enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=v${{ steps.release.outputs.version }},enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=manual-${{ github.run_number }},enable=${{ github.event_name == 'workflow_dispatch' }}
             type=semver,pattern={{version}}
             type=ref,event=tag
