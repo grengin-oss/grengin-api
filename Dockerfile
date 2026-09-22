@@ -5,7 +5,10 @@ FROM rust:1.91-alpine AS builder
 ARG TARGETARCH
 
 # sys deps (no openssl needed now)
-RUN apk add --no-cache build-base pkgconfig perl clang lld musl-dev ca-certificates
+# utoipa-swagger-ui downloads its pinned Swagger UI archive with curl unless
+# the vendored feature is enabled. Keep the builder self-contained and retain
+# TLS certificates for the download.
+RUN apk add --no-cache build-base pkgconfig perl clang lld musl-dev curl ca-certificates
 
 # The pinned Rust image already includes rustup; only install the target architecture.
 RUN case "$TARGETARCH" in \
