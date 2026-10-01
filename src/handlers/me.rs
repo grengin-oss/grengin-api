@@ -34,7 +34,7 @@ use crate::{
         common::SortRule,
         me::{
             AdministeredDepartmentUsersQuery, EffectivePermissionsResponse,
-            MeDepartmentUsersResponse,
+            MeDepartmentUsersResponse, MetadataResponse, UpdateMetadataRequest,
         },
     },
     models::{departments, user_role_assignments, users, users::UserStatus},
@@ -47,8 +47,8 @@ use crate::{
         authorization::{AuthorizationService, is_path_within_scope},
         me_helpers::{
             load_administered_department_ids, load_administered_department_paths,
-            needs_effective_permissions_refresh, scope_condition,
-            should_refresh_administered_departments,
+            load_my_metadata, needs_effective_permissions_refresh, scope_condition,
+            should_refresh_administered_departments, update_guide_page_count,
         },
     },
     state::SharedState,
@@ -888,5 +888,46 @@ pub async fn get_my_administered_department_members(
             }
         })
         .collect();
+    Ok((StatusCode::OK, Json(response)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/me/metadata",
+    tag = "me",
+    responses(
+        (status = 200, body = MetadataResponse),
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 404, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error),
+    )
+)]
+pub async fn get_my_metadata(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+) -> Result<(StatusCode, Json<MetadataResponse>), AuthError> {
+    let response = load_my_metadata(&app_state.database, claims.user_id).await?;
+    Ok((StatusCode::OK, Json(response)))
+}
+
+#[utoipa::path(
+    put,
+    path = "/me/metadata",
+    tag = "me",
+    request_body = UpdateMetadataRequest,
+    responses(
+        (status = 200, body = MetadataResponse),
+        (status = 400, content_type = "application/json", body = Error),
+        (status = 401, content_type = "application/json", body = Error),
+        (status = 404, content_type = "application/json", body = Error),
+        (status = 503, content_type = "application/json", body = Error),
+    )
+)]
+pub async fn update_my_metadata(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Json(req): Json<UpdateMetadataRequest>,
+) -> Result<(StatusCode, Json<MetadataResponse>), AuthError> {
+    let response = update_guide_page_count(&app_state.database, claims.user_id, req).await?;
     Ok((StatusCode::OK, Json(response)))
 }

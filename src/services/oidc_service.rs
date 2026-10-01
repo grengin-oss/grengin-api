@@ -20,7 +20,7 @@ use crate::{
     },
     models::{
         oauth_sessions, roles, user_role_assignments,
-        users::{self, UserStatus},
+        users::{self, TourGuideMetadata, UserStatus},
     },
     services::{authorization::AuthorizationService, oidc_proxy::verify_proxy_assertion},
     state::{AuthProtocolClient, SharedState},
@@ -158,6 +158,28 @@ fn merged_identities(
         },
     );
     serde_json::to_value(map).ok()
+}
+
+// Write-once: returns Some(metadata) only on a user's genuinely first login
+// (tourGuide.firstLogin not yet set), so a repeat login never overwrites the
+// original first_login_at, and callers can skip the metadata write entirely
+// when this returns None.
+fn first_login_metadata(user: &users::Model) -> Option<serde_json::Value> {
+    merged_first_login_metadata(user.tour_guide_metadata(), user.metadata.as_ref())
+}
+
+fn merged_first_login_metadata(
+    mut tour_guide: TourGuideMetadata,
+    existing_metadata: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    if tour_guide.first_login {
+        return None;
+    }
+    tour_guide.first_login = true;
+    tour_guide.first_login_at = Some(Utc::now());
+    tour_guide
+        .merge_into(existing_metadata)
+        .or_else(|| existing_metadata.cloned())
 }
 
 async fn consume_oauth_session<C>(
@@ -506,6 +528,9 @@ pub async fn oidc_oauth_callback(
             email.as_deref(),
         ));
         active_user.last_login_at = Set(Utc::now());
+        if let Some(metadata) = first_login_metadata(u) {
+            active_user.metadata = Set(Some(metadata));
+        }
         active_user.update(&app_state.database).await.map_err(|e| {
             eprintln!("db error while updating user {:?}", e);
             AuthError::ServiceTemporarilyUnavailable
@@ -560,6 +585,9 @@ pub async fn oidc_oauth_callback(
                 ));
                 active_user.updated_at = Set(Utc::now());
                 active_user.last_login_at = Set(Utc::now());
+                if let Some(metadata) = first_login_metadata(u) {
+                    active_user.metadata = Set(Some(metadata));
+                }
                 active_user.update(&app_state.database).await.map_err(|e| {
                     eprintln!("db error while updating user {:?}", e);
                     AuthError::ServiceTemporarilyUnavailable
@@ -608,7 +636,12 @@ pub async fn oidc_oauth_callback(
             mfa_secret: Set(None),
             picture: Set(picture.clone()),
             password: Set(None),
-            metadata: Set(None),
+            metadata: Set(TourGuideMetadata {
+                first_login: true,
+                first_login_at: Some(Utc::now()),
+                guide_page_count: 0,
+            }
+            .merge_into(None)),
             hd: Set(hd),
             identities: Set(merged_identities(
                 &users::IdentityMap::new(),
@@ -838,6 +871,28 @@ mod tests {
                 ClaimsVerificationError::InvalidNonce(_)
             ))
         ));
+    }
+
+    #[test]
+    fn first_login_metadata_is_computed_on_a_users_first_login() {
+        let existing = serde_json::json!({"otherFeature": {"flag": true}});
+        let value = merged_first_login_metadata(TourGuideMetadata::default(), Some(&existing))
+            .expect("first login is computed");
+
+        assert_eq!(value["otherFeature"]["flag"], true);
+        assert_eq!(value["tourGuide"]["firstLogin"], true);
+        assert!(value["tourGuide"]["firstLoginAt"].is_string());
+    }
+
+    #[test]
+    fn first_login_metadata_is_write_once() {
+        let already_logged_in = TourGuideMetadata {
+            first_login: true,
+            first_login_at: Some(Utc::now()),
+            guide_page_count: 3,
+        };
+
+        assert_eq!(merged_first_login_metadata(already_logged_in, None), None);
     }
 
     #[test]

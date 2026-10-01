@@ -3,17 +3,18 @@
 
 use crate::{
     auth::{claims::Claims, error::AuthError, permissions::ROLE_SUPER_ADMIN},
-    dto::me::PermissionScope,
-    models::{departments, permissions, role_permissions, roles, user_role_assignments},
+    dto::me::{MetadataResponse, PermissionScope, UpdateMetadataRequest},
+    models::{departments, permissions, role_permissions, roles, user_role_assignments, users},
     services::authorization::AuthorizationService,
     state::SharedState,
 };
+use chrono::Utc;
 use sea_orm::sea_query::{Alias, BinOper, Expr};
 use sea_orm::{
-    ColumnTrait, Condition, DatabaseConnection, EntityTrait, JoinType, PaginatorTrait, QueryFilter,
-    QuerySelect, RelationTrait,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
+    IntoActiveModel, JoinType, PaginatorTrait, QueryFilter, QuerySelect, RelationTrait,
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
 use uuid::Uuid;
 
 pub async fn load_administered_department_ids(
@@ -227,9 +228,101 @@ pub fn scope_condition(scope_paths: &[String]) -> Condition {
     cond
 }
 
+pub async fn load_my_metadata(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+) -> Result<MetadataResponse, AuthError> {
+    let user = users::Entity::find_by_id(user_id)
+        .one(db)
+        .await
+        .map_err(|e| {
+            eprintln!("user lookup error: {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+
+    Ok(MetadataResponse {
+        metadata: user.metadata.unwrap_or_else(|| Value::Object(Map::new())),
+    })
+}
+
+pub async fn update_guide_page_count(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    request: UpdateMetadataRequest,
+) -> Result<MetadataResponse, AuthError> {
+    let user = users::Entity::find_by_id(user_id)
+        .one(db)
+        .await
+        .map_err(|e| {
+            eprintln!("user lookup error: {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+
+    let mut tour_guide = user.tour_guide_metadata();
+    tour_guide.guide_page_count = request.guide_page_count;
+    let merged = tour_guide.merge_into(user.metadata.as_ref());
+    let mut active = user.into_active_model();
+    active.metadata = Set(merged.clone());
+    active.updated_at = Set(Utc::now());
+    active.update(db).await.map_err(|e| {
+        eprintln!("user guide page count update error: {e}");
+        AuthError::DbTimeout
+    })?;
+
+    Ok(MetadataResponse {
+        metadata: merged.unwrap_or_else(|| Value::Object(Map::new())),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::users::TourGuideMetadata;
+
+    #[test]
+    fn merging_tour_guide_metadata_preserves_other_metadata_keys() {
+        let existing = serde_json::json!({"otherFeature": {"flag": true}});
+        let tour_guide = TourGuideMetadata {
+            first_login: true,
+            first_login_at: None,
+            guide_page_count: 3,
+        };
+
+        let merged = tour_guide.merge_into(Some(&existing)).unwrap();
+
+        assert_eq!(merged["otherFeature"]["flag"], true);
+        assert_eq!(merged["tourGuide"]["guidePageCount"], 3);
+    }
+
+    #[test]
+    fn merging_tour_guide_metadata_overwrites_the_previous_tour_guide_value() {
+        let existing = serde_json::json!({"tourGuide": {"guidePageCount": 1}});
+        let tour_guide = TourGuideMetadata {
+            first_login: true,
+            first_login_at: None,
+            guide_page_count: 2,
+        };
+
+        let merged = tour_guide.merge_into(Some(&existing)).unwrap();
+
+        assert_eq!(merged["tourGuide"]["guidePageCount"], 2);
+    }
+
+    #[test]
+    fn merging_tour_guide_metadata_with_no_existing_metadata_starts_fresh() {
+        let tour_guide = TourGuideMetadata {
+            first_login: true,
+            first_login_at: None,
+            guide_page_count: 1,
+        };
+
+        let merged = tour_guide.merge_into(None).unwrap();
+
+        assert_eq!(merged["tourGuide"]["firstLogin"], true);
+        assert_eq!(merged["tourGuide"]["guidePageCount"], 1);
+    }
 
     #[test]
     fn manage_scope_takes_precedence_over_view_scope() {
