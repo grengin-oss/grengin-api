@@ -5,7 +5,8 @@ use crate::{
     handlers::me::{
         get_my_administered_department_analytics, get_my_administered_department_members,
         get_my_administered_department_user_analytics, get_my_administered_departments_list,
-        get_my_administered_departments_tree, get_my_permissions,
+        get_my_administered_departments_tree, get_my_metadata, get_my_permissions,
+        update_my_metadata,
     },
     handlers::me_prompts::{
         get_my_system_prompt, reset_my_system_prompt, set_my_system_prompt, submit_prompt_feedback,
@@ -56,4 +57,5 @@ pub fn me_routes() -> Router<SharedState> {
                 .delete(reset_my_system_prompt),
         )
         .route("/me/system-prompt/feedback", post(submit_prompt_feedback))
+        .route("/me/metadata", get(get_my_metadata).put(update_my_metadata))
 }

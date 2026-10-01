@@ -62,6 +62,8 @@ use crate::dto::mcp::{
 };
 use crate::dto::me::EffectivePermissionsResponse;
 use crate::dto::me::MeDepartmentUsersResponse;
+use crate::dto::me::MetadataResponse;
+use crate::dto::me::UpdateMetadataRequest;
 use crate::dto::models::{ModelInfo, ProviderInfo};
 use crate::dto::notifications::{
     NotificationDto, NotificationsListQuery, NotificationsListResponse,
@@ -247,6 +249,8 @@ use utoipa::OpenApi;
         me::get_my_administered_department_members,
         me::get_my_administered_departments_list,
         me::get_my_administered_departments_tree,
+        me::get_my_metadata,
+        me::update_my_metadata,
         admin_department_budgets::get_department_budget,
         projects::list_projects,
         projects::create_project,
@@ -413,6 +417,8 @@ use utoipa::OpenApi;
             McpDisconnect,
             McpOauthCallback,
             EffectivePermissionsResponse,
+            MetadataResponse,
+            UpdateMetadataRequest,
             McpEffectiveAccessResponse,
             McpEffectiveServerAccess,
             McpEffectiveToolAccess,

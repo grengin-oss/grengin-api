@@ -33,6 +33,17 @@ pub struct MeDepartmentUsersResponse {
     pub users: Vec<crate::dto::admin_user::User>,
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct MetadataResponse {
+    #[schema(value_type = Object)]
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct UpdateMetadataRequest {
+    pub guide_page_count: i32,
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct AdministeredDepartmentUsersQuery {
     pub department_id: Option<Uuid>,
