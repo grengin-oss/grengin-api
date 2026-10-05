@@ -24,9 +24,9 @@ pub struct ProviderIdentity {
 pub type IdentityMap = HashMap<String, ProviderIdentity>;
 
 /// Onboarding tour-guide progress, stored under the `tourGuide` key of
-/// `users.metadata`. `first_login`/`first_login_at` are set once by the
-/// backend and never accepted from a client; only `guide_page_count` is
-/// client-writable.
+/// `users.metadata`. `first_login` is true only until the user's second login
+/// and `first_login_at` is set once; both are backend-owned and never accepted
+/// from a client. Only `guide_page_count` is client-writable.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TourGuideMetadata {
@@ -109,6 +109,10 @@ impl Model {
             .as_ref()
             .and_then(|value| serde_json::from_value(value.clone()).ok())
             .unwrap_or_default()
+    }
+
+    pub fn has_linked_identity(&self) -> bool {
+        !self.identity_map().is_empty() || self.google_id.is_some() || self.azure_id.is_some()
     }
 
     pub fn identity_for(&self, provider: &str) -> Option<ProviderIdentity> {
