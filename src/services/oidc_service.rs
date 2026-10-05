@@ -160,23 +160,31 @@ fn merged_identities(
     serde_json::to_value(map).ok()
 }
 
-// Write-once: returns Some(metadata) only on a user's genuinely first login
-// (tourGuide.firstLogin not yet set), so a repeat login never overwrites the
-// original first_login_at, and callers can skip the metadata write entirely
-// when this returns None.
-fn first_login_metadata(user: &users::Model) -> Option<serde_json::Value> {
-    merged_first_login_metadata(user.tour_guide_metadata(), user.metadata.as_ref())
+// Every login links an identity, so a user without one has never logged in;
+// this also keeps users from before tourGuide existed out of the first-login
+// state. The first login sets firstLogin, the second clears it, and later
+// logins return None so callers skip the metadata write.
+fn login_metadata(user: &users::Model) -> Option<serde_json::Value> {
+    merged_login_metadata(
+        user.tour_guide_metadata(),
+        user.metadata.as_ref(),
+        user.has_linked_identity(),
+    )
 }
 
-fn merged_first_login_metadata(
+fn merged_login_metadata(
     mut tour_guide: TourGuideMetadata,
     existing_metadata: Option<&serde_json::Value>,
+    logged_in_before: bool,
 ) -> Option<serde_json::Value> {
-    if tour_guide.first_login {
+    if !logged_in_before {
+        tour_guide.first_login = true;
+        tour_guide.first_login_at = Some(Utc::now());
+    } else if tour_guide.first_login {
+        tour_guide.first_login = false;
+    } else {
         return None;
     }
-    tour_guide.first_login = true;
-    tour_guide.first_login_at = Some(Utc::now());
     tour_guide
         .merge_into(existing_metadata)
         .or_else(|| existing_metadata.cloned())
@@ -528,7 +536,7 @@ pub async fn oidc_oauth_callback(
             email.as_deref(),
         ));
         active_user.last_login_at = Set(Utc::now());
-        if let Some(metadata) = first_login_metadata(u) {
+        if let Some(metadata) = login_metadata(u) {
             active_user.metadata = Set(Some(metadata));
         }
         active_user.update(&app_state.database).await.map_err(|e| {
@@ -585,7 +593,7 @@ pub async fn oidc_oauth_callback(
                 ));
                 active_user.updated_at = Set(Utc::now());
                 active_user.last_login_at = Set(Utc::now());
-                if let Some(metadata) = first_login_metadata(u) {
+                if let Some(metadata) = login_metadata(u) {
                     active_user.metadata = Set(Some(metadata));
                 }
                 active_user.update(&app_state.database).await.map_err(|e| {
@@ -874,9 +882,9 @@ mod tests {
     }
 
     #[test]
-    fn first_login_metadata_is_computed_on_a_users_first_login() {
+    fn login_metadata_sets_first_login_on_a_users_first_login() {
         let existing = serde_json::json!({"otherFeature": {"flag": true}});
-        let value = merged_first_login_metadata(TourGuideMetadata::default(), Some(&existing))
+        let value = merged_login_metadata(TourGuideMetadata::default(), Some(&existing), false)
             .expect("first login is computed");
 
         assert_eq!(value["otherFeature"]["flag"], true);
@@ -885,14 +893,43 @@ mod tests {
     }
 
     #[test]
-    fn first_login_metadata_is_write_once() {
-        let already_logged_in = TourGuideMetadata {
+    fn login_metadata_clears_first_login_on_the_second_login() {
+        let first_login_at = Utc::now();
+        let after_first_login = TourGuideMetadata {
             first_login: true,
-            first_login_at: Some(Utc::now()),
+            first_login_at: Some(first_login_at),
             guide_page_count: 3,
         };
 
-        assert_eq!(merged_first_login_metadata(already_logged_in, None), None);
+        let value =
+            merged_login_metadata(after_first_login, None, true).expect("second login is written");
+        let tour_guide: TourGuideMetadata =
+            serde_json::from_value(value["tourGuide"].clone()).unwrap();
+
+        assert!(!tour_guide.first_login);
+        assert_eq!(tour_guide.first_login_at, Some(first_login_at));
+        assert_eq!(tour_guide.guide_page_count, 3);
+    }
+
+    #[test]
+    fn login_metadata_skips_the_write_after_the_second_login() {
+        let after_second_login = TourGuideMetadata {
+            first_login: false,
+            first_login_at: Some(Utc::now()),
+            guide_page_count: 7,
+        };
+
+        assert_eq!(merged_login_metadata(after_second_login, None, true), None);
+    }
+
+    #[test]
+    fn login_metadata_never_marks_a_pre_existing_user_as_first_login() {
+        let existing = serde_json::json!({"otherFeature": {"flag": true}});
+
+        assert_eq!(
+            merged_login_metadata(TourGuideMetadata::default(), Some(&existing), true),
+            None
+        );
     }
 
     #[test]

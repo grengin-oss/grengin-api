@@ -241,8 +241,14 @@ pub async fn load_my_metadata(
         })?
         .ok_or(AuthError::ResourceNotFound)?;
 
+    // Users from before tourGuide existed have no stored value; serve the
+    // defaults so they read as firstLogin: false rather than a missing key.
+    let metadata = user
+        .tour_guide_metadata()
+        .merge_into(user.metadata.as_ref());
+
     Ok(MetadataResponse {
-        metadata: user.metadata.unwrap_or_else(|| Value::Object(Map::new())),
+        metadata: metadata.unwrap_or_else(|| Value::Object(Map::new())),
     })
 }
 
@@ -322,6 +328,20 @@ mod tests {
 
         assert_eq!(merged["tourGuide"]["firstLogin"], true);
         assert_eq!(merged["tourGuide"]["guidePageCount"], 1);
+    }
+
+    #[test]
+    fn a_user_without_stored_tour_guide_reads_as_not_first_login() {
+        let existing = serde_json::json!({"otherFeature": {"flag": true}});
+
+        let merged = TourGuideMetadata::default()
+            .merge_into(Some(&existing))
+            .unwrap();
+
+        assert_eq!(merged["otherFeature"]["flag"], true);
+        assert_eq!(merged["tourGuide"]["firstLogin"], false);
+        assert_eq!(merged["tourGuide"]["guidePageCount"], 0);
+        assert!(merged["tourGuide"].get("firstLoginAt").is_none());
     }
 
     #[test]
