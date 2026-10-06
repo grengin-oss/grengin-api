@@ -245,6 +245,7 @@ pub async fn load_my_metadata(
     // defaults so they read as firstLogin: false rather than a missing key.
     let metadata = user
         .tour_guide_metadata()
+        .unwrap_or_default()
         .merge_into(user.metadata.as_ref());
 
     Ok(MetadataResponse {
@@ -266,7 +267,7 @@ pub async fn update_guide_page_count(
         })?
         .ok_or(AuthError::ResourceNotFound)?;
 
-    let mut tour_guide = user.tour_guide_metadata();
+    let mut tour_guide = user.tour_guide_metadata().unwrap_or_default();
     tour_guide.guide_page_count = request.guide_page_count;
     let merged = tour_guide.merge_into(user.metadata.as_ref());
     let mut active = user.into_active_model();

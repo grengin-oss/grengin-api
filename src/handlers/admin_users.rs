@@ -15,7 +15,7 @@ use crate::{
     },
     models::{
         departments, roles, user_role_assignments,
-        users::{self, UserStatus},
+        users::{self, TourGuideMetadata, UserStatus},
     },
     services::authorization::{AuthorizationService, PermissionScopeMode},
     state::SharedState,
@@ -324,7 +324,7 @@ pub async fn add_new_user(
         department_id: Set(req.department_id),
         is_independent: Set(false),
         effective_permissions: Set(None),
-        metadata: Set(None),
+        metadata: Set(TourGuideMetadata::default().merge_into(None)),
         identities: Set(None),
     };
     user.insert(&app_state.database).await.map_err(|e| {

@@ -10,7 +10,10 @@ use uuid::Uuid;
 
 use crate::{
     auth::permissions::ROLE_SUPER_ADMIN,
-    models::{roles, user_role_assignments, users},
+    models::{
+        roles, user_role_assignments,
+        users::{self, TourGuideMetadata},
+    },
     services::authorization::AuthorizationService,
 };
 
@@ -101,7 +104,7 @@ pub async fn ensure_bootstrap_super_admin(
         department_id: Set(None),
         is_independent: Set(false),
         effective_permissions: Set(None),
-        metadata: Set(None),
+        metadata: Set(TourGuideMetadata::default().merge_into(None)),
         identities: Set(None),
     };
     user.insert(&transaction)
