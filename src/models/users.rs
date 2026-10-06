@@ -24,9 +24,10 @@ pub struct ProviderIdentity {
 pub type IdentityMap = HashMap<String, ProviderIdentity>;
 
 /// Onboarding tour-guide progress, stored under the `tourGuide` key of
-/// `users.metadata`. `first_login` is true only until the user's second login
-/// and `first_login_at` is set once; both are backend-owned and never accepted
-/// from a client. Only `guide_page_count` is client-writable.
+/// `users.metadata`, written with defaults when an account is created.
+/// `first_login_at` is when the user was first granted tokens and `first_login`
+/// stays true until the next granted login; both are backend-owned and never
+/// accepted from a client. Only `guide_page_count` is client-writable.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TourGuideMetadata {
@@ -49,6 +50,19 @@ impl TourGuideMetadata {
         };
         map.insert("tourGuide".to_string(), serde_json::to_value(self).ok()?);
         Some(serde_json::Value::Object(map))
+    }
+
+    /// Applies a login that was granted tokens; returns false when nothing changed.
+    pub fn record_granted_login(&mut self) -> bool {
+        if self.first_login_at.is_none() {
+            self.first_login = true;
+            self.first_login_at = Some(Utc::now());
+        } else if self.first_login {
+            self.first_login = false;
+        } else {
+            return false;
+        }
+        true
     }
 }
 
@@ -111,20 +125,15 @@ impl Model {
             .unwrap_or_default()
     }
 
-    pub fn has_linked_identity(&self) -> bool {
-        !self.identity_map().is_empty() || self.google_id.is_some() || self.azure_id.is_some()
-    }
-
     pub fn identity_for(&self, provider: &str) -> Option<ProviderIdentity> {
         self.identity_map().remove(provider)
     }
 
-    pub fn tour_guide_metadata(&self) -> TourGuideMetadata {
+    pub fn tour_guide_metadata(&self) -> Option<TourGuideMetadata> {
         self.metadata
             .as_ref()
             .and_then(|value| value.get("tourGuide"))
             .and_then(|value| serde_json::from_value(value.clone()).ok())
-            .unwrap_or_default()
     }
 }
 
