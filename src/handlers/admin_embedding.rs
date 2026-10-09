@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use axum::{Json, extract::State};
-use chrono::Utc;
 use reqwest::StatusCode;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, IntoActiveModel};
 
 use crate::{
     auth::{
@@ -15,7 +13,9 @@ use crate::{
     dto::admin_embedding::{EmbeddingConfigResponse, EmbeddingConfigUpdateRequest},
     services::{
         authorization::{AuthorizationService, PermissionScopeMode},
-        embedding_helpers::{get_or_create_embedding_config, model_to_response},
+        embedding_helpers::{
+            apply_embedding_config_update, get_or_create_embedding_config, model_to_response,
+        },
     },
     state::SharedState,
 };
@@ -60,6 +60,7 @@ pub async fn get_embedding_config(
     request_body = EmbeddingConfigUpdateRequest,
     responses(
        (status = 200, body = EmbeddingConfigResponse),
+       (status = 400, content_type = "application/json", body = Error, description = "Dimensions do not match the embedding vector columns (code=6307)"),
        (status = 409, content_type = "application/json", body = Error, description = "Embedding provider/model cannot be changed once configured"),
        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
        (status = 403, content_type = "application/json", body = Error, description = "Permission denied"),
@@ -82,44 +83,7 @@ pub async fn update_embedding_config(
         )
         .await?;
 
-    let config = get_or_create_embedding_config(&app_state).await?;
-
-    if let Some(provider) = req.provider.as_ref() {
-        if provider != &config.provider {
-            return Err(AuthError::DbConflict);
-        }
-    }
-    if let Some(model) = req.model.as_ref() {
-        if model != &config.model {
-            return Err(AuthError::DbConflict);
-        }
-    }
-
-    let mut active = config.into_active_model();
-
-    if let Some(dimensions) = req.dimensions {
-        active.dimensions = Set(Some(dimensions));
-    }
-    if let Some(is_enabled) = req.is_enabled {
-        active.is_enabled = Set(is_enabled);
-    }
-    active.updated_at = Set(Utc::now());
-
-    let updated = active.update(&app_state.database).await.map_err(|e| {
-        eprintln!("embedding config update error: {e}");
-        AuthError::DbTimeout
-    })?;
-
-    app_state
-        .settings
-        .set_embedding_config_in_state(crate::config::setting::EmbeddingSettings {
-            provider: updated.provider.clone(),
-            model: updated.model.clone(),
-            dimensions: updated.dimensions,
-            is_enabled: updated.is_enabled,
-        })
-        .await;
-
+    let updated = apply_embedding_config_update(&app_state, req).await?;
     Ok((
         StatusCode::OK,
         Json(model_to_response(&app_state, &updated).await),

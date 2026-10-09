@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use axum::http::HeaderMap;
+use reqwest::Url;
 use std::{fs, path::Path, process::Command as StdCommand, time::Duration};
 use tokio::process::Command;
 
@@ -42,21 +43,130 @@ fn parse_bool_env(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-pub fn release_base_url(default: &str, provided: Option<&str>) -> String {
-    if let Some(value) = provided
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(|v| v.trim_end_matches('/').to_string())
-    {
-        return value;
-    }
-
+pub fn configured_release_base_url() -> String {
     std::env::var("GRENGIN_RELEASE_BASE_URL")
         .or_else(|_| std::env::var("RELEASE_BASE_URL"))
         .ok()
         .map(|v| v.trim().trim_end_matches('/').to_string())
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.to_string())
+        .unwrap_or_else(|| DEFAULT_RELEASE_BASE_URL.to_string())
+}
+
+pub fn requested_release_base_url(provided: Option<&str>) -> String {
+    provided
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.trim_end_matches('/').to_string())
+        .unwrap_or_else(configured_release_base_url)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum BinaryUpdateRejection {
+    InvalidReleaseUrl,
+    InsecureReleaseUrl,
+    ReleaseOriginNotAllowed,
+    ChecksumVerificationRequired,
+}
+
+impl BinaryUpdateRejection {
+    pub fn message(&self) -> &'static str {
+        match self {
+            Self::InvalidReleaseUrl => {
+                "Invalid release_base_url. Expected an absolute https URL without credentials, query or fragment"
+            }
+            Self::InsecureReleaseUrl => "release_base_url must use https",
+            Self::ReleaseOriginNotAllowed => {
+                "release_base_url must be on the configured release origin (GRENGIN_RELEASE_BASE_URL) or the official Grengin release origin"
+            }
+            Self::ChecksumVerificationRequired => {
+                "Checksum verification cannot be disabled for binary updates"
+            }
+        }
+    }
+}
+
+pub fn resolve_release_base_url(
+    requested: Option<&str>,
+    configured: &str,
+) -> Result<String, BinaryUpdateRejection> {
+    let configured = parse_release_url(configured)?;
+    let Some(requested) = requested.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(canonical_release_url(&configured));
+    };
+    let requested = parse_release_url(requested)?;
+    let official = parse_release_url(DEFAULT_RELEASE_BASE_URL)?;
+    if requested.origin() != configured.origin() && requested.origin() != official.origin() {
+        return Err(BinaryUpdateRejection::ReleaseOriginNotAllowed);
+    }
+    Ok(canonical_release_url(&requested))
+}
+
+fn parse_release_url(value: &str) -> Result<Url, BinaryUpdateRejection> {
+    let url = Url::parse(value).map_err(|_| BinaryUpdateRejection::InvalidReleaseUrl)?;
+    if url.scheme() != "https" {
+        return Err(BinaryUpdateRejection::InsecureReleaseUrl);
+    }
+    if url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(BinaryUpdateRejection::InvalidReleaseUrl);
+    }
+    Ok(url)
+}
+
+// The root update script hands this to curl; passing the parser's canonical form keeps curl
+// from reading a different host out of backslash or userinfo tricks than the one checked here.
+fn canonical_release_url(url: &Url) -> String {
+    url.as_str().trim_end_matches('/').to_string()
+}
+
+pub fn require_checksum_verification(requested: Option<bool>) -> Result<(), BinaryUpdateRejection> {
+    match requested {
+        Some(false) => Err(BinaryUpdateRejection::ChecksumVerificationRequired),
+        _ => Ok(()),
+    }
+}
+
+pub struct BinaryUpdatePlan {
+    pub release_base_url: String,
+    pub version: String,
+    pub arch: String,
+    pub update_installer: bool,
+    pub update_api: bool,
+    pub update_webapp: bool,
+    pub api_service_name: Option<String>,
+}
+
+impl BinaryUpdatePlan {
+    pub fn script_args(&self) -> Vec<String> {
+        let mut args = vec![
+            "--release-base-url".to_string(),
+            self.release_base_url.clone(),
+            "--version".to_string(),
+            self.version.clone(),
+        ];
+        if self.arch != "auto" {
+            args.push("--arch".to_string());
+            args.push(self.arch.clone());
+        }
+        if !self.update_installer {
+            args.push("--skip-installer".to_string());
+        }
+        if !self.update_api {
+            args.push("--skip-api".to_string());
+        }
+        if !self.update_webapp {
+            args.push("--skip-webapp".to_string());
+        }
+        if let Some(service_name) = &self.api_service_name {
+            args.push("--api-service-name".to_string());
+            args.push(service_name.clone());
+        }
+        args
+    }
 }
 
 pub fn domain_reconfigure_script_path() -> String {
@@ -380,4 +490,160 @@ pub async fn ensure_system_maintainer(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MIRROR: &str = "https://mirror.example.com/grengin";
+
+    fn plan(release_base_url: &str) -> BinaryUpdatePlan {
+        BinaryUpdatePlan {
+            release_base_url: release_base_url.to_string(),
+            version: "v1.2.3".to_string(),
+            arch: "auto".to_string(),
+            update_installer: true,
+            update_api: true,
+            update_webapp: true,
+            api_service_name: None,
+        }
+    }
+
+    #[test]
+    fn release_url_defaults_to_the_configured_base() {
+        assert_eq!(
+            resolve_release_base_url(None, DEFAULT_RELEASE_BASE_URL),
+            Ok("https://releases.grengin.io".to_string())
+        );
+        assert_eq!(
+            resolve_release_base_url(Some("  "), MIRROR),
+            Ok(MIRROR.to_string())
+        );
+    }
+
+    #[test]
+    fn release_url_on_the_configured_origin_is_accepted() {
+        assert_eq!(
+            resolve_release_base_url(Some("https://mirror.example.com/other/"), MIRROR),
+            Ok("https://mirror.example.com/other".to_string())
+        );
+    }
+
+    #[test]
+    fn official_release_origin_is_accepted_when_a_mirror_is_configured() {
+        assert_eq!(
+            resolve_release_base_url(Some("https://releases.grengin.io"), MIRROR),
+            Ok("https://releases.grengin.io".to_string())
+        );
+    }
+
+    #[test]
+    fn plain_http_release_url_is_rejected() {
+        assert_eq!(
+            resolve_release_base_url(Some("http://releases.grengin.io"), DEFAULT_RELEASE_BASE_URL),
+            Err(BinaryUpdateRejection::InsecureReleaseUrl)
+        );
+    }
+
+    #[test]
+    fn insecure_configured_release_base_is_rejected() {
+        assert_eq!(
+            resolve_release_base_url(None, "http://mirror.example.com"),
+            Err(BinaryUpdateRejection::InsecureReleaseUrl)
+        );
+    }
+
+    #[test]
+    fn look_alike_and_foreign_release_hosts_are_rejected() {
+        for candidate in [
+            "https://evil.example.com",
+            "https://releases.grengin.io.evil.com",
+            "https://evilreleases.grengin.io",
+            "https://releases.grengin.io:8443",
+        ] {
+            assert_eq!(
+                resolve_release_base_url(Some(candidate), DEFAULT_RELEASE_BASE_URL),
+                Err(BinaryUpdateRejection::ReleaseOriginNotAllowed),
+                "{candidate}"
+            );
+        }
+    }
+
+    #[test]
+    fn userinfo_query_and_fragment_release_urls_are_rejected() {
+        for candidate in [
+            "https://releases.grengin.io@evil.com",
+            "https://user:pass@releases.grengin.io",
+            "https://releases.grengin.io/?x=1",
+            "https://releases.grengin.io/#frag",
+        ] {
+            assert_eq!(
+                resolve_release_base_url(Some(candidate), DEFAULT_RELEASE_BASE_URL),
+                Err(BinaryUpdateRejection::InvalidReleaseUrl),
+                "{candidate}"
+            );
+        }
+    }
+
+    #[test]
+    fn unparseable_release_url_is_rejected() {
+        assert_eq!(
+            resolve_release_base_url(Some("releases.grengin.io"), DEFAULT_RELEASE_BASE_URL),
+            Err(BinaryUpdateRejection::InvalidReleaseUrl)
+        );
+    }
+
+    #[test]
+    fn release_url_reaches_the_script_in_canonical_form() {
+        assert_eq!(
+            resolve_release_base_url(
+                Some(r"HTTPS://Releases.Grengin.IO\@evil.com"),
+                DEFAULT_RELEASE_BASE_URL
+            ),
+            Ok("https://releases.grengin.io/@evil.com".to_string())
+        );
+    }
+
+    #[test]
+    fn checksum_verification_defaults_on_and_cannot_be_disabled() {
+        assert_eq!(require_checksum_verification(None), Ok(()));
+        assert_eq!(require_checksum_verification(Some(true)), Ok(()));
+        assert_eq!(
+            require_checksum_verification(Some(false)),
+            Err(BinaryUpdateRejection::ChecksumVerificationRequired)
+        );
+    }
+
+    #[test]
+    fn update_script_is_never_told_to_skip_checksums() {
+        let mut plan = plan(DEFAULT_RELEASE_BASE_URL);
+        plan.update_installer = false;
+        plan.update_api = false;
+        plan.arch = "aarch64".to_string();
+        plan.api_service_name = Some("grengin".to_string());
+        let args = plan.script_args();
+        assert!(!args.iter().any(|arg| arg == "--skip-checksum"));
+        assert_eq!(
+            args,
+            [
+                "--release-base-url",
+                DEFAULT_RELEASE_BASE_URL,
+                "--version",
+                "v1.2.3",
+                "--arch",
+                "aarch64",
+                "--skip-installer",
+                "--skip-api",
+                "--api-service-name",
+                "grengin",
+            ]
+        );
+    }
+
+    #[test]
+    fn auto_arch_is_left_to_the_script() {
+        let args = plan(DEFAULT_RELEASE_BASE_URL).script_args();
+        assert!(!args.iter().any(|arg| arg == "--arch"));
+    }
 }

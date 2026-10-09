@@ -4,8 +4,8 @@
 use chrono::Utc;
 use sea_orm::sea_query::{Alias, BinOper, Expr};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, JoinType,
-    PaginatorTrait, QueryFilter, QuerySelect, RelationTrait, Set,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, FromQueryResult,
+    JoinType, PaginatorTrait, QueryFilter, QuerySelect, RelationTrait, Set,
 };
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     auth::{
         error::AuthError,
-        permissions::{permission_key, split_permission_key},
+        permissions::{ROLE_SUPER_ADMIN, permission_key, split_permission_key},
     },
     models::{
         departments, mcp_access_policies,
@@ -24,6 +24,14 @@ use crate::{
 };
 
 use super::auth_audit::record_auth_event;
+
+// Role names are checked without scope, so a department-scoped Super Admin row must not
+// count as Super Admin anywhere.
+fn counts_as_role_name() -> Condition {
+    Condition::any()
+        .add(roles::Column::Name.ne(ROLE_SUPER_ADMIN))
+        .add(user_role_assignments::Column::ScopeDepartmentId.is_null())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionScopeMode {
@@ -169,6 +177,7 @@ impl<'a> AuthorizationService<'a> {
             )
             .filter(user_role_assignments::Column::UserId.eq(user_id))
             .filter(roles::Column::Name.eq(role_name))
+            .filter(counts_as_role_name())
             .count(self.db)
             .await
             .map_err(|e| {
@@ -194,6 +203,7 @@ impl<'a> AuthorizationService<'a> {
                 user_role_assignments::Relation::Roles.def(),
             )
             .filter(user_role_assignments::Column::UserId.is_in(user_ids.iter().copied()))
+            .filter(counts_as_role_name())
             .into_tuple::<(Uuid, String)>()
             .all(self.db)
             .await
@@ -948,3 +958,34 @@ pub fn is_path_within_scope(scope_path: &str, target_path: &str) -> bool {
 //         assert_eq!(decision, McpAccessDecision::Deny);
 //     }
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::counts_as_role_name;
+    use crate::models::user_role_assignments;
+    use sea_orm::{
+        ColumnTrait, DbBackend, EntityTrait, JoinType, QueryFilter, QuerySelect, QueryTrait,
+        RelationTrait,
+    };
+    use uuid::Uuid;
+
+    #[test]
+    fn scoped_super_admin_rows_never_count_as_the_super_admin_role_name() {
+        let sql = user_role_assignments::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                user_role_assignments::Relation::Roles.def(),
+            )
+            .filter(user_role_assignments::Column::UserId.eq(Uuid::nil()))
+            .filter(counts_as_role_name())
+            .build(DbBackend::Postgres)
+            .to_string();
+
+        assert!(
+            sql.contains(
+                r#"AND ("roles"."name" <> 'Super Admin' OR "user_role_assignments"."scopeDepartmentId" IS NULL)"#
+            ),
+            "{sql}"
+        );
+    }
+}

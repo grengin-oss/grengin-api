@@ -17,6 +17,8 @@ use serde::Deserialize;
 pub struct ProxyAssertionClaims {
     pub aud: String,
     pub email: Option<String>,
+    #[serde(default)]
+    pub email_verified: Option<bool>,
     pub exp: u64,
     pub iat: u64,
     pub iss: String,

@@ -2,17 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use chrono::Utc;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, QueryOrder};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, DatabaseBackend, DatabaseConnection, EntityTrait,
+    FromQueryResult, IntoActiveModel, QueryOrder, Statement,
+};
 use uuid::Uuid;
 
 use crate::{
-    auth::error::AuthError, dto::admin_embedding::EmbeddingConfigResponse,
-    models::embedding_configs, state::SharedState,
+    auth::error::AuthError,
+    config::setting::EmbeddingSettings,
+    dto::admin_embedding::{EmbeddingConfigResponse, EmbeddingConfigUpdateRequest},
+    models::embedding_configs,
+    state::SharedState,
 };
 
 const DEFAULT_PROVIDER: &str = "openai";
 const DEFAULT_MODEL: &str = "text-embedding-3-small";
 const DEFAULT_DIMENSIONS: i32 = 1536;
+
+#[derive(FromQueryResult)]
+struct VectorColumnRow {
+    dimensions: i32,
+}
 
 pub async fn get_or_create_embedding_config(
     app_state: &SharedState,
@@ -50,6 +61,59 @@ pub async fn get_or_create_embedding_config(
     })
 }
 
+pub async fn apply_embedding_config_update(
+    app_state: &SharedState,
+    req: EmbeddingConfigUpdateRequest,
+) -> Result<embedding_configs::Model, AuthError> {
+    let config = get_or_create_embedding_config(app_state).await?;
+
+    let provider_changed = req
+        .provider
+        .as_ref()
+        .is_some_and(|provider| provider != &config.provider);
+    let model_changed = req
+        .model
+        .as_ref()
+        .is_some_and(|model| model != &config.model);
+    if provider_changed || model_changed {
+        return Err(AuthError::DbConflict);
+    }
+    if let Some(dimensions) = req.dimensions {
+        let column_dimensions = load_vector_column_dimensions(&app_state.database).await?;
+        if !dimensions_fit_vector_columns(dimensions, &column_dimensions) {
+            return Err(AuthError::InvalidRequest {
+                field: "dimensions",
+            });
+        }
+    }
+
+    let mut active = config.into_active_model();
+    if let Some(dimensions) = req.dimensions {
+        active.dimensions = Set(Some(dimensions));
+    }
+    if let Some(is_enabled) = req.is_enabled {
+        active.is_enabled = Set(is_enabled);
+    }
+    active.updated_at = Set(Utc::now());
+
+    let updated = active.update(&app_state.database).await.map_err(|e| {
+        eprintln!("embedding config update error: {e}");
+        AuthError::DbTimeout
+    })?;
+
+    app_state
+        .settings
+        .set_embedding_config_in_state(EmbeddingSettings {
+            provider: updated.provider.clone(),
+            model: updated.model.clone(),
+            dimensions: updated.dimensions,
+            is_enabled: updated.is_enabled,
+        })
+        .await;
+
+    Ok(updated)
+}
+
 pub async fn model_to_response(
     app_state: &SharedState,
     model: &embedding_configs::Model,
@@ -72,5 +136,72 @@ pub async fn model_to_response(
         provider_enabled,
         created_at: model.created_at,
         updated_at: model.updated_at,
+    }
+}
+
+async fn load_vector_column_dimensions(db: &DatabaseConnection) -> Result<Vec<i32>, AuthError> {
+    // pg_attribute is a system catalog with no SeaORM entity; pgvector stores the declared dimension as the column typmod.
+    let sql = r#"
+        SELECT a."atttypmod" AS "dimensions"
+        FROM pg_attribute a
+        WHERE a."attrelid" IN (to_regclass('message_embeddings'), to_regclass('project_source_chunks'))
+          AND a."attname" = 'embedding'
+          AND NOT a."attisdropped"
+    "#;
+    let rows =
+        VectorColumnRow::find_by_statement(Statement::from_string(DatabaseBackend::Postgres, sql))
+            .all(db)
+            .await
+            .map_err(|e| {
+                eprintln!("vector column dimension query error: {e}");
+                AuthError::DbTimeout
+            })?;
+    Ok(rows.into_iter().map(|row| row.dimensions).collect())
+}
+
+// A typmod of -1 means the column was declared as plain `vector` and accepts any dimension.
+fn dimensions_fit_vector_columns(requested: i32, column_dimensions: &[i32]) -> bool {
+    requested > 0
+        && !column_dimensions.is_empty()
+        && column_dimensions
+            .iter()
+            .all(|&declared| declared < 0 || declared == requested)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dimensions_fit_vector_columns;
+
+    #[test]
+    fn dimension_matching_every_vector_column_is_accepted() {
+        assert!(dimensions_fit_vector_columns(1536, &[1536, 1536]));
+    }
+
+    #[test]
+    fn dimension_differing_from_the_vector_columns_is_rejected() {
+        assert!(!dimensions_fit_vector_columns(3072, &[1536, 1536]));
+        assert!(!dimensions_fit_vector_columns(768, &[1536, 1536]));
+    }
+
+    #[test]
+    fn dimension_is_rejected_when_any_vector_column_differs() {
+        assert!(!dimensions_fit_vector_columns(1536, &[1536, 3072]));
+    }
+
+    #[test]
+    fn non_positive_dimension_is_rejected() {
+        assert!(!dimensions_fit_vector_columns(0, &[1536]));
+        assert!(!dimensions_fit_vector_columns(-1, &[-1]));
+    }
+
+    #[test]
+    fn unconstrained_vector_column_accepts_any_positive_dimension() {
+        assert!(dimensions_fit_vector_columns(3072, &[-1, -1]));
+        assert!(dimensions_fit_vector_columns(1536, &[-1, 1536]));
+    }
+
+    #[test]
+    fn missing_vector_columns_reject_every_dimension() {
+        assert!(!dimensions_fit_vector_columns(1536, &[]));
     }
 }

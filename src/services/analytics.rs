@@ -36,6 +36,13 @@ fn scope_condition(scope_paths: &[String]) -> Condition {
     cond
 }
 
+fn department_within_scope(scope_paths: &[String], dept_path: &str) -> bool {
+    !dept_path.is_empty()
+        && scope_paths
+            .iter()
+            .any(|scope| is_path_within_scope(scope, dept_path))
+}
+
 fn empty_user_analytics_response(page: u64, limit: u64) -> UserAnalytics {
     UserAnalytics {
         users: Vec::new(),
@@ -368,11 +375,7 @@ pub async fn calculate_user_analytics_scoped(
             .one(db)
             .await?
             .unwrap_or_default();
-        if dept_path.is_empty()
-            || !scope_paths
-                .iter()
-                .any(|scope| is_path_within_scope(scope, &dept_path))
-        {
+        if !department_within_scope(scope_paths, &dept_path) {
             return Ok(empty_user_analytics_response(page, limit));
         }
         select = select.filter(Expr::col(departments::Column::Path).binary(
@@ -810,11 +813,7 @@ pub async fn get_department_analytics_scoped(
             .one(db)
             .await?
             .unwrap_or_default();
-        if dept_path.is_empty()
-            || !scope_paths
-                .iter()
-                .any(|scope| is_path_within_scope(scope, &dept_path))
-        {
+        if !department_within_scope(scope_paths, &dept_path) {
             return Ok(empty_department_analytics_response(limit, offset));
         }
         select = select.filter(Expr::col(departments::Column::Path).binary(
@@ -1236,4 +1235,47 @@ pub async fn get_timeseries_analytics(
         data,
         granularity: gran.to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{department_within_scope, scope_condition};
+    use crate::models::departments;
+    use sea_orm::{DbBackend, EntityTrait, QueryFilter, QueryTrait};
+
+    fn scopes(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|path| path.to_string()).collect()
+    }
+
+    #[test]
+    fn scoped_admin_may_filter_by_own_or_descendant_department() {
+        let scope = scopes(&["root.sales"]);
+        assert!(department_within_scope(&scope, "root.sales"));
+        assert!(department_within_scope(&scope, "root.sales.emea"));
+    }
+
+    #[test]
+    fn scoped_admin_may_not_filter_by_sibling_parent_or_lookalike_department() {
+        let scope = scopes(&["root.sales"]);
+        assert!(!department_within_scope(&scope, "root.marketing"));
+        assert!(!department_within_scope(&scope, "root"));
+        assert!(!department_within_scope(&scope, "root.salesforce"));
+    }
+
+    #[test]
+    fn unknown_department_or_empty_scope_is_out_of_scope() {
+        assert!(!department_within_scope(&scopes(&["root.sales"]), ""));
+        assert!(!department_within_scope(&[], "root.sales"));
+    }
+
+    #[test]
+    fn scoped_department_rows_are_limited_to_administered_subtrees() {
+        let sql = departments::Entity::find()
+            .filter(scope_condition(&scopes(&["root.sales", "root.hr"])))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.ends_with(
+            r#"WHERE ("path" <@ CAST('root.sales' AS ltree)) OR ("path" <@ CAST('root.hr' AS ltree))"#
+        ));
+    }
 }

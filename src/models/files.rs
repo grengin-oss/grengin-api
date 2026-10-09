@@ -33,6 +33,7 @@ pub struct Model {
     pub local_path: String,
     pub description: Option<String>,
     pub url: Option<String>,
+    pub sha256: Option<String>,
     pub status: FileUploadStatus,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub created_at: DateTime<Utc>,

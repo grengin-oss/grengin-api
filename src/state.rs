@@ -17,6 +17,7 @@ use crate::{
     models::{mcp_servers, sso_providers},
     services::ai_engine_catalog::reconcile_catalog_ai_engines,
     services::discovery_catalog::DiscoveryCatalog,
+    services::http_client::short_call_client,
     services::live_models_cache::LiveModelsCache,
     services::mcp_client::McpServerClient,
     services::notifications::NotificationEvent,
@@ -32,7 +33,6 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
 };
 use tokio::sync::{Notify, RwLock, broadcast};
 use uuid::Uuid;
@@ -102,7 +102,13 @@ impl StreamCancel {
     }
 
     pub async fn cancelled(&self) {
-        self.notify.notified().await;
+        // notify_waiters keeps no permit, so a cancel sent while nobody was waiting
+        // (e.g. during MCP tool execution) is only visible through the flag.
+        let notified = self.notify.notified();
+        if self.is_cancelled() {
+            return;
+        }
+        notified.await;
     }
 }
 
@@ -120,11 +126,8 @@ impl AppState {
             .await
             .clone()
             .filter(|settings| settings.is_enabled && !settings.use_grengin_proxy);
-        let req_client = reqwest::ClientBuilder::new()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(15))
-            .build()
-            .map_err(|e| ConfigError::ReqwestClientBuildError(e.to_string()))?;
+        let req_client =
+            short_call_client().map_err(|e| ConfigError::ReqwestClientBuildError(e.to_string()))?;
         let database = Database::connect(&settings.auth.database_url)
             .await
             .map_err(|e| ConfigError::DbError(e.to_string()))?;
@@ -178,30 +181,6 @@ impl AppState {
         self.oidc_provider(provider)
             .await
             .map(|runtime| runtime.is_enabled)
-    }
-
-    pub async fn is_email_domain_allowed(
-        &self,
-        email: &str,
-        provider: &AuthProvider,
-    ) -> (bool, Option<String>) {
-        if let Some((_, domain)) = email.split_once('@') {
-            let Some(runtime) = self.oidc_provider(provider).await else {
-                return (false, Some(domain.to_string()));
-            };
-            if runtime.allowed_domains.is_empty() {
-                return (true, None);
-            }
-            let domain = domain.to_ascii_lowercase();
-            return (
-                runtime
-                    .allowed_domains
-                    .iter()
-                    .any(|allowed| allowed.eq_ignore_ascii_case(&domain)),
-                Some(domain),
-            );
-        }
-        (false, None)
     }
 
     pub async fn sso_jit_provisioning_enabled(&self, provider: &AuthProvider) -> bool {

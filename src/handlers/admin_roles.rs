@@ -29,10 +29,14 @@ use crate::{
         RoleUpdatedPayload, RoleUserCountRow, RolesResponse, UserRoleAssignmentDto,
         UserRoleAssignmentInput, UserRoleAssignmentsResponse,
     },
-    models::{permissions, role_permissions, roles, user_role_assignments, users},
+    models::{permissions, role_permissions, roles, user_role_assignments},
     services::{
         auth_audit::{build_audit_payload, record_auth_event},
         authorization::{AuthorizationService, PermissionScopeMode},
+        role_assignment::{
+            added_permissions, ensure_role_assignment_allowed, ensure_role_definition_allowed,
+            ensure_role_grant_allowed, load_role_permission_keys,
+        },
     },
     state::SharedState,
 };
@@ -225,6 +229,14 @@ pub async fn create_role(
     {
         return Err(AuthError::DbConflict);
     }
+
+    ensure_role_definition_allowed(
+        &app_state.database,
+        claims.user_id,
+        None,
+        &added_permissions(&[], &req.permissions),
+    )
+    .await?;
 
     let permission_models = permissions::Entity::find()
         .all(&app_state.database)
@@ -449,6 +461,16 @@ pub async fn update_role(
     }
 
     let RoleUpdateRequest { name, permissions } = req;
+    if let Some(permission_keys) = &permissions {
+        let existing = load_role_permission_keys(&app_state.database, role_id).await?;
+        ensure_role_definition_allowed(
+            &app_state.database,
+            claims.user_id,
+            Some(role_id),
+            &added_permissions(&existing, permission_keys),
+        )
+        .await?;
+    }
     let mut role_active: roles::ActiveModel = role.clone().into();
     if let Some(name) = &name {
         role_active.name = Set(name.clone());
@@ -764,15 +786,6 @@ pub async fn assign_role_to_user(
 ) -> Result<(StatusCode, Json<UserRoleAssignmentDto>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
 
-    let target_user = users::Entity::find_by_id(user_id)
-        .one(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("user lookup error: {e}");
-            AuthError::DbTimeout
-        })?
-        .ok_or(AuthError::ResourceNotFound)?;
-
     let role = roles::Entity::find_by_id(req.role_id)
         .one(&app_state.database)
         .await
@@ -786,29 +799,24 @@ pub async fn assign_role_to_user(
         return Err(AuthError::DbConflict);
     }
 
-    let target_scope = req.scope_department_id.or(target_user.department_id);
-
     authz
         .ensure_permission(
             claims.user_id,
             PERMISSION_ROLES_ASSIGN,
-            target_scope,
+            req.scope_department_id,
             PermissionScopeMode::RequireOrgWide,
             Some(user_id),
         )
         .await?;
 
-    if role.name == ROLE_DEPARTMENT_ADMIN {
-        authz
-            .ensure_permission(
-                claims.user_id,
-                PERMISSION_ROLES_ASSIGN,
-                req.scope_department_id,
-                PermissionScopeMode::RequireOrgWide,
-                Some(user_id),
-            )
-            .await?;
-    }
+    ensure_role_grant_allowed(
+        &app_state.database,
+        claims.user_id,
+        &role,
+        req.scope_department_id,
+        &[user_id],
+    )
+    .await?;
 
     let assignment_id = Uuid::new_v4();
     let now = Utc::now();
@@ -898,17 +906,32 @@ pub async fn remove_role_from_user(
         return Err(AuthError::ResourceNotFound);
     }
 
-    let target_scope = assignment.scope_department_id;
-
     authz
         .ensure_permission(
             claims.user_id,
             PERMISSION_ROLES_ASSIGN,
-            target_scope,
+            assignment.scope_department_id,
             PermissionScopeMode::RequireOrgWide,
             Some(user_id),
         )
         .await?;
+
+    let role = roles::Entity::find_by_id(assignment.role_id)
+        .one(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("role lookup error: {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+    ensure_role_assignment_allowed(
+        &app_state.database,
+        claims.user_id,
+        &role,
+        assignment.scope_department_id,
+        &[user_id],
+    )
+    .await?;
 
     user_role_assignments::Entity::delete_by_id(assignment_id)
         .exec(&app_state.database)

@@ -29,7 +29,7 @@ pub struct DomainReconfigureResponse {
 pub struct BinariesUpdateRequest {
     /// Release version path segment (`latest`, `v1.2.3`, etc.)
     pub version: Option<String>,
-    /// Release host root (for example `https://releases.example.com`)
+    /// Release host root; must be https on the GRENGIN_RELEASE_BASE_URL origin or `https://releases.grengin.io`
     pub release_base_url: Option<String>,
     /// `x86_64` or `aarch64` (default: auto-detect host architecture in script)
     pub arch: Option<String>,

@@ -5,6 +5,41 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectMemberRole {
+    Member,
+    Owner,
+    Admin,
+}
+
+impl ProjectMemberRole {
+    pub fn can_write(self) -> bool {
+        matches!(self, Self::Owner | Self::Admin)
+    }
+}
+
+impl std::fmt::Display for ProjectMemberRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Member => write!(f, "member"),
+            Self::Owner => write!(f, "owner"),
+            Self::Admin => write!(f, "admin"),
+        }
+    }
+}
+
+impl TryFrom<String> for ProjectMemberRole {
+    type Error = String;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        match s.as_str() {
+            "member" => Ok(Self::Member),
+            "owner" => Ok(Self::Owner),
+            "admin" => Ok(Self::Admin),
+            _ => Err(format!("unknown project member role: {s}")),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "project_members", rename_all = "camelCase")]
 #[serde(rename_all = "camelCase")]

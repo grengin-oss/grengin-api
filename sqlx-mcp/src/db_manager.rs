@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::read_only::is_read_only_sql;
+use crate::read_only::{is_read_only_sql, statement_body};
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Map, Value, json};
 use sqlx::{
@@ -11,6 +11,8 @@ use sqlx::{
     types::Json,
 };
 use std::time::Duration;
+
+const READ_ONLY_BEGIN: &str = "BEGIN READ ONLY";
 
 pub struct DatabaseManager {
     pool: PgPool,
@@ -54,16 +56,10 @@ ORDER BY table_schema, table_name"
             ));
         }
 
-        if can_wrap_as_subquery(sql) {
-            match self.execute_wrapped_query(sql, &params).await {
-                Ok(value) => return Ok(value),
-                Err(err) => {
-                    tracing::debug!("wrapped query path failed, falling back to raw query: {err}");
-                }
-            }
+        match QueryRoute::for_sql(sql) {
+            QueryRoute::Wrapped => self.execute_wrapped_query(sql, &params).await,
+            QueryRoute::Raw => self.execute_raw_query(sql, &params).await,
         }
-
-        self.execute_raw_query(sql, &params).await
     }
 
     pub async fn get_pool_state(&self) -> Value {
@@ -187,17 +183,12 @@ ORDER BY c.table_schema, c.table_name, c.ordinal_position";
     }
 
     async fn execute_wrapped_query(&self, sql: &str, params: &[Value]) -> Result<Value> {
-        let normalized_sql = trim_single_trailing_semicolon(sql);
-        let wrapped_sql = format!(
-            "SELECT COALESCE(json_agg(to_jsonb(_sqlx_mcp_row)), '[]'::json) AS rows FROM ({normalized_sql}) AS _sqlx_mcp_row"
-        );
-        let arguments = build_arguments(params)?;
-
-        let row = query_with(&wrapped_sql, arguments)
-            .fetch_one(&self.pool)
-            .await
-            .context("query execution failed")?;
-
+        let rows = self
+            .fetch_read_only(&wrap_as_json_rows(sql), params)
+            .await?;
+        let row = rows
+            .first()
+            .ok_or_else(|| anyhow!("wrapped query returned no rows"))?;
         let rows: Value = row
             .try_get("rows")
             .context("failed to decode query rows as JSON")?;
@@ -205,18 +196,57 @@ ORDER BY c.table_schema, c.table_name, c.ordinal_position";
     }
 
     async fn execute_raw_query(&self, sql: &str, params: &[Value]) -> Result<Value> {
-        let arguments = build_arguments(params)?;
-        let rows = query_with(sql, arguments)
-            .fetch_all(&self.pool)
-            .await
-            .context("query execution failed")?;
-
-        let mut out = Vec::with_capacity(rows.len());
-        for row in rows {
-            out.push(row_to_json(&row));
-        }
-        Ok(Value::Array(out))
+        let rows = self.fetch_read_only(sql, params).await?;
+        Ok(Value::Array(rows.iter().map(row_to_json).collect()))
     }
+
+    async fn fetch_read_only(&self, sql: &str, params: &[Value]) -> Result<Vec<PgRow>> {
+        let arguments = build_arguments(params)?;
+        let mut transaction = self
+            .pool
+            .begin_with(READ_ONLY_BEGIN)
+            .await
+            .context("failed to start read-only transaction")?;
+        let result = query_with(sql, arguments)
+            .fetch_all(&mut *transaction)
+            .await;
+        // Roll back rather than commit so session settings changed with set_config() inside
+        // the query are discarded along with the transaction.
+        let rollback = transaction.rollback().await;
+        let rows = result.context("query execution failed")?;
+        rollback.context("failed to close read-only transaction")?;
+        Ok(rows)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum QueryRoute {
+    Wrapped,
+    Raw,
+}
+
+impl QueryRoute {
+    fn for_sql(sql: &str) -> Self {
+        let first = sql
+            .trim_start()
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        match first.as_str() {
+            "SELECT" | "WITH" => Self::Wrapped,
+            _ => Self::Raw,
+        }
+    }
+}
+
+// The newline before ")" keeps a trailing "-- comment" in the caller's SQL from swallowing the
+// rest of the wrapper.
+fn wrap_as_json_rows(sql: &str) -> String {
+    let body = statement_body(sql);
+    format!(
+        "SELECT COALESCE(json_agg(to_jsonb(_sqlx_mcp_row)), '[]'::json) AS rows FROM ({body}\n) AS _sqlx_mcp_row"
+    )
 }
 
 fn row_to_json(row: &PgRow) -> Value {
@@ -317,25 +347,6 @@ fn is_postgres_url(url: &str) -> bool {
     url.starts_with("postgres://") || url.starts_with("postgresql://")
 }
 
-fn can_wrap_as_subquery(sql: &str) -> bool {
-    let first = sql
-        .trim_start()
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .to_ascii_uppercase();
-    matches!(first.as_str(), "SELECT" | "WITH")
-}
-
-fn trim_single_trailing_semicolon(sql: &str) -> &str {
-    let trimmed = sql.trim_end();
-    if let Some(stripped) = trimmed.strip_suffix(';') {
-        stripped.trim_end()
-    } else {
-        trimmed
-    }
-}
-
 fn looks_like_non_postgres_table_listing_query(sql: &str) -> bool {
     let normalized = sql.to_ascii_lowercase();
     normalized.contains("sqlite_master")
@@ -345,8 +356,33 @@ fn looks_like_non_postgres_table_listing_query(sql: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::DatabaseManager;
+    use super::{DatabaseManager, QueryRoute, READ_ONLY_BEGIN, wrap_as_json_rows};
     use serde_json::json;
+
+    #[test]
+    fn every_query_runs_in_a_read_only_transaction() {
+        assert_eq!(READ_ONLY_BEGIN, "BEGIN READ ONLY");
+    }
+
+    #[test]
+    fn selects_and_ctes_take_the_wrapped_route_only() {
+        assert_eq!(QueryRoute::for_sql("SELECT 1"), QueryRoute::Wrapped);
+        assert_eq!(
+            QueryRoute::for_sql("  with x as (select 1) select * from x"),
+            QueryRoute::Wrapped
+        );
+        assert_eq!(QueryRoute::for_sql("SHOW search_path"), QueryRoute::Raw);
+        assert_eq!(QueryRoute::for_sql("EXPLAIN SELECT 1"), QueryRoute::Raw);
+    }
+
+    #[test]
+    fn wrapper_strips_the_terminator_and_survives_trailing_comments() {
+        assert_eq!(
+            wrap_as_json_rows("SELECT 1 AS ok; -- note"),
+            "SELECT COALESCE(json_agg(to_jsonb(_sqlx_mcp_row)), '[]'::json) AS rows FROM (SELECT 1 AS ok\n) AS _sqlx_mcp_row"
+        );
+        assert!(wrap_as_json_rows("SELECT 1 -- note").contains("-- note\n) AS _sqlx_mcp_row"));
+    }
 
     #[tokio::test]
     #[ignore = "requires DB_URL to point at a reachable PostgreSQL instance"]
@@ -416,5 +452,20 @@ mod tests {
             write_attempt.is_err(),
             "read-only query validation must block writes"
         );
+
+        for statement in [
+            "CREATE TABLE sqlx_mcp_read_only_probe (id int)",
+            "SELECT * INTO sqlx_mcp_read_only_probe FROM (SELECT 1 AS id) s",
+            "WITH d AS (DELETE FROM departments RETURNING 1) SELECT count(*) FROM d",
+        ] {
+            let error = manager
+                .fetch_read_only(statement, &[])
+                .await
+                .expect_err("the database must refuse writes even when the scanner is bypassed");
+            assert!(
+                format!("{error:#}").contains("read-only transaction"),
+                "unexpected error for {statement}: {error:#}"
+            );
+        }
     }
 }

@@ -117,7 +117,7 @@ pub async fn get_user_by_id(
        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
        (status = 404, content_type = "application/json", body = Error, description = "User not found (code=5003)"),
        (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
-     
+
     )
 )]
 pub async fn get_users(
@@ -280,7 +280,7 @@ pub async fn get_users(
        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
        (status = 404, content_type = "application/json", body = Error, description = "User not found (code=5003)"),
        (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000) or service temporarily unavailable (code=1000)"),
-     
+
     )
 )]
 pub async fn add_new_user(

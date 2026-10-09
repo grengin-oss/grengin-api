@@ -422,6 +422,7 @@ pub async fn write_artifact_file(
             name: filename,
             content_type,
             bytes: content.as_bytes(),
+            content_sha256: None,
             description: None,
             metadata: None,
         },

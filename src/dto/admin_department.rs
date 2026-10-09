@@ -163,6 +163,12 @@ pub struct RoleAssignmentPayload {
     pub scope_department_id: Option<Uuid>,
 }
 
+#[derive(Serialize)]
+pub struct DepartmentChangeDeniedPayload {
+    pub reason: String,
+    pub department_id: Option<Uuid>,
+}
+
 #[derive(Debug, Clone, FromQueryResult)]
 pub struct DepartmentRow {
     pub id: Uuid,

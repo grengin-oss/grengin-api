@@ -4,8 +4,8 @@
 use chrono::{DateTime, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DatabaseBackend, DatabaseConnection,
-    EntityTrait, IntoActiveModel, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
-    Statement,
+    EntityTrait, IntoActiveModel, JoinType, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+    RelationTrait, Statement,
     sea_query::{Alias, BinOper, Expr, Order},
 };
 use uuid::Uuid;
@@ -61,6 +61,7 @@ pub async fn load_recent_prompts(
     db: &DatabaseConnection,
     conversation_id: Uuid,
     recent_pairs: usize,
+    before: Option<DateTime<Utc>>,
 ) -> Result<RecentMessages, AppError> {
     if recent_pairs == 0 {
         return Ok(RecentMessages {
@@ -73,6 +74,9 @@ pub async fn load_recent_prompts(
         .filter(messages::Column::ConversationId.eq(conversation_id))
         .filter(messages::Column::Deleted.eq(false))
         .filter(messages::Column::Role.is_in(vec![ChatRole::User, ChatRole::Assistant]))
+        .apply_if(before, |query, before| {
+            query.filter(messages::Column::CreatedAt.lt(before))
+        })
         .order_by_desc(messages::Column::CreatedAt)
         .limit(limit)
         .all(db)
@@ -95,6 +99,18 @@ pub async fn load_recent_prompts(
         .collect::<Vec<Prompt>>();
 
     Ok(RecentMessages { prompts, boundary })
+}
+
+// The summary is cumulative; while editing, only a summary that ends before the edited message
+// is free of the content being replaced.
+pub fn summary_usable_with_cutoff(
+    summary_last_message_at: Option<DateTime<Utc>>,
+    cutoff: Option<DateTime<Utc>>,
+) -> bool {
+    match cutoff {
+        None => true,
+        Some(cutoff) => summary_last_message_at.is_some_and(|last| last < cutoff),
+    }
 }
 
 pub async fn load_summary(
@@ -307,7 +323,8 @@ pub async fn update_conversation_summary(
         return Ok(());
     }
     let recent_pairs = app_state.settings.rag.recent_message_pairs;
-    let recent = load_recent_prompts(&app_state.database, conversation_id, recent_pairs).await?;
+    let recent =
+        load_recent_prompts(&app_state.database, conversation_id, recent_pairs, None).await?;
     let boundary = match recent.boundary {
         Some(boundary) => boundary,
         None => return Ok(()),
@@ -683,5 +700,37 @@ impl ChatRole {
             ChatRole::System => "system".to_string(),
             ChatRole::Tool => "tool".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::summary_usable_with_cutoff;
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn summary_is_used_normally_when_not_editing() {
+        assert!(summary_usable_with_cutoff(Some(Utc::now()), None));
+        assert!(summary_usable_with_cutoff(None, None));
+    }
+
+    #[test]
+    fn summary_ending_before_the_edited_message_is_used() {
+        let cutoff = Utc::now();
+        assert!(summary_usable_with_cutoff(
+            Some(cutoff - Duration::seconds(1)),
+            Some(cutoff)
+        ));
+    }
+
+    #[test]
+    fn summary_reaching_the_edited_message_is_skipped() {
+        let cutoff = Utc::now();
+        assert!(!summary_usable_with_cutoff(Some(cutoff), Some(cutoff)));
+        assert!(!summary_usable_with_cutoff(
+            Some(cutoff + Duration::seconds(1)),
+            Some(cutoff)
+        ));
+        assert!(!summary_usable_with_cutoff(None, Some(cutoff)));
     }
 }

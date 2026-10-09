@@ -30,11 +30,16 @@ use crate::{
             period_bounds, refresh_department_budget_available, sum_child_allocations,
             sum_department_cost_in_range,
         },
+        department_access::{
+            BudgetSettings, budget_change_requires_allocate, ensure_budget_change_allowed,
+            ensure_member_move_allowed, ensure_member_release_to_parent_allowed,
+            ensure_reparent_allowed,
+        },
         department_helpers::{
-            build_ltree_path, department_budget_snapshot, departments_base_select,
-            departments_tree_select, ensure_department_admin_assignment,
-            load_department_admin_ids_map, max_subtree_depth, sync_department_admin_assignments,
-            sync_department_allowed_models,
+            build_ltree_path, delete_department_with_scoped_assignments,
+            department_budget_snapshot, departments_base_select, departments_tree_select,
+            ensure_department_admin_assignment, load_department_admin_ids_map, reparent_department,
+            sync_department_admin_assignments, sync_department_allowed_models,
         },
         department_policies::{
             load_allowed_models_map, validate_allowed_models_subset, validate_retention_days,
@@ -42,7 +47,6 @@ use crate::{
         notifications::emit_budget_alerts,
     },
     state::SharedState,
-    utils::ltree::ltree_label_from_uuid,
 };
 use axum::{
     Json,
@@ -54,6 +58,7 @@ use reqwest::StatusCode;
 use rust_decimal::Decimal;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait as _, QueryFilter, Statement,
+    TransactionTrait,
 };
 use sea_orm::{
     Condition, EntityName as _, JoinType, Order, PaginatorTrait, QueryOrder, QuerySelect,
@@ -203,7 +208,6 @@ pub async fn create_department(
             claims.user_id,
             id,
             &requested_admin_ids,
-            req.parent_id,
         )
         .await?;
     }
@@ -829,6 +833,37 @@ pub async fn update_department(
         dept.budget_allocated
     };
 
+    if parent_changed {
+        ensure_reparent_allowed(
+            &app_state.database,
+            claims.user_id,
+            department_id,
+            parent_id,
+        )
+        .await?;
+    }
+    if budget_change_requires_allocate(
+        &BudgetSettings {
+            allocated: dept.budget_allocated,
+            period: dept.budget_period,
+            action_on_exceed: dept.action_on_exceed,
+        },
+        &BudgetSettings {
+            allocated: budget_allocated,
+            period: budget_period,
+            action_on_exceed,
+        },
+        parent_changed,
+    ) {
+        ensure_budget_change_allowed(
+            &app_state.database,
+            claims.user_id,
+            department_id,
+            parent_id,
+        )
+        .await?;
+    }
+
     if req.parent_id.is_some() || req.budget_allocated.is_some() {
         if let Some(parent_id) = parent_id {
             let parent = departments_base_select()
@@ -900,78 +935,48 @@ pub async fn update_department(
             AuthError::DbConflict
         })?;
 
-    // Recompute path/depth if parent changes
-    let (path, depth) = if parent_changed {
-        if let Some(parent_id) = parent_id {
-            let parent = departments_base_select()
-                .filter(departments::Column::Id.eq(parent_id))
-                .into_model::<DepartmentRow>()
-                .one(&app_state.database)
-                .await
-                .map_err(|e| {
-                    eprintln!("db error: {e}");
-                    AuthError::DbTimeout
-                })?
-                .ok_or(AuthError::DbNotFound)?;
-
-            let label = ltree_label_from_uuid(department_id);
-            (format!("{}.{}", parent.path, label), parent.depth + 1)
-        } else {
-            (ltree_label_from_uuid(department_id), 0)
-        }
-    } else {
-        (dept.path.clone(), dept.depth)
-    };
+    let updated_at = Utc::now();
+    let txn = app_state.database.begin().await.map_err(|e| {
+        eprintln!("department update transaction error: {e}");
+        AuthError::DbTimeout
+    })?;
 
     if parent_changed {
-        let subtree_max = max_subtree_depth(&app_state.database, &dept.path).await?;
-        let new_root_depth = depth;
-        let subtree_height = subtree_max - dept.depth;
-        if new_root_depth + subtree_height > 9 {
-            return Err(AuthError::ServiceTemporarilyUnavailable);
-        }
+        reparent_department(&txn, department_id, parent_id, updated_at).await?;
     }
 
-    let updated_at = Utc::now();
-
-    // ✅ SeaQuery UPDATE with CAST(... AS ltree)
-    let stmt = SqlQuery::update()
-        .table(departments::Entity)
-        .values([
-            (departments::Column::Name, name.into()),
-            (departments::Column::Description, description.into()),
-            (departments::Column::ParentId, parent_id.into()),
-            (departments::Column::Depth, depth.into()),
-            (
-                departments::Column::Path,
-                Expr::val(path.clone()).cast_as(Alias::new("ltree")).into(),
-            ),
-            (departments::Column::RetentionDays, retention_days.into()),
-            (
-                departments::Column::BudgetAllocated,
-                budget_allocated.into(),
-            ),
-            (departments::Column::BudgetPeriod, budget_period.into()),
-            (departments::Column::ActionOnExceed, action_on_exceed.into()),
-            (departments::Column::UpdatedAt, updated_at.into()),
-        ])
-        .and_where(Expr::col(departments::Column::Id).eq(department_id))
-        .to_owned();
-
-    let (sql, values) = stmt.build(PostgresQueryBuilder);
-
-    app_state
-        .database
-        .execute(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            sql,
-            values,
-        ))
+    departments::Entity::update_many()
+        .col_expr(departments::Column::Name, Expr::value(name))
+        .col_expr(departments::Column::Description, Expr::value(description))
+        .col_expr(
+            departments::Column::RetentionDays,
+            Expr::value(retention_days),
+        )
+        .col_expr(
+            departments::Column::BudgetAllocated,
+            Expr::value(budget_allocated),
+        )
+        .col_expr(
+            departments::Column::BudgetPeriod,
+            Expr::value(budget_period),
+        )
+        .col_expr(
+            departments::Column::ActionOnExceed,
+            Expr::value(action_on_exceed),
+        )
+        .col_expr(departments::Column::UpdatedAt, Expr::value(updated_at))
+        .filter(departments::Column::Id.eq(department_id))
+        .exec(&txn)
         .await
         .map_err(|e| {
             eprintln!("update error: {e}");
             AuthError::DbTimeout
         })?;
+
+    txn.commit().await.map_err(|e| {
+        eprintln!("department update commit error: {e}");
+        AuthError::DbTimeout
+    })?;
 
     if req.allowed_models.is_some() {
         sync_department_allowed_models(
@@ -989,7 +994,6 @@ pub async fn update_department(
             claims.user_id,
             department_id,
             admin_ids,
-            Some(department_id),
         )
         .await?;
     }
@@ -1099,87 +1103,30 @@ pub async fn move_department(
         AuthError::DbConflict
     })?;
 
-    let subtree_max = max_subtree_depth(&app_state.database, &dept.path).await?;
-    let new_root_depth = new_parent.depth + 1;
-    let subtree_height = subtree_max - dept.depth;
-    if new_root_depth + subtree_height > 9 {
-        return Err(AuthError::ServiceTemporarilyUnavailable);
+    let budget = BudgetSettings {
+        allocated: dept.budget_allocated,
+        period: dept.budget_period,
+        action_on_exceed: dept.action_on_exceed,
+    };
+    if budget_change_requires_allocate(&budget, &budget, true) {
+        ensure_budget_change_allowed(
+            &app_state.database,
+            claims.user_id,
+            department_id,
+            Some(new_parent.id),
+        )
+        .await?;
     }
 
-    // Prevent moving under itself or one of its descendants.
-    if req.new_parent_id == department_id || new_parent.path.starts_with(&dept.path) {
-        return Err(AuthError::DbConflict);
-    }
-
-    let label = ltree_label_from_uuid(department_id);
-    let new_path = format!("{}.{}", new_parent.path, label);
-    let new_depth = new_parent.depth + 1;
-    let depth_delta = new_depth - dept.depth;
-    let updated_at = Utc::now();
-
-    // Update the root department's parent reference.
-    let parent_stmt = SqlQuery::update()
-        .table(departments::Entity)
-        .values([
-            (departments::Column::ParentId, req.new_parent_id.into()),
-            (departments::Column::UpdatedAt, updated_at.into()),
-        ])
-        .and_where(Expr::col(departments::Column::Id).eq(department_id))
-        .to_owned();
-
-    let (parent_sql, parent_values) = parent_stmt.build(PostgresQueryBuilder);
-    app_state
-        .database
-        .execute(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            parent_sql,
-            parent_values,
-        ))
-        .await
-        .map_err(|e| {
-            eprintln!("db update error: {e}");
-            AuthError::DbTimeout
-        })?;
-
-    // Update the entire subtree's path + depth using a prefix replace.
-    let subtree_stmt = SqlQuery::update()
-        .table(departments::Entity)
-        .values([
-            (
-                departments::Column::Depth,
-                Expr::col(departments::Column::Depth)
-                    .add(depth_delta)
-                    .into(),
-            ),
-            (
-                departments::Column::Path,
-                Expr::cust(format!(
-                    "replace(path::text, '{}', '{}')::ltree",
-                    dept.path, new_path
-                ))
-                .into(),
-            ),
-            (departments::Column::UpdatedAt, updated_at.into()),
-        ])
-        .and_where(Expr::col(departments::Column::Path).binary(
-            BinOper::Custom("<@".into()),
-            Expr::val(dept.path.clone()).cast_as(Alias::new("ltree")),
-        ))
-        .to_owned();
-
-    let (subtree_sql, subtree_values) = subtree_stmt.build(PostgresQueryBuilder);
-    app_state
-        .database
-        .execute(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            subtree_sql,
-            subtree_values,
-        ))
-        .await
-        .map_err(|e| {
-            eprintln!("db subtree update error: {e}");
-            AuthError::DbTimeout
-        })?;
+    let txn = app_state.database.begin().await.map_err(|e| {
+        eprintln!("department move transaction error: {e}");
+        AuthError::DbTimeout
+    })?;
+    reparent_department(&txn, department_id, Some(new_parent.id), Utc::now()).await?;
+    txn.commit().await.map_err(|e| {
+        eprintln!("department move commit error: {e}");
+        AuthError::DbTimeout
+    })?;
 
     let _ = authz
         .recompute_effective_permissions_for_department_scope(department_id)
@@ -1217,25 +1164,7 @@ pub async fn delete_department(
             Some(department_id),
         )
         .await?;
-    // Remove scoped role assignments for this department to avoid FK set-null conflicts
-    let _ = user_role_assignments::Entity::delete_many()
-        .filter(user_role_assignments::Column::ScopeDepartmentId.eq(department_id))
-        .exec(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("role assignment delete error: {e}");
-            AuthError::DbTimeout
-        })?;
-    let res = departments::Entity::delete_by_id(department_id)
-        .exec(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("delete error: {e}");
-            AuthError::DbTimeout
-        })?;
-    if res.rows_affected == 0 {
-        return Err(AuthError::DbNotFound);
-    }
+    delete_department_with_scoped_assignments(&app_state.database, department_id).await?;
     let _ = authz.recompute_effective_permissions_for_all_users().await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1271,6 +1200,13 @@ pub async fn add_users_in_department(
             Some(department_id),
         )
         .await?;
+    ensure_member_move_allowed(
+        &app_state.database,
+        claims.user_id,
+        department_id,
+        &user_ids,
+    )
+    .await?;
     let response = get_department_by_id(
         claims,
         State(app_state.clone()),
@@ -1327,6 +1263,10 @@ pub async fn remove_users_from_department(
         )
         .await?;
     let force = query.force.unwrap_or(false);
+    if force {
+        ensure_member_release_to_parent_allowed(&app_state.database, claims.user_id, department_id)
+            .await?;
+    }
 
     let users_t = Alias::new(users::Entity.table_name());
     let depts_t = Alias::new(departments::Entity.table_name());

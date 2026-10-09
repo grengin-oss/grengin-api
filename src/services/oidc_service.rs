@@ -4,10 +4,11 @@
 use crate::{
     auth::{
         azure::{
-            AzureMultitenantValidation, AzureOidcClient, build_azure_public_client,
-            invalidate_azure_multitenant_cache, validate_azure_multitenant_id_token,
+            AzureMultitenantValidation, AzureOidcClient, azure_email_domain_owner_verified,
+            build_azure_public_client, invalidate_azure_multitenant_cache,
+            validate_azure_multitenant_id_token,
         },
-        claims::{Claiming as _, Claims, RefreshClaims},
+        claims::{ACCESS_TOKEN_TTL_SECS, Claiming as _, Claims, RefreshClaims},
         error::AuthError,
         github::GitHubAdapterError,
         identity::VerifiedIdentity,
@@ -34,8 +35,9 @@ use openidconnect::{
 };
 use openidconnect::{OAuth2TokenResponse, TokenResponse as OidcTokenResponse};
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DbErr, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, TryIntoModel, sea_query::Expr,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection,
+    DatabaseTransaction, DbErr, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    Select, TransactionTrait, TryIntoModel, sea_query::Expr,
 };
 use serde::Deserialize;
 use std::borrow::Cow;
@@ -160,6 +162,90 @@ fn merged_identities(
     serde_json::to_value(map).ok()
 }
 
+const PLACEHOLDER_EMAIL_DOMAIN: &str = "users.noreply.oidc";
+
+#[derive(Clone, Copy)]
+struct AzureEmailEvidence {
+    multitenant: bool,
+    domain_owner_verified: Option<bool>,
+}
+
+fn id_token_email_verified(claim: Option<bool>, azure: Option<AzureEmailEvidence>) -> bool {
+    match azure {
+        // Any Entra tenant can set any user's `email` (nOAuth); only xms_edov or a single-tenant authority vouches for it.
+        Some(evidence) => evidence
+            .domain_owner_verified
+            .or(claim)
+            .unwrap_or(!evidence.multitenant),
+        None => claim.unwrap_or(false),
+    }
+}
+
+fn proxy_assertion_email_verified(claim: Option<bool>) -> bool {
+    claim.unwrap_or(true)
+}
+
+fn ensure_proxy_assertion_expected(use_grengin_proxy: bool) -> Result<(), AuthError> {
+    if use_grengin_proxy {
+        Ok(())
+    } else {
+        Err(AuthError::InvalidCallbackParameters)
+    }
+}
+
+fn is_placeholder_email(email: &str) -> bool {
+    email
+        .rsplit_once('@')
+        .is_some_and(|(_, domain)| domain.eq_ignore_ascii_case(PLACEHOLDER_EMAIL_DOMAIN))
+}
+
+fn ensure_email_domain_allowed(
+    email: Option<&str>,
+    email_verified: bool,
+    allowed_domains: &[String],
+) -> Result<(), AuthError> {
+    let Some(email) = email else {
+        return if allowed_domains.is_empty() {
+            Ok(())
+        } else {
+            Err(AuthError::EmailDomainNotAllowed { domain: None })
+        };
+    };
+    if !email_verified && !allowed_domains.is_empty() {
+        return Err(AuthError::InvalidToken);
+    }
+    let Some((_, domain)) = email.split_once('@') else {
+        return Err(AuthError::EmailDomainNotAllowed { domain: None });
+    };
+    if allowed_domains.is_empty() {
+        return Ok(());
+    }
+    let domain = domain.to_ascii_lowercase();
+    if allowed_domains
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(&domain))
+    {
+        Ok(())
+    } else {
+        Err(AuthError::EmailDomainNotAllowed {
+            domain: Some(domain),
+        })
+    }
+}
+
+fn email_link_allowed(
+    mode: &EmailLinkingMode,
+    email: &str,
+    email_verified: bool,
+    linked_subject: Option<&str>,
+    subject: &str,
+) -> bool {
+    matches!(mode, EmailLinkingMode::VerifiedEmail)
+        && email_verified
+        && !is_placeholder_email(email)
+        && linked_subject.is_none_or(|linked| linked == subject)
+}
+
 // Called only once tokens are granted. Accounts created before tourGuide
 // existed have no stored value and are left alone, so they read as
 // firstLogin: false. Returns None when nothing changed.
@@ -176,6 +262,45 @@ fn merged_granted_login_metadata(
         return None;
     }
     tour_guide.merge_into(existing_metadata)
+}
+
+// Link checks and the identities merge read the row they then rewrite, so concurrent
+// callbacks for the same user must serialise on it; otherwise one can link a different
+// subject past the other's check or drop the other's identity.
+async fn begin_login_transaction(
+    db: &DatabaseConnection,
+) -> Result<DatabaseTransaction, AuthError> {
+    db.begin().await.map_err(|e| {
+        eprintln!("db error while starting login transaction: {e:?}");
+        AuthError::ServiceTemporarilyUnavailable
+    })
+}
+
+fn locked_login_user_query(user_id: Uuid) -> Select<users::Entity> {
+    users::Entity::find_by_id(user_id)
+        .filter(users::Column::Status.ne(UserStatus::Deleted))
+        .lock_exclusive()
+}
+
+async fn lock_user_for_login(
+    txn: &DatabaseTransaction,
+    user_id: Uuid,
+) -> Result<users::Model, AuthError> {
+    locked_login_user_query(user_id)
+        .one(txn)
+        .await
+        .map_err(|e| {
+            eprintln!("db error while locking user for login: {e:?}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?
+        .ok_or(AuthError::InvalidToken)
+}
+
+async fn commit_login_transaction(txn: DatabaseTransaction) -> Result<(), AuthError> {
+    txn.commit().await.map_err(|e| {
+        eprintln!("db error while committing login: {e:?}");
+        AuthError::ServiceTemporarilyUnavailable
+    })
 }
 
 async fn consume_oauth_session<C>(
@@ -250,6 +375,7 @@ pub async fn oidc_oauth_callback(
         }
     })?;
     let identity = if let Some(assertion) = cb.assertion.clone() {
+        ensure_proxy_assertion_expected(runtime.use_grengin_proxy)?;
         let expected_audience =
             origin_from_url(&redirect_uri_value).ok_or(AuthError::InvalidRedirectUri {
                 redirect_uri: Some(redirect_uri_value.clone()),
@@ -265,7 +391,7 @@ pub async fn oidc_oauth_callback(
         VerifiedIdentity {
             subject: claims.provider_sub.ok_or(AuthError::InvalidToken)?,
             email: claims.email,
-            email_verified: true,
+            email_verified: proxy_assertion_email_verified(claims.email_verified),
             display_name: claims.name,
             picture: claims.picture,
             hosted_domain: None,
@@ -402,9 +528,15 @@ pub async fn oidc_oauth_callback(
             // Keep the persisted subject unchanged for compatibility with existing Entra users.
             let subject = claims.subject().as_str().to_string();
             let mut email = claims.email().map(|e| e.as_str().to_string());
-            let mut email_verified = claims.email_verified().unwrap_or_else(|| {
-                provider.eq_ignore_ascii_case("azure") || provider.eq_ignore_ascii_case("apple")
-            });
+            let azure_email_evidence =
+                provider
+                    .eq_ignore_ascii_case("azure")
+                    .then(|| AzureEmailEvidence {
+                        multitenant: azure_multitenant_validation.is_some(),
+                        domain_owner_verified: azure_email_domain_owner_verified(id_token),
+                    });
+            let mut email_verified =
+                id_token_email_verified(claims.email_verified(), azure_email_evidence);
             let picture = claims
                 .picture()
                 .and_then(|pic_claim| pic_claim.get(None))
@@ -461,15 +593,7 @@ pub async fn oidc_oauth_callback(
     } else {
         None
     };
-    if let Some(email) = email.as_ref() {
-        if !email_verified && !runtime.allowed_domains.is_empty() {
-            return Err(AuthError::InvalidToken);
-        }
-        let (is_allowed, domain) = app_state.is_email_domain_allowed(email, &provider).await;
-        if !is_allowed {
-            return Err(AuthError::EmailDomainNotAllowed { domain });
-        }
-    }
+    ensure_email_domain_allowed(email.as_deref(), email_verified, &runtime.allowed_domains)?;
     let normalized_provider = provider.trim().to_ascii_lowercase();
     let identity_match = serde_json::json!({
         normalized_provider.clone(): { "subject": sub.clone() }
@@ -506,7 +630,9 @@ pub async fn oidc_oauth_callback(
                 })?;
         }
     }
-    if let Some(u) = &user {
+    if let Some(user_id) = user.as_ref().map(|u| u.id) {
+        let txn = begin_login_transaction(&app_state.database).await?;
+        let u = lock_user_for_login(&txn, user_id).await?;
         match &u.status {
             UserStatus::Deactivated | UserStatus::Suspended => {
                 return Err(AuthError::AccountDeactivated);
@@ -524,10 +650,12 @@ pub async fn oidc_oauth_callback(
             email.as_deref(),
         ));
         active_user.last_login_at = Set(Utc::now());
-        active_user.update(&app_state.database).await.map_err(|e| {
+        active_user.update(&txn).await.map_err(|e| {
             eprintln!("db error while updating user {:?}", e);
             AuthError::ServiceTemporarilyUnavailable
         })?;
+        commit_login_transaction(txn).await?;
+        user = Some(u);
     }
     if user.is_none() {
         if let Some(ref em) = email {
@@ -542,7 +670,9 @@ pub async fn oidc_oauth_callback(
                     AuthError::ServiceTemporarilyUnavailable
                 })?;
 
-            if let Some(u) = &user {
+            if let Some(user_id) = user.as_ref().map(|u| u.id) {
+                let txn = begin_login_transaction(&app_state.database).await?;
+                let u = lock_user_for_login(&txn, user_id).await?;
                 match &u.status {
                     UserStatus::Deactivated | UserStatus::Suspended => {
                         return Err(AuthError::AccountDeactivated);
@@ -552,16 +682,16 @@ pub async fn oidc_oauth_callback(
                     }
                     _ => (),
                 }
-                let configured_linking = matches!(
-                    runtime.configuration.email_linking,
-                    EmailLinkingMode::VerifiedEmail
-                );
-                if !configured_linking || !email_verified {
-                    return Err(AuthError::InvalidToken);
-                }
-                if u.identity_for(&normalized_provider)
-                    .is_some_and(|identity| identity.subject != sub)
-                {
+                let linked_identity = u.identity_for(&normalized_provider);
+                if !email_link_allowed(
+                    &runtime.configuration.email_linking,
+                    em,
+                    email_verified,
+                    linked_identity
+                        .as_ref()
+                        .map(|identity| identity.subject.as_str()),
+                    &sub,
+                ) {
                     return Err(AuthError::InvalidToken);
                 }
                 let can_link_google = google_id.is_some() && u.google_id.is_none();
@@ -581,10 +711,12 @@ pub async fn oidc_oauth_callback(
                 ));
                 active_user.updated_at = Set(Utc::now());
                 active_user.last_login_at = Set(Utc::now());
-                active_user.update(&app_state.database).await.map_err(|e| {
+                active_user.update(&txn).await.map_err(|e| {
                     eprintln!("db error while updating user {:?}", e);
                     AuthError::ServiceTemporarilyUnavailable
                 })?;
+                commit_login_transaction(txn).await?;
+                user = Some(u);
             }
         }
     }
@@ -612,7 +744,7 @@ pub async fn oidc_oauth_callback(
             id: Set(Uuid::new_v4()),
             email: Set(email
                 .clone()
-                .unwrap_or_else(|| format!("{sub}@users.noreply.oidc"))),
+                .unwrap_or_else(|| format!("{sub}@{PLACEHOLDER_EMAIL_DOMAIN}"))),
             name: Set(display_name.into()),
             google_id: Set(google_id),
             azure_id: Set(azure_id),
@@ -722,7 +854,7 @@ pub async fn oidc_oauth_callback(
     let resp = AuthToken {
         access_token: access_token_claims.get_token_string(),
         token_type: TokenType::Bearer,
-        expires_in: 3600,
+        expires_in: ACCESS_TOKEN_TTL_SECS as i32,
         refresh_token: Some(refresh_token_claims.get_token_string()),
         user: Some(user_response),
     };
@@ -922,6 +1054,18 @@ mod tests {
     }
 
     #[test]
+    fn login_updates_lock_the_live_user_row() {
+        use sea_orm::{DbBackend, QueryTrait};
+
+        let sql = locked_login_user_query(Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+
+        assert!(sql.ends_with("FOR UPDATE"), "{sql}");
+        assert!(sql.contains(r#""users"."status" <> 'deleted'"#), "{sql}");
+    }
+
+    #[test]
     fn identity_merge_replaces_only_the_same_provider() {
         let first = merged_identities(&users::IdentityMap::new(), "okta", "old-subject", None)
             .expect("first identity map");
@@ -934,6 +1078,212 @@ mod tests {
 
         assert_eq!(second.len(), 1);
         assert_eq!(second["okta"].subject, "new-subject");
+    }
+
+    fn domains(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    const SINGLE_TENANT_AZURE: AzureEmailEvidence = AzureEmailEvidence {
+        multitenant: false,
+        domain_owner_verified: None,
+    };
+    const MULTITENANT_AZURE: AzureEmailEvidence = AzureEmailEvidence {
+        multitenant: true,
+        domain_owner_verified: None,
+    };
+
+    #[test]
+    fn id_token_email_verified_claim_is_honoured() {
+        assert!(id_token_email_verified(Some(true), None));
+        assert!(!id_token_email_verified(Some(false), None));
+    }
+
+    #[test]
+    fn missing_email_verified_claim_means_unverified_for_generic_oidc_and_apple() {
+        assert!(!id_token_email_verified(None, None));
+    }
+
+    #[test]
+    fn single_tenant_azure_email_is_trusted_without_a_claim() {
+        assert!(id_token_email_verified(None, Some(SINGLE_TENANT_AZURE)));
+    }
+
+    #[test]
+    fn multitenant_azure_email_without_domain_owner_proof_is_unverified() {
+        assert!(!id_token_email_verified(None, Some(MULTITENANT_AZURE)));
+    }
+
+    #[test]
+    fn multitenant_azure_email_with_xms_edov_true_is_verified() {
+        let evidence = AzureEmailEvidence {
+            domain_owner_verified: Some(true),
+            ..MULTITENANT_AZURE
+        };
+
+        assert!(id_token_email_verified(None, Some(evidence)));
+    }
+
+    #[test]
+    fn azure_xms_edov_false_overrides_single_tenant_trust_and_claims() {
+        let evidence = AzureEmailEvidence {
+            domain_owner_verified: Some(false),
+            ..SINGLE_TENANT_AZURE
+        };
+
+        assert!(!id_token_email_verified(Some(true), Some(evidence)));
+    }
+
+    #[test]
+    fn azure_email_verified_claim_false_is_honoured_in_single_tenant() {
+        assert!(!id_token_email_verified(
+            Some(false),
+            Some(SINGLE_TENANT_AZURE)
+        ));
+    }
+
+    #[test]
+    fn proxy_assertion_reporting_unverified_email_is_not_verified() {
+        assert!(!proxy_assertion_email_verified(Some(false)));
+        assert!(proxy_assertion_email_verified(Some(true)));
+    }
+
+    #[test]
+    fn proxy_assertion_without_email_verified_keeps_trusting_the_proxy() {
+        assert!(proxy_assertion_email_verified(None));
+    }
+
+    #[test]
+    fn proxy_assertion_is_rejected_for_providers_not_using_the_proxy() {
+        assert!(ensure_proxy_assertion_expected(true).is_ok());
+        assert!(matches!(
+            ensure_proxy_assertion_expected(false),
+            Err(AuthError::InvalidCallbackParameters)
+        ));
+    }
+
+    #[test]
+    fn login_without_email_passes_when_no_allow_list_is_configured() {
+        assert!(ensure_email_domain_allowed(None, false, &[]).is_ok());
+    }
+
+    #[test]
+    fn login_without_email_is_rejected_by_a_configured_allow_list() {
+        assert!(matches!(
+            ensure_email_domain_allowed(None, false, &domains(&["corp.com"])),
+            Err(AuthError::EmailDomainNotAllowed { domain: None })
+        ));
+    }
+
+    #[test]
+    fn placeholder_email_is_rejected_by_a_configured_allow_list() {
+        let placeholder = format!("subject-1@{PLACEHOLDER_EMAIL_DOMAIN}");
+
+        assert!(matches!(
+            ensure_email_domain_allowed(Some(&placeholder), true, &domains(&["corp.com"])),
+            Err(AuthError::EmailDomainNotAllowed { domain: Some(_) })
+        ));
+    }
+
+    #[test]
+    fn unverified_email_is_rejected_by_a_configured_allow_list() {
+        assert!(matches!(
+            ensure_email_domain_allowed(Some("ada@corp.com"), false, &domains(&["corp.com"])),
+            Err(AuthError::InvalidToken)
+        ));
+    }
+
+    #[test]
+    fn verified_email_in_an_allowed_domain_is_accepted_case_insensitively() {
+        assert!(
+            ensure_email_domain_allowed(Some("Ada@CORP.com"), true, &domains(&["corp.com"]))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn verified_email_outside_the_allow_list_is_rejected() {
+        assert!(matches!(
+            ensure_email_domain_allowed(Some("ada@evil.com"), true, &domains(&["corp.com"])),
+            Err(AuthError::EmailDomainNotAllowed { domain: Some(domain) }) if domain == "evil.com"
+        ));
+    }
+
+    #[test]
+    fn email_without_a_domain_is_rejected_even_without_an_allow_list() {
+        assert!(matches!(
+            ensure_email_domain_allowed(Some("not-an-email"), true, &[]),
+            Err(AuthError::EmailDomainNotAllowed { domain: None })
+        ));
+    }
+
+    #[test]
+    fn any_email_passes_when_no_allow_list_is_configured() {
+        assert!(ensure_email_domain_allowed(Some("ada@anywhere.com"), false, &[]).is_ok());
+    }
+
+    #[test]
+    fn verified_email_links_to_an_existing_account() {
+        assert!(email_link_allowed(
+            &EmailLinkingMode::VerifiedEmail,
+            "ada@corp.com",
+            true,
+            None,
+            "subject-1"
+        ));
+        assert!(email_link_allowed(
+            &EmailLinkingMode::VerifiedEmail,
+            "ada@corp.com",
+            true,
+            Some("subject-1"),
+            "subject-1"
+        ));
+    }
+
+    #[test]
+    fn unverified_email_never_links_to_an_existing_account() {
+        assert!(!email_link_allowed(
+            &EmailLinkingMode::VerifiedEmail,
+            "ada@corp.com",
+            false,
+            None,
+            "subject-1"
+        ));
+    }
+
+    #[test]
+    fn disabled_email_linking_never_links() {
+        assert!(!email_link_allowed(
+            &EmailLinkingMode::Disabled,
+            "ada@corp.com",
+            true,
+            None,
+            "subject-1"
+        ));
+    }
+
+    #[test]
+    fn placeholder_email_never_links_to_an_existing_account() {
+        let placeholder = format!("subject-1@{}", PLACEHOLDER_EMAIL_DOMAIN.to_uppercase());
+
+        assert!(!email_link_allowed(
+            &EmailLinkingMode::VerifiedEmail,
+            &placeholder,
+            true,
+            None,
+            "subject-1"
+        ));
+    }
+
+    #[test]
+    fn email_link_is_refused_when_another_subject_is_already_linked() {
+        assert!(!email_link_allowed(
+            &EmailLinkingMode::VerifiedEmail,
+            "ada@corp.com",
+            true,
+            Some("subject-1"),
+            "subject-2"
+        ));
     }
 
     #[test]

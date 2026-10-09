@@ -1667,3 +1667,59 @@ async fn keeps_other_http_errors_bounded_and_generic() {
     ));
     assert!(!server_error.to_string().contains("internal provider trace"));
 }
+
+const GEMINI_IMAGE_MANIFEST: &[u8] = include_bytes!("../examples/gemini-image.provider.json");
+
+#[tokio::test]
+async fn gemini_image_key_is_sent_as_a_header_and_never_in_the_url_or_error() {
+    let (base_url, requests) = serve_once(
+        "400 Bad Request",
+        "application/json",
+        br#"{"error":{"message":"API key not valid: super-secret"}}"#.to_vec(),
+    )
+    .await;
+    let manifest = ProviderManifestV1::from_json(GEMINI_IMAGE_MANIFEST).unwrap();
+    let provider = DeclarativeProvider::new(manifest, runtime(base_url)).unwrap();
+
+    let error = provider
+        .images()
+        .unwrap()
+        .generate(ImageRequest {
+            model: ModelId::new("gemini-3.1-flash-lite-image"),
+            ..image_request(1)
+        })
+        .await
+        .unwrap_err();
+    assert!(!error.to_string().contains("super-secret"), "{error}");
+    assert!(!format!("{error:?}").contains("super-secret"));
+
+    let requests = requests.lock().await;
+    let mut head = requests[0].head.lines();
+    let request_line = head.next().unwrap();
+    assert!(request_line.contains(":generateContent"), "{request_line}");
+    assert!(!request_line.contains("super-secret"), "{request_line}");
+    assert!(!request_line.contains("key="), "{request_line}");
+    assert!(head.any(|line| line.eq_ignore_ascii_case("x-goog-api-key: super-secret")));
+}
+
+#[test]
+fn manifests_cannot_map_credentials_into_query_parameters() {
+    let value = manifest_value(
+        "https://example.com/v1/",
+        json!({"imageGeneration": true}),
+        json!({
+            "imageGeneration": {
+                "method": "POST",
+                "path": "images",
+                "query": {"key": {"$get": "credentials.api_key"}},
+                "bodyEncoding": "json",
+                "body": {},
+                "response": {"bodyEncoding": "binary"}
+            }
+        }),
+    );
+    assert!(matches!(
+        ProviderManifestV1::from_json(&serde_json::to_vec(&value).unwrap()),
+        Err(ProviderError::InvalidManifest(_))
+    ));
+}

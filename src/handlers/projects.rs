@@ -34,7 +34,6 @@ use crate::{
         project_sources, projects, projects::ProjectVisibility, users,
     },
     services::{
-        file_storage::remove_model_file,
         project_helpers::*,
         project_source_processing::{
             delete_source_chunks, process_source_before_response, write_artifact_file,
@@ -565,7 +564,10 @@ pub async fn add_project_source(
     Json(req): Json<AddSourceRequest>,
 ) -> Result<(StatusCode, Json<ProjectSourceResponse>), AuthError> {
     let project = get_project_or_404(id, &app_state.database).await?;
-    ensure_project_read_access(claims.user_id, &project, &app_state.database).await?;
+    ensure_project_content_access(claims.user_id, &project, &app_state.database).await?;
+    if let Some(file_id) = req.file_id {
+        ensure_source_file_attachable(claims.user_id, id, file_id, &app_state.database).await?;
+    }
 
     let origin = req
         .origin
@@ -573,7 +575,7 @@ pub async fn add_project_source(
         .unwrap_or("uploaded")
         .trim()
         .to_ascii_lowercase();
-    if !matches!(origin.as_str(), "uploaded" | "artifact") {
+    if origin != "uploaded" {
         return Err(AuthError::InvalidRequest { field: "origin" });
     }
 
@@ -989,7 +991,7 @@ pub async fn add_project_artifact(
     Json(req): Json<ArtifactCreateRequest>,
 ) -> Result<(StatusCode, Json<ProjectSourceResponse>), AuthError> {
     let project = get_project_or_404(id, &app_state.database).await?;
-    ensure_project_read_access(claims.user_id, &project, &app_state.database).await?;
+    ensure_project_content_access(claims.user_id, &project, &app_state.database).await?;
 
     let title = req.title.trim().to_string();
     if title.is_empty() {
@@ -1125,7 +1127,7 @@ pub async fn update_project_artifact(
     Json(req): Json<ArtifactUpdateRequest>,
 ) -> Result<(StatusCode, Json<ProjectSourceResponse>), AuthError> {
     let project = get_project_or_404(id, &app_state.database).await?;
-    ensure_project_read_access(claims.user_id, &project, &app_state.database).await?;
+    ensure_project_content_access(claims.user_id, &project, &app_state.database).await?;
 
     let artifact = project_sources::Entity::find()
         .filter(project_sources::Column::Id.eq(artifact_id))
@@ -1241,9 +1243,9 @@ pub async fn delete_project_artifact(
     Path((id, artifact_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, AuthError> {
     let project = get_project_or_404(id, &app_state.database).await?;
-    ensure_project_read_access(claims.user_id, &project, &app_state.database).await?;
+    ensure_project_content_access(claims.user_id, &project, &app_state.database).await?;
 
-    let artifact = project_sources::Entity::find()
+    project_sources::Entity::find()
         .filter(project_sources::Column::Id.eq(artifact_id))
         .filter(project_sources::Column::ProjectId.eq(id))
         .filter(project_sources::Column::Origin.eq("artifact"))
@@ -1267,17 +1269,8 @@ pub async fn delete_project_artifact(
             AuthError::DbTimeout
         })?;
 
-    if let Some(fid) = artifact.file_id {
-        if let Ok(Some(file)) = crate::models::files::Entity::find_by_id(fid)
-            .one(&app_state.database)
-            .await
-            && let Err(error) =
-                remove_model_file(&app_state.settings.file_storage_root, &file).await
-        {
-            eprintln!("project artifact file cleanup failed: {error:?}");
-        }
-    }
-
+    // Older source rows could mark an uploaded attachment as an artifact. Retain the file
+    // because chats and other project sources may still reference its ID.
     Ok(StatusCode::NO_CONTENT)
 }
 

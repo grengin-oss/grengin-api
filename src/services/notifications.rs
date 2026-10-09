@@ -19,7 +19,7 @@ use crate::{
         departments, notifications, permissions, role_permissions, roles, user_role_assignments,
         users::{self, UserStatus},
     },
-    services::budget_allocation::period_bounds,
+    services::budget_allocation::{BudgetHealth, period_bounds},
     state::SharedState,
 };
 
@@ -79,16 +79,10 @@ pub async fn emit_budget_alerts(state: &SharedState, department_id: Uuid) -> Res
 
     let budget_available = dept.budget_available;
     let budget_allocated = dept.budget_allocated;
-    let kind = if budget_available <= Decimal::ZERO {
-        BUDGET_EXHAUSTED_KIND
-    } else {
-        let low_threshold =
-            budget_allocated * Decimal::from_f32_retain(0.2).unwrap_or(Decimal::ZERO);
-        if budget_allocated > Decimal::ZERO && budget_available <= low_threshold {
-            BUDGET_LOW_KIND
-        } else {
-            return Ok(());
-        }
+    let kind = match BudgetHealth::classify(budget_allocated, budget_available) {
+        BudgetHealth::Exhausted => BUDGET_EXHAUSTED_KIND,
+        BudgetHealth::Low => BUDGET_LOW_KIND,
+        BudgetHealth::Unlimited | BudgetHealth::Healthy => return Ok(()),
     };
 
     let now = Utc::now();

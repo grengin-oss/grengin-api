@@ -438,12 +438,73 @@ fn format_pgvector(values: &[f32]) -> String {
 }
 
 fn truncate_snippet(value: &str) -> String {
-    const MAX_LEN: usize = 240;
+    const MAX_CHARS: usize = 240;
     let trimmed = value.trim();
-    if trimmed.len() <= MAX_LEN {
-        return trimmed.to_string();
+    match trimmed.char_indices().nth(MAX_CHARS) {
+        Some((cut, _)) => format!("{}...", &trimmed[..cut]),
+        None => trimmed.to_string(),
     }
-    let mut out = trimmed[..MAX_LEN].to_string();
-    out.push_str("...");
-    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_snippet;
+
+    #[test]
+    fn short_snippet_is_returned_trimmed_without_ellipsis() {
+        assert_eq!(truncate_snippet("  hello world \n"), "hello world");
+    }
+
+    #[test]
+    fn snippet_of_exactly_240_chars_has_no_ellipsis() {
+        let text = "a".repeat(240);
+        assert_eq!(truncate_snippet(&text), text);
+    }
+
+    #[test]
+    fn ascii_snippet_over_limit_is_cut_at_240_chars_with_ellipsis() {
+        let out = truncate_snippet(&"a".repeat(500));
+        assert_eq!(out, format!("{}...", "a".repeat(240)));
+    }
+
+    #[test]
+    fn emoji_straddling_byte_240_is_kept_whole() {
+        let text = format!("{}{}", "a".repeat(239), "😀".repeat(5));
+        let out = truncate_snippet(&text);
+        assert_eq!(out, format!("{}😀...", "a".repeat(239)));
+    }
+
+    #[test]
+    fn cjk_snippet_is_cut_by_characters_not_bytes() {
+        let out = truncate_snippet(&"漢字".repeat(200));
+        assert_eq!(out.chars().count(), 243);
+        assert!(out.starts_with("漢字漢字"));
+        assert!(out.ends_with("字..."));
+    }
+
+    #[test]
+    fn precomposed_accent_at_byte_240_does_not_panic() {
+        let text = format!("a{}", "é".repeat(300));
+        let out = truncate_snippet(&text);
+        assert_eq!(out, format!("a{}...", "é".repeat(239)));
+    }
+
+    #[test]
+    fn combining_accent_split_at_the_limit_drops_only_the_mark() {
+        let text = format!("a{}", "e\u{301}".repeat(200));
+        let out = truncate_snippet(&text);
+        assert_eq!(out, format!("a{}e...", "e\u{301}".repeat(119)));
+    }
+
+    #[test]
+    fn multibyte_text_within_limit_is_not_truncated() {
+        let text = "😀".repeat(240);
+        assert_eq!(truncate_snippet(&text), text);
+    }
+
+    #[test]
+    fn leading_whitespace_does_not_count_toward_the_limit() {
+        let text = format!("   {}", "ü".repeat(240));
+        assert_eq!(truncate_snippet(&text), "ü".repeat(240));
+    }
 }

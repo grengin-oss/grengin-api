@@ -11,8 +11,8 @@ use crate::{
     dto::models::{ModelInfo, ModelsResponse, ProviderInfo},
     models::users,
     services::{
-        department_policies::effective_allowed_models, models_cache::load_providers_cached,
-        provider_models::is_chat_selectable_model,
+        chat_stream_helpers::is_model_whitelisted, department_policies::effective_allowed_models,
+        models_cache::load_providers_cached, provider_models::is_chat_selectable_model,
     },
     state::SharedState,
 };
@@ -83,7 +83,7 @@ pub async fn get_list_models(
             .models
             .into_iter()
             .filter(is_chat_selectable_model)
-            .filter(|model| whitelist.contains(&model.name) || whitelist.contains(&model.key))
+            .filter(|model| is_model_whitelisted(&whitelist, &[&model.key, &model.name]))
             .collect::<Vec<ModelInfo>>();
         if let Some(allowed) = &allowed_set {
             let provider_key = provider.key.to_lowercase();
@@ -116,6 +116,14 @@ pub async fn get_list_models(
         if plugin.models().is_none() {
             continue;
         }
+        let whitelist = app_state
+            .settings
+            .get_ai_engine_whitelist(&provider_key)
+            .await
+            .unwrap_or_default();
+        if whitelist.is_empty() {
+            continue;
+        }
         let plugin_models = match app_state
             .live_models_cache
             .get_or_fetch(&provider_key, plugin.as_ref())
@@ -134,6 +142,7 @@ pub async fn get_list_models(
             .into_iter()
             .map(|model| crate::services::provider_models::to_model_info(&provider_key, model))
             .filter(is_chat_selectable_model)
+            .filter(|model| is_model_whitelisted(&whitelist, &[&model.key, &model.name]))
             .collect::<Vec<_>>();
         if let Some(allowed) = &allowed_set {
             models.retain(|model| {

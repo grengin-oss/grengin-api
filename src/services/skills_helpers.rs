@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::services::skill_access::visible_skills_condition;
 use crate::utils::zip::ZipArchive;
 use base64::prelude::*;
 use chrono::Utc;
@@ -77,14 +78,9 @@ pub async fn list_skills_query(
     is_active: Option<bool>,
     limit: u64,
     offset: u64,
-    own_user_id: Option<Uuid>,
+    user_id: Uuid,
 ) -> Result<(Vec<skills::Model>, u64), AuthError> {
-    // Include org/global skills (user_id IS NULL) plus the caller's own personal skills.
-    let mut user_filter = sea_orm::Condition::any().add(skills::Column::UserId.is_null());
-    if let Some(uid) = own_user_id {
-        user_filter = user_filter.add(skills::Column::UserId.eq(uid));
-    }
-    let mut select = skills::Entity::find().filter(user_filter);
+    let mut select = skills::Entity::find().filter(visible_skills_condition(Some(user_id)));
 
     if let Some(dept_id) = department_id {
         select = select.filter(
@@ -121,6 +117,7 @@ pub async fn list_skills_query(
 pub async fn load_skills_for_stream(
     db: &DatabaseConnection,
     conversation_id: Uuid,
+    user_id: Uuid,
     transient_skill_ids: &[Uuid],
 ) -> Vec<skills::Model> {
     let builtin_ids: Vec<Uuid> = skills::Entity::find()
@@ -157,6 +154,7 @@ pub async fn load_skills_for_stream(
     skills::Entity::find()
         .filter(skills::Column::Id.is_in(all_ids))
         .filter(skills::Column::IsActive.eq(true))
+        .filter(visible_skills_condition(Some(user_id)))
         .all(db)
         .await
         .unwrap_or_default()
@@ -470,6 +468,7 @@ async fn persist_skill_knowledge(
             name: &prepared.file_name,
             content_type: &prepared.content_type,
             bytes: &prepared.bytes,
+            content_sha256: None,
             description: Some("skill knowledge attachment".to_string()),
             metadata: None,
         },
@@ -666,6 +665,7 @@ pub async fn unlink_skill_from_conversation(
 pub async fn list_conversation_skills(
     db: &DatabaseConnection,
     conversation_id: Uuid,
+    user_id: Uuid,
 ) -> Result<Vec<(conversation_skills::Model, skills::Model)>, AuthError> {
     let links = conversation_skills::Entity::find()
         .filter(conversation_skills::Column::ConversationId.eq(conversation_id))
@@ -680,6 +680,7 @@ pub async fn list_conversation_skills(
     let skill_ids: Vec<Uuid> = links.iter().map(|l| l.skill_id).collect();
     let skill_map: HashMap<Uuid, skills::Model> = skills::Entity::find()
         .filter(skills::Column::Id.is_in(skill_ids))
+        .filter(visible_skills_condition(Some(user_id)))
         .all(db)
         .await
         .unwrap_or_default()
@@ -712,30 +713,42 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_knowledge_is_rejected_before_the_skill_transaction() {
-        let db = DatabaseConnection::Disconnected;
-        let save_called = Arc::new(AtomicBool::new(false));
-        let called = save_called.clone();
-        let result = save_skill_with_knowledge(
-            &db,
-            std::path::Path::new("/unused"),
-            Uuid::new_v4(),
-            Some(knowledge_attachment("../unsafe.md")),
-            move |_| {
-                Box::pin(async move {
-                    called.store(true, Ordering::SeqCst);
-                    Ok(skill_model(Uuid::new_v4()))
-                })
-            },
-        )
-        .await;
+        for file_name in [
+            "../unsafe.md",
+            "/etc/passwd",
+            "..\\unsafe.md",
+            "notes\0.md",
+            "notes.md/",
+            "",
+        ] {
+            let db = DatabaseConnection::Disconnected;
+            let save_called = Arc::new(AtomicBool::new(false));
+            let called = save_called.clone();
+            let result = save_skill_with_knowledge(
+                &db,
+                std::path::Path::new("/unused"),
+                Uuid::new_v4(),
+                Some(knowledge_attachment(file_name)),
+                move |_| {
+                    Box::pin(async move {
+                        called.store(true, Ordering::SeqCst);
+                        Ok(skill_model(Uuid::new_v4()))
+                    })
+                },
+            )
+            .await;
 
-        assert!(matches!(
-            result,
-            Err(AuthError::InvalidRequest {
-                field: "knowledge_attachment.file_name"
-            })
-        ));
-        assert!(!save_called.load(Ordering::SeqCst));
+            assert!(
+                matches!(
+                    result,
+                    Err(AuthError::InvalidRequest {
+                        field: "knowledge_attachment.file_name"
+                    })
+                ),
+                "{file_name:?} must be rejected"
+            );
+            assert!(!save_called.load(Ordering::SeqCst));
+        }
     }
 
     fn knowledge_attachment(file_name: &str) -> KnowledgeAttachment {

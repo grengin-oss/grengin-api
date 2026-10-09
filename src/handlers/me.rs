@@ -46,8 +46,8 @@ use crate::{
         analytics,
         authorization::{AuthorizationService, is_path_within_scope},
         me_helpers::{
-            load_administered_department_ids, load_administered_department_paths,
-            load_my_metadata, needs_effective_permissions_refresh, scope_condition,
+            load_administered_department_ids, load_administered_department_paths, load_my_metadata,
+            needs_effective_permissions_refresh, scope_condition,
             should_refresh_administered_departments, update_guide_page_count,
         },
     },
