@@ -2,17 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use chrono::Utc;
+use llm_plugin::ProviderError;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, prelude::Decimal, sea_query::Expr,
+    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, UpdateMany, prelude::Decimal,
+    sea_query::Expr,
 };
+use serde_json::Value;
 use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::{
-    dto::models::ModelInfo,
+    dto::{chat_stream::ResponseStopped, models::ModelInfo},
     error::{AppError, ErrorDetailVariant, ErrorResponse},
-    models::{departments::ActionOnExceed, messages},
+    models::{departments::ActionOnExceed, messages, messages::StopReason},
     services::budget_allocation::{BudgetHealth, get_department_budget_status},
     state::SharedState,
 };
@@ -136,6 +139,7 @@ pub struct ContentCheckpoint {
     message_id: Uuid,
     last_saved_at: Option<Instant>,
     unsaved: Option<String>,
+    stop_reason_if_dropped: Option<StopReason>,
 }
 
 impl ContentCheckpoint {
@@ -145,7 +149,18 @@ impl ContentCheckpoint {
             message_id,
             last_saved_at: None,
             unsaved: None,
+            stop_reason_if_dropped: Some(StopReason::NetworkError),
         }
+    }
+
+    // The reply's final state was saved, including any stop reason, so dropping the stream
+    // afterwards must not mark it as interrupted.
+    pub fn finish(&mut self) {
+        self.stop_reason_if_dropped = None;
+    }
+
+    pub fn fail_with(&mut self, reason: StopReason) {
+        self.stop_reason_if_dropped = Some(reason);
     }
 
     pub fn is_due(&self, now: Instant) -> bool {
@@ -163,29 +178,79 @@ impl ContentCheckpoint {
     }
 }
 
-// Covers streams dropped mid-response (client disconnect) between throttled saves.
+// Covers streams dropped mid-response (client disconnect, or a failure that ended the stream
+// early) between throttled saves: the latest text is kept and the reply is marked as stopped.
 impl Drop for ContentCheckpoint {
     fn drop(&mut self) {
-        let Some(content) = self.unsaved.take() else {
+        let content = self.unsaved.take();
+        let reason = self.stop_reason_if_dropped.take();
+        if content.is_none() && reason.is_none() {
             return;
-        };
+        }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
         let db = self.db.clone();
-        let message_id = self.message_id;
+        let update = interrupted_reply_update(self.message_id, content, reason);
         runtime.spawn(async move {
-            let result = messages::Entity::update_many()
-                .col_expr(messages::Column::MessageContent, Expr::value(content))
-                .col_expr(messages::Column::UpdatedAt, Expr::value(Utc::now()))
-                .filter(messages::Column::Id.eq(message_id))
-                .exec(&db)
-                .await;
-            if let Err(error) = result {
-                eprintln!("deferred assistant content save error: {error}");
+            if let Err(error) = update.exec(&db).await {
+                eprintln!("interrupted assistant reply save error: {error}");
             }
         });
     }
+}
+
+fn interrupted_reply_update(
+    message_id: Uuid,
+    content: Option<String>,
+    reason: Option<StopReason>,
+) -> UpdateMany<messages::Entity> {
+    let mut update = messages::Entity::update_many()
+        .col_expr(messages::Column::UpdatedAt, Expr::value(Utc::now()))
+        .filter(messages::Column::Id.eq(message_id));
+    if let Some(content) = content {
+        update = update.col_expr(messages::Column::MessageContent, Expr::value(content));
+    }
+    if let Some(reason) = reason {
+        // SeaQuery has no jsonb merge, and the other metadata keys must be kept.
+        update = update.col_expr(
+            messages::Column::Metadata,
+            Expr::cust_with_values(
+                r#"COALESCE("metadata", '{}'::jsonb) || jsonb_build_object('stopReason', $1::text)"#,
+                [reason.as_str()],
+            ),
+        );
+    }
+    update
+}
+
+pub fn with_stop_reason(metadata: Option<Value>, reason: StopReason) -> Value {
+    let mut map = match metadata {
+        Some(Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    map.insert(
+        StopReason::METADATA_KEY.to_string(),
+        Value::String(reason.as_str().to_string()),
+    );
+    Value::Object(map)
+}
+
+// A provider that couldn't be reached or dropped the connection is a network problem;
+// anything it answered with is the provider's.
+pub fn stop_reason_for_provider_error(error: &ProviderError) -> StopReason {
+    match error {
+        ProviderError::Transport(_) | ProviderError::StreamEnded => StopReason::NetworkError,
+        _ => StopReason::ProviderError,
+    }
+}
+
+pub fn response_stopped_event_data(message_id: Uuid, reason: StopReason) -> String {
+    serde_json::to_string(&ResponseStopped {
+        message_id,
+        stop_reason: reason,
+    })
+    .unwrap_or_else(|_| "{}".to_string())
 }
 
 #[cfg(test)]
@@ -225,6 +290,101 @@ mod tests {
 
     fn whitelist(entries: &[&str]) -> Vec<String> {
         entries.iter().map(|entry| entry.to_string()).collect()
+    }
+
+    fn checkpoint() -> ContentCheckpoint {
+        ContentCheckpoint::new(DatabaseConnection::Disconnected, Uuid::from_u128(5))
+    }
+
+    #[test]
+    fn a_dropped_stream_is_marked_as_a_network_interruption_by_default() {
+        let mut checkpoint = checkpoint();
+        assert_eq!(
+            checkpoint.stop_reason_if_dropped,
+            Some(StopReason::NetworkError)
+        );
+        checkpoint.stop_reason_if_dropped = None;
+    }
+
+    #[test]
+    fn a_finished_reply_is_not_marked_when_the_stream_is_dropped() {
+        let mut checkpoint = checkpoint();
+        checkpoint.finish();
+        assert_eq!(checkpoint.stop_reason_if_dropped, None);
+    }
+
+    #[test]
+    fn a_failure_that_ends_the_stream_keeps_its_own_reason() {
+        let mut checkpoint = checkpoint();
+        checkpoint.fail_with(StopReason::ServerError);
+        assert_eq!(
+            checkpoint.stop_reason_if_dropped,
+            Some(StopReason::ServerError)
+        );
+        checkpoint.stop_reason_if_dropped = None;
+    }
+
+    #[test]
+    fn interrupted_reply_update_keeps_other_metadata_and_saves_the_text() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = interrupted_reply_update(
+            Uuid::from_u128(5),
+            Some("partial answer".to_string()),
+            Some(StopReason::NetworkError),
+        )
+        .build(DbBackend::Postgres)
+        .to_string();
+
+        assert!(
+            sql.contains(r#"COALESCE("metadata", '{}'::jsonb) ||"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("jsonb_build_object('stopReason', 'network_error'"),
+            "{sql}"
+        );
+        assert!(sql.contains("'partial answer'"), "{sql}");
+        assert!(
+            sql.contains(&format!(r#""id" = '{}'"#, Uuid::from_u128(5))),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn stop_reason_is_merged_into_existing_metadata() {
+        let metadata = serde_json::json!({"webSearch": true, "cancelled": true});
+        let merged = with_stop_reason(Some(metadata), StopReason::UserEdited);
+        assert_eq!(merged["webSearch"], true);
+        assert_eq!(merged["cancelled"], true);
+        assert_eq!(merged["stopReason"], "user_edited");
+        assert_eq!(
+            with_stop_reason(None, StopReason::ProviderError)["stopReason"],
+            "provider_error"
+        );
+    }
+
+    #[test]
+    fn unreachable_or_dropped_providers_are_network_errors() {
+        assert_eq!(
+            stop_reason_for_provider_error(&ProviderError::StreamEnded),
+            StopReason::NetworkError
+        );
+        assert_eq!(
+            stop_reason_for_provider_error(&ProviderError::QuotaExhausted),
+            StopReason::ProviderError
+        );
+        assert_eq!(
+            stop_reason_for_provider_error(&ProviderError::PaymentRequired),
+            StopReason::ProviderError
+        );
+    }
+
+    #[test]
+    fn response_stopped_event_names_the_message_and_the_reason() {
+        let data = response_stopped_event_data(Uuid::from_u128(5), StopReason::UserCancelled);
+        let value: Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(value["message_id"], Uuid::from_u128(5).to_string());
+        assert_eq!(value["stop_reason"], "user_cancelled");
     }
 
     #[test]
@@ -394,8 +554,8 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_sent_while_nobody_waits_is_not_lost() {
-        let handle = StreamCancel::new();
-        handle.cancel();
+        let handle = StreamCancel::new(Uuid::nil());
+        handle.cancel(StopReason::UserCancelled);
 
         let result = tokio::time::timeout(Duration::from_millis(100), handle.cancelled()).await;
 
@@ -404,13 +564,13 @@ mod tests {
 
     #[tokio::test]
     async fn waiting_stream_is_woken_by_cancel() {
-        let handle = std::sync::Arc::new(StreamCancel::new());
+        let handle = std::sync::Arc::new(StreamCancel::new(Uuid::nil()));
         let waiter = tokio::spawn({
             let handle = handle.clone();
             async move { handle.cancelled().await }
         });
         tokio::task::yield_now().await;
-        handle.cancel();
+        handle.cancel(StopReason::UserCancelled);
 
         let result = tokio::time::timeout(Duration::from_secs(1), waiter).await;
 
@@ -419,7 +579,7 @@ mod tests {
 
     #[tokio::test]
     async fn uncancelled_stream_keeps_waiting() {
-        let handle = StreamCancel::new();
+        let handle = StreamCancel::new(Uuid::nil());
 
         let result = tokio::time::timeout(Duration::from_millis(20), handle.cancelled()).await;
 

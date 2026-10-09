@@ -20,7 +20,7 @@ use crate::{
         mcp_access_policies::McpPermission,
         mcp_executions,
         mcp_servers::McpTransportType,
-        messages::{self, ChatRole},
+        messages::{self, ChatRole, StopReason},
         users,
     },
     services::provider_stream::{
@@ -40,7 +40,8 @@ use crate::{
         chat_stream_helpers::{
             ContentCheckpoint, DepartmentBudgetGate, ToolRoundOutcome, department_budget_status,
             ensure_model_whitelisted, model_identifiers, next_tool_round,
-            persistence_error_event_data,
+            persistence_error_event_data, response_stopped_event_data,
+            stop_reason_for_provider_error, with_stop_reason,
         },
         conversation_access::{
             can_access_conversation, find_active_conversation_for_user,
@@ -55,7 +56,7 @@ use crate::{
             build_mcp_server_context, resolve_mcp_oauth_token, resolve_mcp_tool_descriptor,
         },
         mcp_tools::load_mcp_tools,
-        message_helpers::{EditInProgress, PendingEdit, begin_pending_edit},
+        message_helpers::{EditInProgress, PendingEdit, begin_pending_edit, edit_commits},
         notifications::emit_budget_alerts,
         provider_chat::{
             LlmStreamError, LlmStreamEvent, PluginStreamParser, build_plugin_chat_request,
@@ -280,6 +281,13 @@ async fn hydrate_prompt_files(
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
       })
     )),
+    ("response_stopped" = (
+      description = "event:response_stopped — the assistant reply stopped before it finished; sent before done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited an earlier message while it was generating), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}; a reply whose client disconnected is stored as network_error.",
+      value = json!({
+        "event": "response_stopped",
+        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "stop_reason": "user_cancelled" }
+      })
+    )),
     ("done" = (
       description = "event:done — final event. Always emitted last (even after ai_error or cancelled).",
       value = json!({
@@ -431,6 +439,13 @@ pub async fn handle_chat_stream_path_doc() {}
       value = json!({
         "event": "cancelled",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
+      })
+    )),
+    ("response_stopped" = (
+      description = "event:response_stopped — the assistant reply stopped before it finished; sent before done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited an earlier message while it was generating), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}; a reply whose client disconnected is stored as network_error.",
+      value = json!({
+        "event": "response_stopped",
+        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "stop_reason": "user_cancelled" }
       })
     )),
     ("done" = (
@@ -728,12 +743,8 @@ pub async fn handle_chat_stream(
         let conversation =
             find_active_conversation_for_user(&app_state.database, conversation_id, claims.user_id)
                 .await?;
-        edit_in_progress = begin_pending_edit(
-            &app_state.database,
-            conversation_id,
-            pending_edit.map(|Extension(edit)| edit),
-        )
-        .await?;
+        edit_in_progress =
+            begin_pending_edit(conversation_id, pending_edit.map(|Extension(edit)| edit));
         let history_cutoff = edit_in_progress
             .as_ref()
             .map(EditInProgress::history_cutoff);
@@ -1517,7 +1528,9 @@ pub async fn handle_chat_stream(
         }
         let mut content_checkpoint =
             ContentCheckpoint::new(app_state.database.clone(), new_message_id);
-        let cancel_handle = app_state.register_stream_cancel(new_message_id).await;
+        let cancel_handle = app_state
+            .register_stream_cancel(new_message_id, conversation_id)
+            .await;
 
         // Emit before the event loop so message_start always arrives before any delta,
         // regardless of provider (Gemini fires usageMetadata only on the last chunk).
@@ -1533,6 +1546,7 @@ pub async fn handle_chat_stream(
        let mut final_message_cost = Decimal::from(0);
        let mut persist_error: Option<sea_orm::DbErr> = None;
        let mut turn_failed = false;
+       let mut stop_reason: Option<StopReason> = None;
        loop {
            let mut stream_should_continue = false;
            let mut stream_finished = false;
@@ -1550,6 +1564,8 @@ pub async fn handle_chat_stream(
                        output_rate,
                    );
                    final_message_cost = cancel_cost;
+                   let cancel_reason = cancel_handle.reason().unwrap_or(StopReason::UserCancelled);
+                   stop_reason = Some(cancel_reason);
                    new_llm_message.updated_at = Set(Utc::now());
                    new_llm_message.request_tokens = Set(request_tokens);
                    new_llm_message.response_tokens = Set(response_tokens);
@@ -1559,6 +1575,7 @@ pub async fn handle_chat_stream(
                    new_llm_message.metadata = Set(Some(json!({
                        "webSearch": req.web_search,
                        "cancelled": true,
+                       "stopReason": cancel_reason.as_str(),
                        "cachedInputTokens": cached_input_tokens_acc,
                        "cacheCreationTokens": cache_creation_tokens_acc,
                    })));
@@ -2183,6 +2200,7 @@ pub async fn handle_chat_stream(
                              &ChatStreamError::from_stream_error(*kind, provider.clone(), message.clone()).to_response()
                          ).unwrap_or_else(|_| "{}".to_string());
                          yield Event::default().event(ChatStreamEvents::AiError.to_string()).data(data);
+                         stop_reason = Some(StopReason::ProviderError);
                          turn_failed = true;
                          stream_finished = true;
                          break;
@@ -2506,6 +2524,7 @@ pub async fn handle_chat_stream(
                            );
                            let data = serde_json::to_string(&stream_err.to_response()).unwrap_or_else(|_| "{}".to_string());
                            yield Event::default().event(ChatStreamEvents::AiError.to_string()).data(data);
+                           stop_reason = Some(stop_reason_for_provider_error(&error));
                            turn_failed = true;
                            stream_finished = true;
                            break;
@@ -2519,6 +2538,7 @@ pub async fn handle_chat_stream(
                yield Event::default()
                    .event(ChatStreamEvents::AiError.to_string())
                    .data(persistence_error_event_data());
+               stop_reason = Some(StopReason::ServerError);
                turn_failed = true;
                stream_finished = true;
            }
@@ -2549,6 +2569,7 @@ pub async fn handle_chat_stream(
                                    yield Event::default()
                                        .event(ChatStreamEvents::AiError.to_string())
                                        .data(data);
+                                   stop_reason = Some(stop_reason_for_provider_error(&error));
                                    turn_failed = true;
                                    stream_finished = true;
                                }
@@ -2639,16 +2660,30 @@ pub async fn handle_chat_stream(
                        yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(chat_stream.to_string());
                    }
                }
+               if let Some(reason) = stop_reason {
+                   let metadata = new_llm_message.metadata.clone().take().flatten();
+                   new_llm_message.metadata = Set(Some(with_stop_reason(metadata, reason)));
+               }
                new_llm_message.updated_at = Set(Utc::now());
                match new_llm_message.clone().update(&app_state.database).await {
-                   Ok(_) => content_checkpoint.saved(Instant::now()),
+                   Ok(_) => {
+                       content_checkpoint.saved(Instant::now());
+                       content_checkpoint.finish();
+                   }
                    Err(error) => {
                        eprintln!("assistant message final save error: {error}");
+                       content_checkpoint.fail_with(stop_reason.unwrap_or(StopReason::ServerError));
                        if !turn_failed {
                            yield Event::default()
                                .event(ChatStreamEvents::AiError.to_string())
                                .data(persistence_error_event_data());
                        }
+                       yield Event::default()
+                           .event(ChatStreamEvents::ResponseStopped.to_string())
+                           .data(response_stopped_event_data(
+                               new_message_id,
+                               stop_reason.unwrap_or(StopReason::ServerError),
+                           ));
                        yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
                        return;
                    }
@@ -2747,12 +2782,16 @@ pub async fn handle_chat_stream(
                        }
                    }
                    if !saved_artifacts.is_empty() {
-                       new_llm_message.metadata = Set(Some(json!({
+                       let metadata = json!({
                            "webSearch": req.web_search,
                            "artifacts": saved_artifacts,
                            "cachedInputTokens": cached_input_tokens_acc,
                            "cacheCreationTokens": cache_creation_tokens_acc,
-                       })));
+                       });
+                       new_llm_message.metadata = Set(Some(match stop_reason {
+                           Some(reason) => with_stop_reason(Some(metadata), reason),
+                           None => metadata,
+                       }));
                        new_llm_message.updated_at = Set(Utc::now());
                        let _ = new_llm_message.clone().update(&app_state.database).await;
                    }
@@ -2773,7 +2812,7 @@ pub async fn handle_chat_stream(
                    tool_call: None,
                    tool_result: None,
                };
-               if !turn_failed
+               if edit_commits(turn_failed, stop_reason)
                    && let Some(edit) = edit_in_progress.take()
                    && let Err(error) = edit.commit(&app_state.database).await
                {
@@ -2799,6 +2838,11 @@ pub async fn handle_chat_stream(
                            if do_summary { let _ = update_conversation_summary(&state, conversation_id, &provider_clone, &model_clone).await; }
                        });
                    }
+               }
+               if let Some(reason) = stop_reason {
+                   yield Event::default()
+                       .event(ChatStreamEvents::ResponseStopped.to_string())
+                       .data(response_stopped_event_data(new_message_id, reason));
                }
                yield Event::default().event(ChatStreamEvents::StreamFinished.to_string()).data(finished_event.to_string());
                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");

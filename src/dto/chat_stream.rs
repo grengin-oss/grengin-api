@@ -1,10 +1,20 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{dto::files::File, models::messages::ChatRole};
+use crate::{
+    dto::files::File,
+    models::messages::{ChatRole, StopReason},
+};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
+
+// Sent before `done` when an assistant reply stopped before it finished.
+#[derive(Serialize, ToSchema)]
+pub struct ResponseStopped {
+    pub message_id: Uuid,
+    pub stop_reason: StopReason,
+}
 
 #[derive(Serialize, ToSchema)]
 pub struct ActiveSkillInfo {
@@ -64,6 +74,8 @@ pub enum ChatStreamEvents {
     ImageGenerated,
     #[serde(rename = "stream_finished")]
     StreamFinished,
+    #[serde(rename = "response_stopped")]
+    ResponseStopped,
 }
 
 impl ChatStreamEvents {

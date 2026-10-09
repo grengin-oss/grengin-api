@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{dto::files::File, models::messages::ChatRole};
+use crate::{
+    dto::files::File,
+    models::messages::{ChatRole, StopReason},
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -84,6 +87,8 @@ pub struct MessageResponse {
     pub tools_results: Vec<serde_json::Value>,
     pub parts: MessageParts,
     pub usage: TokenUsage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema, IntoParams)]

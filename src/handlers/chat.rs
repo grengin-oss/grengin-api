@@ -14,7 +14,7 @@ use crate::{
     error::{AppError, ErrorResponse},
     models::{
         conversations::{self, ConversationWithCount},
-        messages::{self},
+        messages::{self, StopReason},
     },
     services::{chat_helpers::resolve_web_search_enabled, search},
     state::SharedState,
@@ -452,6 +452,7 @@ pub async fn get_chat_by_id(
                     .and_then(|value| i32::try_from(value).ok())
                     .unwrap_or(0),
             },
+            stop_reason: StopReason::from_metadata(metadata),
         };
         conversation_response
             .messages
