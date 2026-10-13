@@ -198,7 +198,7 @@ async fn hydrate_prompt_files(
       })
     )),
     ("image_generated" = (
-      description = "event:image_generated — emitted for image generation models instead of the LLM event sequence (message_start/delta/message_end). Contains the saved file and cost. Always followed immediately by done.",
+      description = "event:image_generated — emitted for image generation models instead of the LLM event sequence (message_start/delta/message_end). Contains the saved file and cost. Followed by stream_finished and done. Not sent for an edit that a newer edit of the same message overtook: response_stopped (stop_reason user_edited) is sent instead and the image is not added to the conversation.",
       value = json!({
         "event": "image_generated",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "file_id": "92deac9e-7f9f-4d4f-a69b-43737cc2b3a7", "content_type": "image/png", "cost": 0.04 }
@@ -275,14 +275,14 @@ async fn hydrate_prompt_files(
       })
     )),
     ("cancelled" = (
-      description = "event:cancelled — emitted when the stream was cancelled by the client before completion.",
+      description = "event:cancelled — the reply was stopped before it finished, either by POST /chat/stream/{message_id}/cancel or because the user edited a message in this conversation while it was generating. Followed by response_stopped with the reason.",
       value = json!({
         "event": "cancelled",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
       })
     )),
     ("response_stopped" = (
-      description = "event:response_stopped — the assistant reply stopped before it finished; sent before done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited an earlier message while it was generating), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}; a reply whose client disconnected is stored as network_error.",
+      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation while it was generating, or a newer edit of the same message took over), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnected is stored as network_error, or as user_cancelled when POST /chat/stream/{message_id}/cancel arrives within 5 seconds.",
       value = json!({
         "event": "response_stopped",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "stop_reason": "user_cancelled" }
@@ -358,7 +358,7 @@ pub async fn handle_chat_stream_path_doc() {}
       })
     )),
     ("image_generated" = (
-      description = "event:image_generated — emitted for image generation models instead of the LLM event sequence (message_start/delta/message_end). Contains the saved file and cost. Always followed immediately by done.",
+      description = "event:image_generated — emitted for image generation models instead of the LLM event sequence (message_start/delta/message_end). Contains the saved file and cost. Followed by stream_finished and done. Not sent for an edit that a newer edit of the same message overtook: response_stopped (stop_reason user_edited) is sent instead and the image is not added to the conversation.",
       value = json!({
         "event": "image_generated",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "file_id": "92deac9e-7f9f-4d4f-a69b-43737cc2b3a7", "content_type": "image/png", "cost": 0.04 }
@@ -435,14 +435,14 @@ pub async fn handle_chat_stream_path_doc() {}
       })
     )),
     ("cancelled" = (
-      description = "event:cancelled — emitted when the stream was cancelled by the client before completion.",
+      description = "event:cancelled — the reply was stopped before it finished, either by POST /chat/stream/{message_id}/cancel or because the user edited a message in this conversation while it was generating. Followed by response_stopped with the reason.",
       value = json!({
         "event": "cancelled",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
       })
     )),
     ("response_stopped" = (
-      description = "event:response_stopped — the assistant reply stopped before it finished; sent before done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited an earlier message while it was generating), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}; a reply whose client disconnected is stored as network_error.",
+      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation while it was generating, or a newer edit of the same message took over), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnected is stored as network_error, or as user_cancelled when POST /chat/stream/{message_id}/cancel arrives within 5 seconds.",
       value = json!({
         "event": "response_stopped",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "stop_reason": "user_cancelled" }
@@ -491,15 +491,16 @@ pub async fn handle_chat_stream_doc() {}
     post,
     path = "/chat/stream/{message_id}/cancel",
     tag = "chat",
+    description = "Stops an assistant reply that is still generating (the Stop button). Pass the message_id from the reply's message_start event; this works for replies from POST /chat/stream, POST /chat/stream/{chat_id} and PATCH /chat/{chat_id}/message/{message_id}/stream.\n\nIf the client still has the stream open, it ends with cancelled, response_stopped (stop_reason user_cancelled), stream_finished and done. The text generated so far is kept, and GET /chat/{chat_id} returns the message with stop_reason user_cancelled. Stopping an edit's reply keeps the edit with the partial reply.\n\nThe client may close the stream at the same moment it calls this endpoint: a reply whose client disconnected waits 5 seconds for a stop request before it is recorded as network_error, so a Stop sent within that window is still stored as user_cancelled. A reply that was already stopped for another reason (for example user_edited) keeps that reason.\n\nOnly a reply generating on the server instance that receives this request can be stopped.",
     params(
-        ("message_id" = Uuid, Path, description = "Assistant message id to cancel")
+        ("message_id" = Uuid, Path, description = "Assistant message id from the reply's message_start event")
     ),
     responses(
-        (status = 202),
-        (status = 204),
-        (status = 401, content_type = "application/json", body = Error),
-        (status = 404, content_type = "application/json", body = ErrorResponse),
-        (status = 503, content_type = "application/json", body = ErrorResponse),
+        (status = 202, description = "The reply was generating, or its client disconnected less than 5 seconds ago, and has been stopped; it is stored with stop_reason user_cancelled unless it had already stopped for another reason"),
+        (status = 204, description = "Nothing to stop: the reply already finished, failed, was disconnected more than 5 seconds ago, or is generating on another server instance; the message is left unchanged"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+        (status = 404, content_type = "application/json", body = ErrorResponse, description = "Message not found, or it belongs to another user's conversation (code=1001)"),
+        (status = 503, content_type = "application/json", body = ErrorResponse, description = "DB unavailable (code=5000) or timeout (code=5001)"),
     )
 )]
 pub async fn cancel_chat_stream(
