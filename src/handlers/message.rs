@@ -6,7 +6,6 @@ use crate::{
     dto::chat_stream::{ChatInput, ChatStream},
     error::AppError,
     handlers::chat_stream::handle_chat_stream,
-    models::messages::StopReason,
     services::message_helpers::*,
     state::SharedState,
 };
@@ -70,9 +69,6 @@ pub async fn edit_chat_message_by_id_and_stream(
         &mut req,
     )
     .await?;
-    app_state
-        .cancel_conversation_streams(chat_id, StopReason::UserEdited)
-        .await;
     Ok(handle_chat_stream(
         claims,
         Some(Path(chat_id)),

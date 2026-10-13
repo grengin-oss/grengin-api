@@ -74,6 +74,7 @@ mod m20260827_000001_add_configuration_to_sso_providers;
 mod m20261007_000001_cascade_scoped_role_assignments;
 mod m20261007_000002_demote_scoped_super_admin_assignments;
 mod m20261008_000001_add_sha256_to_files;
+mod m20261013_000001_add_edit_ordering_to_conversations;
 
 pub struct Migrator;
 
@@ -172,6 +173,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261007_000001_cascade_scoped_role_assignments::Migration),
             Box::new(m20261007_000002_demote_scoped_super_admin_assignments::Migration),
             Box::new(m20261008_000001_add_sha256_to_files::Migration),
+            Box::new(m20261013_000001_add_edit_ordering_to_conversations::Migration),
         ]
     }
 }

@@ -40,7 +40,7 @@ use crate::{
         chat_stream_helpers::{
             ContentCheckpoint, DepartmentBudgetGate, ToolRoundOutcome, department_budget_status,
             ensure_model_whitelisted, model_identifiers, next_tool_round,
-            persistence_error_event_data, response_stopped_event_data,
+            persistence_error_event_data, record_stop_reason, response_stopped_event_data,
             stop_reason_for_provider_error, with_stop_reason,
         },
         conversation_access::{
@@ -56,7 +56,7 @@ use crate::{
             build_mcp_server_context, resolve_mcp_oauth_token, resolve_mcp_tool_descriptor,
         },
         mcp_tools::load_mcp_tools,
-        message_helpers::{EditInProgress, PendingEdit, begin_pending_edit, edit_commits},
+        message_helpers::{EditInProgress, EditStatus, PendingEdit, begin_pending_edit},
         notifications::emit_budget_alerts,
         provider_chat::{
             LlmStreamError, LlmStreamEvent, PluginStreamParser, build_plugin_chat_request,
@@ -921,6 +921,8 @@ pub async fn handle_chat_stream(
             last_message_at: Set(Some(Utc::now())),
             archived_at: Set(None),
             pinned: Set(false),
+            edit_requests: Set(0),
+            edit_claim: Set(None),
             message_count: Set(req.messages.len() as i32),
             total_tokens: Set(0),
             total_cost: Set(Decimal::from(0)),
@@ -1346,15 +1348,31 @@ pub async fn handle_chat_stream(
                         yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
                         return;
                     }
+                    let mut superseded = false;
                     if let Some(mut edit) = edit_in_progress.take() {
                         edit.record_attempt_message(img_message_id);
-                        if let Err(error) = edit.commit(&app_state.database).await {
-                            eprintln!("edit commit error: {error:?}");
-                            yield Event::default()
-                                .event(ChatStreamEvents::AiError.to_string())
-                                .data(persistence_error_event_data());
-                            yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
-                            return;
+                        let committed = match edit.claim(&app_state.database).await {
+                            Ok(EditStatus::Current) => {
+                                app_state.interrupt_older_streams(conversation_id, edit.request()).await;
+                                edit.commit(&app_state.database).await
+                            }
+                            other => other,
+                        };
+                        match committed {
+                            Ok(EditStatus::Current) => {}
+                            // A newer edit took over, so this image stays hidden and is reported as stopped.
+                            Ok(EditStatus::Superseded) => {
+                                superseded = true;
+                                record_stop_reason(&app_state.database, img_message_id, StopReason::UserEdited).await;
+                            }
+                            Err(error) => {
+                                eprintln!("edit commit error: {error:?}");
+                                yield Event::default()
+                                    .event(ChatStreamEvents::AiError.to_string())
+                                    .data(persistence_error_event_data());
+                                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                                return;
+                            }
                         }
                     }
                     if let Ok(Some(conversation)) = conversations::Entity::find_by_id(conversation_id.clone())
@@ -1379,16 +1397,22 @@ pub async fn handle_chat_stream(
                             }
                         }
                     }
-                    for (file_id, content_type, _, _, _) in &generated {
-                        if let Ok(data) = serde_json::to_string(&json!({
-                            "message_id": img_message_id,
-                            "file_id": file_id,
-                            "content_type": content_type,
-                            "cost": image_gen_cost.to_f32().unwrap_or(0.0),
-                        })) {
-                            yield Event::default()
-                                .event(ChatStreamEvents::ImageGenerated.to_string())
-                                .data(data);
+                    if superseded {
+                        yield Event::default()
+                            .event(ChatStreamEvents::ResponseStopped.to_string())
+                            .data(response_stopped_event_data(img_message_id, StopReason::UserEdited));
+                    } else {
+                        for (file_id, content_type, _, _, _) in &generated {
+                            if let Ok(data) = serde_json::to_string(&json!({
+                                "message_id": img_message_id,
+                                "file_id": file_id,
+                                "content_type": content_type,
+                                "cost": image_gen_cost.to_f32().unwrap_or(0.0),
+                            })) {
+                                yield Event::default()
+                                    .event(ChatStreamEvents::ImageGenerated.to_string())
+                                    .data(data);
+                            }
                         }
                     }
                     let finished = ChatStream {
@@ -1525,12 +1549,40 @@ pub async fn handle_chat_stream(
         }
         if let Some(edit) = edit_in_progress.as_mut() {
             edit.record_attempt_message(new_message_id);
+            match edit.claim(&app_state.database).await {
+                Ok(EditStatus::Current) => {}
+                // A newer edit of this message already started replying, so this one stops here.
+                Ok(EditStatus::Superseded) => {
+                    record_stop_reason(&app_state.database, new_message_id, StopReason::UserEdited).await;
+                    yield Event::default()
+                        .event(ChatStreamEvents::ResponseStopped.to_string())
+                        .data(response_stopped_event_data(new_message_id, StopReason::UserEdited));
+                    yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("edit claim error: {error:?}");
+                    yield Event::default()
+                        .event(ChatStreamEvents::AiError.to_string())
+                        .data(persistence_error_event_data());
+                    yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                    return;
+                }
+            }
         }
-        let mut content_checkpoint =
-            ContentCheckpoint::new(app_state.database.clone(), new_message_id);
         let cancel_handle = app_state
-            .register_stream_cancel(new_message_id, conversation_id)
+            .register_stream_cancel(
+                new_message_id,
+                conversation_id,
+                edit_in_progress.as_ref().map(EditInProgress::request),
+            )
             .await;
+        let mut content_checkpoint = ContentCheckpoint::new(
+            app_state.database.clone(),
+            new_message_id,
+            cancel_handle.clone(),
+            app_state.stream_cancellations.clone(),
+        );
 
         // Emit before the event loop so message_start always arrives before any delta,
         // regardless of provider (Gemini fires usageMetadata only on the last chunk).
@@ -2584,7 +2636,6 @@ pub async fn handle_chat_stream(
            }
 
            if stream_finished {
-               app_state.clear_stream_cancel(new_message_id).await;
                if total_tokens == 0 {
                    total_tokens = request_tokens + response_tokens;
                }
@@ -2812,20 +2863,30 @@ pub async fn handle_chat_stream(
                    tool_call: None,
                    tool_result: None,
                };
-               if edit_commits(turn_failed, stop_reason)
-                   && let Some(edit) = edit_in_progress.take()
-                   && let Err(error) = edit.commit(&app_state.database).await
-               {
-                   eprintln!("edit commit error: {error:?}");
-                   yield Event::default()
-                       .event(ChatStreamEvents::AiError.to_string())
-                       .data(persistence_error_event_data());
-                   yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
-                   break;
+               let mut turn_visible = edit_in_progress.is_none();
+               if !turn_failed && let Some(edit) = edit_in_progress.take() {
+                   match edit.commit(&app_state.database).await {
+                       Ok(EditStatus::Current) => turn_visible = true,
+                       // A newer edit claimed the conversation, so this one stays hidden.
+                       Ok(EditStatus::Superseded) => {
+                           if stop_reason.is_none() {
+                               stop_reason = Some(StopReason::UserEdited);
+                               record_stop_reason(&app_state.database, new_message_id, StopReason::UserEdited).await;
+                           }
+                       }
+                       Err(error) => {
+                           eprintln!("edit commit error: {error:?}");
+                           yield Event::default()
+                               .event(ChatStreamEvents::AiError.to_string())
+                               .data(persistence_error_event_data());
+                           yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                           break;
+                       }
+                   }
                }
                // An edit's messages only become visible at commit, so indexing and the summary
                // update run after it, and not at all for an edit that didn't commit.
-               if edit_in_progress.is_none() && app_state.settings.rag.enabled {
+               if turn_visible && app_state.settings.rag.enabled {
                    let do_embed = app_state.settings.rag.retrieval_enabled;
                    let do_summary = app_state.settings.rag.summary_enabled;
                    if do_embed || do_summary {

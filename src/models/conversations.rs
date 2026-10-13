@@ -28,6 +28,10 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub metadata: Option<serde_json::Value>,
     pub pinned: bool,
+    // Numbers edit requests as they arrive, so which edit is newest never depends on a clock.
+    pub edit_requests: i32,
+    // Number of the newest edit request that has started replying; older edits cannot commit.
+    pub edit_claim: Option<i32>,
 }
 
 #[derive(Debug, FromQueryResult, Serialize, Deserialize)]
