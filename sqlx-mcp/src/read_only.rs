@@ -120,7 +120,7 @@ impl Iterator for Tokenizer<'_> {
         loop {
             let c = self.peek()?;
             let rest = self.rest();
-            if c.is_whitespace() {
+            if is_whitespace(c) {
                 self.bump();
             } else if rest.starts_with("--") {
                 self.skip_line_comment();
@@ -167,8 +167,15 @@ impl Iterator for Tokenizer<'_> {
     }
 }
 
+// Postgres's lexer counts every non-ASCII character as part of an identifier and only ASCII
+// spaces as whitespace, so `¡$a$` or `SELECT<NBSP>$a$` is one name, not a dollar quote that
+// would hide the rest of the statement from this scan.
 fn is_ident_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+    c.is_ascii_alphanumeric() || c == '_' || !c.is_ascii()
+}
+
+fn is_whitespace(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0B' | '\x0C')
 }
 
 pub fn is_read_only_sql(sql: &str) -> bool {
@@ -226,6 +233,33 @@ mod tests {
     #[test]
     fn rejects_write_statement() {
         assert!(!is_read_only_sql("UPDATE users SET name = 'x'"));
+    }
+
+    #[test]
+    fn a_non_ascii_symbol_before_a_dollar_sign_does_not_open_a_dollar_quote() {
+        assert!(!is_read_only_sql(
+            "WITH ¡$a$ AS (SELECT 1), d AS (DELETE FROM t RETURNING 1) SELECT * FROM ¡$a$"
+        ));
+        assert!(!is_read_only_sql(
+            "/**/SELECT 1 AS ¡$a$, 2 AS x INTO t2 FROM t -- ¡$a$"
+        ));
+        assert!(!is_read_only_sql(
+            "SELECT 1 AS €$a$, d AS (DELETE FROM t RETURNING 1) FROM t -- €$a$"
+        ));
+    }
+
+    #[test]
+    fn a_non_breaking_space_is_part_of_a_name_as_in_postgres() {
+        assert!(!is_read_only_sql(
+            "WITH x\u{a0}$a$ AS (SELECT 1), d AS (DELETE FROM t RETURNING 1) SELECT 1 -- $a$"
+        ));
+    }
+
+    #[test]
+    fn non_ascii_names_and_dollar_quotes_still_read() {
+        assert!(is_read_only_sql("SELECT 1 AS café, '¡hola' AS greeting"));
+        assert!(is_read_only_sql("SELECT $é$ DELETE $é$ AS text"));
+        assert!(is_read_only_sql("SELECT $$ UPDATE $$ AS text"));
     }
 
     #[test]

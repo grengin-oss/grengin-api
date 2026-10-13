@@ -13,9 +13,12 @@ use sqlx::{
 use std::time::Duration;
 
 const READ_ONLY_BEGIN: &str = "BEGIN READ ONLY";
+// Scoped to the transaction (is_local = true), so it ends with the rollback.
+const STATEMENT_TIMEOUT_SQL: &str = "SELECT set_config('statement_timeout', $1, true)";
 
 pub struct DatabaseManager {
     pool: PgPool,
+    statement_timeout: Duration,
     read_only: bool,
 }
 
@@ -24,6 +27,7 @@ impl DatabaseManager {
         url: &str,
         max_connections: u32,
         timeout_seconds: u64,
+        statement_timeout_seconds: u64,
         read_only: bool,
     ) -> Result<Self> {
         if !is_postgres_url(url) {
@@ -38,7 +42,11 @@ impl DatabaseManager {
             .connect_lazy(url)
             .context("failed to configure postgres pool")?;
 
-        Ok(Self { pool, read_only })
+        Ok(Self {
+            pool,
+            statement_timeout: Duration::from_secs(statement_timeout_seconds),
+            read_only,
+        })
     }
 
     pub async fn execute_query(&self, sql: &str, params: Vec<Value>) -> Result<Value> {
@@ -207,6 +215,12 @@ ORDER BY c.table_schema, c.table_name, c.ordinal_position";
             .begin_with(READ_ONLY_BEGIN)
             .await
             .context("failed to start read-only transaction")?;
+        // One slow query must not hold a pooled connection indefinitely.
+        sqlx::query(STATEMENT_TIMEOUT_SQL)
+            .bind(statement_timeout_setting(self.statement_timeout))
+            .execute(&mut *transaction)
+            .await
+            .context("failed to set the query time limit")?;
         let result = query_with(sql, arguments)
             .fetch_all(&mut *transaction)
             .await;
@@ -247,6 +261,10 @@ fn wrap_as_json_rows(sql: &str) -> String {
     format!(
         "SELECT COALESCE(json_agg(to_jsonb(_sqlx_mcp_row)), '[]'::json) AS rows FROM ({body}\n) AS _sqlx_mcp_row"
     )
+}
+
+fn statement_timeout_setting(limit: Duration) -> String {
+    format!("{}ms", limit.as_millis())
 }
 
 fn row_to_json(row: &PgRow) -> Value {
@@ -356,8 +374,21 @@ fn looks_like_non_postgres_table_listing_query(sql: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{DatabaseManager, QueryRoute, READ_ONLY_BEGIN, wrap_as_json_rows};
+    use super::{
+        DatabaseManager, QueryRoute, READ_ONLY_BEGIN, STATEMENT_TIMEOUT_SQL,
+        statement_timeout_setting, wrap_as_json_rows,
+    };
     use serde_json::json;
+    use std::time::Duration;
+
+    #[test]
+    fn the_time_limit_is_scoped_to_the_query_transaction() {
+        assert!(STATEMENT_TIMEOUT_SQL.contains("set_config('statement_timeout', $1, true)"));
+        assert_eq!(
+            statement_timeout_setting(Duration::from_secs(30)),
+            "30000ms"
+        );
+    }
 
     #[test]
     fn every_query_runs_in_a_read_only_transaction() {
@@ -386,9 +417,33 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires DB_URL to point at a reachable PostgreSQL instance"]
+    async fn a_query_running_past_the_time_limit_is_cancelled() {
+        let db_url = std::env::var("DB_URL").expect("DB_URL env var must be set");
+        let manager =
+            DatabaseManager::new(&db_url, 1, 10, 1, true).expect("manager init should pass");
+
+        let slow = manager
+            .execute_query("SELECT pg_sleep(3) IS NULL AS slept", vec![])
+            .await
+            .expect_err("a 3 second query must not finish under a 1 second limit");
+        assert!(
+            format!("{slow:#}").contains("statement timeout"),
+            "{slow:#}"
+        );
+
+        let rows = manager
+            .execute_query("SELECT 1 AS ok", vec![])
+            .await
+            .expect("the connection stays usable after a cancelled query");
+        assert_eq!(rows, json!([{ "ok": 1 }]));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DB_URL to point at a reachable PostgreSQL instance"]
     async fn smoke_executes_read_only_query_when_db_url_present() {
         let db_url = std::env::var("DB_URL").expect("DB_URL env var must be set");
-        let manager = DatabaseManager::new(&db_url, 1, 10, true).expect("manager init should pass");
+        let manager =
+            DatabaseManager::new(&db_url, 1, 10, 30, true).expect("manager init should pass");
 
         manager
             .test_connection()

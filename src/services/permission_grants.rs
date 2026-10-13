@@ -179,6 +179,17 @@ impl PermissionGrants {
             })
     }
 
+    // Each permission this user can exercise, with the scope it was granted at.
+    pub fn effective(&self) -> impl Iterator<Item = (&str, DepartmentScope<'_>)> {
+        self.grants.iter().filter_map(|grant| match &grant.scope {
+            GrantScope::OrgWide => Some((grant.permission.as_str(), DepartmentScope::OrgWide)),
+            GrantScope::Department(path) if grant.is_scopeable => {
+                Some((grant.permission.as_str(), DepartmentScope::Department(path)))
+            }
+            GrantScope::Department(_) => None,
+        })
+    }
+
     pub fn missing(&self, permissions: &[String], target: DepartmentScope<'_>) -> Vec<String> {
         let mut missing: Vec<String> = permissions
             .iter()

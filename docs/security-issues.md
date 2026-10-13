@@ -160,7 +160,12 @@ Fixes are on the `fix/security-issues` branch.
   `m20261007_000002_demote_scoped_super_admin_assignments` turns existing scoped Super Admin
   grants into Department Admin grants on the same department and clears the affected users'
   cached permissions; its down migration is a no-op, because restoring them would bring the
-  escalation back.
+  escalation back. Changing a user's profile, status or account (`PUT /admin/users/{id}`,
+  `PATCH /admin/users/{id}/status`, `DELETE /admin/users/{id}`) follows the same rule
+  (`ensure_user_management_allowed`): only an org-wide Super Admin manages a Super Admin, and
+  anyone else must hold each of the target's permissions at the scope it was granted. Without
+  this, a scoped admin could deactivate or delete an org-wide admin in its department, or change
+  its email and take the account over at the next sign-in.
 - **Tests:** `role_assignment`, `permission_grants`, `department_helpers`, `authorization`,
   migration statement tests.
 
@@ -212,8 +217,9 @@ Fixes are on the `fix/security-issues` branch.
 - **Status:** Fixed.
 - **Fix:** adding sources and adding, updating or deleting artifacts now require
   `ensure_project_content_access`: the project owner or any explicit member. Users who can only
-  read a team project cannot change it. Managing project MCP servers stays owner-level
-  (`ensure_project_write_access`). Member roles are now an enum (`ProjectMemberRole`).
+  read a team project cannot change it. Managing project MCP servers stays as it was on `main`
+  (`ensure_project_write_access`): the project owner or a member with the `admin` role; members
+  added as `owner` edit content only. Member roles are now an enum (`ProjectMemberRole`).
 - **Tests:** `project_helpers`.
 
 ### 10. Personal skills readable by any user (High, Skills)
@@ -239,7 +245,9 @@ Fixes are on the `fix/security-issues` branch.
   the target department and each user's current department. Reparenting needs the new parent in
   scope. Changing a department's budget amount, period or exceed action, or moving a department
   that has a budget, needs `budget:allocate` on its parent (org-wide for top-level departments).
-- **Tests:** `department_access`.
+  A negative budget is refused with 400 (code 6307); it would count as funds handed back to the
+  parent and lift the parent's block.
+- **Tests:** `department_access`, `budget_allocation`.
 
 ### 13. Department deletion widens scoped roles (High, RBAC)
 
@@ -435,13 +443,66 @@ message save failure still reported success, and that `message_count` drifted on
 are fixed as described above. For finding 7, the state is now removed in the same transaction
 that stores the tokens.
 
+## Live Test Follow-ups
+
+The branch build was then tested live on localhost against throwaway copies of a dev database,
+with real Keycloak logins for a Super Admin, a scoped Department Admin, an org-wide HR Admin and
+plain users. The areas were auth, chat and files, projects and skills, departments and budgets,
+MCP and audit, and upload deduplication: about 650 checks, plus `tests/api/run.sh`. These
+findings were fixed; each fix has unit tests and was re-checked live:
+
+| # | Finding | Fix |
+|---|---------|-----|
+| 1 | A scoped Department Admin could deactivate, delete or change the email of an org-wide Super Admin in its department, then take the account over at the next sign-in. `main` has it too | User management needs the target's rights (issue 4) |
+| 2 | Negative department budgets were accepted, so a Department Admin could lift its own block and hand out more than its parent had | Refused with 400, code 6307 (issue 12) |
+| 3 | Updating a role with an unknown permission key left it with no permissions, and creating one left the role row behind; a repeated key did the same through the bulk insert. `main` has it too | Keys are resolved and de-duplicated before anything is written |
+| 4 | PUT moving a funded department under itself or a descendant answered 400 (code 6304), while `/move` answered 409 | The cycle check runs before the budget check |
+| 5 | A department PUT whose `admin_ids` change was refused had already committed its other fields | The admin checks run before the update commits |
+| 6 | A project artifact title too long for a file name answered 503 (code 5001) | 400 on `title`, code 6307 |
+| 7 | Members added as `owner` could manage project MCP servers; on `main` only the project owner or an `admin`-role member could | Restored (issue 9) |
+| 8 | `/auth/refresh` answered 404 "email not found" for a deleted or missing user | 401, code 6103 (issue 20) |
+| 9 | An unverified-email login revealed the matching account's status (code 6105 or 6107 instead of 6103) | The link check runs before the status check (issue 6) |
+| 10 | sqlx-mcp's scanner read a non-ASCII symbol or non-breaking space before `$tag$` as the start of a dollar quote, hiding a write from the scan; the read-only transaction still refused it | Identifier and whitespace rules follow Postgres's lexer (issue 16) |
+| 11 | `GET /files?limit=0` panicked on a division by zero. `main` has it too | Fixed |
+| 12 | A team project's detail listed every linked chat's title, including other users' private chats, to anyone who could read the project. `main` has it too | Only the viewer's own chats are listed; `chat_count` still counts all linked chats |
+| 13 | A department update committed before its admin grants were written one by one, so a failure part-way left part of the change applied | The department fields, allowed models and admin grants are written in one transaction; audit events and the permission cache follow the commit |
+| 14 | Role create and update wrote the role and its permissions outside a transaction, so a database error could leave a role half-created or stripped of its permissions | One transaction each |
+| 15 | sqlx-mcp queries had no time limit, so a slow `SELECT` could hold a connection indefinitely | Each query runs under a statement timeout inside its read-only transaction (`--statement-timeout`, default 30 seconds) |
+| 16 | Two concurrent department updates each worked out their admin changes before their transaction, so asking for Alice in one and Bob in the other could leave both | The update locks the department row first and works out the changes after the lock, so the second update starts from what the first committed |
+| 17 | Department create inserted the department before syncing its models and admins, so an unknown admin id or a later failure left the department behind | Admins, including the creator's automatic grant, are checked first against the new department's path; the department, its models and its admins are then written in one transaction |
+| 18 | A department update read the department before taking the lock, so an update waiting on the lock could write back stale values, for example undoing a budget change while only changing admins | The update takes the lock before reading the department, so it reads, checks and writes what the previous update committed. A request that can't get the lock within 5 seconds answers 503 rather than holding a connection while it waits |
+| 19 | Role and grant changes wrote their audit events after committing and ignored failures, so a grant could commit without its event | Role create, update and delete, user role assign and revoke, and department admin changes write their audit events in the same transaction as the change |
+
+Found and left as they are:
+
+- **503 for invalid input:** a department deeper than the limit (create and reparent), a budget
+  too large for its column, renaming a role to an existing name, deleting a department that has
+  children, and a NUL byte in chat search. All except the reparent case come from `main`, and
+  the reparent case follows the create path. Nothing is written in any of them.
+- **Chat:** an attachment that can't be resolved (another user's or a deleted file) is saved with
+  the user message before the request fails, so every later turn in that chat fails with 404.
+  `main` has it too; it is best fixed on `feat/chat-edit`, which reworks that code.
+- **Departments and analytics:** `POST /admin/departments/{id}/members` returns the department as
+  it was before the change, and `GET /admin/analytics/departments` ignores `department_id` for
+  org-wide callers. Both come from `main`. A scoped Department Admin can delete a funded
+  top-level department it administers, and a parent with budget 0 (unlimited) can't fund
+  children; these need a decision rather than a fix.
+- **MCP:** a provider refresh response without a `refresh_token` clears the stored one, so the
+  user has to authorize again later. `main` has it too.
+- **Edits:** the edit bugs fixed on `feat/chat-edit` (assistant replies and replaced messages
+  could be edited, overlapping edits could both stay visible, a rejected edit stopped the running
+  reply, and cancel handles were not released on disconnect) also exist on this branch. They are
+  not fixed twice, so the two branches merge cleanly.
+
 ## Decisions to Confirm
 
 These fixes change behaviour that people may rely on. Each one uses the safest default; any can
 be reversed.
 
 - **Issue 4:** only roles whose permissions the assigner holds can be granted. The seeded HR
-  Admin can now grant only User and HR Admin, not Observer or Department Admin.
+  Admin can now grant only User and HR Admin, not Observer or Department Admin. The same rule
+  covers editing, deactivating and deleting users: an org-wide HR Admin can no longer manage a
+  Super Admin or a Department Admin, and a Department Admin still manages its plain members.
 - **Issue 6:** with a multi-tenant Azure authority (`common`), email linking is off, and every
   Azure login fails when an allow-list is set, until the app registration adds the `xms_edov`
   optional claim or uses a single-tenant ID. Proxy assertions without an `email_verified` claim
@@ -457,6 +518,8 @@ be reversed.
 - **Issue 22:** models with no catalog or plugin price still cost 0. A non-whitelisted model
   reuses error 6002, whose message mentions the department.
 - **Issue 28:** a budget of 0 with "block" no longer blocks all spending.
+- **Audit durability (follow-up 19):** if the audit event for a role or grant change can't be
+  written, the change fails with 503 instead of committing unrecorded.
 - **Issue 30:** with the default `TRUSTED_PROXIES`, clients on private networks can still fake
   their logged IP; behind CloudFront or Cloudflare, the edge IP is logged until those ranges are
   added.
@@ -473,6 +536,13 @@ be reversed.
 - Multi-tenant Azure deployments with an allow-list need the `xms_edov` optional claim.
 - When the assistant reply, or a generated image's message, can't be saved, the client now
   receives a persistence `ai_error` instead of a success event, for normal chats as well as edits.
+- `POST /auth/refresh` answers 401 (code 6103) instead of 404 (code 6101) when the user was
+  deleted.
+- A negative `budget_allocated` on `PUT /admin/departments/{id}` answers 400 (code 6307).
+- `GET /projects/{id}/detail` lists only the caller's own linked chats.
+- Concurrent updates of one department queue; one that waits more than 5 seconds answers 503.
+- sqlx-mcp cancels a query after 30 seconds by default; set `--statement-timeout` (seconds, 0 for
+  no limit) in the MCP server's arguments to change it.
 
 ## Noticed, Not Fixed
 
@@ -489,18 +559,17 @@ be reversed.
   today a user still restarts the authorization. Offering "Try again" on that page would make the
   retry reachable.
 - **Projects:** a conversation linked to a project keeps pulling that project's documents after
-  the user loses access; project chat listings show other users' conversation titles to anyone
-  who can read the project.
+  the user loses access.
 - **MCP and system:** `api_service_name` goes unvalidated into `systemctl restart`; the update
-  script pulls the API image by tag and never verifies the downloaded `.sig`; sqlx-mcp has no
-  `statement_timeout`.
+  script pulls the API image by tag and never verifies the downloaded `.sig`; sqlx-mcp returns
+  every row a query produces, with no row limit.
 - **AI engines:** a whitelist entry that matches no catalog model key or name (for example the
-  alias `claude-haiku-4-5` while the catalog lists `claude-haiku-4-5-20251001`) exposes nothing;
-  the model is neither listed nor usable. Admins should re-save those whitelists.
+  alias `claude-haiku-4-5` while the catalog lists `claude-haiku-4-5-20251001`) is not listed by
+  `GET /models`, but the stream still accepts it by that exact name and charges it 0, because it
+  has no price. Admins should re-save those whitelists.
 - **RAG:** an embedding model set only by environment variable uses its native dimension, so
   non-1536 models still fail inserts.
-- **Departments:** `DepartmentUpdate.budget_allocated` is `f32` and loses precision;
-  `create_department` is not transactional; `/move` doesn't check the new parent's available
-  budget.
+- **Departments:** `DepartmentUpdate.budget_allocated` is `f32` and loses precision; `/move`
+  doesn't check the new parent's available budget.
 - **Startup:** the catalog manifest prefetch has no retry, so a connection reset from the CDN
   leaves that manifest to be fetched on demand later. This happens on `main` too.

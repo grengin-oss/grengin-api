@@ -673,15 +673,7 @@ pub async fn oidc_oauth_callback(
             if let Some(user_id) = user.as_ref().map(|u| u.id) {
                 let txn = begin_login_transaction(&app_state.database).await?;
                 let u = lock_user_for_login(&txn, user_id).await?;
-                match &u.status {
-                    UserStatus::Deactivated | UserStatus::Suspended => {
-                        return Err(AuthError::AccountDeactivated);
-                    }
-                    UserStatus::Pending => {
-                        return Err(AuthError::AccountPendingApproval);
-                    }
-                    _ => (),
-                }
+                // A login that may not claim this account learns nothing about it, not even its status.
                 let linked_identity = u.identity_for(&normalized_provider);
                 if !email_link_allowed(
                     &runtime.configuration.email_linking,
@@ -693,6 +685,15 @@ pub async fn oidc_oauth_callback(
                     &sub,
                 ) {
                     return Err(AuthError::InvalidToken);
+                }
+                match &u.status {
+                    UserStatus::Deactivated | UserStatus::Suspended => {
+                        return Err(AuthError::AccountDeactivated);
+                    }
+                    UserStatus::Pending => {
+                        return Err(AuthError::AccountPendingApproval);
+                    }
+                    _ => (),
                 }
                 let can_link_google = google_id.is_some() && u.google_id.is_none();
                 let can_link_azure = azure_id.is_some() && u.azure_id.is_none();

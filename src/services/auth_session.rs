@@ -87,7 +87,7 @@ pub async fn refresh_access_token(
             eprintln!("Db get one error: {:?}", e);
             AuthError::DbTimeout
         })?
-        .ok_or(AuthError::EmailDoesNotExist)?;
+        .ok_or(AuthError::InvalidToken)?;
     ensure_session_status(Some(&user.status))?;
     let access_token_claims =
         Claims::new_access_token(user.email.clone(), user.name.clone(), user.id);

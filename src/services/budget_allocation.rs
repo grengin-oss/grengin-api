@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
+    auth::error::AuthError,
     handlers::admin_department_budgets::departments_budget_select,
     models::{conversations, departments, messages, users},
 };
@@ -12,6 +13,17 @@ use sea_orm::{
     QuerySelect, RelationTrait, sea_query::Expr,
 };
 use uuid::Uuid;
+
+// A negative allocation would be counted as funds handed back to the parent, raising what the
+// parent and its other children can spend and lifting a block on the parent.
+pub fn requested_budget_allocation(value: f32) -> Result<Decimal, AuthError> {
+    if value < 0.0 {
+        return Err(AuthError::InvalidRequest {
+            field: "budget_allocated",
+        });
+    }
+    Decimal::from_f32_retain(value).ok_or(AuthError::ServiceTemporarilyUnavailable)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BudgetHealth {
@@ -251,8 +263,29 @@ pub async fn get_department_budget_status(
 
 #[cfg(test)]
 mod tests {
-    use super::BudgetHealth;
+    use super::{BudgetHealth, requested_budget_allocation};
+    use crate::auth::error::AuthError;
     use rust_decimal::Decimal;
+
+    #[test]
+    fn negative_budget_allocations_are_rejected() {
+        assert!(matches!(
+            requested_budget_allocation(-100.0),
+            Err(AuthError::InvalidRequest {
+                field: "budget_allocated"
+            })
+        ));
+        assert!(requested_budget_allocation(-0.01).is_err());
+    }
+
+    #[test]
+    fn zero_and_positive_budget_allocations_are_kept() {
+        assert_eq!(requested_budget_allocation(0.0).ok(), Some(Decimal::ZERO));
+        assert_eq!(
+            requested_budget_allocation(12.5).ok(),
+            Some(Decimal::new(125, 1))
+        );
+    }
 
     fn health(allocated: i64, available: i64) -> BudgetHealth {
         BudgetHealth::classify(Decimal::from(allocated), Decimal::from(available))

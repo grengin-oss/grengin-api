@@ -6,6 +6,7 @@ use crate::{
     dto::projects::{
         ProjectChatResponse, ProjectMcpServerResponse, ProjectResponse, ProjectSourceResponse,
     },
+    error::AppError,
     models::{
         conversation_projects, conversations, files, files::FileUploadStatus, mcp_servers,
         project_mcp_servers, project_members, project_members::ProjectMemberRole, project_sources,
@@ -14,10 +15,19 @@ use crate::{
 };
 use sea_orm::{
     ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect,
+    QueryOrder, QuerySelect, Select,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
+
+// The artifact title becomes its stored file name, so a title the file system can't hold is the
+// caller's mistake rather than a database failure.
+pub fn artifact_write_error(error: AppError) -> AuthError {
+    match error {
+        AppError::ValidationEmptyField { .. } => AuthError::InvalidRequest { field: "title" },
+        _ => AuthError::DbTimeout,
+    }
+}
 
 pub async fn get_project_or_404(
     id: Uuid,
@@ -307,6 +317,7 @@ pub async fn fetch_project_sources(
 
 pub async fn fetch_project_chats(
     project_id: Uuid,
+    viewer_id: Uuid,
     db: &DatabaseConnection,
 ) -> Result<Vec<ProjectChatResponse>, AuthError> {
     let conv_ids: Vec<Uuid> = conversation_projects::Entity::find()
@@ -325,10 +336,7 @@ pub async fn fetch_project_chats(
         return Ok(vec![]);
     }
 
-    let convs = conversations::Entity::find()
-        .filter(conversations::Column::Id.is_in(conv_ids))
-        .order_by_desc(conversations::Column::UpdatedAt)
-        .limit(50)
+    let convs = viewer_project_chats(conv_ids, viewer_id)
         .all(db)
         .await
         .map_err(|e| {
@@ -346,6 +354,16 @@ pub async fn fetch_project_chats(
             updated_at: c.updated_at,
         })
         .collect())
+}
+
+// Anyone who can read a team project sees its detail, but each linked chat stays private to its
+// owner, so only the viewer's own chats are listed.
+fn viewer_project_chats(conv_ids: Vec<Uuid>, viewer_id: Uuid) -> Select<conversations::Entity> {
+    conversations::Entity::find()
+        .filter(conversations::Column::Id.is_in(conv_ids))
+        .filter(conversations::Column::UserId.eq(viewer_id))
+        .order_by_desc(conversations::Column::UpdatedAt)
+        .limit(50)
 }
 
 pub fn is_valid_category(s: &str) -> bool {
@@ -399,10 +417,16 @@ pub async fn fetch_project_mcp_servers(
 
 #[cfg(test)]
 mod tests {
-    use super::{can_attach_source_file, can_edit_project_content, can_write_project};
-    use crate::models::{
-        files, files::FileUploadStatus, project_members::ProjectMemberRole, projects,
-        projects::ProjectVisibility,
+    use super::{
+        artifact_write_error, can_attach_source_file, can_edit_project_content, can_write_project,
+    };
+    use crate::{
+        auth::error::AuthError,
+        error::AppError,
+        models::{
+            files, files::FileUploadStatus, project_members::ProjectMemberRole, projects,
+            projects::ProjectVisibility,
+        },
     };
     use chrono::Utc;
     use uuid::Uuid;
@@ -469,11 +493,41 @@ mod tests {
     }
 
     #[test]
-    fn owner_and_admin_role_members_can_write_project() {
+    fn only_admin_role_members_can_write_project() {
         let project = project(Uuid::new_v4(), ProjectVisibility::Private);
-        for role in [ProjectMemberRole::Owner, ProjectMemberRole::Admin] {
-            assert!(can_write_project(Uuid::new_v4(), &project, Some(role)));
+        assert!(can_write_project(
+            Uuid::new_v4(),
+            &project,
+            Some(ProjectMemberRole::Admin)
+        ));
+        for role in [ProjectMemberRole::Owner, ProjectMemberRole::Member] {
+            assert!(!can_write_project(Uuid::new_v4(), &project, Some(role)));
         }
+    }
+
+    #[test]
+    fn project_chats_list_only_the_viewers_own_conversations() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let viewer = Uuid::from_u128(7);
+        let sql = super::viewer_project_chats(vec![Uuid::from_u128(1)], viewer)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains(&format!(r#""conversations"."userId" = '{viewer}'"#)),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn a_title_too_long_for_a_file_name_is_a_bad_request() {
+        assert!(matches!(
+            artifact_write_error(AppError::ValidationEmptyField { field: "file_name" }),
+            AuthError::InvalidRequest { field: "title" }
+        ));
+        assert!(matches!(
+            artifact_write_error(AppError::DbTimeout),
+            AuthError::DbTimeout
+        ));
     }
 
     #[test]

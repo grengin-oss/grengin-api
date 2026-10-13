@@ -259,7 +259,7 @@ pub async fn get_project_detail(
     let (chat_counts, source_counts, member_counts) =
         fetch_counts(&[id], &app_state.database).await?;
     let sources = fetch_project_sources(id, &app_state.database).await?;
-    let chats = fetch_project_chats(id, &app_state.database).await?;
+    let chats = fetch_project_chats(id, claims.user_id, &app_state.database).await?;
     let mcp_servers = fetch_project_mcp_servers(id, &app_state.database).await?;
 
     Ok((
@@ -1037,7 +1037,7 @@ pub async fn add_project_artifact(
         &req.content,
     )
     .await
-    .map_err(|_| AuthError::DbTimeout)?;
+    .map_err(artifact_write_error)?;
 
     let inserted = project_sources::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -1201,7 +1201,7 @@ pub async fn update_project_artifact(
             content,
         )
         .await
-        .map_err(|_| AuthError::DbTimeout)?;
+        .map_err(artifact_write_error)?;
 
         active.file_id = Set(Some(file_uuid));
         active.file_size = Set(content.len() as i64);
