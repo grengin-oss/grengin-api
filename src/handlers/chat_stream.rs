@@ -279,14 +279,14 @@ async fn hydrate_prompt_files(
       })
     )),
     ("cancelled" = (
-      description = "event:cancelled — the reply was stopped before it finished, either by POST /chat/stream/{message_id}/cancel or because the user edited a message in this conversation or switched to another version while it was generating. Followed by response_stopped with the reason.",
+      description = "event:cancelled — the reply was stopped before it finished, either by POST /chat/stream/{message_id}/cancel or because the user edited a message in this conversation or switched to another version while it was generating. A switch that lands before the reply starts streaming stops it right after message_start, with no delta. Followed by response_stopped with the reason.",
       value = json!({
         "event": "cancelled",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
       })
     )),
     ("response_stopped" = (
-      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation or switched to another version while it was generating, or a newer edit of the same message took over), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnected is stored as network_error, or as user_cancelled when POST /chat/stream/{message_id}/cancel arrives within 5 seconds.",
+      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation or switched to another version while it was generating, including before it started streaming, or a newer edit of the same message took over; the reply stays with the version it was sent in), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnected is stored as network_error, or as user_cancelled when POST /chat/stream/{message_id}/cancel arrives within 5 seconds.",
       value = json!({
         "event": "response_stopped",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "stop_reason": "user_cancelled" }
@@ -439,14 +439,14 @@ pub async fn handle_chat_stream_path_doc() {}
       })
     )),
     ("cancelled" = (
-      description = "event:cancelled — the reply was stopped before it finished, either by POST /chat/stream/{message_id}/cancel or because the user edited a message in this conversation or switched to another version while it was generating. Followed by response_stopped with the reason.",
+      description = "event:cancelled — the reply was stopped before it finished, either by POST /chat/stream/{message_id}/cancel or because the user edited a message in this conversation or switched to another version while it was generating. A switch that lands before the reply starts streaming stops it right after message_start, with no delta. Followed by response_stopped with the reason.",
       value = json!({
         "event": "cancelled",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
       })
     )),
     ("response_stopped" = (
-      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation or switched to another version while it was generating, or a newer edit of the same message took over), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnected is stored as network_error, or as user_cancelled when POST /chat/stream/{message_id}/cancel arrives within 5 seconds.",
+      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation or switched to another version while it was generating, including before it started streaming, or a newer edit of the same message took over; the reply stays with the version it was sent in), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnected is stored as network_error, or as user_cancelled when POST /chat/stream/{message_id}/cancel arrives within 5 seconds.",
       value = json!({
         "event": "response_stopped",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "stop_reason": "user_cancelled" }

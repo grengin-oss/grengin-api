@@ -344,6 +344,7 @@ async fn fetch_conversations_by_ids(
     get,
     path = "/chat/{chat_id}",
     tag = "chat",
+    description = "Returns the conversation with the messages of the version shown, oldest first; message_count here is the number of those messages.\n\n- A message that has other versions (editing a message adds one) carries `versions`: `current` of `total`, and `message_ids` oldest first. Send one of those ids to PUT /chat/{chat_id}/branch to show that version.\n- A reply that stopped before it finished carries `stop_reason`: user_cancelled, user_edited, provider_error, network_error or server_error.",
     params(
         ("chat_id" = Uuid, Path, description = "Unique identifier for the conversation"),
     ),
