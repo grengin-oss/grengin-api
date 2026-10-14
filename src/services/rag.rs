@@ -3,9 +3,10 @@
 
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DatabaseBackend, DatabaseConnection,
-    EntityTrait, IntoActiveModel, JoinType, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
-    RelationTrait, Statement,
+    AccessMode, ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DatabaseBackend,
+    DatabaseConnection, DatabaseTransaction, EntityTrait, IntoActiveModel, IsolationLevel,
+    JoinType, QueryFilter, QueryOrder, QuerySelect, QueryTrait, RelationTrait, Statement,
+    TransactionTrait,
     sea_query::{Alias, BinOper, Expr, Order},
 };
 use uuid::Uuid;
@@ -16,7 +17,7 @@ use crate::{
     dto::prompt::{Prompt, PromptTextResponse},
     error::AppError,
     models::{
-        conversation_summaries, message_embeddings, messages, messages::ChatRole,
+        conversation_summaries, conversations, message_embeddings, messages, messages::ChatRole,
         project_source_chunks, project_sources,
     },
     services::{
@@ -57,8 +58,8 @@ struct ProjectChunkRow {
     file_name: String,
 }
 
-pub async fn load_recent_prompts(
-    db: &DatabaseConnection,
+pub async fn load_recent_prompts<C: ConnectionTrait>(
+    db: &C,
     conversation_id: Uuid,
     recent_pairs: usize,
     before: Option<DateTime<Utc>>,
@@ -113,8 +114,8 @@ pub fn summary_usable_with_cutoff(
     }
 }
 
-pub async fn load_summary(
-    db: &DatabaseConnection,
+pub async fn load_summary<C: ConnectionTrait>(
+    db: &C,
     conversation_id: Uuid,
 ) -> Result<Option<conversation_summaries::Model>, AppError> {
     conversation_summaries::Entity::find()
@@ -127,12 +128,41 @@ pub async fn load_summary(
         })
 }
 
-pub async fn build_retrieval_prompt(
+// A turn reads the end of the thread and the history the model gets from one snapshot, so a
+// version switch landing between those reads can't pair a turn kept with one version with the
+// other version's history. Repeatable read keeps one snapshot for every query of the transaction.
+pub async fn begin_history_snapshot(
+    db: &DatabaseConnection,
+) -> Result<DatabaseTransaction, AppError> {
+    db.begin_with_config(
+        Some(IsolationLevel::RepeatableRead),
+        Some(AccessMode::ReadOnly),
+    )
+    .await
+    .map_err(|e| {
+        eprintln!("history snapshot begin error: {e}");
+        AppError::DbTimeout
+    })
+}
+
+pub async fn end_history_snapshot(snapshot: DatabaseTransaction) -> Result<(), AppError> {
+    snapshot.commit().await.map_err(|e| {
+        eprintln!("history snapshot end error: {e}");
+        AppError::DbTimeout
+    })
+}
+
+pub struct RetrievalQuery {
+    provider: String,
+    model: String,
+    vector: String,
+}
+
+// Embedded before the history snapshot opens, so the snapshot never waits on the embedding provider.
+pub async fn embed_retrieval_query(
     app_state: &SharedState,
-    conversation_id: Uuid,
     query_text: &str,
-    boundary: Option<DateTime<Utc>>,
-) -> Result<Option<String>, AppError> {
+) -> Result<Option<RetrievalQuery>, AppError> {
     if query_text.trim().is_empty() {
         return Ok(None);
     }
@@ -146,19 +176,32 @@ pub async fn build_retrieval_prompt(
         Some(config) if config.is_enabled => config,
         _ => return Ok(None),
     };
-    let boundary = boundary.unwrap_or_else(Utc::now);
     let embedding = match generate_embedding(app_state, &embedding_config, query_text).await? {
         Some(embedding) => embedding,
         None => return Ok(None),
     };
-    let vector = format_pgvector(&embedding);
+    Ok(Some(RetrievalQuery {
+        provider: embedding_config.provider,
+        model: embedding_config.model,
+        vector: format_pgvector(&embedding),
+    }))
+}
+
+pub async fn build_retrieval_prompt<C: ConnectionTrait>(
+    app_state: &SharedState,
+    conn: &C,
+    conversation_id: Uuid,
+    query: &RetrievalQuery,
+    boundary: Option<DateTime<Utc>>,
+) -> Result<Option<String>, AppError> {
+    let boundary = boundary.unwrap_or_else(Utc::now);
     let distance_expr = Expr::col((
         message_embeddings::Entity,
         message_embeddings::Column::Embedding,
     ))
     .binary(
         BinOper::Custom("<=>".into()),
-        Expr::val(vector).cast_as(Alias::new("vector")),
+        Expr::val(query.vector.as_str()).cast_as(Alias::new("vector")),
     );
 
     let rows = message_embeddings::Entity::find()
@@ -167,8 +210,8 @@ pub async fn build_retrieval_prompt(
             message_embeddings::Relation::Messages.def(),
         )
         .filter(message_embeddings::Column::ConversationId.eq(conversation_id))
-        .filter(message_embeddings::Column::Provider.eq(embedding_config.provider.clone()))
-        .filter(message_embeddings::Column::Model.eq(embedding_config.model.clone()))
+        .filter(message_embeddings::Column::Provider.eq(query.provider.as_str()))
+        .filter(message_embeddings::Column::Model.eq(query.model.as_str()))
         .filter(messages::Column::Deleted.eq(false))
         .filter(messages::Column::Role.is_in(vec![ChatRole::User, ChatRole::Assistant]))
         .filter(messages::Column::CreatedAt.lt(boundary))
@@ -184,7 +227,7 @@ pub async fn build_retrieval_prompt(
         .order_by(distance_expr, Order::Asc)
         .limit(app_state.settings.rag.retrieval_top_k as u64)
         .into_model::<RetrievedMessageRow>()
-        .all(&app_state.database)
+        .all(conn)
         .await
         .map_err(|e| {
             eprintln!("rag retrieval query error: {e}");
@@ -397,6 +440,38 @@ pub async fn update_conversation_summary(
         generate_summary_text(app_state, &summary_provider, &summary_model, summary_prompt).await?;
     let summary_text = summary_response.text.trim().to_string();
 
+    // Editing or switching versions hides the thread from some message on, under this same lock,
+    // and drops a summary covering it. These messages were read before the model call, so the
+    // summary is kept only if the newest of them is still shown; otherwise it would bring the
+    // hidden version back into every later prompt.
+    let txn = app_state.database.begin().await.map_err(|e| {
+        eprintln!("rag summary transaction error: {e}");
+        AppError::DbTimeout
+    })?;
+    conversations::Entity::find_by_id(conversation_id)
+        .lock_exclusive()
+        .one(&txn)
+        .await
+        .map_err(|e| {
+            eprintln!("rag summary lock error: {e}");
+            AppError::DbTimeout
+        })?;
+    let still_shown = match last_message.as_ref() {
+        Some(last) => messages::Entity::find_by_id(last.id)
+            .filter(messages::Column::Deleted.eq(false))
+            .one(&txn)
+            .await
+            .map_err(|e| {
+                eprintln!("rag summary message check error: {e}");
+                AppError::DbTimeout
+            })?
+            .is_some(),
+        None => false,
+    };
+    if !still_shown {
+        return Ok(());
+    }
+
     let now = Utc::now();
     if let Some(existing) = existing_summary {
         let mut active = existing.into_active_model();
@@ -406,7 +481,7 @@ pub async fn update_conversation_summary(
             active.last_message_id = sea_orm::ActiveValue::Set(Some(last.id));
         }
         active.updated_at = sea_orm::ActiveValue::Set(now);
-        active.update(&app_state.database).await.map_err(|e| {
+        active.update(&txn).await.map_err(|e| {
             eprintln!("rag summary update error: {e}");
             AppError::DbTimeout
         })?;
@@ -424,11 +499,15 @@ pub async fn update_conversation_summary(
             created_at: sea_orm::ActiveValue::Set(now),
             updated_at: sea_orm::ActiveValue::Set(now),
         };
-        summary.insert(&app_state.database).await.map_err(|e| {
+        summary.insert(&txn).await.map_err(|e| {
             eprintln!("rag summary insert error: {e}");
             AppError::DbTimeout
         })?;
     }
+    txn.commit().await.map_err(|e| {
+        eprintln!("rag summary commit error: {e}");
+        AppError::DbTimeout
+    })?;
 
     Ok(())
 }

@@ -92,6 +92,9 @@ pub struct Model {
     #[sea_orm(nullable)]
     pub previous_message_id: Option<Uuid>,
     pub deleted: bool,
+    // Hidden because another version of the conversation is shown; unlike a deleted message or
+    // an unfinished edit attempt, it can be shown again by switching back to its version.
+    pub inactive_branch: bool,
     pub role: ChatRole,
     pub message_content: String,
     pub model_provider: String,

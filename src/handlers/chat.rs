@@ -16,7 +16,9 @@ use crate::{
         conversations::{self, ConversationWithCount},
         messages::{self, StopReason},
     },
-    services::{chat_helpers::resolve_web_search_enabled, search},
+    services::{
+        chat_helpers::resolve_web_search_enabled, message_branches::load_message_versions, search,
+    },
     state::SharedState,
 };
 use axum::{
@@ -379,6 +381,7 @@ pub async fn get_chat_by_id(
         })?;
 
     let message_count = messages_models.len() as u64;
+    let versions = load_message_versions(&app_state.database, chat_id).await?;
 
     let web_search_enabled = resolve_web_search_enabled(conversation_model.metadata.as_ref());
     let mut conversation_response = ConversationResponse {
@@ -422,6 +425,7 @@ pub async fn get_chat_by_id(
                 .and_then(|v| serde_json::from_value(v).ok())
         });
         let message = MessageResponse {
+            versions: versions.get(&message_model.id).cloned(),
             id: message_model.id,
             role: message_model.role,
             cost: message_model.cost.to_f32().unwrap_or_default(),

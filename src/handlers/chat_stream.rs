@@ -56,6 +56,7 @@ use crate::{
             build_mcp_server_context, resolve_mcp_oauth_token, resolve_mcp_tool_descriptor,
         },
         mcp_tools::load_mcp_tools,
+        message_branches::{ThreadEntry, add_to_thread, is_shown, last_shown_message},
         message_helpers::{EditInProgress, EditStatus, PendingEdit, begin_pending_edit},
         notifications::emit_budget_alerts,
         provider_chat::{
@@ -64,8 +65,9 @@ use crate::{
         },
         provider_resolver::{ResolveProviderError, resolve_provider},
         rag::{
-            EmbeddingTarget, assemble_prompts_with_budget, build_project_retrieval_prompt,
-            build_retrieval_prompt, embed_messages, load_recent_prompts, load_summary,
+            EmbeddingTarget, assemble_prompts_with_budget, begin_history_snapshot,
+            build_project_retrieval_prompt, build_retrieval_prompt, embed_messages,
+            embed_retrieval_query, end_history_snapshot, load_recent_prompts, load_summary,
             summary_usable_with_cutoff, update_conversation_summary,
         },
         skills_helpers::{load_skill_knowledge_for_stream, load_skills_for_stream},
@@ -92,8 +94,10 @@ use futures_util::StreamExt;
 use num_traits::ToPrimitive;
 use reqwest::StatusCode;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
-    QueryOrder, QueryTrait, prelude::Decimal,
+    ActiveModelTrait,
+    ActiveValue::{NotSet, Set},
+    ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QueryTrait,
+    prelude::Decimal,
 };
 use serde_json::{Value, json};
 use std::{collections::HashMap, convert::Infallible};
@@ -275,14 +279,14 @@ async fn hydrate_prompt_files(
       })
     )),
     ("cancelled" = (
-      description = "event:cancelled — the reply was stopped before it finished, either by POST /chat/stream/{message_id}/cancel or because the user edited a message in this conversation while it was generating. Followed by response_stopped with the reason.",
+      description = "event:cancelled — the reply was stopped before it finished, either by POST /chat/stream/{message_id}/cancel or because the user edited a message in this conversation or switched to another version while it was generating. Followed by response_stopped with the reason.",
       value = json!({
         "event": "cancelled",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
       })
     )),
     ("response_stopped" = (
-      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation while it was generating, or a newer edit of the same message took over), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnected is stored as network_error, or as user_cancelled when POST /chat/stream/{message_id}/cancel arrives within 5 seconds.",
+      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation or switched to another version while it was generating, or a newer edit of the same message took over), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnected is stored as network_error, or as user_cancelled when POST /chat/stream/{message_id}/cancel arrives within 5 seconds.",
       value = json!({
         "event": "response_stopped",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "stop_reason": "user_cancelled" }
@@ -435,14 +439,14 @@ pub async fn handle_chat_stream_path_doc() {}
       })
     )),
     ("cancelled" = (
-      description = "event:cancelled — the reply was stopped before it finished, either by POST /chat/stream/{message_id}/cancel or because the user edited a message in this conversation while it was generating. Followed by response_stopped with the reason.",
+      description = "event:cancelled — the reply was stopped before it finished, either by POST /chat/stream/{message_id}/cancel or because the user edited a message in this conversation or switched to another version while it was generating. Followed by response_stopped with the reason.",
       value = json!({
         "event": "cancelled",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
       })
     )),
     ("response_stopped" = (
-      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation while it was generating, or a newer edit of the same message took over), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnected is stored as network_error, or as user_cancelled when POST /chat/stream/{message_id}/cancel arrives within 5 seconds.",
+      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation or switched to another version while it was generating, or a newer edit of the same message took over), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnected is stored as network_error, or as user_cancelled when POST /chat/stream/{message_id}/cancel arrives within 5 seconds.",
       value = json!({
         "event": "response_stopped",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "stop_reason": "user_cancelled" }
@@ -740,6 +744,7 @@ pub async fn handle_chat_stream(
     let mut recent_prompts: Vec<Prompt> = Vec::new();
     let mut linked_projects = Vec::new();
     let mut edit_in_progress: Option<EditInProgress> = None;
+    let mut thread_parent: Option<Uuid> = None;
     let (conversation_id, title) = if let Some(Path(conversation_id)) = chat_id {
         let conversation =
             find_active_conversation_for_user(&app_state.database, conversation_id, claims.user_id)
@@ -751,12 +756,6 @@ pub async fn handle_chat_stream(
             .map(EditInProgress::history_cutoff);
         let mut conversation_active = conversation.clone().into_active_model();
         conversation_active.updated_at = Set(Utc::now());
-        // An edit recounts these when it commits, so a failed attempt leaves them as they were.
-        if edit_in_progress.is_none() {
-            conversation_active.message_count =
-                Set(conversation.message_count + req.messages.len() as i32);
-            conversation_active.last_message_at = Set(Some(Utc::now()));
-        }
         conversation_active
             .update(&app_state.database)
             .await
@@ -768,56 +767,23 @@ pub async fn handle_chat_stream(
             load_readable_linked_projects(&app_state.database, conversation_id, claims.user_id)
                 .await?;
 
+        let mut retrieval_embedding = None;
         if app_state.settings.rag.enabled {
-            let recent = load_recent_prompts(
-                &app_state.database,
-                conversation_id,
-                app_state.settings.rag.recent_message_pairs,
-                history_cutoff,
-            )
-            .await?;
-            let recent_boundary = recent.boundary;
-            recent_prompts = recent.prompts;
-            if app_state.settings.rag.summary_enabled {
-                if let Some(summary) = load_summary(&app_state.database, conversation_id).await? {
-                    if !summary.summary.trim().is_empty()
-                        && summary_usable_with_cutoff(summary.last_message_at, history_cutoff)
-                    {
-                        summary_prompt = Some(Prompt {
-                            role: ChatRole::System,
-                            text: format!("Conversation summary:\n{}", summary.summary),
-                            files: Vec::new(),
-                        });
-                    }
-                }
-            }
             let top_k = app_state.settings.rag.retrieval_top_k;
             let retrieval_future = async {
                 if app_state.settings.rag.retrieval_enabled {
-                    build_retrieval_prompt(
-                        &app_state,
-                        conversation_id,
-                        &retrieval_query,
-                        recent_boundary.or(history_cutoff),
-                    )
-                    .await
+                    embed_retrieval_query(&app_state, &retrieval_query).await
                 } else {
                     Ok(None)
                 }
             };
-            let (retrieval_result, project_retrieval_results) = tokio::join!(
+            let (embedding_result, project_retrieval_results) = tokio::join!(
                 retrieval_future,
                 futures_util::future::join_all(linked_projects.iter().map(|project| {
                     build_project_retrieval_prompt(&app_state, project.id, &retrieval_query, top_k)
                 })),
             );
-            if let Some(text) = retrieval_result? {
-                retrieval_prompt = Some(Prompt {
-                    role: ChatRole::System,
-                    text,
-                    files: Vec::new(),
-                });
-            }
+            retrieval_embedding = embedding_result?;
             let combined_project_text: String = project_retrieval_results
                 .into_iter()
                 .filter_map(|r| r.ok().flatten())
@@ -830,6 +796,54 @@ pub async fn handle_chat_stream(
                     files: Vec::new(),
                 });
             }
+        }
+
+        let snapshot = begin_history_snapshot(&app_state.database).await?;
+        // A new message continues the thread on screen; an edit's new version takes the edited
+        // message's parent instead, so the two become versions of each other.
+        thread_parent = match edit_in_progress.as_ref() {
+            Some(edit) => edit.parent_id(),
+            None => last_shown_message(&snapshot, conversation_id).await?,
+        };
+        if app_state.settings.rag.enabled {
+            let recent = load_recent_prompts(
+                &snapshot,
+                conversation_id,
+                app_state.settings.rag.recent_message_pairs,
+                history_cutoff,
+            )
+            .await?;
+            let recent_boundary = recent.boundary;
+            recent_prompts = recent.prompts;
+            if app_state.settings.rag.summary_enabled {
+                if let Some(summary) = load_summary(&snapshot, conversation_id).await? {
+                    if !summary.summary.trim().is_empty()
+                        && summary_usable_with_cutoff(summary.last_message_at, history_cutoff)
+                    {
+                        summary_prompt = Some(Prompt {
+                            role: ChatRole::System,
+                            text: format!("Conversation summary:\n{}", summary.summary),
+                            files: Vec::new(),
+                        });
+                    }
+                }
+            }
+            if let Some(query) = retrieval_embedding.as_ref()
+                && let Some(text) = build_retrieval_prompt(
+                    &app_state,
+                    &snapshot,
+                    conversation_id,
+                    query,
+                    recent_boundary.or(history_cutoff),
+                )
+                .await?
+            {
+                retrieval_prompt = Some(Prompt {
+                    role: ChatRole::System,
+                    text,
+                    files: Vec::new(),
+                });
+            }
         } else {
             let previous_messages = messages::Entity::find()
                 .filter(messages::Column::ConversationId.eq(conversation_id))
@@ -838,7 +852,7 @@ pub async fn handle_chat_stream(
                     query.filter(messages::Column::CreatedAt.lt(cutoff))
                 })
                 .order_by_asc(messages::Column::CreatedAt)
-                .all(&app_state.database)
+                .all(&snapshot)
                 .await
                 .map_err(|e| {
                     eprintln!("DB get messages error {:?}", e);
@@ -857,6 +871,7 @@ pub async fn handle_chat_stream(
                 })
                 .collect::<Vec<Prompt>>();
         }
+        end_history_snapshot(snapshot).await?;
         (conversation_id, None)
     } else {
         let first_message = req
@@ -924,7 +939,8 @@ pub async fn handle_chat_stream(
             pinned: Set(false),
             edit_requests: Set(0),
             edit_claim: Set(None),
-            message_count: Set(req.messages.len() as i32),
+            // Each request message counts as it is added to the thread.
+            message_count: Set(0),
             total_tokens: Set(0),
             total_cost: Set(Decimal::from(0)),
             metadata: Set(Some(new_metadata)),
@@ -938,23 +954,24 @@ pub async fn handle_chat_stream(
             })?;
         (new_conversation_id, generated_title)
     };
-    let mut previous_message_id = None;
+    let mut previous_message_id = thread_parent;
     let mut embedding_targets: Vec<EmbeddingTarget> = Vec::new();
     for message in &req.messages {
         let new_message_id = Uuid::new_v4();
-        let created_at = Utc::now();
+        let mut created_at = Utc::now();
         metadata["files"] = message
             .files
             .iter()
             .map(|f| serde_json::to_value(f).unwrap())
             .collect::<Vec<serde_json::Value>>()
             .into();
-        let new_message = messages::ActiveModel {
+        let mut new_message = messages::ActiveModel {
             id: Set(new_message_id),
             conversation_id: Set(conversation_id),
             previous_message_id: Set(previous_message_id),
             role: Set(message.role),
             deleted: Set(edit_in_progress.is_some()),
+            inactive_branch: Set(false),
             message_content: Set(message.content.clone()),
             model_provider: Set(provider.clone()),
             model_name: Set(model_name.clone()),
@@ -970,15 +987,22 @@ pub async fn handle_chat_stream(
             cost: Set(Decimal::from(0)),
             metadata: Set(Some(metadata.clone())),
         };
-        previous_message_id = Some(new_message_id);
-        new_message
-            .clone()
-            .insert(&app_state.database)
-            .await
-            .map_err(|e| {
+        if edit_in_progress.is_some() {
+            new_message.insert(&app_state.database).await.map_err(|e| {
                 eprintln!("Db one insert error {:?}", e);
                 AppError::DbTimeout
             })?;
+        } else {
+            created_at = add_to_thread(
+                &app_state.database,
+                &mut new_message,
+                conversation_id,
+                previous_message_id,
+                ThreadEntry::Sent,
+            )
+            .await?;
+        }
+        previous_message_id = Some(new_message_id);
         if let Some(edit) = edit_in_progress.as_mut() {
             edit.record_attempt_message(new_message_id);
         }
@@ -1320,11 +1344,12 @@ pub async fn handle_chat_stream(
                         + calculate_cost_decimal(total_image_input, 0, image_input_rate, None)
                         + calculate_cost_decimal(0, total_output, None, effective_output_rate);
                     let total_input_tokens = total_text_input + total_image_input;
-                    let img_msg = messages::ActiveModel {
+                    let mut img_msg = messages::ActiveModel {
                         id: Set(img_message_id),
                         conversation_id: Set(conversation_id.clone()),
                         previous_message_id: Set(previous_message_id),
                         deleted: Set(edit_in_progress.is_some()),
+                        inactive_branch: Set(false),
                         role: Set(ChatRole::Assistant),
                         message_content: Set(String::new()),
                         model_provider: Set(provider.clone()),
@@ -1341,8 +1366,16 @@ pub async fn handle_chat_stream(
                         updated_at: Set(now),
                         metadata: Set(Some(json!({ "files": files_meta }))),
                     };
-                    if let Err(e) = img_msg.insert(&app_state.database).await {
-                        eprintln!("image gen message insert error: {e}");
+                    let inserted = if edit_in_progress.is_some() {
+                        img_msg.insert(&app_state.database).await.map(|_| ()).map_err(|e| {
+                            eprintln!("image gen message insert error: {e}");
+                            AppError::DbTimeout
+                        })
+                    } else {
+                        add_to_thread(&app_state.database, &mut img_msg, conversation_id, previous_message_id, ThreadEntry::Reply).await.map(|_| ())
+                    };
+                    if let Err(e) = inserted {
+                        eprintln!("image gen message insert error: {e:?}");
                         yield Event::default()
                             .event(ChatStreamEvents::AiError.to_string())
                             .data(persistence_error_event_data());
@@ -1518,12 +1551,13 @@ pub async fn handle_chat_stream(
         };
 
         let new_message_id = Uuid::new_v4();
-        let assistant_created_at = Utc::now();
+        let mut assistant_created_at = Utc::now();
         let mut new_llm_message = messages::ActiveModel {
            id: Set(new_message_id.clone()),
            conversation_id: Set(conversation_id.clone()),
            previous_message_id: Set(previous_message_id),
            deleted: Set(edit_in_progress.is_some()),
+           inactive_branch: Set(false),
            role: Set(ChatRole::Assistant),
            message_content: Set(message_content.clone()),
            model_provider: Set(provider.clone()),
@@ -1540,14 +1574,29 @@ pub async fn handle_chat_stream(
            cost: Set(Decimal::from(0)),
            metadata: Set(Some(json!({"webSearch":req.web_search}))),
          };
-        if let Err(error) = new_llm_message.clone().insert(&app_state.database).await {
-            eprintln!("assistant message insert error: {error}");
+        let inserted = if edit_in_progress.is_some() {
+            new_llm_message.clone().insert(&app_state.database).await.map(|_| ()).map_err(|e| {
+                eprintln!("assistant message insert error: {e}");
+                AppError::DbTimeout
+            })
+        } else {
+            add_to_thread(&app_state.database, &mut new_llm_message, conversation_id, previous_message_id, ThreadEntry::Reply)
+                .await
+                .map(|stamped| assistant_created_at = stamped)
+        };
+        if let Err(error) = inserted {
+            eprintln!("assistant message insert error: {error:?}");
             yield Event::default()
                 .event(ChatStreamEvents::AiError.to_string())
                 .data(persistence_error_event_data());
             yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
             return;
         }
+        // Only an edit commit or a branch switch decides where the reply sits and whether it is
+        // shown, so the stream's later saves must not write these back over a switch.
+        new_llm_message.previous_message_id = NotSet;
+        new_llm_message.deleted = NotSet;
+        new_llm_message.inactive_branch = NotSet;
         if let Some(edit) = edit_in_progress.as_mut() {
             edit.record_attempt_message(new_message_id);
             match edit.claim(&app_state.database).await {
@@ -1578,6 +1627,13 @@ pub async fn handle_chat_stream(
                 edit_in_progress.as_ref().map(EditInProgress::request),
             )
             .await;
+        // A switch can only stop replies registered above; one that landed earlier has hidden
+        // this reply with its version, so it stops the same way.
+        if edit_in_progress.is_none()
+            && matches!(is_shown(&app_state.database, new_message_id).await, Ok(false))
+        {
+            cancel_handle.cancel(StopReason::UserEdited);
+        }
         let mut content_checkpoint = ContentCheckpoint::new(
             app_state.database.clone(),
             new_message_id,

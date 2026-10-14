@@ -89,6 +89,21 @@ pub struct MessageResponse {
     pub usage: TokenUsage,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<StopReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub versions: Option<MessageVersions>,
+}
+
+// Present on a message that has other versions, which edits create; render as "< current / total >".
+#[derive(Serialize, ToSchema, Clone, Debug, PartialEq, Eq)]
+pub struct MessageVersions {
+    pub current: u32,
+    pub total: u32,
+    pub message_ids: Vec<Uuid>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct SelectBranchRequest {
+    pub message_id: Uuid,
 }
 
 #[derive(Serialize, Deserialize, ToSchema, IntoParams)]
