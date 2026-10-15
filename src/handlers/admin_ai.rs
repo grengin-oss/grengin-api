@@ -542,6 +542,16 @@ pub async fn delete_ai_engines_api_key_key(
     active_model.updated_at = Set(Utc::now());
     active_model.api_key_status = Set(ApiKeyStatus::NotConfigured);
     active_model.is_enabled = Set(false);
+    // Persist first: resolve_provider re-registers from the DB on a registry miss, so evicting
+    // before the row is disabled lets a concurrent chat put the deleted key back until restart.
+    active_model
+        .clone()
+        .update(&app_state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("db error update one {e}");
+            AuthError::DbTimeout
+        })?;
     app_state
         .settings
         .load_ai_engine_in_state(
@@ -560,14 +570,6 @@ pub async fn delete_ai_engines_api_key_key(
         .live_models_cache
         .invalidate(&ai_engine.engine_key)
         .await;
-    active_model
-        .clone()
-        .update(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("db error update one {e}");
-            AuthError::DbTimeout
-        })?;
     let model = active_model.try_into_model().map_err(|e| {
         eprintln!("db error model parse error {e}");
         AuthError::DbTimeout

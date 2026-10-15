@@ -14,9 +14,11 @@ use crate::{
     error::{AppError, ErrorResponse},
     models::{
         conversations::{self, ConversationWithCount},
-        messages::{self},
+        messages::{self, StopReason},
     },
-    services::{chat_helpers::resolve_web_search_enabled, search},
+    services::{
+        chat_helpers::resolve_web_search_enabled, message_branches::load_message_versions, search,
+    },
     state::SharedState,
 };
 use axum::{
@@ -342,6 +344,7 @@ async fn fetch_conversations_by_ids(
     get,
     path = "/chat/{chat_id}",
     tag = "chat",
+    description = "Returns the conversation with the messages of the version shown, oldest first; message_count here is the number of those messages.\n\n- A message that has other versions (editing a message adds one) carries `versions`: `current` of `total`, and `message_ids` oldest first. Send one of those ids to PUT /chat/{chat_id}/branch to show that version.\n- A reply that stopped before it finished carries `stop_reason`: user_cancelled, user_edited, provider_error, network_error or server_error.",
     params(
         ("chat_id" = Uuid, Path, description = "Unique identifier for the conversation"),
     ),
@@ -379,6 +382,7 @@ pub async fn get_chat_by_id(
         })?;
 
     let message_count = messages_models.len() as u64;
+    let versions = load_message_versions(&app_state.database, chat_id).await?;
 
     let web_search_enabled = resolve_web_search_enabled(conversation_model.metadata.as_ref());
     let mut conversation_response = ConversationResponse {
@@ -422,6 +426,7 @@ pub async fn get_chat_by_id(
                 .and_then(|v| serde_json::from_value(v).ok())
         });
         let message = MessageResponse {
+            versions: versions.get(&message_model.id).cloned(),
             id: message_model.id,
             role: message_model.role,
             cost: message_model.cost.to_f32().unwrap_or_default(),
@@ -452,6 +457,7 @@ pub async fn get_chat_by_id(
                     .and_then(|value| i32::try_from(value).ok())
                     .unwrap_or(0),
             },
+            stop_reason: StopReason::from_metadata(metadata),
         };
         conversation_response
             .messages

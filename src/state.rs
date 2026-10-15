@@ -14,9 +14,10 @@ use crate::{
     },
     config::setting::{AzureSettings, ConfigError, GoogleSettings, OidcClient, Settings},
     dto::oauth::AuthProvider,
-    models::{mcp_servers, sso_providers},
+    models::{mcp_servers, messages::StopReason, sso_providers},
     services::ai_engine_catalog::reconcile_catalog_ai_engines,
     services::discovery_catalog::DiscoveryCatalog,
+    services::http_client::short_call_client,
     services::live_models_cache::LiveModelsCache,
     services::mcp_client::McpServerClient,
     services::notifications::NotificationEvent,
@@ -32,10 +33,11 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
 };
 use tokio::sync::{Notify, RwLock, broadcast};
 use uuid::Uuid;
+
+pub type StreamCancellations = Arc<RwLock<HashMap<Uuid, Arc<StreamCancel>>>>;
 
 pub struct AppState {
     pub database: DatabaseConnection,
@@ -44,7 +46,7 @@ pub struct AppState {
     pub settings: Settings,
     pub mcp_clients: RwLock<HashMap<Uuid, Arc<McpServerClient>>>,
     pub notification_hub: broadcast::Sender<NotificationEvent>,
-    pub stream_cancellations: RwLock<HashMap<Uuid, Arc<StreamCancel>>>,
+    pub stream_cancellations: StreamCancellations,
     pub provider_registry: ProviderRegistry,
     pub live_models_cache: LiveModelsCache,
     pub discovery_catalog: DiscoveryCatalog,
@@ -80,21 +82,46 @@ pub enum AuthProtocolClient {
 pub type SharedState = Arc<AppState>;
 
 pub struct StreamCancel {
+    conversation_id: Uuid,
+    edit_request: Option<i32>,
     cancelled: AtomicBool,
+    reason: std::sync::Mutex<Option<StopReason>>,
     notify: Notify,
 }
 
 impl StreamCancel {
-    pub fn new() -> Self {
+    pub fn new(conversation_id: Uuid) -> Self {
         Self {
+            conversation_id,
+            edit_request: None,
             cancelled: AtomicBool::new(false),
+            reason: std::sync::Mutex::new(None),
             notify: Notify::new(),
         }
     }
 
-    pub fn cancel(&self) {
+    fn for_edit(conversation_id: Uuid, request: i32) -> Self {
+        Self {
+            edit_request: Some(request),
+            ..Self::new(conversation_id)
+        }
+    }
+
+    fn is_older_than(&self, request: i32) -> bool {
+        self.edit_request.is_none_or(|own| own < request)
+    }
+
+    // The first reason wins, so a user stop that races an edit is still reported as a stop.
+    pub fn cancel(&self, reason: StopReason) {
+        if let Ok(mut current) = self.reason.lock() {
+            current.get_or_insert(reason);
+        }
         self.cancelled.store(true, Ordering::Relaxed);
         self.notify.notify_waiters();
+    }
+
+    pub fn reason(&self) -> Option<StopReason> {
+        self.reason.lock().ok().and_then(|reason| *reason)
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -102,7 +129,13 @@ impl StreamCancel {
     }
 
     pub async fn cancelled(&self) {
-        self.notify.notified().await;
+        // notify_waiters keeps no permit, so a cancel sent while nobody was waiting
+        // (e.g. during MCP tool execution) is only visible through the flag.
+        let notified = self.notify.notified();
+        if self.is_cancelled() {
+            return;
+        }
+        notified.await;
     }
 }
 
@@ -120,11 +153,8 @@ impl AppState {
             .await
             .clone()
             .filter(|settings| settings.is_enabled && !settings.use_grengin_proxy);
-        let req_client = reqwest::ClientBuilder::new()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(15))
-            .build()
-            .map_err(|e| ConfigError::ReqwestClientBuildError(e.to_string()))?;
+        let req_client =
+            short_call_client().map_err(|e| ConfigError::ReqwestClientBuildError(e.to_string()))?;
         let database = Database::connect(&settings.auth.database_url)
             .await
             .map_err(|e| ConfigError::DbError(e.to_string()))?;
@@ -159,7 +189,7 @@ impl AppState {
             settings,
             mcp_clients: RwLock::new(HashMap::new()),
             notification_hub,
-            stream_cancellations: RwLock::new(HashMap::new()),
+            stream_cancellations: Arc::new(RwLock::new(HashMap::new())),
             provider_registry: ProviderRegistry::new(),
             live_models_cache: LiveModelsCache::new(),
             discovery_catalog,
@@ -180,30 +210,6 @@ impl AppState {
             .map(|runtime| runtime.is_enabled)
     }
 
-    pub async fn is_email_domain_allowed(
-        &self,
-        email: &str,
-        provider: &AuthProvider,
-    ) -> (bool, Option<String>) {
-        if let Some((_, domain)) = email.split_once('@') {
-            let Some(runtime) = self.oidc_provider(provider).await else {
-                return (false, Some(domain.to_string()));
-            };
-            if runtime.allowed_domains.is_empty() {
-                return (true, None);
-            }
-            let domain = domain.to_ascii_lowercase();
-            return (
-                runtime
-                    .allowed_domains
-                    .iter()
-                    .any(|allowed| allowed.eq_ignore_ascii_case(&domain)),
-                Some(domain),
-            );
-        }
-        (false, None)
-    }
-
     pub async fn sso_jit_provisioning_enabled(&self, provider: &AuthProvider) -> bool {
         self.oidc_provider(provider)
             .await
@@ -221,26 +227,29 @@ impl AppState {
             .map(|engine| engine.is_enabled)
     }
 
-    pub async fn register_stream_cancel(&self, message_id: Uuid) -> Arc<StreamCancel> {
+    pub async fn register_stream_cancel(
+        &self,
+        message_id: Uuid,
+        conversation_id: Uuid,
+        edit_request: Option<i32>,
+    ) -> Arc<StreamCancel> {
         let mut guard = self.stream_cancellations.write().await;
-        let handle = Arc::new(StreamCancel::new());
-        guard.insert(message_id, handle.clone());
-        handle
+        register_stream(&mut guard, message_id, conversation_id, edit_request)
     }
 
     pub async fn cancel_stream(&self, message_id: Uuid) -> bool {
         let guard = self.stream_cancellations.read().await;
         if let Some(handle) = guard.get(&message_id) {
-            handle.cancel();
+            handle.cancel(StopReason::UserCancelled);
             true
         } else {
             false
         }
     }
 
-    pub async fn clear_stream_cancel(&self, message_id: Uuid) {
-        let mut guard = self.stream_cancellations.write().await;
-        guard.remove(&message_id);
+    pub async fn interrupt_older_streams(&self, conversation_id: Uuid, edit_request: i32) {
+        let guard = self.stream_cancellations.read().await;
+        interrupt_older_streams(&guard, conversation_id, edit_request);
     }
 
     pub async fn get_oidc_provider_runtime(
@@ -599,5 +608,172 @@ impl AppState {
     pub async fn remove_mcp_client(&self, server_id: &Uuid) {
         let mut clients = self.mcp_clients.write().await;
         clients.remove(server_id);
+    }
+}
+
+// Edits follow the same order as their claims: an edit stops the plain replies and older edits
+// of its conversation, and one that finds a newer edit already replying stops itself. Deciding
+// under the lock that inserts the stream makes the outcome independent of arrival order.
+fn register_stream(
+    streams: &mut HashMap<Uuid, Arc<StreamCancel>>,
+    message_id: Uuid,
+    conversation_id: Uuid,
+    edit_request: Option<i32>,
+) -> Arc<StreamCancel> {
+    let handle = Arc::new(match edit_request {
+        Some(request) => StreamCancel::for_edit(conversation_id, request),
+        None => StreamCancel::new(conversation_id),
+    });
+    if let Some(request) = edit_request {
+        let newer_edit_running = streams
+            .values()
+            .any(|other| other.conversation_id == conversation_id && !other.is_older_than(request));
+        if newer_edit_running {
+            handle.cancel(StopReason::UserEdited);
+        } else {
+            interrupt_older_streams(streams, conversation_id, request);
+        }
+    }
+    streams.insert(message_id, handle.clone());
+    handle
+}
+
+fn interrupt_older_streams(
+    streams: &HashMap<Uuid, Arc<StreamCancel>>,
+    conversation_id: Uuid,
+    edit_request: i32,
+) -> Vec<Uuid> {
+    streams
+        .iter()
+        .filter(|(_, handle)| {
+            handle.conversation_id == conversation_id && handle.is_older_than(edit_request)
+        })
+        .map(|(message_id, handle)| {
+            handle.cancel(StopReason::UserEdited);
+            *message_id
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StreamCancel, interrupt_older_streams, register_stream};
+    use crate::models::messages::StopReason;
+    use std::{collections::HashMap, sync::Arc};
+    use uuid::Uuid;
+
+    #[test]
+    fn cancel_records_why_the_stream_stopped() {
+        let handle = StreamCancel::new(Uuid::new_v4());
+        assert_eq!(handle.reason(), None);
+        handle.cancel(StopReason::UserCancelled);
+        assert!(handle.is_cancelled());
+        assert_eq!(handle.reason(), Some(StopReason::UserCancelled));
+    }
+
+    #[test]
+    fn first_cancel_reason_wins() {
+        let handle = StreamCancel::new(Uuid::new_v4());
+        handle.cancel(StopReason::UserCancelled);
+        handle.cancel(StopReason::UserEdited);
+        assert_eq!(handle.reason(), Some(StopReason::UserCancelled));
+    }
+
+    #[test]
+    fn editing_cancels_only_streams_in_that_conversation() {
+        let edited = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let in_edited = Uuid::new_v4();
+        let in_other = Uuid::new_v4();
+        let streams = HashMap::from([
+            (in_edited, Arc::new(StreamCancel::new(edited))),
+            (in_other, Arc::new(StreamCancel::new(other))),
+        ]);
+
+        let cancelled = interrupt_older_streams(&streams, edited, 1);
+
+        assert_eq!(cancelled, vec![in_edited]);
+        assert_eq!(streams[&in_edited].reason(), Some(StopReason::UserEdited));
+        assert!(!streams[&in_other].is_cancelled());
+    }
+
+    #[test]
+    fn an_edit_starting_to_reply_interrupts_its_conversation_but_not_itself() {
+        let edited = Uuid::new_v4();
+        let running = Uuid::new_v4();
+        let elsewhere = Uuid::new_v4();
+        let mut streams = HashMap::from([
+            (running, Arc::new(StreamCancel::new(edited))),
+            (elsewhere, Arc::new(StreamCancel::new(Uuid::new_v4()))),
+        ]);
+
+        let edit = register_stream(&mut streams, Uuid::new_v4(), edited, Some(1));
+
+        assert_eq!(streams[&running].reason(), Some(StopReason::UserEdited));
+        assert!(!streams[&elsewhere].is_cancelled());
+        assert!(!edit.is_cancelled());
+        assert_eq!(streams.len(), 3);
+    }
+
+    #[test]
+    fn a_plain_reply_interrupts_nothing() {
+        let conversation = Uuid::new_v4();
+        let running = Uuid::new_v4();
+        let mut streams = HashMap::from([(running, Arc::new(StreamCancel::new(conversation)))]);
+
+        register_stream(&mut streams, Uuid::new_v4(), conversation, None);
+
+        assert!(!streams[&running].is_cancelled());
+    }
+
+    #[test]
+    fn a_newer_edit_registering_second_stops_the_older_one() {
+        let conversation = Uuid::new_v4();
+        let mut streams = HashMap::new();
+
+        let older = register_stream(&mut streams, Uuid::new_v4(), conversation, Some(1));
+        let newer = register_stream(&mut streams, Uuid::new_v4(), conversation, Some(2));
+
+        assert_eq!(older.reason(), Some(StopReason::UserEdited));
+        assert!(!newer.is_cancelled());
+    }
+
+    #[test]
+    fn an_older_edit_registering_second_stops_itself_and_leaves_the_newer_one() {
+        let conversation = Uuid::new_v4();
+        let mut streams = HashMap::new();
+
+        let newer = register_stream(&mut streams, Uuid::new_v4(), conversation, Some(2));
+        let older = register_stream(&mut streams, Uuid::new_v4(), conversation, Some(1));
+
+        assert_eq!(older.reason(), Some(StopReason::UserEdited));
+        assert!(!newer.is_cancelled());
+    }
+
+    #[test]
+    fn edits_of_other_conversations_never_interact() {
+        let mut streams = HashMap::new();
+
+        let newer = register_stream(&mut streams, Uuid::new_v4(), Uuid::new_v4(), Some(2));
+        let older = register_stream(&mut streams, Uuid::new_v4(), Uuid::new_v4(), Some(1));
+
+        assert!(!newer.is_cancelled());
+        assert!(!older.is_cancelled());
+    }
+
+    #[test]
+    fn an_older_image_edit_does_not_stop_a_newer_edit() {
+        let conversation = Uuid::new_v4();
+        let plain = Uuid::new_v4();
+        let newer = Uuid::new_v4();
+        let streams = HashMap::from([
+            (plain, Arc::new(StreamCancel::new(conversation))),
+            (newer, Arc::new(StreamCancel::for_edit(conversation, 3))),
+        ]);
+
+        let stopped = interrupt_older_streams(&streams, conversation, 2);
+
+        assert_eq!(stopped, vec![plain]);
+        assert!(!streams[&newer].is_cancelled());
     }
 }

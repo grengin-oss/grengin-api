@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::models::mcp_servers::McpTransportType;
+use crate::services::http_client::long_lived_stream_client;
 use chrono::{DateTime, Duration, Utc};
 use oauth2::{
     EndpointNotSet as OAuthEndpointNotSet, EndpointSet as OAuthEndpointSet, basic::BasicClient,
@@ -9,7 +10,7 @@ use oauth2::{
 use openidconnect::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointNotSet, EndpointSet,
     IssuerUrl, Nonce, OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
-    RefreshToken, Scope, TokenUrl,
+    RefreshToken, RequestTokenError, Scope, TokenUrl,
     core::{CoreAuthenticationFlow, CoreClient, CoreJsonWebKeySet},
 };
 use reqwest::{Client as ReqwestClient, header::ACCEPT};
@@ -35,6 +36,8 @@ pub enum McpClientError {
     Rmcp(String),
     #[error("oauth error: {0}")]
     OAuth(String),
+    #[error("oauth token endpoint unreachable: {0}")]
+    OAuthUnreachable(String),
     #[error("invalid oauth configuration: {0}")]
     OAuthConfig(String),
     #[error("invalid tool args: {0}")]
@@ -370,10 +373,14 @@ pub async fn exchange_code(
                 request =
                     request.set_pkce_verifier(PkceCodeVerifier::new(pkce_verifier.to_string()));
             }
-            let token_response = request
-                .request_async(http_client)
-                .await
-                .map_err(|e| McpClientError::OAuth(e.to_string()))?;
+            let token_response = request.request_async(http_client).await.map_err(|e| {
+                // Only a request that never got a response leaves the code unused.
+                if matches!(e, RequestTokenError::Request(_)) {
+                    McpClientError::OAuthUnreachable(e.to_string())
+                } else {
+                    McpClientError::OAuth(e.to_string())
+                }
+            })?;
             Ok(tokens_from_response(&token_response))
         }
         McpOAuthFlow::Oauth2 => {
@@ -395,7 +402,7 @@ pub async fn exchange_code(
                 .form(&form)
                 .send()
                 .await
-                .map_err(|e| McpClientError::OAuth(e.to_string()))?;
+                .map_err(|e| McpClientError::OAuthUnreachable(e.to_string()))?;
             let status = response.status();
             let body = response
                 .text()
@@ -518,7 +525,9 @@ async fn connect_rmcp_http(
     if let Some(token) = auth_header {
         config = config.auth_header(token);
     }
-    let transport = StreamableHttpClientTransport::from_config(config);
+    let client = long_lived_stream_client()
+        .map_err(|e| McpClientError::Rmcp(format!("http client build failed: {e}")))?;
+    let transport = StreamableHttpClientTransport::with_client(client, config);
     ().serve(transport)
         .await
         .map_err(|e| McpClientError::Rmcp(format!("rmcp connect failed: {e}")))
@@ -872,4 +881,98 @@ fn resolve_env_placeholders(value: &str) -> Result<String, McpClientError> {
 fn resolve_env_var(name: &str) -> Result<String, McpClientError> {
     std::env::var(name)
         .map_err(|_| McpClientError::Config(format!("missing environment variable: {name}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    fn oauth2_config(token_url: String) -> McpOAuthConfig {
+        McpOAuthConfig {
+            issuer_url: "https://issuer.example.com".to_string(),
+            auth_url: "https://issuer.example.com/authorize".to_string(),
+            token_url,
+            client_id: "client".to_string(),
+            client_secret: None,
+            redirect_url: "https://app.example.com/mcp/oauth/callback".to_string(),
+            scopes: vec![],
+            extra_params: HashMap::new(),
+            flow: McpOAuthFlow::Oauth2,
+            use_pkce: true,
+        }
+    }
+
+    async fn token_endpoint_replying(status: &'static str, body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+        format!("http://{address}/token")
+    }
+
+    #[tokio::test]
+    async fn token_endpoint_that_never_answers_is_reported_as_unreachable() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+
+        let result = exchange_code(
+            &oauth2_config(format!("http://{address}/token")),
+            "code",
+            "verifier",
+            &ReqwestClient::new(),
+        )
+        .await;
+
+        assert!(matches!(result, Err(McpClientError::OAuthUnreachable(_))));
+    }
+
+    #[tokio::test]
+    async fn token_endpoint_rejecting_the_code_is_not_reported_as_unreachable() {
+        let token_url =
+            token_endpoint_replying("400 Bad Request", r#"{"error":"invalid_grant"}"#).await;
+
+        let result = exchange_code(
+            &oauth2_config(token_url),
+            "used-code",
+            "verifier",
+            &ReqwestClient::new(),
+        )
+        .await;
+
+        assert!(matches!(result, Err(McpClientError::OAuth(_))));
+    }
+
+    #[tokio::test]
+    async fn token_endpoint_returning_tokens_redeems_the_code() {
+        let token_url = token_endpoint_replying(
+            "200 OK",
+            r#"{"access_token":"at","token_type":"Bearer","expires_in":3600,"refresh_token":"rt"}"#,
+        )
+        .await;
+
+        let tokens = exchange_code(
+            &oauth2_config(token_url),
+            "code",
+            "verifier",
+            &ReqwestClient::new(),
+        )
+        .await
+        .expect("tokens");
+
+        assert_eq!(tokens.access_token, "at");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("rt"));
+    }
 }

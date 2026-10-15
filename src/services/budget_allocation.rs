@@ -13,6 +13,29 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetHealth {
+    Unlimited,
+    Healthy,
+    Low,
+    Exhausted,
+}
+
+impl BudgetHealth {
+    pub fn classify(allocated: Decimal, available: Decimal) -> Self {
+        // budgetAllocated is NOT NULL DEFAULT 0, so zero is how "no budget configured" is stored.
+        if allocated <= Decimal::ZERO {
+            Self::Unlimited
+        } else if available <= Decimal::ZERO {
+            Self::Exhausted
+        } else if available <= allocated * Decimal::new(2, 1) {
+            Self::Low
+        } else {
+            Self::Healthy
+        }
+    }
+}
+
 pub fn period_bounds(
     period: &departments::BudgetPeriod,
     now: DateTime<Utc>,
@@ -166,10 +189,16 @@ pub async fn refresh_department_budget_available(
     Ok(budget_available)
 }
 
+pub struct DepartmentBudgetStatus {
+    pub allocated: Decimal,
+    pub available: Decimal,
+    pub action_on_exceed: departments::ActionOnExceed,
+}
+
 pub async fn get_department_budget_status(
     db: &DatabaseConnection,
     dept_id: Uuid,
-) -> Result<(Decimal, departments::ActionOnExceed), sea_orm::DbErr> {
+) -> Result<DepartmentBudgetStatus, sea_orm::DbErr> {
     #[derive(Debug, FromQueryResult)]
     struct DeptBudgetPolicyRow {
         #[sea_orm(from_alias = "budgetAllocated")]
@@ -190,7 +219,11 @@ pub async fn get_department_budget_status(
         .one(db)
         .await?
     else {
-        return Ok((Decimal::ZERO, departments::ActionOnExceed::Warn));
+        return Ok(DepartmentBudgetStatus {
+            allocated: Decimal::ZERO,
+            available: Decimal::ZERO,
+            action_on_exceed: departments::ActionOnExceed::Warn,
+        });
     };
 
     let now = Utc::now();
@@ -209,5 +242,48 @@ pub async fn get_department_budget_status(
         .exec(db)
         .await?;
 
-    Ok((budget_available, dept.action_on_exceed))
+    Ok(DepartmentBudgetStatus {
+        allocated: dept.budget_allocated,
+        available: budget_available,
+        action_on_exceed: dept.action_on_exceed,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BudgetHealth;
+    use rust_decimal::Decimal;
+
+    fn health(allocated: i64, available: i64) -> BudgetHealth {
+        BudgetHealth::classify(Decimal::from(allocated), Decimal::from(available))
+    }
+
+    #[test]
+    fn department_without_budget_is_unlimited_not_exhausted() {
+        assert_eq!(health(0, 0), BudgetHealth::Unlimited);
+    }
+
+    #[test]
+    fn department_without_budget_stays_unlimited_whatever_available_holds() {
+        assert_eq!(health(0, 50), BudgetHealth::Unlimited);
+        assert_eq!(health(-10, 0), BudgetHealth::Unlimited);
+    }
+
+    #[test]
+    fn spent_budget_is_exhausted() {
+        assert_eq!(health(100, 0), BudgetHealth::Exhausted);
+        assert_eq!(health(100, -5), BudgetHealth::Exhausted);
+    }
+
+    #[test]
+    fn budget_at_or_below_twenty_percent_is_low() {
+        assert_eq!(health(100, 20), BudgetHealth::Low);
+        assert_eq!(health(100, 1), BudgetHealth::Low);
+    }
+
+    #[test]
+    fn budget_above_twenty_percent_is_healthy() {
+        assert_eq!(health(100, 21), BudgetHealth::Healthy);
+        assert_eq!(health(100, 100), BudgetHealth::Healthy);
+    }
 }

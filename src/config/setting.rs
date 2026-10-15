@@ -7,6 +7,7 @@ use crate::{
         jwt::{KEYS, Keys},
     },
     models::{ai_engines, embedding_configs, sso_providers},
+    services::client_ip::TrustedProxies,
 };
 use openidconnect::{EndpointMaybeSet, EndpointNotSet, EndpointSet, core::CoreClient};
 use reqwest::Url;
@@ -38,6 +39,7 @@ pub struct Settings {
 pub struct ServerSettings {
     pub host: String,
     pub port: u16,
+    pub trusted_proxies: TrustedProxies,
 }
 
 pub struct AuthSettings {
@@ -397,7 +399,14 @@ impl ServerSettings {
             .ok()
             .and_then(|s| s.parse::<u16>().ok())
             .unwrap_or(8080); // default
-        Ok(Self { host, port })
+        let trusted_proxies =
+            TrustedProxies::from_setting(std::env::var("TRUSTED_PROXIES").ok().as_deref())
+                .ok_or(ConfigError::ParseError("TRUSTED_PROXIES"))?;
+        Ok(Self {
+            host,
+            port,
+            trusted_proxies,
+        })
     }
 }
 

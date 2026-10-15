@@ -14,7 +14,7 @@ use crate::{
         DomainReconfigureResponse, ReconfigureAvailableResponse,
     },
     services::reconfigure::{
-        self, DEFAULT_RELEASE_BASE_URL, build_script_availability, ensure_system_maintainer,
+        self, BinaryUpdatePlan, build_script_availability, ensure_system_maintainer,
     },
     state::SharedState,
 };
@@ -293,8 +293,7 @@ pub async fn update_binaries(
                 success: false,
                 message: "Invalid version. Allowed chars: [A-Za-z0-9._-] and no '/'".to_string(),
                 version: request.version.unwrap_or_default(),
-                release_base_url: reconfigure::release_base_url(
-                    DEFAULT_RELEASE_BASE_URL,
+                release_base_url: reconfigure::requested_release_base_url(
                     request.release_base_url.as_deref(),
                 ),
                 arch: request.arch.unwrap_or_default(),
@@ -315,8 +314,7 @@ pub async fn update_binaries(
                 success: false,
                 message: "Invalid arch. Allowed: x86_64, aarch64".to_string(),
                 version,
-                release_base_url: reconfigure::release_base_url(
-                    DEFAULT_RELEASE_BASE_URL,
+                release_base_url: reconfigure::requested_release_base_url(
                     request.release_base_url.as_deref(),
                 ),
                 arch: request.arch.unwrap_or_default(),
@@ -330,14 +328,39 @@ pub async fn update_binaries(
         ));
     };
 
-    let release_base_url = reconfigure::release_base_url(
-        DEFAULT_RELEASE_BASE_URL,
-        request.release_base_url.as_deref(),
-    );
     let update_installer = request.update_installer.unwrap_or(false);
     let update_api = request.update_api.unwrap_or(true);
     let update_webapp = request.update_webapp.unwrap_or(true);
-    let verify_checksums = request.verify_checksums.unwrap_or(true);
+    let release_base_url =
+        match reconfigure::require_checksum_verification(request.verify_checksums).and_then(|()| {
+            reconfigure::resolve_release_base_url(
+                request.release_base_url.as_deref(),
+                &reconfigure::configured_release_base_url(),
+            )
+        }) {
+            Ok(url) => url,
+            Err(rejection) => {
+                return Ok((
+                    StatusCode::OK,
+                    Json(BinariesUpdateResponse {
+                        success: false,
+                        message: rejection.message().to_string(),
+                        version,
+                        release_base_url: reconfigure::requested_release_base_url(
+                            request.release_base_url.as_deref(),
+                        ),
+                        arch,
+                        update_installer,
+                        update_api,
+                        update_webapp,
+                        verify_checksums: request.verify_checksums.unwrap_or(true),
+                        script_path,
+                        output: vec![],
+                    }),
+                ));
+            }
+        };
+    let verify_checksums = true;
 
     if !update_installer && !update_api && !update_webapp {
         return Ok((
@@ -383,37 +406,21 @@ pub async fn update_binaries(
         }
     };
 
-    let mut script_args = vec![
-        "--release-base-url".to_string(),
-        release_base_url.clone(),
-        "--version".to_string(),
-        version.clone(),
-    ];
-    if arch != "auto" {
-        script_args.push("--arch".to_string());
-        script_args.push(arch.clone());
+    let script_args = BinaryUpdatePlan {
+        release_base_url: release_base_url.clone(),
+        version: version.clone(),
+        arch: arch.clone(),
+        update_installer,
+        update_api,
+        update_webapp,
+        api_service_name: request
+            .api_service_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string),
     }
-    if !update_installer {
-        script_args.push("--skip-installer".to_string());
-    }
-    if !update_api {
-        script_args.push("--skip-api".to_string());
-    }
-    if !update_webapp {
-        script_args.push("--skip-webapp".to_string());
-    }
-    if !verify_checksums {
-        script_args.push("--skip-checksum".to_string());
-    }
-    if let Some(service_name) = request
-        .api_service_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        script_args.push("--api-service-name".to_string());
-        script_args.push(service_name.to_string());
-    }
+    .script_args();
 
     let output = reconfigure::run_script_command(
         &script_path,

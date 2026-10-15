@@ -7,12 +7,14 @@ use crate::{
         ProjectChatResponse, ProjectMcpServerResponse, ProjectResponse, ProjectSourceResponse,
     },
     models::{
-        conversation_projects, conversations, mcp_servers, project_mcp_servers, project_members,
-        project_sources, project_sources::ProcessingStatus, projects, projects::ProjectVisibility,
+        conversation_projects, conversations, files, files::FileUploadStatus, mcp_servers,
+        project_mcp_servers, project_members, project_members::ProjectMemberRole, project_sources,
+        project_sources::ProcessingStatus, projects, projects::ProjectVisibility,
     },
 };
 use sea_orm::{
-    ColumnTrait, Condition, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+    ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, QuerySelect,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -64,6 +66,22 @@ pub fn ensure_project_owner(user_id: Uuid, project: &projects::Model) -> Result<
     }
 }
 
+async fn find_project_member(
+    user_id: Uuid,
+    project_id: Uuid,
+    db: &DatabaseConnection,
+) -> Result<Option<project_members::Model>, AuthError> {
+    project_members::Entity::find()
+        .filter(project_members::Column::ProjectId.eq(project_id))
+        .filter(project_members::Column::UserId.eq(user_id))
+        .one(db)
+        .await
+        .map_err(|e| {
+            eprintln!("db member check error: {e}");
+            AuthError::DbTimeout
+        })
+}
+
 pub async fn ensure_project_write_access(
     user_id: Uuid,
     project: &projects::Model,
@@ -72,19 +90,82 @@ pub async fn ensure_project_write_access(
     if project.owner_id == user_id {
         return Ok(());
     }
-    let member = project_members::Entity::find()
-        .filter(project_members::Column::ProjectId.eq(project.id))
-        .filter(project_members::Column::UserId.eq(user_id))
+    let role = find_project_member(user_id, project.id, db)
+        .await?
+        .and_then(|m| ProjectMemberRole::try_from(m.role).ok());
+    if can_write_project(user_id, project, role) {
+        Ok(())
+    } else {
+        Err(AuthError::PermissionDenied)
+    }
+}
+
+pub async fn ensure_project_content_access(
+    user_id: Uuid,
+    project: &projects::Model,
+    db: &DatabaseConnection,
+) -> Result<(), AuthError> {
+    if project.owner_id == user_id {
+        return Ok(());
+    }
+    let is_member = find_project_member(user_id, project.id, db)
+        .await?
+        .is_some();
+    if can_edit_project_content(user_id, project, is_member) {
+        Ok(())
+    } else {
+        Err(AuthError::PermissionDenied)
+    }
+}
+
+// Sources and artifacts are shared work: any explicit member may edit them, but
+// users who can only read a team project may not.
+fn can_edit_project_content(user_id: Uuid, project: &projects::Model, is_member: bool) -> bool {
+    project.owner_id == user_id || is_member
+}
+
+fn can_write_project(
+    user_id: Uuid,
+    project: &projects::Model,
+    member_role: Option<ProjectMemberRole>,
+) -> bool {
+    project.owner_id == user_id || member_role.is_some_and(ProjectMemberRole::can_write)
+}
+
+pub async fn ensure_source_file_attachable(
+    user_id: Uuid,
+    project_id: Uuid,
+    file_id: Uuid,
+    db: &DatabaseConnection,
+) -> Result<(), AuthError> {
+    let file = files::Entity::find_by_id(file_id)
         .one(db)
         .await
         .map_err(|e| {
-            eprintln!("db member check error: {e}");
+            eprintln!("db source file lookup error: {e}");
             AuthError::DbTimeout
-        })?;
-    match member {
-        Some(m) if m.role == "admin" => Ok(()),
-        _ => Err(AuthError::PermissionDenied),
+        })?
+        .ok_or(AuthError::ResourceNotFound)?;
+    let already_in_project = file.user_id != user_id
+        && project_sources::Entity::find()
+            .filter(project_sources::Column::ProjectId.eq(project_id))
+            .filter(project_sources::Column::FileId.eq(file_id))
+            .count(db)
+            .await
+            .map_err(|e| {
+                eprintln!("db source file attachment check error: {e}");
+                AuthError::DbTimeout
+            })?
+            > 0;
+    if can_attach_source_file(user_id, &file, already_in_project) {
+        Ok(())
+    } else {
+        Err(AuthError::ResourceNotFound)
     }
+}
+
+fn can_attach_source_file(user_id: Uuid, file: &files::Model, already_in_project: bool) -> bool {
+    file.status == FileUploadStatus::Uploaded && (file.user_id == user_id || already_in_project)
 }
 
 pub fn build_visibility_condition(user_id: Uuid, member_project_ids: Vec<Uuid>) -> Condition {
@@ -314,4 +395,160 @@ pub async fn fetch_project_mcp_servers(
             })
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{can_attach_source_file, can_edit_project_content, can_write_project};
+    use crate::models::{
+        files, files::FileUploadStatus, project_members::ProjectMemberRole, projects,
+        projects::ProjectVisibility,
+    };
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn project(owner_id: Uuid, visibility: ProjectVisibility) -> projects::Model {
+        let now = Utc::now();
+        projects::Model {
+            id: Uuid::new_v4(),
+            name: "Project".to_string(),
+            description: None,
+            category: "research".to_string(),
+            visibility,
+            owner_id,
+            instructions: None,
+            last_activity_at: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn file(owner_id: Uuid, status: FileUploadStatus) -> files::Model {
+        let now = Utc::now();
+        files::Model {
+            id: Uuid::new_v4(),
+            user_id: owner_id,
+            name: "doc.md".to_string(),
+            content_type: "text/markdown".to_string(),
+            size: 1,
+            local_path: "/unused".to_string(),
+            description: None,
+            url: None,
+            sha256: None,
+            status,
+            created_at: now,
+            updated_at: now,
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn project_owner_can_write_private_and_team_projects() {
+        let owner = Uuid::new_v4();
+        for visibility in [ProjectVisibility::Private, ProjectVisibility::Team] {
+            assert!(can_write_project(owner, &project(owner, visibility), None));
+        }
+    }
+
+    #[test]
+    fn non_member_cannot_write_team_project_they_can_read() {
+        let project = project(Uuid::new_v4(), ProjectVisibility::Team);
+        assert!(!can_write_project(Uuid::new_v4(), &project, None));
+    }
+
+    #[test]
+    fn plain_member_cannot_write_private_or_team_project() {
+        for visibility in [ProjectVisibility::Private, ProjectVisibility::Team] {
+            let project = project(Uuid::new_v4(), visibility);
+            assert!(!can_write_project(
+                Uuid::new_v4(),
+                &project,
+                Some(ProjectMemberRole::Member)
+            ));
+        }
+    }
+
+    #[test]
+    fn owner_and_admin_role_members_can_write_project() {
+        let project = project(Uuid::new_v4(), ProjectVisibility::Private);
+        for role in [ProjectMemberRole::Owner, ProjectMemberRole::Admin] {
+            assert!(can_write_project(Uuid::new_v4(), &project, Some(role)));
+        }
+    }
+
+    #[test]
+    fn unknown_member_role_is_not_parsed_into_a_write_role() {
+        assert!(ProjectMemberRole::try_from("editor".to_string()).is_err());
+        assert_eq!(
+            ProjectMemberRole::try_from("owner".to_string()),
+            Ok(ProjectMemberRole::Owner)
+        );
+    }
+
+    #[test]
+    fn project_owner_can_edit_sources_and_artifacts() {
+        let owner = Uuid::new_v4();
+        for visibility in [ProjectVisibility::Private, ProjectVisibility::Team] {
+            assert!(can_edit_project_content(
+                owner,
+                &project(owner, visibility),
+                false
+            ));
+        }
+    }
+
+    #[test]
+    fn any_explicit_member_can_edit_sources_and_artifacts() {
+        let project = project(Uuid::new_v4(), ProjectVisibility::Team);
+        assert!(can_edit_project_content(Uuid::new_v4(), &project, true));
+    }
+
+    #[test]
+    fn non_member_who_can_read_a_team_project_cannot_edit_its_sources() {
+        let project = project(Uuid::new_v4(), ProjectVisibility::Team);
+        assert!(!can_edit_project_content(Uuid::new_v4(), &project, false));
+    }
+
+    #[test]
+    fn user_can_attach_their_own_uploaded_file() {
+        let user = Uuid::new_v4();
+        assert!(can_attach_source_file(
+            user,
+            &file(user, FileUploadStatus::Uploaded),
+            false
+        ));
+    }
+
+    #[test]
+    fn user_cannot_attach_another_users_file() {
+        assert!(!can_attach_source_file(
+            Uuid::new_v4(),
+            &file(Uuid::new_v4(), FileUploadStatus::Uploaded),
+            false
+        ));
+    }
+
+    #[test]
+    fn user_can_reattach_a_file_already_in_the_project() {
+        assert!(can_attach_source_file(
+            Uuid::new_v4(),
+            &file(Uuid::new_v4(), FileUploadStatus::Uploaded),
+            true
+        ));
+    }
+
+    #[test]
+    fn deleted_file_cannot_be_attached() {
+        let user = Uuid::new_v4();
+        assert!(!can_attach_source_file(
+            user,
+            &file(user, FileUploadStatus::Deleted),
+            false
+        ));
+        assert!(!can_attach_source_file(
+            user,
+            &file(Uuid::new_v4(), FileUploadStatus::Deleted),
+            true
+        ));
+    }
 }

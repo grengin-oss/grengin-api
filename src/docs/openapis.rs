@@ -41,8 +41,8 @@ use crate::dto::audit_logs::{
 use crate::dto::auth::{AuthInit, AuthToken, RefreshToken, TokenType};
 use crate::dto::branding::{Branding, BrandingUpdate};
 use crate::dto::chat::{
-    ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse,
-    PaginatedConversations, TokenUsage,
+    ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse, MessageVersions,
+    PaginatedConversations, SelectBranchRequest, TokenUsage,
 };
 use crate::dto::chat_stream::{ChatInput, ChatStream};
 use crate::dto::common::{PaginationQuery, SortRule};
@@ -133,6 +133,7 @@ use utoipa::OpenApi;
         chat_stream::cancel_chat_stream,
         message::delete_chat_message_by_id,
         message::edit_chat_message_by_id_and_stream,
+        message::show_chat_branch,
         admin_users::add_new_user,
         admin_users::get_users,
         admin_users::update_user,
@@ -305,6 +306,8 @@ use utoipa::OpenApi;
             ErrorDetailVariant,
             ArchiveChatRequest,
             MessageResponse,
+            MessageVersions,
+            SelectBranchRequest,
             ConversationResponse,
             PaginatedConversations,
             File,

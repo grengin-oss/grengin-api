@@ -14,21 +14,23 @@ use crate::{
     },
     services::{
         analytics_cache::spawn_analytics_cache_refresh,
-        audit_logs::spawn_audit_log_retention_worker, deployment_health::load_deployment_health,
-        file_storage::prepare_storage_root, startup_migrations::run_startup_migrations,
+        audit_logs::spawn_audit_log_retention_worker, auth_session::SessionGuard,
+        deployment_health::load_deployment_health, file_storage::prepare_storage_root,
+        startup_migrations::run_startup_migrations,
     },
     state::{AppState, SharedState},
 };
 use anyhow::Error;
 use axum::http::HeaderValue;
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{DefaultBodyLimit, State},
     middleware::from_fn_with_state,
     routing::get,
 };
 use reqwest::StatusCode;
 use serde_json::json;
+use std::net::SocketAddr;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 async fn sample_root(
@@ -103,11 +105,16 @@ pub async fn init_app() -> Result<(), Error> {
         .merge(auth_routes())
         .merge(errors_routes())
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
+        .layer(Extension(SessionGuard::new(app_state.database.clone())))
         .layer(from_fn_with_state(app_state.clone(), audit_log_middleware))
         .layer(cors)
         .with_state(app_state);
     let listener = tokio::net::TcpListener::bind(&address).await?;
     println!("Started listening to {}", address);
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

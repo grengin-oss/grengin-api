@@ -119,6 +119,12 @@ struct AzureTokenTenantClaims {
     tid: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct AzureEmailOwnershipClaims {
+    #[serde(default)]
+    xms_edov: Option<serde_json::Value>,
+}
+
 pub fn is_azure_multitenant_authority(tenant_id: &str) -> bool {
     matches!(
         tenant_id.trim().to_ascii_lowercase().as_str(),
@@ -372,6 +378,25 @@ pub fn validate_azure_multitenant_id_token(
     Ok(tenant_id)
 }
 
+pub fn azure_email_domain_owner_verified(id_token: &CoreIdToken) -> Option<bool> {
+    let claims: AzureEmailOwnershipClaims = decode_jwt_segment(&id_token.to_string(), 1).ok()?;
+    match claims.xms_edov? {
+        serde_json::Value::Bool(verified) => Some(verified),
+        serde_json::Value::String(value) if value == "1" || value.eq_ignore_ascii_case("true") => {
+            Some(true)
+        }
+        serde_json::Value::String(value) if value == "0" || value.eq_ignore_ascii_case("false") => {
+            Some(false)
+        }
+        serde_json::Value::Number(value) => match value.as_u64() {
+            Some(1) => Some(true),
+            Some(0) => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub async fn build_azure_client<S: Into<String>>(
     req_client: &ReqwestClient,
     client_id: S,
@@ -513,6 +538,69 @@ mod tests {
             .expect("payload"),
         );
         CoreIdToken::from_str(&format!("{header}.{payload}.c2lnbmF0dXJl")).expect("ID token")
+    }
+
+    fn token_with_email_ownership(xms_edov: Option<serde_json::Value>) -> CoreIdToken {
+        let header = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&serde_json::json!({"alg": "RS256", "kid": "kid"})).expect("header"),
+        );
+        let mut payload = serde_json::json!({
+            "iss": "https://login.microsoftonline.com/ff507be6-32aa-4573-99a0-185d88089a7e/v2.0",
+            "sub": "subject",
+            "aud": "client-id",
+            "exp": 4_102_444_800_i64,
+            "iat": 1_700_000_000_i64,
+            "email": "owner@example.com"
+        });
+        if let Some(value) = xms_edov {
+            payload["xms_edov"] = value;
+        }
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("payload"));
+        CoreIdToken::from_str(&format!("{header}.{payload}.c2lnbmF0dXJl")).expect("ID token")
+    }
+
+    #[test]
+    fn xms_edov_true_proves_email_domain_ownership() {
+        for value in [
+            serde_json::json!(true),
+            serde_json::json!("true"),
+            serde_json::json!("1"),
+            serde_json::json!(1),
+        ] {
+            assert_eq!(
+                azure_email_domain_owner_verified(&token_with_email_ownership(Some(value))),
+                Some(true)
+            );
+        }
+    }
+
+    #[test]
+    fn xms_edov_false_reports_unverified_email_domain() {
+        for value in [
+            serde_json::json!(false),
+            serde_json::json!("false"),
+            serde_json::json!("0"),
+            serde_json::json!(0),
+        ] {
+            assert_eq!(
+                azure_email_domain_owner_verified(&token_with_email_ownership(Some(value))),
+                Some(false)
+            );
+        }
+    }
+
+    #[test]
+    fn missing_or_malformed_xms_edov_gives_no_domain_ownership_evidence() {
+        assert_eq!(
+            azure_email_domain_owner_verified(&token_with_email_ownership(None)),
+            None
+        );
+        assert_eq!(
+            azure_email_domain_owner_verified(&token_with_email_ownership(Some(
+                serde_json::json!("yes")
+            ))),
+            None
+        );
     }
 
     #[test]

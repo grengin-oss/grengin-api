@@ -96,6 +96,15 @@ pub struct RoleAssignmentPayload {
     pub scope_department_id: Option<Uuid>,
 }
 
+#[derive(Serialize)]
+pub struct RoleChangeDeniedPayload {
+    pub reason: String,
+    pub role_id: Option<Uuid>,
+    pub user_id: Option<Uuid>,
+    pub scope_department_id: Option<Uuid>,
+    pub missing_permissions: Vec<String>,
+}
+
 #[derive(Debug, FromQueryResult)]
 pub struct RolePermissionRow {
     #[sea_orm(from_alias = "roleId")]

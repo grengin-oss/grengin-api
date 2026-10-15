@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
+use axum::response::Response;
 use chrono::{Duration, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
+    QuerySelect, Set, TransactionTrait,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -11,7 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::encryption::{decrypt_key, encrypt_key},
-    dto::mcp::{McpAccessRule, McpServer, McpTool, McpToolExecution},
+    dto::mcp::{McpAccessRule, McpOauthCallbackQuery, McpServer, McpTool, McpToolExecution},
     error::AppError,
     models::{
         departments, mcp_access_policies, mcp_connections, mcp_executions, mcp_oauth_states,
@@ -20,9 +22,13 @@ use crate::{
     services::mcp_tools::mcp_server_short_id,
     services::{
         mcp_client::{
-            McpOAuthConfig, McpOAuthTokens, build_authorization_url, oauth_config_from_connection,
-            refresh_token,
+            McpClientError, McpOAuthConfig, McpOAuthTokens, build_authorization_url, exchange_code,
+            oauth_config_from_connection, refresh_token,
         },
+        mcp_oauth::{
+            OAuthStateRejection, StoredToken, allowed_redirect_uri, check_oauth_state, seal_token,
+        },
+        mcp_service::build_oauth_callback_response,
         mcp_tools::{McpServerSummary, McpToolDescriptor},
     },
     state::SharedState,
@@ -291,20 +297,32 @@ pub async fn resolve_mcp_oauth_token(
         return Ok(None);
     }
 
-    let Some(access_token) = connection.access_token.clone() else {
+    let app_key = &state.settings.auth.app_key;
+    let Some(access_token) = open_stored_token(app_key, connection.access_token.as_deref()) else {
         return Ok(None);
     };
+    let refresh_token_value = open_stored_token(app_key, connection.refresh_token.as_deref());
 
-    let needs_refresh = match connection.expires_at {
-        Some(exp) => exp <= Utc::now(),
-        None => false,
-    };
-
+    let needs_refresh = connection.expires_at.is_some_and(|exp| exp <= Utc::now());
     if !needs_refresh {
-        return Ok(Some(access_token));
+        if (access_token.needs_sealing()
+            || refresh_token_value
+                .as_ref()
+                .is_some_and(StoredToken::needs_sealing))
+            && let Err(e) = seal_legacy_tokens(
+                state,
+                connection,
+                &access_token,
+                refresh_token_value.as_ref(),
+            )
+            .await
+        {
+            eprintln!("mcp oauth legacy token sealing error: {e:?}");
+        }
+        return Ok(Some(access_token.secret().to_string()));
     }
 
-    let Some(refresh_token_value) = connection.refresh_token.clone() else {
+    let Some(refresh_token_value) = refresh_token_value else {
         return Ok(None);
     };
 
@@ -318,26 +336,46 @@ pub async fn resolve_mcp_oauth_token(
         .ok_or(AppError::ResourceNotFound)?;
 
     let oauth_config = build_oauth_config(&state, &server)?;
-    let refreshed = refresh_token(&oauth_config, &refresh_token_value, &state.req_client)
-        .await
-        .map_err(|e| {
-            eprintln!("mcp oauth refresh error: {e}");
-            AppError::ServiceTemporarilyUnavailable
-        })?;
+    let refreshed = refresh_token(
+        &oauth_config,
+        refresh_token_value.secret(),
+        &state.req_client,
+    )
+    .await
+    .map_err(|e| {
+        eprintln!("mcp oauth refresh error: {e}");
+        AppError::ServiceTemporarilyUnavailable
+    })?;
 
+    let refreshed_access_token = refreshed.access_token.clone();
     store_oauth_tokens(state, user_id, server_id, &server.name, refreshed).await?;
-    let updated = mcp_connections::Entity::find()
-        .filter(mcp_connections::Column::UserId.eq(user_id))
-        .filter(mcp_connections::Column::ServerId.eq(server_id))
-        .one(&state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("mcp connection reload error: {e}");
-            AppError::DbTimeout
-        })?
-        .and_then(|row| row.access_token);
+    Ok(Some(refreshed_access_token))
+}
 
-    Ok(updated)
+fn open_stored_token(app_key: &[u8; 32], stored: Option<&str>) -> Option<StoredToken> {
+    StoredToken::open(app_key, stored?)
+        .inspect_err(|e| eprintln!("mcp oauth token decryption error: {e:?}"))
+        .ok()
+}
+
+async fn seal_legacy_tokens(
+    state: &SharedState,
+    connection: mcp_connections::Model,
+    access_token: &StoredToken,
+    refresh_token: Option<&StoredToken>,
+) -> Result<(), AppError> {
+    let app_key = &state.settings.auth.app_key;
+    let sealed_refresh_token = refresh_token
+        .map(|token| seal_token(app_key, token.secret()))
+        .transpose()?;
+    let mut active: mcp_connections::ActiveModel = connection.into();
+    active.access_token = Set(Some(seal_token(app_key, access_token.secret())?));
+    active.refresh_token = Set(sealed_refresh_token);
+    active.update(&state.database).await.map_err(|e| {
+        eprintln!("mcp connection update error: {e}");
+        AppError::DbTimeout
+    })?;
+    Ok(())
 }
 
 pub async fn store_oauth_tokens(
@@ -347,7 +385,32 @@ pub async fn store_oauth_tokens(
     server_name: &str,
     tokens: McpOAuthTokens,
 ) -> Result<(), AppError> {
+    store_oauth_tokens_with(
+        &state.database,
+        &state.settings.auth.app_key,
+        user_id,
+        server_id,
+        server_name,
+        tokens,
+    )
+    .await
+}
+
+async fn store_oauth_tokens_with<C: ConnectionTrait>(
+    db: &C,
+    app_key: &[u8; 32],
+    user_id: Uuid,
+    server_id: Uuid,
+    server_name: &str,
+    tokens: McpOAuthTokens,
+) -> Result<(), AppError> {
     let now = Utc::now();
+    let access_token = seal_token(app_key, &tokens.access_token)?;
+    let refresh_token = tokens
+        .refresh_token
+        .as_deref()
+        .map(|token| seal_token(app_key, token))
+        .transpose()?;
     let scopes_json = if tokens.scopes.is_empty() {
         None
     } else {
@@ -360,7 +423,7 @@ pub async fn store_oauth_tokens(
     if let Some(existing) = mcp_connections::Entity::find()
         .filter(mcp_connections::Column::UserId.eq(user_id))
         .filter(mcp_connections::Column::ServerId.eq(server_id))
-        .one(&state.database)
+        .one(db)
         .await
         .map_err(|e| {
             eprintln!("mcp connection lookup error: {e}");
@@ -372,11 +435,11 @@ pub async fn store_oauth_tokens(
         active.connected_at = Set(Some(now));
         active.expires_at = Set(tokens.expires_at);
         active.scopes = Set(scopes_json);
-        active.access_token = Set(Some(tokens.access_token));
-        active.refresh_token = Set(tokens.refresh_token);
+        active.access_token = Set(Some(access_token));
+        active.refresh_token = Set(refresh_token);
         active.token_type = Set(tokens.token_type);
         active.updated_at = Set(now);
-        active.update(&state.database).await.map_err(|e| {
+        active.update(db).await.map_err(|e| {
             eprintln!("mcp connection update error: {e}");
             AppError::DbTimeout
         })?;
@@ -392,13 +455,13 @@ pub async fn store_oauth_tokens(
         connected_at: Set(Some(now)),
         expires_at: Set(tokens.expires_at),
         scopes: Set(scopes_json),
-        access_token: Set(Some(tokens.access_token)),
-        refresh_token: Set(tokens.refresh_token),
+        access_token: Set(Some(access_token)),
+        refresh_token: Set(refresh_token),
         token_type: Set(tokens.token_type),
         created_at: Set(now),
         updated_at: Set(now),
     };
-    model.insert(&state.database).await.map_err(|e| {
+    model.insert(db).await.map_err(|e| {
         eprintln!("mcp connection insert error: {e}");
         AppError::DbTimeout
     })?;
@@ -557,6 +620,15 @@ pub async fn build_mcp_oauth_prompt(
     server_id: Uuid,
     user_id: Uuid,
 ) -> Result<McpOauthPrompt, AppError> {
+    start_oauth_authorization(state, server_id, user_id, None).await
+}
+
+pub async fn start_oauth_authorization(
+    state: &SharedState,
+    server_id: Uuid,
+    user_id: Uuid,
+    redirect_uri: Option<&str>,
+) -> Result<McpOauthPrompt, AppError> {
     let server = mcp_servers::Entity::find_by_id(server_id)
         .one(&state.database)
         .await
@@ -577,6 +649,14 @@ pub async fn build_mcp_oauth_prompt(
         return Err(AppError::ServiceTemporarilyUnavailable);
     }
 
+    let redirect_uri = redirect_uri.and_then(|candidate| {
+        let allowed = allowed_redirect_uri(candidate, &state.settings.auth.redirect_url);
+        if allowed.is_none() {
+            eprintln!("mcp oauth redirect_uri rejected: not relative and not on the app origin");
+        }
+        allowed
+    });
+
     let oauth_config = build_oauth_config(state, &server)?;
     let authorization = build_authorization_url(&oauth_config).map_err(|e| {
         eprintln!("mcp oauth authorize url error: {e}");
@@ -591,7 +671,7 @@ pub async fn build_mcp_oauth_prompt(
         user_id: Set(user_id),
         state: Set(authorization.state.clone()),
         pkce_verifier: Set(authorization.pkce_verifier.clone()),
-        redirect_uri: Set(None),
+        redirect_uri: Set(redirect_uri),
         expires_at: Set(Some(expires_at)),
         created_at: Set(now),
     };
@@ -604,4 +684,211 @@ pub async fn build_mcp_oauth_prompt(
         authorization_url: authorization.authorization_url,
         server_name: server.name,
     })
+}
+
+pub async fn complete_oauth_authorization(
+    state: &SharedState,
+    caller_user_id: Uuid,
+    callback: McpOauthCallbackQuery,
+) -> Result<Response, AppError> {
+    let oauth_state = mcp_oauth_states::Entity::find()
+        .filter(mcp_oauth_states::Column::State.eq(callback.state.clone()))
+        .one(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp oauth state lookup error: {e}");
+            AppError::DbTimeout
+        })?
+        .ok_or(AppError::ResourceNotFound)?;
+
+    match check_oauth_state(&oauth_state, caller_user_id, Utc::now()) {
+        Ok(()) => {}
+        Err(OAuthStateRejection::Expired) => {
+            delete_oauth_state(state, oauth_state.id).await.ok();
+            return Err(AppError::ResourceNotFound);
+        }
+        Err(OAuthStateRejection::StartedByAnotherUser) => {
+            eprintln!(
+                "mcp oauth callback rejected: state belongs to another user (server {})",
+                oauth_state.server_id
+            );
+            return Err(AppError::ResourceNotFound);
+        }
+    }
+
+    let redirect_uri = oauth_state
+        .redirect_uri
+        .as_deref()
+        .and_then(|uri| allowed_redirect_uri(uri, &state.settings.auth.redirect_url));
+
+    if let Some(error) = callback.error {
+        eprintln!("mcp oauth error: {error} {:?}", callback.error_description);
+        finish_oauth_state(state, oauth_state.id, OAuthCallbackOutcome::ProviderError).await;
+        return Ok(build_oauth_callback_response(
+            redirect_uri.as_deref(),
+            oauth_state.server_id,
+            false,
+        ));
+    }
+
+    let code = callback
+        .code
+        .ok_or(AppError::ValidationMissingField { field: "code" })?;
+
+    let server = mcp_servers::Entity::find_by_id(oauth_state.server_id)
+        .one(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp server lookup error: {e}");
+            AppError::DbTimeout
+        })?
+        .ok_or(AppError::McpServerNotFound)?;
+
+    let oauth_config = build_oauth_config(state, &server)?;
+    let exchange = exchange_code(
+        &oauth_config,
+        &code,
+        &oauth_state.pkce_verifier,
+        &state.req_client,
+    )
+    .await;
+    let outcome = OAuthCallbackOutcome::from_exchange(&exchange);
+    if outcome != OAuthCallbackOutcome::CodeRedeemed {
+        finish_oauth_state(state, oauth_state.id, outcome).await;
+    }
+    let tokens = exchange.map_err(|e| {
+        eprintln!("mcp oauth token exchange error: {e}");
+        AppError::ServiceTemporarilyUnavailable
+    })?;
+
+    redeem_oauth_state(state, oauth_state.id, oauth_state.user_id, &server, tokens).await?;
+
+    Ok(build_oauth_callback_response(
+        redirect_uri.as_deref(),
+        oauth_state.server_id,
+        true,
+    ))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OAuthCallbackOutcome {
+    ProviderError,
+    TokenEndpointUnreachable,
+    CodeRejected,
+    CodeRedeemed,
+}
+
+impl OAuthCallbackOutcome {
+    fn from_exchange<T>(exchange: &Result<T, McpClientError>) -> Self {
+        match exchange {
+            Ok(_) => Self::CodeRedeemed,
+            Err(McpClientError::OAuthUnreachable(_)) => Self::TokenEndpointUnreachable,
+            Err(_) => Self::CodeRejected,
+        }
+    }
+
+    // Only a token endpoint that never answered leaves the code unused, so only then can
+    // the same callback be retried. Once the provider has seen the code the state is spent,
+    // even if storing the tokens afterwards fails.
+    fn consumes_state(self) -> bool {
+        !matches!(self, Self::TokenEndpointUnreachable)
+    }
+}
+
+// The state is removed in the same transaction that stores the tokens, so either both happen
+// or neither does. A state left behind by a failed write belongs to a spent code: the provider
+// rejects any retry, and that rejection consumes the state.
+async fn redeem_oauth_state(
+    state: &SharedState,
+    oauth_state_id: Uuid,
+    user_id: Uuid,
+    server: &mcp_servers::Model,
+    tokens: McpOAuthTokens,
+) -> Result<(), AppError> {
+    let txn = state.database.begin().await.map_err(|e| {
+        eprintln!("mcp oauth redeem begin error: {e}");
+        AppError::DbTimeout
+    })?;
+    let removed = mcp_oauth_states::Entity::delete_by_id(oauth_state_id)
+        .exec(&txn)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp oauth state delete error: {e}");
+            AppError::DbTimeout
+        })?;
+    if removed.rows_affected != 1 {
+        return Err(AppError::ResourceNotFound);
+    }
+    store_oauth_tokens_with(
+        &txn,
+        &state.settings.auth.app_key,
+        user_id,
+        server.id,
+        &server.name,
+        tokens,
+    )
+    .await?;
+    txn.commit().await.map_err(|e| {
+        eprintln!("mcp oauth redeem commit error: {e}");
+        AppError::DbTimeout
+    })
+}
+
+// Best-effort for rejected codes and provider-reported errors: the provider won't accept the
+// code again, and the state expires on its own.
+async fn finish_oauth_state(
+    state: &SharedState,
+    oauth_state_id: Uuid,
+    outcome: OAuthCallbackOutcome,
+) {
+    if outcome.consumes_state()
+        && let Err(e) = delete_oauth_state(state, oauth_state_id).await
+    {
+        eprintln!("mcp oauth state cleanup failed, it expires on its own: {e:?}");
+    }
+}
+
+async fn delete_oauth_state(state: &SharedState, oauth_state_id: Uuid) -> Result<bool, AppError> {
+    let deleted = mcp_oauth_states::Entity::delete_by_id(oauth_state_id)
+        .exec(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp oauth state delete error: {e}");
+            AppError::DbTimeout
+        })?;
+    Ok(deleted.rows_affected == 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OAuthCallbackOutcome;
+    use crate::services::mcp_client::McpClientError;
+
+    #[test]
+    fn unreachable_token_endpoint_keeps_the_oauth_state_for_a_retry() {
+        let exchange: Result<(), _> = Err(McpClientError::OAuthUnreachable("refused".into()));
+        let outcome = OAuthCallbackOutcome::from_exchange(&exchange);
+        assert_eq!(outcome, OAuthCallbackOutcome::TokenEndpointUnreachable);
+        assert!(!outcome.consumes_state());
+    }
+
+    #[test]
+    fn rejected_code_consumes_the_oauth_state() {
+        let exchange: Result<(), _> = Err(McpClientError::OAuth("invalid_grant".into()));
+        let outcome = OAuthCallbackOutcome::from_exchange(&exchange);
+        assert_eq!(outcome, OAuthCallbackOutcome::CodeRejected);
+        assert!(outcome.consumes_state());
+    }
+
+    #[test]
+    fn redeemed_code_consumes_the_oauth_state_before_tokens_are_stored() {
+        let outcome = OAuthCallbackOutcome::from_exchange(&Ok::<(), McpClientError>(()));
+        assert_eq!(outcome, OAuthCallbackOutcome::CodeRedeemed);
+        assert!(outcome.consumes_state());
+    }
+
+    #[test]
+    fn provider_reported_errors_consume_the_oauth_state() {
+        assert!(OAuthCallbackOutcome::ProviderError.consumes_state());
+    }
 }

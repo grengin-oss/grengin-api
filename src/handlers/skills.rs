@@ -22,6 +22,7 @@ use crate::{
     models::{conversations, skills},
     services::{
         authorization::{AuthorizationService, PermissionScopeMode},
+        skill_access::get_visible_skill_or_404,
         skills_helpers::*,
     },
     state::SharedState,
@@ -56,7 +57,7 @@ pub async fn list_skills(
         query.is_active,
         limit,
         offset,
-        Some(claims.user_id),
+        claims.user_id,
     )
     .await?;
 
@@ -84,11 +85,11 @@ pub async fn list_skills(
     )
 )]
 pub async fn get_skill(
-    _claims: Claims,
+    claims: Claims,
     Path(id): Path<Uuid>,
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode, Json<SkillResponse>), AuthError> {
-    let skill = get_skill_or_404(id, &app_state.database).await?;
+    let skill = get_visible_skill_or_404(id, claims.user_id, &app_state.database).await?;
     let knowledge_files = get_skill_knowledge_info(&app_state.database, skill.id).await;
     Ok((
         StatusCode::OK,
@@ -167,6 +168,7 @@ pub async fn update_skill(
             None,
         )
         .await?;
+    get_visible_skill_or_404(id, claims.user_id, &app_state.database).await?;
 
     let (skill, knowledge_files) = update_managed_skill_with_knowledge(
         &app_state.database,
@@ -211,7 +213,7 @@ pub async fn delete_skill(
         )
         .await?;
 
-    let skill = get_skill_or_404(id, &app_state.database).await?;
+    let skill = get_visible_skill_or_404(id, claims.user_id, &app_state.database).await?;
     if skill.is_builtin {
         return Err(AuthError::PermissionDenied);
     }
@@ -255,7 +257,8 @@ pub async fn list_conversation_skill_links(
         })?
         .ok_or(AuthError::ResourceNotFound)?;
 
-    let pairs = list_conversation_skills(&app_state.database, conversation_id).await?;
+    let pairs =
+        list_conversation_skills(&app_state.database, conversation_id, claims.user_id).await?;
 
     let resp = pairs
         .into_iter()
@@ -298,7 +301,7 @@ pub async fn link_skill(
         })?
         .ok_or(AuthError::ResourceNotFound)?;
 
-    let skill = get_skill_or_404(req.skill_id, &app_state.database).await?;
+    let skill = get_visible_skill_or_404(req.skill_id, claims.user_id, &app_state.database).await?;
     let link = link_skill_to_conversation(&app_state.database, conversation_id, skill.id).await?;
 
     Ok((

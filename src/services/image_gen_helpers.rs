@@ -8,7 +8,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    models::files,
+    models::files::{self, FileUploadStatus},
     services::file_storage::{FileWrite, StorageCategory, read_model_bytes, store_file_bytes},
     state::SharedState,
 };
@@ -85,6 +85,7 @@ pub async fn generate_and_save(
                 name: &filename,
                 content_type: &result.content_type,
                 bytes: &result.bytes,
+                content_sha256: None,
                 description: None,
                 metadata: Some(json!({
                     "prompt": prompt,
@@ -137,10 +138,8 @@ async fn load_input_images(
             .one(&app_state.database)
             .await
             .context("db lookup input image")?
+            .filter(|file| can_use_input_image(file, user_id))
             .ok_or_else(|| anyhow!("input image file not found: {id}"))?;
-        if file.user_id != user_id {
-            return Err(anyhow!("input image file not found: {id}"));
-        }
         let bytes = read_model_bytes(&app_state.settings.file_storage_root, &file)
             .await
             .map_err(|error| anyhow!("read input image {id}: {error:?}"))?;
@@ -153,13 +152,62 @@ async fn load_input_images(
     Ok(images)
 }
 
+// Same rule as read_file_for_user: owner only, and never a soft-deleted file.
+fn can_use_input_image(file: &files::Model, user_id: Uuid) -> bool {
+    file.user_id == user_id && file.status == FileUploadStatus::Uploaded
+}
+
 fn to_i32(value: u32) -> Option<i32> {
     i32::try_from(value).ok()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::distributed_usage;
+    use super::*;
+    use chrono::Utc;
+
+    fn stored_file(owner: Uuid, status: FileUploadStatus) -> files::Model {
+        let now = Utc::now();
+        files::Model {
+            id: Uuid::new_v4(),
+            user_id: owner,
+            name: "input.png".to_string(),
+            content_type: "image/png".to_string(),
+            size: 1,
+            local_path: "input.png".to_string(),
+            description: None,
+            url: None,
+            sha256: None,
+            status,
+            created_at: now,
+            updated_at: now,
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn owner_can_use_uploaded_input_image() {
+        let owner = Uuid::new_v4();
+        assert!(can_use_input_image(
+            &stored_file(owner, FileUploadStatus::Uploaded),
+            owner
+        ));
+    }
+
+    #[test]
+    fn other_user_cannot_use_input_image() {
+        let file = stored_file(Uuid::new_v4(), FileUploadStatus::Uploaded);
+        assert!(!can_use_input_image(&file, Uuid::new_v4()));
+    }
+
+    #[test]
+    fn owner_cannot_use_deleted_input_image() {
+        let owner = Uuid::new_v4();
+        assert!(!can_use_input_image(
+            &stored_file(owner, FileUploadStatus::Deleted),
+            owner
+        ));
+    }
 
     #[test]
     fn usage_is_distributed_without_changing_the_total() {

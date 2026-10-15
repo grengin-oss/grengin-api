@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use openssl::sha::sha256;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
@@ -253,6 +253,91 @@ fn normalize_openai_parameters(schema: &Value) -> Value {
     normalized
 }
 
+pub fn tool_is_usable(
+    permission: mcp_access_policies::McpPermission,
+    tool_is_read_only: bool,
+) -> bool {
+    match permission {
+        mcp_access_policies::McpPermission::Full => true,
+        mcp_access_policies::McpPermission::ReadOnly => tool_is_read_only,
+        mcp_access_policies::McpPermission::Denied => false,
+    }
+}
+
+pub async fn filter_tools_for_user(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    tools: Vec<mcp_tools::Model>,
+) -> Result<Vec<mcp_tools::Model>, AppError> {
+    if tools.is_empty() {
+        return Ok(tools);
+    }
+    let access_context = build_access_context(db, user_id).await?;
+
+    let server_ids: Vec<Uuid> = tools
+        .iter()
+        .map(|tool| tool.server_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let servers: HashMap<Uuid, mcp_servers::Model> = mcp_servers::Entity::find()
+        .filter(mcp_servers::Column::Id.is_in(server_ids.clone()))
+        .all(db)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp servers fetch error: {e}");
+            AppError::DbTimeout
+        })?
+        .into_iter()
+        .map(|server| (server.id, server))
+        .collect();
+
+    let mut server_rule_map: HashMap<Uuid, Vec<mcp_access_policies::Model>> = HashMap::new();
+    for rule in load_server_rules(db, &server_ids).await? {
+        if let Some(server_id) = rule.server_id {
+            server_rule_map.entry(server_id).or_default().push(rule);
+        }
+    }
+    let tool_ids: Vec<Uuid> = tools.iter().map(|tool| tool.id).collect();
+    let mut tool_rule_map: HashMap<Uuid, Vec<mcp_access_policies::Model>> = HashMap::new();
+    for rule in load_tool_rules(db, &tool_ids).await? {
+        if let Some(tool_id) = rule.tool_id {
+            tool_rule_map.entry(tool_id).or_default().push(rule);
+        }
+    }
+
+    let mut server_access_cache = HashMap::new();
+    let mut allowed = Vec::with_capacity(tools.len());
+    for tool in tools {
+        let Some(server) = servers.get(&tool.server_id) else {
+            continue;
+        };
+        let server_access = match server_access_cache.get(&tool.server_id) {
+            Some(access) => access,
+            None => {
+                let rules = server_rule_map
+                    .get(&tool.server_id)
+                    .map(|rules| rules.as_slice())
+                    .unwrap_or(&[]);
+                let access =
+                    resolve_server_access_with_rules(db, &access_context, server, rules).await?;
+                server_access_cache.entry(tool.server_id).or_insert(access)
+            }
+        };
+        let tool_rules = tool_rule_map
+            .get(&tool.id)
+            .map(|rules| rules.as_slice())
+            .unwrap_or(&[]);
+        let tool_access =
+            resolve_tool_access_with_rules(db, &access_context, &tool, server_access, tool_rules)
+                .await?;
+        if tool_is_usable(tool_access.permission, tool.is_read_only) {
+            allowed.push(tool);
+        }
+    }
+    Ok(allowed)
+}
+
 pub async fn load_mcp_tools(
     state: &SharedState,
     user_id: Uuid,
@@ -362,22 +447,15 @@ pub async fn load_mcp_tools(
         )
         .await?;
 
-        if tool_access.permission == mcp_access_policies::McpPermission::Denied {
+        if !tool_is_usable(tool_access.permission, tool.is_read_only) {
             if debug {
                 println!(
-                    "mcp tools debug: deny tool '{}' (openai='{}') via {:?}",
-                    tool.name, openai_name, tool_access.resolved_via
-                );
-            }
-            continue;
-        }
-        if tool_access.permission == mcp_access_policies::McpPermission::ReadOnly
-            && !tool.is_read_only
-        {
-            if debug {
-                println!(
-                    "mcp tools debug: read-only deny tool '{}' (openai='{}') is_read_only=false",
-                    tool.name, openai_name
+                    "mcp tools debug: deny tool '{}' (openai='{}') via {:?} permission={:?} is_read_only={}",
+                    tool.name,
+                    openai_name,
+                    tool_access.resolved_via,
+                    tool_access.permission,
+                    tool.is_read_only
                 );
             }
             continue;
@@ -412,4 +490,28 @@ pub async fn load_mcp_tools(
     }
 
     Ok((lookup, server_summaries))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tool_is_usable;
+    use crate::models::mcp_access_policies::McpPermission;
+
+    #[test]
+    fn full_access_tools_are_usable_whether_or_not_they_are_read_only() {
+        assert!(tool_is_usable(McpPermission::Full, false));
+        assert!(tool_is_usable(McpPermission::Full, true));
+    }
+
+    #[test]
+    fn read_only_access_allows_only_read_only_tools() {
+        assert!(tool_is_usable(McpPermission::ReadOnly, true));
+        assert!(!tool_is_usable(McpPermission::ReadOnly, false));
+    }
+
+    #[test]
+    fn denied_tools_are_never_usable() {
+        assert!(!tool_is_usable(McpPermission::Denied, true));
+        assert!(!tool_is_usable(McpPermission::Denied, false));
+    }
 }

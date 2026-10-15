@@ -20,7 +20,7 @@ use crate::{
     },
     models::users::UserStatus,
     services::{
-        analytics_cache,
+        analytics_cache, analytics_scope,
         authorization::{AuthorizationService, PermissionScopeMode},
     },
     state::SharedState,
@@ -165,12 +165,8 @@ pub async fn get_department_analytics(
         )
         .await?;
 
-    let result = analytics_cache::get_department_analytics_cached(&app_state.database, query)
-        .await
-        .map_err(|e| {
-            eprintln!("Department analytics error: {}", e);
-            AuthError::DbTimeout
-        })?;
+    let result =
+        analytics_scope::department_analytics_for_caller(claims, &app_state, query).await?;
 
     Ok((StatusCode::OK, Json(result)))
 }

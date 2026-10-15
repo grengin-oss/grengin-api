@@ -16,13 +16,12 @@ use crate::{
     },
     error::{AppError, ChatStreamError, ErrorResponse},
     models::{
-        conversation_projects, conversations,
-        departments::ActionOnExceed,
+        conversations,
         mcp_access_policies::McpPermission,
         mcp_executions,
         mcp_servers::McpTransportType,
-        messages::{self, ChatRole},
-        projects, users,
+        messages::{self, ChatRole, StopReason},
+        users,
     },
     services::provider_stream::{
         StreamParseResult, StreamParser, StreamWebSearchAction as ParsedWebSearchAction,
@@ -34,9 +33,19 @@ use crate::{
             ARTIFACT_SYSTEM_HINT, ArtifactAccum, ArtifactParseEvent, ArtifactParser,
             content_type_to_ext,
         },
-        budget_allocation::{get_department_budget_status, refresh_department_budget_available},
+        budget_allocation::refresh_department_budget_available,
         chat_helpers::{
             effective_max_tokens, effective_native_web_search, supports_native_web_search,
+        },
+        chat_stream_helpers::{
+            ContentCheckpoint, DepartmentBudgetGate, ToolRoundOutcome, department_budget_status,
+            ensure_model_whitelisted, model_identifiers, next_tool_round,
+            persistence_error_event_data, record_stop_reason, response_stopped_event_data,
+            stop_reason_for_provider_error, with_stop_reason,
+        },
+        conversation_access::{
+            can_access_conversation, find_active_conversation_for_user,
+            load_readable_linked_projects,
         },
         department_policies::check_model_allowed,
         file_storage::{
@@ -47,6 +56,8 @@ use crate::{
             build_mcp_server_context, resolve_mcp_oauth_token, resolve_mcp_tool_descriptor,
         },
         mcp_tools::load_mcp_tools,
+        message_branches::{ThreadEntry, add_to_thread, is_shown, last_shown_message},
+        message_helpers::{EditInProgress, EditStatus, PendingEdit, begin_pending_edit},
         notifications::emit_budget_alerts,
         provider_chat::{
             LlmStreamError, LlmStreamEvent, PluginStreamParser, build_plugin_chat_request,
@@ -54,9 +65,10 @@ use crate::{
         },
         provider_resolver::{ResolveProviderError, resolve_provider},
         rag::{
-            EmbeddingTarget, assemble_prompts_with_budget, build_project_retrieval_prompt,
-            build_retrieval_prompt, embed_messages, load_recent_prompts, load_summary,
-            update_conversation_summary,
+            EmbeddingTarget, assemble_prompts_with_budget, begin_history_snapshot,
+            build_project_retrieval_prompt, build_retrieval_prompt, embed_messages,
+            embed_retrieval_query, end_history_snapshot, load_recent_prompts, load_summary,
+            summary_usable_with_cutoff, update_conversation_summary,
         },
         skills_helpers::{load_skill_knowledge_for_stream, load_skills_for_stream},
         system_prompts,
@@ -70,7 +82,7 @@ use crate::{
     utils::llm_error::extract_llm_error_message,
 };
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, State},
     response::{
         Sse,
@@ -82,8 +94,10 @@ use futures_util::StreamExt;
 use num_traits::ToPrimitive;
 use reqwest::StatusCode;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
-    QueryOrder, QuerySelect, prelude::Decimal,
+    ActiveModelTrait,
+    ActiveValue::{NotSet, Set},
+    ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QueryTrait,
+    prelude::Decimal,
 };
 use serde_json::{Value, json};
 use std::{collections::HashMap, convert::Infallible};
@@ -188,17 +202,17 @@ async fn hydrate_prompt_files(
       })
     )),
     ("image_generated" = (
-      description = "event:image_generated — emitted for image generation models instead of the LLM event sequence (message_start/delta/message_end). Contains the saved file and cost. Always followed immediately by done.",
+      description = "event:image_generated — emitted for image generation models instead of the LLM event sequence (message_start/delta/message_end). Contains the saved file and cost. Followed by stream_finished and done. Not sent for an edit that a newer edit of the same message overtook: response_stopped (stop_reason user_edited) is sent instead and the image is not added to the conversation.",
       value = json!({
         "event": "image_generated",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "file_id": "92deac9e-7f9f-4d4f-a69b-43737cc2b3a7", "content_type": "image/png", "cost": 0.04 }
       })
     )),
     ("message_start" = (
-      description = "event:message_start — emitted when the assistant message record is created.",
+      description = "event:message_start — emitted when the assistant message record is created. message_id is the reply (pass it to POST /chat/stream/{message_id}/cancel); user_message_id is the message you just sent, the id to use with PATCH /chat/{chat_id}/message/{message_id}/stream.",
       value = json!({
         "event": "message_start",
-        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
+        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "user_message_id": "5d0f3c1e-8a2b-4b6e-9f3a-1c2d3e4f5a60" }
       })
     )),
     ("delta" = (
@@ -265,10 +279,17 @@ async fn hydrate_prompt_files(
       })
     )),
     ("cancelled" = (
-      description = "event:cancelled — emitted when the stream was cancelled by the client before completion.",
+      description = "event:cancelled — the reply was stopped before it finished, either by POST /chat/stream/{message_id}/cancel or because the user edited a message in this conversation or switched to another version while it was generating. A switch that lands before the reply starts streaming stops it right after message_start, with no delta. Followed by response_stopped with the reason.",
       value = json!({
         "event": "cancelled",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
+      })
+    )),
+    ("response_stopped" = (
+      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation or switched to another version while it was generating, including before it started streaming, or a newer edit of the same message took over; the reply stays with the version it was sent in), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnected is stored as network_error, or as user_cancelled when POST /chat/stream/{message_id}/cancel arrives within 5 seconds.",
+      value = json!({
+        "event": "response_stopped",
+        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "stop_reason": "user_cancelled" }
       })
     )),
     ("done" = (
@@ -303,7 +324,7 @@ async fn hydrate_prompt_files(
    ),
     (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
     (status = 400, content_type = "application/json", body = ErrorResponse, description = "Validation error — empty messages (code=2002)"),
-    (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003), model not allowed for department (code=6002), or budget exceeded (code=6001)"),
+    (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003), model not whitelisted by admin or not allowed for department (code=6002), or budget exceeded (code=6001)"),
     (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found (code=5003)"),
     (status = 503, content_type = "application/json", body = ErrorResponse, description = "DB unavailable (code=5000) or timeout (code=5001)"),
 
@@ -341,17 +362,17 @@ pub async fn handle_chat_stream_path_doc() {}
       })
     )),
     ("image_generated" = (
-      description = "event:image_generated — emitted for image generation models instead of the LLM event sequence (message_start/delta/message_end). Contains the saved file and cost. Always followed immediately by done.",
+      description = "event:image_generated — emitted for image generation models instead of the LLM event sequence (message_start/delta/message_end). Contains the saved file and cost. Followed by stream_finished and done. Not sent for an edit that a newer edit of the same message overtook: response_stopped (stop_reason user_edited) is sent instead and the image is not added to the conversation.",
       value = json!({
         "event": "image_generated",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "file_id": "92deac9e-7f9f-4d4f-a69b-43737cc2b3a7", "content_type": "image/png", "cost": 0.04 }
       })
     )),
     ("message_start" = (
-      description = "event:message_start — emitted when the assistant message record is created.",
+      description = "event:message_start — emitted when the assistant message record is created. message_id is the reply (pass it to POST /chat/stream/{message_id}/cancel); user_message_id is the message you just sent, the id to use with PATCH /chat/{chat_id}/message/{message_id}/stream.",
       value = json!({
         "event": "message_start",
-        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
+        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "user_message_id": "5d0f3c1e-8a2b-4b6e-9f3a-1c2d3e4f5a60" }
       })
     )),
     ("delta" = (
@@ -418,10 +439,17 @@ pub async fn handle_chat_stream_path_doc() {}
       })
     )),
     ("cancelled" = (
-      description = "event:cancelled — emitted when the stream was cancelled by the client before completion.",
+      description = "event:cancelled — the reply was stopped before it finished, either by POST /chat/stream/{message_id}/cancel or because the user edited a message in this conversation or switched to another version while it was generating. A switch that lands before the reply starts streaming stops it right after message_start, with no delta. Followed by response_stopped with the reason.",
       value = json!({
         "event": "cancelled",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
+      })
+    )),
+    ("response_stopped" = (
+      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation or switched to another version while it was generating, including before it started streaming, or a newer edit of the same message took over; the reply stays with the version it was sent in), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnected is stored as network_error, or as user_cancelled when POST /chat/stream/{message_id}/cancel arrives within 5 seconds.",
+      value = json!({
+        "event": "response_stopped",
+        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "stop_reason": "user_cancelled" }
       })
     )),
     ("done" = (
@@ -456,7 +484,7 @@ pub async fn handle_chat_stream_path_doc() {}
    ),
     (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
     (status = 400, content_type = "application/json", body = ErrorResponse, description = "Validation error — empty messages (code=2002)"),
-    (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003), model not allowed for department (code=6002), or budget exceeded (code=6001)"),
+    (status = 403, content_type = "application/json", body = ErrorResponse, description = "LLM provider disabled by admin (code=4003), model not whitelisted by admin or not allowed for department (code=6002), or budget exceeded (code=6001)"),
     (status = 404, content_type = "application/json", body = ErrorResponse, description = "Conversation not found (code=5003)"),
     (status = 503, content_type = "application/json", body = ErrorResponse, description = "DB unavailable (code=5000) or timeout (code=5001)"),
     ),
@@ -467,15 +495,16 @@ pub async fn handle_chat_stream_doc() {}
     post,
     path = "/chat/stream/{message_id}/cancel",
     tag = "chat",
+    description = "Stops an assistant reply that is still generating (the Stop button). Pass the message_id from the reply's message_start event; this works for replies from POST /chat/stream, POST /chat/stream/{chat_id} and PATCH /chat/{chat_id}/message/{message_id}/stream.\n\nIf the client still has the stream open, it ends with cancelled, response_stopped (stop_reason user_cancelled), stream_finished and done. The text generated so far is kept, and GET /chat/{chat_id} returns the message with stop_reason user_cancelled. Stopping an edit's reply keeps the edit with the partial reply.\n\nThe client may close the stream at the same moment it calls this endpoint: a reply whose client disconnected waits 5 seconds for a stop request before it is recorded as network_error, so a Stop sent within that window is still stored as user_cancelled. A reply that was already stopped for another reason (for example user_edited) keeps that reason.\n\nOnly a reply generating on the server instance that receives this request can be stopped.",
     params(
-        ("message_id" = Uuid, Path, description = "Assistant message id to cancel")
+        ("message_id" = Uuid, Path, description = "Assistant message id from the reply's message_start event")
     ),
     responses(
-        (status = 202),
-        (status = 204),
-        (status = 401, content_type = "application/json", body = Error),
-        (status = 404, content_type = "application/json", body = ErrorResponse),
-        (status = 503, content_type = "application/json", body = ErrorResponse),
+        (status = 202, description = "The reply was generating, or its client disconnected less than 5 seconds ago, and has been stopped; it is stored with stop_reason user_cancelled unless it had already stopped for another reason"),
+        (status = 204, description = "Nothing to stop: the reply already finished, failed, was disconnected more than 5 seconds ago, or is generating on another server instance; the message is left unchanged"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+        (status = 404, content_type = "application/json", body = ErrorResponse, description = "Message not found, or it belongs to another user's conversation (code=1001)"),
+        (status = 503, content_type = "application/json", body = ErrorResponse, description = "DB unavailable (code=5000) or timeout (code=5001)"),
     )
 )]
 pub async fn cancel_chat_stream(
@@ -501,7 +530,7 @@ pub async fn cancel_chat_stream(
         })?
         .ok_or(AppError::ResourceNotFound)?;
 
-    if conversation.user_id != claims.user_id {
+    if !can_access_conversation(conversation.user_id, claims.user_id) {
         return Err(AppError::ResourceNotFound);
     }
 
@@ -516,6 +545,7 @@ pub async fn handle_chat_stream(
     claims: Claims,
     mut chat_id: Option<Path<Uuid>>,
     State(app_state): State<SharedState>,
+    pending_edit: Option<Extension<PendingEdit>>,
     Json(req): Json<ChatInput>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, AppError> {
     let start = Instant::now();
@@ -573,20 +603,15 @@ pub async fn handle_chat_stream(
         }
 
         if let Some(department_id) = user.department_id {
-            let (budget_available, action_on_exceed) =
-                get_department_budget_status(&app_state.database, department_id)
-                    .await
-                    .map_err(|e| {
-                        eprintln!("get department budget status error: {e}");
-                        AppError::DbTimeout
-                    })?;
-            if budget_available.to_f32() <= Some(0_f32) {
-                match action_on_exceed {
-                    ActionOnExceed::Block => {
-                        return Err(AppError::DepartmentBudgetExceeded);
-                    }
-                    ActionOnExceed::Warn => {
-                        budget_warning = Some(BudgetWarningPayload {
+            let (budget_gate, budget_available) =
+                department_budget_status(&app_state.database, department_id).await?;
+            match budget_gate {
+                DepartmentBudgetGate::Open => {}
+                DepartmentBudgetGate::Block => {
+                    return Err(AppError::DepartmentBudgetExceeded);
+                }
+                DepartmentBudgetGate::Warn => {
+                    budget_warning = Some(BudgetWarningPayload {
                         department_id,
                         budget_available: budget_available.to_string(),
                         action: "warn",
@@ -594,7 +619,6 @@ pub async fn handle_chat_stream(
                             "Department budget is exhausted for the current period. The chat will proceed, but usage may exceed the budget."
                                 .to_string(),
                     });
-                    }
                 }
             }
         }
@@ -626,7 +650,16 @@ pub async fn handle_chat_stream(
     let plugin_model_supports_web_search = plugin_model_info
         .as_ref()
         .is_some_and(|model| model.supports_web_search);
-    let mut catalog_model_supports_web_search = false;
+    let catalog_model = match get_model_info_cached(&app_state.req_client, &model_name).await {
+        Ok(model) => model,
+        Err(error) => {
+            eprintln!("models cache error: {error}");
+            None
+        }
+    };
+    let catalog_model_supports_web_search = catalog_model
+        .as_ref()
+        .is_some_and(|model| model.supports_web_search);
     let (
         input_rate,
         output_rate,
@@ -637,77 +670,48 @@ pub async fn handle_chat_stream(
         max_output_tokens,
         is_image_gen,
         supports_multiple_images,
-    ) = match get_model_info_cached(&app_state.req_client, &model_name).await {
-        Ok(Some(model)) => {
-            catalog_model_supports_web_search = model.supports_web_search;
-            (
-                model.input_token_rate,
-                model.output_token_rate,
-                model.image_input_token_rate,
-                model.image_output_token_rate,
-                model.cached_input_token_rate,
-                model.cache_creation_token_rate,
-                model.max_output_tokens,
-                model.model_type == ModelType::ImageGenerator,
-                model.supports_multiple_images,
-            )
-        }
-        Ok(None) => plugin_model_info.as_ref().map_or(
-            (
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                plugin_is_image_only,
-                false,
-            ),
-            |model| {
-                (
-                    model.input_token_rate,
-                    model.output_token_rate,
-                    model.image_input_token_rate,
-                    model.image_output_token_rate,
-                    model.cached_input_token_rate,
-                    model.cache_creation_token_rate,
-                    model.max_output_tokens,
-                    model.model_type == ModelType::ImageGenerator,
-                    model.supports_multiple_images,
-                )
-            },
+    ) = match catalog_model.as_ref().or(plugin_model_info.as_ref()) {
+        Some(model) => (
+            model.input_token_rate,
+            model.output_token_rate,
+            model.image_input_token_rate,
+            model.image_output_token_rate,
+            model.cached_input_token_rate,
+            model.cache_creation_token_rate,
+            model.max_output_tokens,
+            model.model_type == ModelType::ImageGenerator,
+            model.supports_multiple_images,
         ),
-        Err(error) => {
-            eprintln!("models cache error: {error}");
-            plugin_model_info.as_ref().map_or(
-                (
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    plugin_is_image_only,
-                    false,
-                ),
-                |model| {
-                    (
-                        model.input_token_rate,
-                        model.output_token_rate,
-                        model.image_input_token_rate,
-                        model.image_output_token_rate,
-                        model.cached_input_token_rate,
-                        model.cache_creation_token_rate,
-                        model.max_output_tokens,
-                        model.model_type == ModelType::ImageGenerator,
-                        model.supports_multiple_images,
-                    )
-                },
-            )
-        }
+        None => (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            plugin_is_image_only,
+            false,
+        ),
     };
+    ensure_model_whitelisted(
+        &app_state,
+        &provider,
+        &provider_key,
+        &model_name,
+        &model_identifiers(
+            &model_name,
+            &provider_key,
+            plugin_model_info.as_ref(),
+            catalog_model.as_ref(),
+        ),
+    )
+    .await?;
+    if !is_image_gen && provider_config.chat().is_none() {
+        return Err(AppError::LlmProviderNotConfigured {
+            provider: provider.clone(),
+        });
+    }
     let model_supports_web_search = supports_native_web_search(
         &provider_key,
         plugin_model_supports_web_search,
@@ -738,22 +742,20 @@ pub async fn handle_chat_stream(
     let mut retrieval_prompt: Option<Prompt> = None;
     let mut project_retrieval_prompt: Option<Prompt> = None;
     let mut recent_prompts: Vec<Prompt> = Vec::new();
-    let mut linked_project_ids: Vec<Uuid> = Vec::new();
+    let mut linked_projects = Vec::new();
+    let mut edit_in_progress: Option<EditInProgress> = None;
+    let mut thread_parent: Option<Uuid> = None;
     let (conversation_id, title) = if let Some(Path(conversation_id)) = chat_id {
-        let conversation = conversations::Entity::find_by_id(conversation_id.clone())
-            .filter(conversations::Column::ArchivedAt.is_null())
-            .one(&app_state.database)
-            .await
-            .map_err(|e| {
-                eprintln!("DB get one error {:?}", e);
-                AppError::DbTimeout
-            })?
-            .ok_or(AppError::DbNotFound)?;
+        let conversation =
+            find_active_conversation_for_user(&app_state.database, conversation_id, claims.user_id)
+                .await?;
+        edit_in_progress =
+            begin_pending_edit(conversation_id, pending_edit.map(|Extension(edit)| edit));
+        let history_cutoff = edit_in_progress
+            .as_ref()
+            .map(EditInProgress::history_cutoff);
         let mut conversation_active = conversation.clone().into_active_model();
         conversation_active.updated_at = Set(Utc::now());
-        conversation_active.message_count =
-            Set(conversation.message_count + req.messages.len() as i32);
-        conversation_active.last_message_at = Set(Some(Utc::now()));
         conversation_active
             .update(&app_state.database)
             .await
@@ -761,62 +763,27 @@ pub async fn handle_chat_stream(
                 eprintln!("Db update one error {:?}", e);
                 AppError::DbTimeout
             })?;
-        linked_project_ids = conversation_projects::Entity::find()
-            .select_only()
-            .column(conversation_projects::Column::ProjectId)
-            .filter(conversation_projects::Column::ConversationId.eq(conversation_id))
-            .into_tuple::<Uuid>()
-            .all(&app_state.database)
-            .await
-            .unwrap_or_default();
+        linked_projects =
+            load_readable_linked_projects(&app_state.database, conversation_id, claims.user_id)
+                .await?;
 
+        let mut retrieval_embedding = None;
         if app_state.settings.rag.enabled {
-            let recent = load_recent_prompts(
-                &app_state.database,
-                conversation_id,
-                app_state.settings.rag.recent_message_pairs,
-            )
-            .await?;
-            let recent_boundary = recent.boundary;
-            recent_prompts = recent.prompts;
-            if app_state.settings.rag.summary_enabled {
-                if let Some(summary) = load_summary(&app_state.database, conversation_id).await? {
-                    if !summary.summary.trim().is_empty() {
-                        summary_prompt = Some(Prompt {
-                            role: ChatRole::System,
-                            text: format!("Conversation summary:\n{}", summary.summary),
-                            files: Vec::new(),
-                        });
-                    }
-                }
-            }
             let top_k = app_state.settings.rag.retrieval_top_k;
             let retrieval_future = async {
                 if app_state.settings.rag.retrieval_enabled {
-                    build_retrieval_prompt(
-                        &app_state,
-                        conversation_id,
-                        &retrieval_query,
-                        recent_boundary,
-                    )
-                    .await
+                    embed_retrieval_query(&app_state, &retrieval_query).await
                 } else {
                     Ok(None)
                 }
             };
-            let (retrieval_result, project_retrieval_results) = tokio::join!(
+            let (embedding_result, project_retrieval_results) = tokio::join!(
                 retrieval_future,
-                futures_util::future::join_all(linked_project_ids.iter().map(|pid| {
-                    build_project_retrieval_prompt(&app_state, *pid, &retrieval_query, top_k)
+                futures_util::future::join_all(linked_projects.iter().map(|project| {
+                    build_project_retrieval_prompt(&app_state, project.id, &retrieval_query, top_k)
                 })),
             );
-            if let Some(text) = retrieval_result? {
-                retrieval_prompt = Some(Prompt {
-                    role: ChatRole::System,
-                    text,
-                    files: Vec::new(),
-                });
-            }
+            retrieval_embedding = embedding_result?;
             let combined_project_text: String = project_retrieval_results
                 .into_iter()
                 .filter_map(|r| r.ok().flatten())
@@ -829,12 +796,63 @@ pub async fn handle_chat_stream(
                     files: Vec::new(),
                 });
             }
+        }
+
+        let snapshot = begin_history_snapshot(&app_state.database).await?;
+        // A new message continues the thread on screen; an edit's new version takes the edited
+        // message's parent instead, so the two become versions of each other.
+        thread_parent = match edit_in_progress.as_ref() {
+            Some(edit) => edit.parent_id(),
+            None => last_shown_message(&snapshot, conversation_id).await?,
+        };
+        if app_state.settings.rag.enabled {
+            let recent = load_recent_prompts(
+                &snapshot,
+                conversation_id,
+                app_state.settings.rag.recent_message_pairs,
+                history_cutoff,
+            )
+            .await?;
+            let recent_boundary = recent.boundary;
+            recent_prompts = recent.prompts;
+            if app_state.settings.rag.summary_enabled {
+                if let Some(summary) = load_summary(&snapshot, conversation_id).await? {
+                    if !summary.summary.trim().is_empty()
+                        && summary_usable_with_cutoff(summary.last_message_at, history_cutoff)
+                    {
+                        summary_prompt = Some(Prompt {
+                            role: ChatRole::System,
+                            text: format!("Conversation summary:\n{}", summary.summary),
+                            files: Vec::new(),
+                        });
+                    }
+                }
+            }
+            if let Some(query) = retrieval_embedding.as_ref()
+                && let Some(text) = build_retrieval_prompt(
+                    &app_state,
+                    &snapshot,
+                    conversation_id,
+                    query,
+                    recent_boundary.or(history_cutoff),
+                )
+                .await?
+            {
+                retrieval_prompt = Some(Prompt {
+                    role: ChatRole::System,
+                    text,
+                    files: Vec::new(),
+                });
+            }
         } else {
             let previous_messages = messages::Entity::find()
                 .filter(messages::Column::ConversationId.eq(conversation_id))
                 .filter(messages::Column::Deleted.eq(false))
+                .apply_if(history_cutoff, |query, cutoff| {
+                    query.filter(messages::Column::CreatedAt.lt(cutoff))
+                })
                 .order_by_asc(messages::Column::CreatedAt)
-                .all(&app_state.database)
+                .all(&snapshot)
                 .await
                 .map_err(|e| {
                     eprintln!("DB get messages error {:?}", e);
@@ -853,6 +871,7 @@ pub async fn handle_chat_stream(
                 })
                 .collect::<Vec<Prompt>>();
         }
+        end_history_snapshot(snapshot).await?;
         (conversation_id, None)
     } else {
         let first_message = req
@@ -918,7 +937,10 @@ pub async fn handle_chat_stream(
             last_message_at: Set(Some(Utc::now())),
             archived_at: Set(None),
             pinned: Set(false),
-            message_count: Set(req.messages.len() as i32),
+            edit_requests: Set(0),
+            edit_claim: Set(None),
+            // Each request message counts as it is added to the thread.
+            message_count: Set(0),
             total_tokens: Set(0),
             total_cost: Set(Decimal::from(0)),
             metadata: Set(Some(new_metadata)),
@@ -932,23 +954,26 @@ pub async fn handle_chat_stream(
             })?;
         (new_conversation_id, generated_title)
     };
-    let mut previous_message_id = None;
+    let mut previous_message_id = thread_parent;
+    // Sent back on message_start, so a client can edit the message it just sent.
+    let mut user_message_id: Option<Uuid> = None;
     let mut embedding_targets: Vec<EmbeddingTarget> = Vec::new();
     for message in &req.messages {
         let new_message_id = Uuid::new_v4();
-        let created_at = Utc::now();
+        let mut created_at = Utc::now();
         metadata["files"] = message
             .files
             .iter()
             .map(|f| serde_json::to_value(f).unwrap())
             .collect::<Vec<serde_json::Value>>()
             .into();
-        let new_message = messages::ActiveModel {
+        let mut new_message = messages::ActiveModel {
             id: Set(new_message_id),
             conversation_id: Set(conversation_id),
             previous_message_id: Set(previous_message_id),
             role: Set(message.role),
-            deleted: Set(false),
+            deleted: Set(edit_in_progress.is_some()),
+            inactive_branch: Set(false),
             message_content: Set(message.content.clone()),
             model_provider: Set(provider.clone()),
             model_name: Set(model_name.clone()),
@@ -964,15 +989,28 @@ pub async fn handle_chat_stream(
             cost: Set(Decimal::from(0)),
             metadata: Set(Some(metadata.clone())),
         };
-        previous_message_id = Some(new_message_id);
-        new_message
-            .clone()
-            .insert(&app_state.database)
-            .await
-            .map_err(|e| {
+        if edit_in_progress.is_some() {
+            new_message.insert(&app_state.database).await.map_err(|e| {
                 eprintln!("Db one insert error {:?}", e);
                 AppError::DbTimeout
             })?;
+        } else {
+            created_at = add_to_thread(
+                &app_state.database,
+                &mut new_message,
+                conversation_id,
+                previous_message_id,
+                ThreadEntry::Sent,
+            )
+            .await?;
+        }
+        previous_message_id = Some(new_message_id);
+        if message.role == ChatRole::User {
+            user_message_id = Some(new_message_id);
+        }
+        if let Some(edit) = edit_in_progress.as_mut() {
+            edit.record_attempt_message(new_message_id);
+        }
         if matches!(message.role, ChatRole::User | ChatRole::Assistant) {
             embedding_targets.push(EmbeddingTarget {
                 message_id: new_message_id,
@@ -1021,12 +1059,7 @@ pub async fn handle_chat_stream(
             );
         }
     }
-    if !linked_project_ids.is_empty() {
-        let linked_projects = projects::Entity::find()
-            .filter(projects::Column::Id.is_in(linked_project_ids.clone()))
-            .all(&app_state.database)
-            .await
-            .unwrap_or_default();
+    if !linked_projects.is_empty() {
         let mut project_blocks: Vec<String> = linked_projects
             .into_iter()
             .filter_map(|p| {
@@ -1064,7 +1097,13 @@ pub async fn handle_chat_stream(
     let active_skills = if is_image_gen {
         vec![]
     } else {
-        load_skills_for_stream(&app_state.database, conversation_id, &transient_skill_ids).await
+        load_skills_for_stream(
+            &app_state.database,
+            conversation_id,
+            claims.user_id,
+            &transient_skill_ids,
+        )
+        .await
     };
     let mut skill_web_search = false;
     let mut skill_mcp_server_ids: Vec<Uuid> = Vec::new();
@@ -1251,7 +1290,7 @@ pub async fn handle_chat_stream(
         let first_chat_stream = ChatStream{
           id: Some(conversation_id.clone()),
           title:title.clone(),
-          message_id:None,
+          message_id:None, user_message_id: None,
           is_new:Some(title.is_some()),
           content:None,
           input_tokens:None,
@@ -1310,11 +1349,12 @@ pub async fn handle_chat_stream(
                         + calculate_cost_decimal(total_image_input, 0, image_input_rate, None)
                         + calculate_cost_decimal(0, total_output, None, effective_output_rate);
                     let total_input_tokens = total_text_input + total_image_input;
-                    let img_msg = messages::ActiveModel {
+                    let mut img_msg = messages::ActiveModel {
                         id: Set(img_message_id),
                         conversation_id: Set(conversation_id.clone()),
                         previous_message_id: Set(previous_message_id),
-                        deleted: Set(false),
+                        deleted: Set(edit_in_progress.is_some()),
+                        inactive_branch: Set(false),
                         role: Set(ChatRole::Assistant),
                         message_content: Set(String::new()),
                         model_provider: Set(provider.clone()),
@@ -1331,8 +1371,48 @@ pub async fn handle_chat_stream(
                         updated_at: Set(now),
                         metadata: Set(Some(json!({ "files": files_meta }))),
                     };
-                    if let Err(e) = img_msg.insert(&app_state.database).await {
-                        eprintln!("image gen message insert error: {e}");
+                    let inserted = if edit_in_progress.is_some() {
+                        img_msg.insert(&app_state.database).await.map(|_| ()).map_err(|e| {
+                            eprintln!("image gen message insert error: {e}");
+                            AppError::DbTimeout
+                        })
+                    } else {
+                        add_to_thread(&app_state.database, &mut img_msg, conversation_id, previous_message_id, ThreadEntry::Reply).await.map(|_| ())
+                    };
+                    if let Err(e) = inserted {
+                        eprintln!("image gen message insert error: {e:?}");
+                        yield Event::default()
+                            .event(ChatStreamEvents::AiError.to_string())
+                            .data(persistence_error_event_data());
+                        yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                        return;
+                    }
+                    let mut superseded = false;
+                    if let Some(mut edit) = edit_in_progress.take() {
+                        edit.record_attempt_message(img_message_id);
+                        let committed = match edit.claim(&app_state.database).await {
+                            Ok(EditStatus::Current) => {
+                                app_state.interrupt_older_streams(conversation_id, edit.request()).await;
+                                edit.commit(&app_state.database).await
+                            }
+                            other => other,
+                        };
+                        match committed {
+                            Ok(EditStatus::Current) => {}
+                            // A newer edit took over, so this image stays hidden and is reported as stopped.
+                            Ok(EditStatus::Superseded) => {
+                                superseded = true;
+                                record_stop_reason(&app_state.database, img_message_id, StopReason::UserEdited).await;
+                            }
+                            Err(error) => {
+                                eprintln!("edit commit error: {error:?}");
+                                yield Event::default()
+                                    .event(ChatStreamEvents::AiError.to_string())
+                                    .data(persistence_error_event_data());
+                                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                                return;
+                            }
+                        }
                     }
                     if let Ok(Some(conversation)) = conversations::Entity::find_by_id(conversation_id.clone())
                         .one(&app_state.database)
@@ -1356,22 +1436,28 @@ pub async fn handle_chat_stream(
                             }
                         }
                     }
-                    for (file_id, content_type, _, _, _) in &generated {
-                        if let Ok(data) = serde_json::to_string(&json!({
-                            "message_id": img_message_id,
-                            "file_id": file_id,
-                            "content_type": content_type,
-                            "cost": image_gen_cost.to_f32().unwrap_or(0.0),
-                        })) {
-                            yield Event::default()
-                                .event(ChatStreamEvents::ImageGenerated.to_string())
-                                .data(data);
+                    if superseded {
+                        yield Event::default()
+                            .event(ChatStreamEvents::ResponseStopped.to_string())
+                            .data(response_stopped_event_data(img_message_id, StopReason::UserEdited));
+                    } else {
+                        for (file_id, content_type, _, _, _) in &generated {
+                            if let Ok(data) = serde_json::to_string(&json!({
+                                "message_id": img_message_id,
+                                "file_id": file_id,
+                                "content_type": content_type,
+                                "cost": image_gen_cost.to_f32().unwrap_or(0.0),
+                            })) {
+                                yield Event::default()
+                                    .event(ChatStreamEvents::ImageGenerated.to_string())
+                                    .data(data);
+                            }
                         }
                     }
                     let finished = ChatStream {
                         id: None,
                         title: None,
-                        message_id: Some(img_message_id),
+                        message_id: Some(img_message_id), user_message_id: None,
                         is_new: None,
                         content: None,
                         input_tokens: Some(total_input_tokens),
@@ -1409,15 +1495,22 @@ pub async fn handle_chat_stream(
             return;
         }
 
-        // Unwrap is safe — these are present when !is_image_gen.
-        let stream_parser = stream_parser.expect("stream_parser is None only for image gen");
-        let chat = provider_config
-            .chat()
-            .expect("chat capability is present for non-image providers");
-        let mut provider_session = match chat
-            .start(provider_request.expect("provider request is present for chat"))
-            .await
-        {
+        let (Some(stream_parser), Some(provider_request), Some(chat)) =
+            (stream_parser, provider_request, provider_config.chat())
+        else {
+            let stream_err = ChatStreamError::ProviderError {
+                provider: provider.clone(),
+                message: "provider does not support chat".to_string(),
+            };
+            let data = serde_json::to_string(&stream_err.to_response())
+                .unwrap_or_else(|_| "{}".to_string());
+            yield Event::default()
+                .event(ChatStreamEvents::AiError.to_string())
+                .data(data);
+            yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+            return;
+        };
+        let mut provider_session = match chat.start(provider_request).await {
             Ok(session) => session,
             Err(error) => {
                 eprintln!("provider chat start failed: {}", provider_error_class(&error));
@@ -1463,12 +1556,13 @@ pub async fn handle_chat_stream(
         };
 
         let new_message_id = Uuid::new_v4();
-        let assistant_created_at = Utc::now();
+        let mut assistant_created_at = Utc::now();
         let mut new_llm_message = messages::ActiveModel {
            id: Set(new_message_id.clone()),
            conversation_id: Set(conversation_id.clone()),
            previous_message_id: Set(previous_message_id),
-           deleted: Set(false),
+           deleted: Set(edit_in_progress.is_some()),
+           inactive_branch: Set(false),
            role: Set(ChatRole::Assistant),
            message_content: Set(message_content.clone()),
            model_provider: Set(provider.clone()),
@@ -1485,30 +1579,93 @@ pub async fn handle_chat_stream(
            cost: Set(Decimal::from(0)),
            metadata: Set(Some(json!({"webSearch":req.web_search}))),
          };
-        new_llm_message
-             .clone()
-             .insert(&app_state.database)
-             .await
-             .expect("failed to insert llm response in table messages");
+        let inserted = if edit_in_progress.is_some() {
+            new_llm_message.clone().insert(&app_state.database).await.map(|_| ()).map_err(|e| {
+                eprintln!("assistant message insert error: {e}");
+                AppError::DbTimeout
+            })
+        } else {
+            add_to_thread(&app_state.database, &mut new_llm_message, conversation_id, previous_message_id, ThreadEntry::Reply)
+                .await
+                .map(|stamped| assistant_created_at = stamped)
+        };
+        if let Err(error) = inserted {
+            eprintln!("assistant message insert error: {error:?}");
+            yield Event::default()
+                .event(ChatStreamEvents::AiError.to_string())
+                .data(persistence_error_event_data());
+            yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+            return;
+        }
+        // Only an edit commit or a branch switch decides where the reply sits and whether it is
+        // shown, so the stream's later saves must not write these back over a switch.
+        new_llm_message.previous_message_id = NotSet;
+        new_llm_message.deleted = NotSet;
+        new_llm_message.inactive_branch = NotSet;
+        if let Some(edit) = edit_in_progress.as_mut() {
+            edit.record_attempt_message(new_message_id);
+            match edit.claim(&app_state.database).await {
+                Ok(EditStatus::Current) => {}
+                // A newer edit of this message already started replying, so this one stops here.
+                Ok(EditStatus::Superseded) => {
+                    record_stop_reason(&app_state.database, new_message_id, StopReason::UserEdited).await;
+                    yield Event::default()
+                        .event(ChatStreamEvents::ResponseStopped.to_string())
+                        .data(response_stopped_event_data(new_message_id, StopReason::UserEdited));
+                    yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("edit claim error: {error:?}");
+                    yield Event::default()
+                        .event(ChatStreamEvents::AiError.to_string())
+                        .data(persistence_error_event_data());
+                    yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                    return;
+                }
+            }
+        }
+        let cancel_handle = app_state
+            .register_stream_cancel(
+                new_message_id,
+                conversation_id,
+                edit_in_progress.as_ref().map(EditInProgress::request),
+            )
+            .await;
+        // A switch can only stop replies registered above; one that landed earlier has hidden
+        // this reply with its version, so it stops the same way.
+        if edit_in_progress.is_none()
+            && matches!(is_shown(&app_state.database, new_message_id).await, Ok(false))
+        {
+            cancel_handle.cancel(StopReason::UserEdited);
+        }
+        let mut content_checkpoint = ContentCheckpoint::new(
+            app_state.database.clone(),
+            new_message_id,
+            cancel_handle.clone(),
+            app_state.stream_cancellations.clone(),
+        );
 
         // Emit before the event loop so message_start always arrives before any delta,
         // regardless of provider (Gemini fires usageMetadata only on the last chunk).
         yield Event::default()
             .event(ChatStreamEvents::MessageStart.to_string())
             .data(ChatStream {
-                id: None, title: None, message_id: Some(new_message_id),
+                id: None, title: None, message_id: Some(new_message_id), user_message_id,
                 is_new: None, content: None, input_tokens: None, output_tokens: None,
                 cached_input_tokens: None, cache_creation_tokens: None,
                 latency_ms: None, cost: None, event: None, tool_call: None, tool_result: None,
             }.to_string());
 
-       let cancel_handle = app_state.register_stream_cancel(new_message_id).await;
-
        let mut final_message_cost = Decimal::from(0);
+       let mut persist_error: Option<sea_orm::DbErr> = None;
+       let mut turn_failed = false;
+       let mut stop_reason: Option<StopReason> = None;
        loop {
            let mut stream_should_continue = false;
            let mut stream_finished = false;
-           while let Some(event) = tokio::select! {
+           'events: while let Some(event) = tokio::select! {
+               biased;
                _ = cancel_handle.cancelled() => {
                    let cancel_cost = calculate_llm_cost(
                        request_tokens,
@@ -1521,6 +1678,8 @@ pub async fn handle_chat_stream(
                        output_rate,
                    );
                    final_message_cost = cancel_cost;
+                   let cancel_reason = cancel_handle.reason().unwrap_or(StopReason::UserCancelled);
+                   stop_reason = Some(cancel_reason);
                    new_llm_message.updated_at = Set(Utc::now());
                    new_llm_message.request_tokens = Set(request_tokens);
                    new_llm_message.response_tokens = Set(response_tokens);
@@ -1530,19 +1689,19 @@ pub async fn handle_chat_stream(
                    new_llm_message.metadata = Set(Some(json!({
                        "webSearch": req.web_search,
                        "cancelled": true,
+                       "stopReason": cancel_reason.as_str(),
                        "cachedInputTokens": cached_input_tokens_acc,
                        "cacheCreationTokens": cache_creation_tokens_acc,
                    })));
-                   new_llm_message
-                       .clone()
-                       .update(&app_state.database)
-                       .await
-                       .expect("failed to update cancelled llm response");
+                   match new_llm_message.clone().update(&app_state.database).await {
+                       Ok(_) => content_checkpoint.saved(Instant::now()),
+                       Err(error) => persist_error = Some(error),
+                   }
 
                    let cancel_event = ChatStream {
                        id: None,
                        title: None,
-                       message_id: Some(new_message_id),
+                       message_id: Some(new_message_id), user_message_id: None,
                        is_new: None,
                        content: None,
                        input_tokens: Some(request_tokens),
@@ -1596,15 +1755,20 @@ pub async fn handle_chat_stream(
                                cache_creation_rate,
                                output_rate,
                            ));
-                           new_llm_message
-                             .clone()
-                             .update(&app_state.database)
-                             .await
-                             .expect("failed to update in new llm response in table messages");
+                           let now = Instant::now();
+                           if content_checkpoint.is_due(now) {
+                               if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                                   persist_error = Some(error);
+                                   break 'events;
+                               }
+                               content_checkpoint.saved(now);
+                           } else {
+                               content_checkpoint.defer(&message_content);
+                           }
                            let (passthrough, parse_events) = artifact_parser.push(text);
                            if !passthrough.is_empty() {
                                let chat_stream = ChatStream {
-                                   id: None, title: None, message_id: None, is_new: None,
+                                   id: None, title: None, message_id: None, user_message_id: None, is_new: None,
                                    content: Some(passthrough),
                                    input_tokens: None, output_tokens: None,
                                    cached_input_tokens: None, cache_creation_tokens: None,
@@ -1704,11 +1868,10 @@ pub async fn handle_chat_stream(
                               "cachedInputTokens": cached_input_tokens_acc,
                               "cacheCreationTokens": cache_creation_tokens_acc,
                           })));
-                          new_llm_message
-                            .clone()
-                            .update(&app_state.database)
-                            .await
-                            .expect("failed to update in new llm response in table messages");
+                          if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                              persist_error = Some(error);
+                              break 'events;
+                          }
                        }
                        StreamParseResult::MessageStart { request_id:req_id,input_tokens,output_tokens,cached_input_tokens,cache_creation_tokens} => {
                           let accumulate_tokens = mcp_tooling_enabled && tool_round > 0;
@@ -1761,11 +1924,10 @@ pub async fn handle_chat_stream(
                               "cachedInputTokens": cached_input_tokens_acc,
                               "cacheCreationTokens": cache_creation_tokens_acc,
                           })));
-                          new_llm_message
-                            .clone()
-                            .update(&app_state.database)
-                            .await
-                            .expect("failed to update in new llm response in table messages");
+                          if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                              persist_error = Some(error);
+                              break 'events;
+                          }
                        }
                        StreamParseResult::ToolInput(tool_input) => {
                            let resolved_name = tool_input
@@ -1811,15 +1973,14 @@ pub async fn handle_chat_stream(
                            tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
                            new_llm_message.tools_calls = Set(tool_calls.clone());
                            new_llm_message.updated_at = Set(Utc::now());
-                           new_llm_message
-                             .clone()
-                             .update(&app_state.database)
-                             .await
-                             .expect("failed to update tool input in new llm response in table messages");
+                           if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                               persist_error = Some(error);
+                               break 'events;
+                           }
                            let chat_stream = ChatStream {
                                id:None,
                                title:None,
-                               message_id:None,
+                               message_id:None, user_message_id: None,
                                is_new:None,
                                content:None,
                                input_tokens:None,
@@ -1889,15 +2050,14 @@ pub async fn handle_chat_stream(
                                        );
                                        new_llm_message.tools_calls = Set(tool_calls.clone());
                                        new_llm_message.updated_at = Set(Utc::now());
-                                       new_llm_message
-                                           .clone()
-                                           .update(&app_state.database)
-                                           .await
-                                           .expect("failed to update resolved tool call in table messages");
+                                       if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                                           persist_error = Some(error);
+                                           break 'events;
+                                       }
                                        let resolved_stream = ChatStream {
                                            id: None,
                                            title: None,
-                                           message_id: None,
+                                           message_id: None, user_message_id: None,
                                            is_new: None,
                                            content: None,
                                            input_tokens: None,
@@ -1926,7 +2086,7 @@ pub async fn handle_chat_stream(
                            let chat_stream = ChatStream {
                                id:None,
                                title:None,
-                               message_id:None,
+                               message_id:None, user_message_id: None,
                                is_new:None,
                                content:None,
                                input_tokens:None,
@@ -1989,15 +2149,14 @@ pub async fn handle_chat_stream(
                            tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
                            new_llm_message.tools_calls = Set(tool_calls.clone());
                            new_llm_message.updated_at = Set(Utc::now());
-                           new_llm_message
-                             .clone()
-                             .update(&app_state.database)
-                             .await
-                             .expect("failed to update tool calls in new llm response in table messages");
+                           if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                               persist_error = Some(error);
+                               break 'events;
+                           }
                            let chat_stream = ChatStream {
                                id:None,
                                title:None,
-                               message_id:None,
+                               message_id:None, user_message_id: None,
                                is_new:None,
                                content:None,
                                input_tokens:None,
@@ -2039,15 +2198,14 @@ pub async fn handle_chat_stream(
                                tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
                                new_llm_message.tools_calls = Set(tool_calls.clone());
                                new_llm_message.updated_at = Set(Utc::now());
-                               new_llm_message
-                                 .clone()
-                                 .update(&app_state.database)
-                                 .await
-                                 .expect("failed to update tool calls in new llm response in table messages");
+                               if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                                   persist_error = Some(error);
+                                   break 'events;
+                               }
                                let chat_stream = ChatStream {
                                    id:None,
                                    title:None,
-                                   message_id:None,
+                                   message_id:None, user_message_id: None,
                                    is_new:None,
                                    content:None,
                                    input_tokens:None,
@@ -2085,15 +2243,14 @@ pub async fn handle_chat_stream(
                                tool_results.push(serde_json::to_value(&tool_result).unwrap_or_else(|_| json!({})));
                                new_llm_message.tools_results = Set(tool_results.clone());
                                new_llm_message.updated_at = Set(Utc::now());
-                               new_llm_message
-                                 .clone()
-                                 .update(&app_state.database)
-                                 .await
-                                 .expect("failed to update tool results in new llm response in table messages");
+                               if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                                   persist_error = Some(error);
+                                   break 'events;
+                               }
                                let chat_stream = ChatStream {
                                    id:None,
                                    title:None,
-                                   message_id:None,
+                                   message_id:None, user_message_id: None,
                                    is_new:None,
                                    content:None,
                                    input_tokens:None,
@@ -2127,15 +2284,14 @@ pub async fn handle_chat_stream(
                            tool_results.push(serde_json::to_value(&tool_result).unwrap_or_else(|_| json!({})));
                            new_llm_message.tools_results = Set(tool_results.clone());
                            new_llm_message.updated_at = Set(Utc::now());
-                           new_llm_message
-                             .clone()
-                             .update(&app_state.database)
-                             .await
-                             .expect("failed to update tool results in new llm response in table messages");
+                           if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                               persist_error = Some(error);
+                               break 'events;
+                           }
                            let chat_stream = ChatStream {
                                id:None,
                                title:None,
-                               message_id:None,
+                               message_id:None, user_message_id: None,
                                is_new:None,
                                content:None,
                                input_tokens:None,
@@ -2158,6 +2314,8 @@ pub async fn handle_chat_stream(
                              &ChatStreamError::from_stream_error(*kind, provider.clone(), message.clone()).to_response()
                          ).unwrap_or_else(|_| "{}".to_string());
                          yield Event::default().event(ChatStreamEvents::AiError.to_string()).data(data);
+                         stop_reason = Some(StopReason::ProviderError);
+                         turn_failed = true;
                          stream_finished = true;
                          break;
                        }
@@ -2190,15 +2348,14 @@ pub async fn handle_chat_stream(
                        new_llm_message.tools_calls = Set(tool_calls.clone());
                        new_llm_message.tools_results = Set(tool_results.clone());
                        new_llm_message.updated_at = Set(Utc::now());
-                       new_llm_message
-                         .clone()
-                           .update(&app_state.database)
-                           .await
-                           .expect("failed to update llm response in table messages");
+                       if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                           persist_error = Some(error);
+                           break 'events;
+                       }
                        yield Event::default()
                            .event(ChatStreamEvents::MessageEnd.to_string())
                            .data(ChatStream {
-                               id: None, title: None, message_id: Some(new_message_id),
+                               id: None, title: None, message_id: Some(new_message_id), user_message_id: None,
                                is_new: None, content: None,
                                input_tokens: Some(request_tokens),
                                output_tokens: Some(response_tokens),
@@ -2208,8 +2365,6 @@ pub async fn handle_chat_stream(
                                cost: message_cost.to_f32(),
                                event: None, tool_call: None, tool_result: None,
                            }.to_string());
-                       // remove cancel handle once stream ends
-                       app_state.clear_stream_cancel(new_message_id).await;
                        if mcp_tooling_enabled
                            && !pending_mcp_tool_calls.is_empty()
                            && tool_round < max_tool_rounds
@@ -2217,6 +2372,9 @@ pub async fn handle_chat_stream(
                            let mut provider_tool_results: Vec<llm_plugin::ToolResult> = Vec::new();
 
                            for call in pending_mcp_tool_calls.drain(..) {
+                               if cancel_handle.is_cancelled() {
+                                   break;
+                               }
                                let Some(tool_ref) = resolve_mcp_tool_descriptor(&mcp_tool_lookup, &call.tool_name).cloned() else {
                                    continue;
                                };
@@ -2413,15 +2571,14 @@ pub async fn handle_chat_stream(
                                );
                                new_llm_message.tools_results = Set(tool_results.clone());
                                new_llm_message.updated_at = Set(Utc::now());
-                               new_llm_message
-                                   .clone()
-                                   .update(&app_state.database)
-                                   .await
-                                   .expect("failed to update tool results in new llm response in table messages");
+                               if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                                   persist_error = Some(error);
+                                   break 'events;
+                               }
                                let chat_stream = ChatStream {
                                    id:None,
                                    title:None,
-                                   message_id:None,
+                                   message_id:None, user_message_id: None,
                                    is_new:None,
                                    content:None,
                                    input_tokens:None,
@@ -2448,16 +2605,18 @@ pub async fn handle_chat_stream(
                                }
                            }
 
-                           if oauth_required_seen {
-                               stream_finished = true;
-                           } else {
-                               if provider_tool_results.is_empty() {
-                                   stream_finished = true;
-                               } else {
+                           match next_tool_round(
+                               cancel_handle.is_cancelled(),
+                               oauth_required_seen,
+                               !provider_tool_results.is_empty(),
+                           ) {
+                               ToolRoundOutcome::Continue => {
                                    next_tool_results = Some(provider_tool_results);
                                    tool_round += 1;
                                    stream_should_continue = true;
                                }
+                               ToolRoundOutcome::Finish => stream_finished = true,
+                               ToolRoundOutcome::ReportCancel => {}
                            }
                        } else {
                            stream_finished = true;
@@ -2479,12 +2638,28 @@ pub async fn handle_chat_stream(
                            );
                            let data = serde_json::to_string(&stream_err.to_response()).unwrap_or_else(|_| "{}".to_string());
                            yield Event::default().event(ChatStreamEvents::AiError.to_string()).data(data);
+                           stop_reason = Some(stop_reason_for_provider_error(&error));
+                           turn_failed = true;
                            stream_finished = true;
                            break;
                        }
                    };
                }
            }
+           }
+           if let Some(error) = persist_error.take() {
+               eprintln!("assistant message persistence error: {error}");
+               yield Event::default()
+                   .event(ChatStreamEvents::AiError.to_string())
+                   .data(persistence_error_event_data());
+               stop_reason = Some(StopReason::ServerError);
+               turn_failed = true;
+               stream_finished = true;
+           }
+           // A cancel that arrived outside the select (tool execution, DB writes) is
+           // reported by the biased cancel branch on the next pass.
+           if !stream_finished && cancel_handle.is_cancelled() {
+               continue;
            }
            if stream_should_continue {
                    let results = next_tool_results.take();
@@ -2508,6 +2683,8 @@ pub async fn handle_chat_stream(
                                    yield Event::default()
                                        .event(ChatStreamEvents::AiError.to_string())
                                        .data(data);
+                                   stop_reason = Some(stop_reason_for_provider_error(&error));
+                                   turn_failed = true;
                                    stream_finished = true;
                                }
                            }
@@ -2521,7 +2698,6 @@ pub async fn handle_chat_stream(
            }
 
            if stream_finished {
-               app_state.clear_stream_cancel(new_message_id).await;
                if total_tokens == 0 {
                    total_tokens = request_tokens + response_tokens;
                }
@@ -2573,23 +2749,8 @@ pub async fn handle_chat_stream(
                        created_at: assistant_created_at,
                    });
                }
-               if app_state.settings.rag.enabled {
-                   let do_embed = app_state.settings.rag.retrieval_enabled;
-                   let do_summary = app_state.settings.rag.summary_enabled;
-                   if do_embed || do_summary {
-                       let targets = std::mem::take(&mut embedding_targets);
-                       let state = app_state.clone();
-                       let provider_clone = provider.clone();
-                       let model_clone = model_name.clone();
-                       tokio::spawn(async move {
-                           if do_embed { let _ = embed_messages(&state, targets).await; }
-                           if do_summary { let _ = update_conversation_summary(&state, conversation_id, &provider_clone, &model_clone).await; }
-                       });
-                   }
-               }
                // Flush any tool calls that were emitted to the client but never got a result.
                // Happens when the stream errors or is cancelled mid-execution.
-               let mut flush_dirty = false;
                for (tool_id, tool_name) in emitted_tc.iter() {
                    if !completed_tr.contains(tool_id) {
                        let failed = ChatStreamToolResult {
@@ -2602,9 +2763,8 @@ pub async fn handle_chat_stream(
                        };
                        tool_results.push(serde_json::to_value(&failed).unwrap_or_else(|_| json!({})));
                        new_llm_message.tools_results = Set(tool_results.clone());
-                       flush_dirty = true;
                        let chat_stream = ChatStream {
-                           id: None, title: None, message_id: None, is_new: None,
+                           id: None, title: None, message_id: None, user_message_id: None, is_new: None,
                            content: None, input_tokens: None, output_tokens: None,
                            cached_input_tokens: None, cache_creation_tokens: None,
                            latency_ms: None, cost: None, event: None, tool_call: None,
@@ -2613,15 +2773,39 @@ pub async fn handle_chat_stream(
                        yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(chat_stream.to_string());
                    }
                }
-               if flush_dirty {
-                   new_llm_message.updated_at = Set(Utc::now());
-                   let _ = new_llm_message.clone().update(&app_state.database).await;
+               if let Some(reason) = stop_reason {
+                   let metadata = new_llm_message.metadata.clone().take().flatten();
+                   new_llm_message.metadata = Set(Some(with_stop_reason(metadata, reason)));
+               }
+               new_llm_message.updated_at = Set(Utc::now());
+               match new_llm_message.clone().update(&app_state.database).await {
+                   Ok(_) => {
+                       content_checkpoint.saved(Instant::now());
+                       content_checkpoint.finish();
+                   }
+                   Err(error) => {
+                       eprintln!("assistant message final save error: {error}");
+                       content_checkpoint.fail_with(stop_reason.unwrap_or(StopReason::ServerError));
+                       if !turn_failed {
+                           yield Event::default()
+                               .event(ChatStreamEvents::AiError.to_string())
+                               .data(persistence_error_event_data());
+                       }
+                       yield Event::default()
+                           .event(ChatStreamEvents::ResponseStopped.to_string())
+                           .data(response_stopped_event_data(
+                               new_message_id,
+                               stop_reason.unwrap_or(StopReason::ServerError),
+                           ));
+                       yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                       return;
+                   }
                }
                let (remaining, flush_events) = artifact_parser.flush();
                if !remaining.is_empty() {
                    let chat_stream = ChatStream {
                        content: Some(remaining),
-                       id: None, title: None, message_id: None, is_new: None,
+                       id: None, title: None, message_id: None, user_message_id: None, is_new: None,
                        input_tokens: None, output_tokens: None,
                        cached_input_tokens: None, cache_creation_tokens: None,
                        latency_ms: None, cost: None,
@@ -2672,6 +2856,7 @@ pub async fn handle_chat_stream(
                                name: &filename,
                                content_type: &acc.content_type,
                                bytes: acc.content.as_bytes(),
+                               content_sha256: None,
                                description: Some(format!("Artifact: {}", acc.title)),
                                metadata: None,
                            },
@@ -2710,12 +2895,16 @@ pub async fn handle_chat_stream(
                        }
                    }
                    if !saved_artifacts.is_empty() {
-                       new_llm_message.metadata = Set(Some(json!({
+                       let metadata = json!({
                            "webSearch": req.web_search,
                            "artifacts": saved_artifacts,
                            "cachedInputTokens": cached_input_tokens_acc,
                            "cacheCreationTokens": cache_creation_tokens_acc,
-                       })));
+                       });
+                       new_llm_message.metadata = Set(Some(match stop_reason {
+                           Some(reason) => with_stop_reason(Some(metadata), reason),
+                           None => metadata,
+                       }));
                        new_llm_message.updated_at = Set(Utc::now());
                        let _ = new_llm_message.clone().update(&app_state.database).await;
                    }
@@ -2723,7 +2912,7 @@ pub async fn handle_chat_stream(
                let finished_event = ChatStream {
                    id: None,
                    title: None,
-                   message_id: Some(new_message_id),
+                   message_id: Some(new_message_id), user_message_id: None,
                    is_new: None,
                    content: None,
                    input_tokens: Some(request_tokens),
@@ -2736,6 +2925,48 @@ pub async fn handle_chat_stream(
                    tool_call: None,
                    tool_result: None,
                };
+               let mut turn_visible = edit_in_progress.is_none();
+               if !turn_failed && let Some(edit) = edit_in_progress.take() {
+                   match edit.commit(&app_state.database).await {
+                       Ok(EditStatus::Current) => turn_visible = true,
+                       // A newer edit claimed the conversation, so this one stays hidden.
+                       Ok(EditStatus::Superseded) => {
+                           if stop_reason.is_none() {
+                               stop_reason = Some(StopReason::UserEdited);
+                               record_stop_reason(&app_state.database, new_message_id, StopReason::UserEdited).await;
+                           }
+                       }
+                       Err(error) => {
+                           eprintln!("edit commit error: {error:?}");
+                           yield Event::default()
+                               .event(ChatStreamEvents::AiError.to_string())
+                               .data(persistence_error_event_data());
+                           yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                           break;
+                       }
+                   }
+               }
+               // An edit's messages only become visible at commit, so indexing and the summary
+               // update run after it, and not at all for an edit that didn't commit.
+               if turn_visible && app_state.settings.rag.enabled {
+                   let do_embed = app_state.settings.rag.retrieval_enabled;
+                   let do_summary = app_state.settings.rag.summary_enabled;
+                   if do_embed || do_summary {
+                       let targets = std::mem::take(&mut embedding_targets);
+                       let state = app_state.clone();
+                       let provider_clone = provider.clone();
+                       let model_clone = model_name.clone();
+                       tokio::spawn(async move {
+                           if do_embed { let _ = embed_messages(&state, targets).await; }
+                           if do_summary { let _ = update_conversation_summary(&state, conversation_id, &provider_clone, &model_clone).await; }
+                       });
+                   }
+               }
+               if let Some(reason) = stop_reason {
+                   yield Event::default()
+                       .event(ChatStreamEvents::ResponseStopped.to_string())
+                       .data(response_stopped_event_data(new_message_id, reason));
+               }
                yield Event::default().event(ChatStreamEvents::StreamFinished.to_string()).data(finished_event.to_string());
                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
                break;

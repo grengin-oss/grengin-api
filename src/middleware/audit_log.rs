@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, net::SocketAddr};
 
 use axum::{
-    extract::{MatchedPath, Request, State},
+    extract::{ConnectInfo, MatchedPath, Request, State},
     http::{HeaderMap, Method, header},
     middleware::Next,
     response::Response,
@@ -51,6 +51,48 @@ enum SnapshotTarget {
     McpToolsByServer,
 }
 
+impl SnapshotTarget {
+    fn content(self) -> SnapshotContent {
+        match self {
+            SnapshotTarget::Conversation | SnapshotTarget::Message => SnapshotContent::Chat,
+            SnapshotTarget::RolePrompt | SnapshotTarget::UserPromptPreferenceByActor => {
+                SnapshotContent::Prompt
+            }
+            SnapshotTarget::None
+            | SnapshotTarget::User
+            | SnapshotTarget::Department
+            | SnapshotTarget::DepartmentMembers
+            | SnapshotTarget::Role
+            | SnapshotTarget::UserRolesByUser
+            | SnapshotTarget::SsoProvider
+            | SnapshotTarget::BrandingSingleton
+            | SnapshotTarget::EmbeddingConfigSingleton
+            | SnapshotTarget::AiEngineByKey
+            | SnapshotTarget::Notification
+            | SnapshotTarget::DepartmentPromptAssignment
+            | SnapshotTarget::McpServer
+            | SnapshotTarget::McpServerPolicies
+            | SnapshotTarget::McpServerRules
+            | SnapshotTarget::McpToolPolicies
+            | SnapshotTarget::McpConnectionByActorServer
+            | SnapshotTarget::McpToolsByServer => SnapshotContent::Configuration,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SnapshotContent {
+    Configuration,
+    Chat,
+    Prompt,
+}
+
+struct RedactedSnapshots {
+    before: Option<Value>,
+    after: Option<Value>,
+    changed_fields: Vec<String>,
+}
+
 #[derive(Clone, Copy)]
 struct AuditRouteAction {
     action: &'static str,
@@ -66,7 +108,7 @@ pub async fn audit_log_middleware(
 ) -> Response {
     let method = req.method().clone();
     let request_path = req.uri().path().to_string();
-    let query = req.uri().query().map(|v| v.to_string());
+    let query = req.uri().query().map(redact_query);
     let matched_path = req
         .extensions()
         .get::<MatchedPath>()
@@ -89,7 +131,16 @@ pub async fn audit_log_middleware(
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .map(ToOwned::to_owned);
-    let ip_address = extract_client_ip(req.headers());
+    let peer_ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip());
+    let ip_address = app_state
+        .settings
+        .server
+        .trusted_proxies
+        .client_ip(peer_ip, req.headers())
+        .map(|ip| ip.to_string());
 
     let resource_id = route_action.and_then(|action| {
         action
@@ -137,8 +188,10 @@ pub async fn audit_log_middleware(
         } else {
             None
         };
-        let changed_fields =
-            compute_changed_fields(before_snapshot.as_ref(), after_snapshot.as_ref());
+        let content = route_action
+            .map(|action| action.snapshot_target.content())
+            .unwrap_or(SnapshotContent::Configuration);
+        let snapshots = redact_snapshots(before_snapshot, after_snapshot, content);
         let details = json!({
             "method": method.as_str(),
             "route": route_path,
@@ -146,9 +199,9 @@ pub async fn audit_log_middleware(
             "query": query,
             "status_code": status_code,
             "success": true,
-            "before": before_snapshot,
-            "after": after_snapshot,
-            "changed_fields": changed_fields,
+            "before": snapshots.before,
+            "after": snapshots.after,
+            "changed_fields": snapshots.changed_fields,
         });
         if let Err(err) = record_audit_log(
             &db,
@@ -178,7 +231,7 @@ async fn fetch_snapshot(
     actor_user_id: Option<Uuid>,
 ) -> Option<Value> {
     let db = &app_state.database;
-    let value = match target {
+    match target {
         SnapshotTarget::None => None,
         SnapshotTarget::User => {
             let id = parse_uuid(resource_id)?;
@@ -388,8 +441,21 @@ async fn fetch_snapshot(
                 "items": rows
             }))
         }
-    };
-    value.map(sanitize_value)
+    }
+}
+
+// Diff before redacting so a changed title or rotated key still shows up in changed_fields.
+fn redact_snapshots(
+    before: Option<Value>,
+    after: Option<Value>,
+    content: SnapshotContent,
+) -> RedactedSnapshots {
+    let changed_fields = compute_changed_fields(before.as_ref(), after.as_ref());
+    RedactedSnapshots {
+        before: before.map(|value| sanitize_value(value, content)),
+        after: after.map(|value| sanitize_value(value, content)),
+        changed_fields,
+    }
 }
 
 fn compute_changed_fields(before: Option<&Value>, after: Option<&Value>) -> Vec<String> {
@@ -412,41 +478,87 @@ fn compute_changed_fields(before: Option<&Value>, after: Option<&Value>) -> Vec<
     }
 }
 
-fn sanitize_value(value: Value) -> Value {
+fn sanitize_value(value: Value, content: SnapshotContent) -> Value {
     match value {
         Value::Object(map) => {
             let mut out = serde_json::Map::new();
             for (key, value) in map {
-                if is_sensitive_key(&key) {
+                if is_sensitive_key(&key, &value, content) {
                     out.insert(key, Value::String("[REDACTED]".to_string()));
                 } else {
-                    out.insert(key, sanitize_value(value));
+                    out.insert(key, sanitize_value(value, content));
                 }
             }
             Value::Object(out)
         }
-        Value::Array(values) => Value::Array(values.into_iter().map(sanitize_value).collect()),
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(|value| sanitize_value(value, content))
+                .collect(),
+        ),
         other => other,
     }
 }
 
-fn is_sensitive_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
+fn redact_query(query: &str) -> String {
+    query
+        .split('&')
+        .map(|pair| {
+            let key = pair.split_once('=').map_or(pair, |(key, _)| key);
+            let normalized = normalize_key(key);
+            // OAuth callbacks carry the authorization code or a signed proxy assertion here.
+            if is_credential_key(&normalized) || matches!(normalized.as_str(), "code" | "assertion")
+            {
+                format!("{key}=[REDACTED]")
+            } else {
+                pair.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn is_sensitive_key(key: &str, value: &Value, content: SnapshotContent) -> bool {
+    let key = normalize_key(key);
+    let is_token_count = key.ends_with("tokens") && value.is_number();
+    (!is_token_count && is_credential_key(&key))
+        || (content == SnapshotContent::Chat && is_chat_content_key(&key))
+        || (content == SnapshotContent::Prompt && is_prompt_content_key(&key))
+}
+
+fn normalize_key(key: &str) -> String {
+    key.chars()
+        .filter(|c| !matches!(c, '_' | '-'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+fn is_credential_key(key: &str) -> bool {
     [
         "password",
         "secret",
         "token",
-        "api_key",
         "apikey",
         "authorization",
         "cookie",
-        "mfa_secret",
-        // Never persist user/assistant raw chat message text in audit snapshots.
-        "messagecontent",
-        "message_content",
     ]
     .iter()
     .any(|sensitive| key.contains(sensitive))
+}
+
+// Titles and file names are derived from or supplied with the chat, so they are content too.
+fn is_chat_content_key(key: &str) -> bool {
+    matches!(
+        key,
+        "messagecontent" | "toolscalls" | "toolsresults" | "title" | "name" | "base64"
+    )
+}
+
+// System and custom prompts can carry personal or confidential text, so only their
+// labels and flags are kept.
+fn is_prompt_content_key(key: &str) -> bool {
+    matches!(key, "prompttext" | "customprompttext" | "variables")
 }
 
 fn parse_uuid(value: Option<&str>) -> Option<Uuid> {
@@ -988,24 +1100,6 @@ fn extract_path_param(route: &str, path: &str, param_name: &str) -> Option<Strin
     None
 }
 
-fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
-    for key in ["x-forwarded-for", "x-real-ip", "cf-connecting-ip"] {
-        if let Some(value) = headers.get(key).and_then(|v| v.to_str().ok()) {
-            if key == "x-forwarded-for" {
-                if let Some(first) = value.split(',').next() {
-                    let trimmed = first.trim();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed.to_string());
-                    }
-                }
-            } else if !value.is_empty() {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
-}
-
 fn extract_user_id(headers: &HeaderMap) -> Option<Uuid> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let token = value
@@ -1014,4 +1108,251 @@ fn extract_user_id(headers: &HeaderMap) -> Option<Uuid> {
     Claims::from_token_string(token)
         .ok()
         .map(|claims| claims.user_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::{SnapshotContent, SnapshotTarget, redact_query, redact_snapshots, sanitize_value};
+
+    const REDACTED: &str = "[REDACTED]";
+
+    fn message_snapshot() -> Value {
+        json!({
+            "id": "5f0c3c2e-1111-4222-8333-944445555666",
+            "role": "assistant",
+            "messageContent": "Here is the patient summary",
+            "modelName": "gpt-4o",
+            "requestTokens": 120,
+            "responseTokens": 80,
+            "totalTokens": 200,
+            "toolsCalls": [{"name": "search_records", "arguments": "{\"patient\":\"Jane\"}"}],
+            "toolsResults": [{"output": "Jane Doe, DOB 1980-01-01"}],
+            "metadata": {
+                "webSearch": false,
+                "cachedInputTokens": 10,
+                "files": [{"id": "f1", "name": "jane_doe_labs.pdf", "type": "application/pdf", "base64": "JVBERi0x"}],
+                "artifacts": [{"id": "a1", "title": "Jane's treatment plan", "content_type": "text/markdown"}]
+            }
+        })
+    }
+
+    #[test]
+    fn message_snapshot_redacts_text_tool_calls_and_tool_results() {
+        let out = sanitize_value(message_snapshot(), SnapshotContent::Chat);
+        assert_eq!(out["messageContent"], REDACTED);
+        assert_eq!(out["toolsCalls"], REDACTED);
+        assert_eq!(out["toolsResults"], REDACTED);
+    }
+
+    #[test]
+    fn message_snapshot_redacts_attachment_names_inline_data_and_artifact_titles() {
+        let out = sanitize_value(message_snapshot(), SnapshotContent::Chat);
+        assert_eq!(out["metadata"]["files"][0]["name"], REDACTED);
+        assert_eq!(out["metadata"]["files"][0]["base64"], REDACTED);
+        assert_eq!(out["metadata"]["files"][0]["type"], "application/pdf");
+        assert_eq!(out["metadata"]["artifacts"][0]["title"], REDACTED);
+        assert_eq!(
+            out["metadata"]["artifacts"][0]["content_type"],
+            "text/markdown"
+        );
+    }
+
+    #[test]
+    fn message_snapshot_keeps_token_counts_and_model_metadata() {
+        let out = sanitize_value(message_snapshot(), SnapshotContent::Chat);
+        assert_eq!(out["requestTokens"], 120);
+        assert_eq!(out["responseTokens"], 80);
+        assert_eq!(out["totalTokens"], 200);
+        assert_eq!(out["metadata"]["cachedInputTokens"], 10);
+        assert_eq!(out["modelName"], "gpt-4o");
+        assert_eq!(out["role"], "assistant");
+    }
+
+    #[test]
+    fn conversation_snapshot_redacts_title_but_keeps_usage() {
+        let snapshot = json!({
+            "title": "Divorce settlement questions",
+            "modelName": "gpt-4o",
+            "totalTokens": 4200,
+            "messageCount": 6,
+            "metadata": {"titleGenerationUsage": {"model": "gpt-4o", "inputTokens": 30, "outputTokens": 8}}
+        });
+        let out = sanitize_value(snapshot, SnapshotContent::Chat);
+        assert_eq!(out["title"], REDACTED);
+        assert_eq!(out["totalTokens"], 4200);
+        assert_eq!(out["messageCount"], 6);
+        assert_eq!(out["metadata"]["titleGenerationUsage"]["inputTokens"], 30);
+        assert_eq!(out["metadata"]["titleGenerationUsage"]["model"], "gpt-4o");
+    }
+
+    #[test]
+    fn configuration_snapshot_keeps_titles_and_names() {
+        let notification = json!({"title": "Budget 80% used", "body": "Engineering is at 80%"});
+        let department = json!({"name": "Engineering", "description": "Platform team"});
+        assert_eq!(
+            sanitize_value(notification.clone(), SnapshotContent::Configuration),
+            notification
+        );
+        assert_eq!(
+            sanitize_value(department.clone(), SnapshotContent::Configuration),
+            department
+        );
+    }
+
+    #[test]
+    fn credentials_are_redacted_in_every_snapshot() {
+        let snapshot = json!({
+            "password": "hash",
+            "mfaSecret": "totp",
+            "clientSecret": "s3cret",
+            "apiKey": "sk-live",
+            "accessToken": "at",
+            "refreshToken": "rt",
+            "cookie": "session=1",
+            "connectionConfig": {
+                "headers": {"Authorization": "Bearer x", "X-Api-Key": "k"},
+                "env": {"GITHUB_TOKEN": "ghp"}
+            }
+        });
+        for content in [
+            SnapshotContent::Configuration,
+            SnapshotContent::Chat,
+            SnapshotContent::Prompt,
+        ] {
+            let out = sanitize_value(snapshot.clone(), content);
+            for key in [
+                "password",
+                "mfaSecret",
+                "clientSecret",
+                "apiKey",
+                "accessToken",
+                "refreshToken",
+                "cookie",
+            ] {
+                assert_eq!(out[key], REDACTED, "{key} must be redacted");
+            }
+            let config = &out["connectionConfig"];
+            assert_eq!(config["headers"]["Authorization"], REDACTED);
+            assert_eq!(config["headers"]["X-Api-Key"], REDACTED);
+            assert_eq!(config["env"]["GITHUB_TOKEN"], REDACTED);
+        }
+    }
+
+    #[test]
+    fn token_named_text_values_stay_redacted() {
+        let snapshot = json!({"bearerTokens": "abc.def", "maxTokens": 4096});
+        let out = sanitize_value(snapshot, SnapshotContent::Configuration);
+        assert_eq!(out["bearerTokens"], REDACTED);
+        assert_eq!(out["maxTokens"], 4096);
+    }
+
+    #[test]
+    fn changed_fields_report_redacted_changes_without_their_values() {
+        let before = json!({"title": "Old private title", "apiKey": "old", "pinned": false});
+        let after = json!({"title": "New private title", "apiKey": "new", "pinned": false});
+        let out = redact_snapshots(Some(before), Some(after), SnapshotContent::Chat);
+        assert_eq!(out.changed_fields, vec!["apiKey", "title"]);
+        let before = out.before.expect("before snapshot");
+        let after = out.after.expect("after snapshot");
+        assert_eq!(before["title"], REDACTED);
+        assert_eq!(after["title"], REDACTED);
+        assert_eq!(after["apiKey"], REDACTED);
+        assert_eq!(after["pinned"], false);
+    }
+
+    #[test]
+    fn oauth_callback_query_hides_code_and_assertion() {
+        assert_eq!(
+            redact_query("code=4%2F0Ab&state=xyz&assertion=eyJhbGci.eyJzdWIi.sig"),
+            "code=[REDACTED]&state=xyz&assertion=[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn credential_named_query_params_are_redacted_and_others_kept() {
+        assert_eq!(
+            redact_query("access_token=abc&page=2&archived&api-key=k"),
+            "access_token=[REDACTED]&page=2&archived&api-key=[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn only_conversation_and_message_snapshots_hold_chat_content() {
+        assert_eq!(
+            SnapshotTarget::Conversation.content(),
+            SnapshotContent::Chat
+        );
+        assert_eq!(SnapshotTarget::Message.content(), SnapshotContent::Chat);
+        assert_eq!(
+            SnapshotTarget::Notification.content(),
+            SnapshotContent::Configuration
+        );
+        assert_eq!(
+            SnapshotTarget::DepartmentPromptAssignment.content(),
+            SnapshotContent::Configuration
+        );
+    }
+
+    #[test]
+    fn role_and_user_prompt_snapshots_hold_prompt_content() {
+        assert_eq!(
+            SnapshotTarget::RolePrompt.content(),
+            SnapshotContent::Prompt
+        );
+        assert_eq!(
+            SnapshotTarget::UserPromptPreferenceByActor.content(),
+            SnapshotContent::Prompt
+        );
+    }
+
+    #[test]
+    fn role_prompt_snapshot_redacts_prompt_text_and_variables_but_keeps_labels() {
+        let snapshot = json!({
+            "id": "4f1c",
+            "name": "HR assistant",
+            "promptText": "Employee Jane Doe is on medical leave; never mention it.",
+            "variables": {"employee": "Jane Doe"},
+            "isSystem": false,
+            "usageCount": 3
+        });
+        let out = sanitize_value(snapshot, SnapshotContent::Prompt);
+        assert_eq!(out["promptText"], REDACTED);
+        assert_eq!(out["variables"], REDACTED);
+        assert_eq!(out["name"], "HR assistant");
+        assert_eq!(out["isSystem"], false);
+        assert_eq!(out["usageCount"], 3);
+    }
+
+    #[test]
+    fn user_prompt_preference_redacts_custom_text_but_keeps_selection() {
+        let snapshot = json!({
+            "promptId": "9b2e",
+            "customPromptText": "I am recovering from surgery, keep answers short.",
+            "isActive": true
+        });
+        let out = sanitize_value(snapshot, SnapshotContent::Prompt);
+        assert_eq!(out["customPromptText"], REDACTED);
+        assert_eq!(out["promptId"], "9b2e");
+        assert_eq!(out["isActive"], true);
+    }
+
+    #[test]
+    fn prompt_text_changes_are_reported_without_their_values() {
+        let before = json!({"name": "Support", "promptText": "Old instructions"});
+        let after = json!({"name": "Support", "promptText": "New instructions"});
+        let out = redact_snapshots(Some(before), Some(after), SnapshotContent::Prompt);
+        assert_eq!(out.changed_fields, vec!["promptText"]);
+        assert_eq!(out.after.expect("after snapshot")["promptText"], REDACTED);
+    }
+
+    #[test]
+    fn configuration_snapshots_keep_fields_named_like_prompt_text() {
+        let out = sanitize_value(
+            json!({"variables": {"region": "eu"}}),
+            SnapshotContent::Configuration,
+        );
+        assert_eq!(out["variables"]["region"], "eu");
+    }
 }

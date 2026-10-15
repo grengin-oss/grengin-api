@@ -9,14 +9,17 @@ use crate::{
     },
     error::{AppError, ErrorResponse},
     models::files::{self, FileUploadStatus},
-    services::file_storage::{read_file_for_user, store_uploaded_file},
+    services::{
+        file_download::download_response,
+        file_storage::{read_file_for_user, store_uploaded_file},
+    },
     state::SharedState,
 };
 use axum::{
     Json,
     body::Body,
     extract::{Path, Query, State},
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use chrono::Utc;
 use migration::extension::postgres::PgExpr;
@@ -88,16 +91,7 @@ pub async fn download_file(
         file_id,
     )
     .await?;
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", file_model.content_type)
-        .body(Body::from(file_binary))
-        .map_err(|e| {
-            eprintln!("Response builder error: {e}");
-            AppError::DbTimeout
-        })?
-        .into_response();
-    Ok(response)
+    Ok(download_response(&file_model, file_binary))
 }
 
 #[utoipa::path(
