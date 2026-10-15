@@ -209,10 +209,10 @@ async fn hydrate_prompt_files(
       })
     )),
     ("message_start" = (
-      description = "event:message_start — emitted when the assistant message record is created.",
+      description = "event:message_start — emitted when the assistant message record is created. message_id is the reply (pass it to POST /chat/stream/{message_id}/cancel); user_message_id is the message you just sent, the id to use with PATCH /chat/{chat_id}/message/{message_id}/stream.",
       value = json!({
         "event": "message_start",
-        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
+        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "user_message_id": "5d0f3c1e-8a2b-4b6e-9f3a-1c2d3e4f5a60" }
       })
     )),
     ("delta" = (
@@ -369,10 +369,10 @@ pub async fn handle_chat_stream_path_doc() {}
       })
     )),
     ("message_start" = (
-      description = "event:message_start — emitted when the assistant message record is created.",
+      description = "event:message_start — emitted when the assistant message record is created. message_id is the reply (pass it to POST /chat/stream/{message_id}/cancel); user_message_id is the message you just sent, the id to use with PATCH /chat/{chat_id}/message/{message_id}/stream.",
       value = json!({
         "event": "message_start",
-        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
+        "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "user_message_id": "5d0f3c1e-8a2b-4b6e-9f3a-1c2d3e4f5a60" }
       })
     )),
     ("delta" = (
@@ -955,6 +955,8 @@ pub async fn handle_chat_stream(
         (new_conversation_id, generated_title)
     };
     let mut previous_message_id = thread_parent;
+    // Sent back on message_start, so a client can edit the message it just sent.
+    let mut user_message_id: Option<Uuid> = None;
     let mut embedding_targets: Vec<EmbeddingTarget> = Vec::new();
     for message in &req.messages {
         let new_message_id = Uuid::new_v4();
@@ -1003,6 +1005,9 @@ pub async fn handle_chat_stream(
             .await?;
         }
         previous_message_id = Some(new_message_id);
+        if message.role == ChatRole::User {
+            user_message_id = Some(new_message_id);
+        }
         if let Some(edit) = edit_in_progress.as_mut() {
             edit.record_attempt_message(new_message_id);
         }
@@ -1285,7 +1290,7 @@ pub async fn handle_chat_stream(
         let first_chat_stream = ChatStream{
           id: Some(conversation_id.clone()),
           title:title.clone(),
-          message_id:None,
+          message_id:None, user_message_id: None,
           is_new:Some(title.is_some()),
           content:None,
           input_tokens:None,
@@ -1452,7 +1457,7 @@ pub async fn handle_chat_stream(
                     let finished = ChatStream {
                         id: None,
                         title: None,
-                        message_id: Some(img_message_id),
+                        message_id: Some(img_message_id), user_message_id: None,
                         is_new: None,
                         content: None,
                         input_tokens: Some(total_input_tokens),
@@ -1646,7 +1651,7 @@ pub async fn handle_chat_stream(
         yield Event::default()
             .event(ChatStreamEvents::MessageStart.to_string())
             .data(ChatStream {
-                id: None, title: None, message_id: Some(new_message_id),
+                id: None, title: None, message_id: Some(new_message_id), user_message_id,
                 is_new: None, content: None, input_tokens: None, output_tokens: None,
                 cached_input_tokens: None, cache_creation_tokens: None,
                 latency_ms: None, cost: None, event: None, tool_call: None, tool_result: None,
@@ -1696,7 +1701,7 @@ pub async fn handle_chat_stream(
                    let cancel_event = ChatStream {
                        id: None,
                        title: None,
-                       message_id: Some(new_message_id),
+                       message_id: Some(new_message_id), user_message_id: None,
                        is_new: None,
                        content: None,
                        input_tokens: Some(request_tokens),
@@ -1763,7 +1768,7 @@ pub async fn handle_chat_stream(
                            let (passthrough, parse_events) = artifact_parser.push(text);
                            if !passthrough.is_empty() {
                                let chat_stream = ChatStream {
-                                   id: None, title: None, message_id: None, is_new: None,
+                                   id: None, title: None, message_id: None, user_message_id: None, is_new: None,
                                    content: Some(passthrough),
                                    input_tokens: None, output_tokens: None,
                                    cached_input_tokens: None, cache_creation_tokens: None,
@@ -1975,7 +1980,7 @@ pub async fn handle_chat_stream(
                            let chat_stream = ChatStream {
                                id:None,
                                title:None,
-                               message_id:None,
+                               message_id:None, user_message_id: None,
                                is_new:None,
                                content:None,
                                input_tokens:None,
@@ -2052,7 +2057,7 @@ pub async fn handle_chat_stream(
                                        let resolved_stream = ChatStream {
                                            id: None,
                                            title: None,
-                                           message_id: None,
+                                           message_id: None, user_message_id: None,
                                            is_new: None,
                                            content: None,
                                            input_tokens: None,
@@ -2081,7 +2086,7 @@ pub async fn handle_chat_stream(
                            let chat_stream = ChatStream {
                                id:None,
                                title:None,
-                               message_id:None,
+                               message_id:None, user_message_id: None,
                                is_new:None,
                                content:None,
                                input_tokens:None,
@@ -2151,7 +2156,7 @@ pub async fn handle_chat_stream(
                            let chat_stream = ChatStream {
                                id:None,
                                title:None,
-                               message_id:None,
+                               message_id:None, user_message_id: None,
                                is_new:None,
                                content:None,
                                input_tokens:None,
@@ -2200,7 +2205,7 @@ pub async fn handle_chat_stream(
                                let chat_stream = ChatStream {
                                    id:None,
                                    title:None,
-                                   message_id:None,
+                                   message_id:None, user_message_id: None,
                                    is_new:None,
                                    content:None,
                                    input_tokens:None,
@@ -2245,7 +2250,7 @@ pub async fn handle_chat_stream(
                                let chat_stream = ChatStream {
                                    id:None,
                                    title:None,
-                                   message_id:None,
+                                   message_id:None, user_message_id: None,
                                    is_new:None,
                                    content:None,
                                    input_tokens:None,
@@ -2286,7 +2291,7 @@ pub async fn handle_chat_stream(
                            let chat_stream = ChatStream {
                                id:None,
                                title:None,
-                               message_id:None,
+                               message_id:None, user_message_id: None,
                                is_new:None,
                                content:None,
                                input_tokens:None,
@@ -2350,7 +2355,7 @@ pub async fn handle_chat_stream(
                        yield Event::default()
                            .event(ChatStreamEvents::MessageEnd.to_string())
                            .data(ChatStream {
-                               id: None, title: None, message_id: Some(new_message_id),
+                               id: None, title: None, message_id: Some(new_message_id), user_message_id: None,
                                is_new: None, content: None,
                                input_tokens: Some(request_tokens),
                                output_tokens: Some(response_tokens),
@@ -2573,7 +2578,7 @@ pub async fn handle_chat_stream(
                                let chat_stream = ChatStream {
                                    id:None,
                                    title:None,
-                                   message_id:None,
+                                   message_id:None, user_message_id: None,
                                    is_new:None,
                                    content:None,
                                    input_tokens:None,
@@ -2759,7 +2764,7 @@ pub async fn handle_chat_stream(
                        tool_results.push(serde_json::to_value(&failed).unwrap_or_else(|_| json!({})));
                        new_llm_message.tools_results = Set(tool_results.clone());
                        let chat_stream = ChatStream {
-                           id: None, title: None, message_id: None, is_new: None,
+                           id: None, title: None, message_id: None, user_message_id: None, is_new: None,
                            content: None, input_tokens: None, output_tokens: None,
                            cached_input_tokens: None, cache_creation_tokens: None,
                            latency_ms: None, cost: None, event: None, tool_call: None,
@@ -2800,7 +2805,7 @@ pub async fn handle_chat_stream(
                if !remaining.is_empty() {
                    let chat_stream = ChatStream {
                        content: Some(remaining),
-                       id: None, title: None, message_id: None, is_new: None,
+                       id: None, title: None, message_id: None, user_message_id: None, is_new: None,
                        input_tokens: None, output_tokens: None,
                        cached_input_tokens: None, cache_creation_tokens: None,
                        latency_ms: None, cost: None,
@@ -2907,7 +2912,7 @@ pub async fn handle_chat_stream(
                let finished_event = ChatStream {
                    id: None,
                    title: None,
-                   message_id: Some(new_message_id),
+                   message_id: Some(new_message_id), user_message_id: None,
                    is_new: None,
                    content: None,
                    input_tokens: Some(request_tokens),

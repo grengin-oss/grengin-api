@@ -93,6 +93,8 @@ pub struct ChatStream {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_message_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_new: Option<bool>,
@@ -239,4 +241,49 @@ pub struct MessageRequest {
     pub role: ChatRole,
     pub content: String,
     pub files: Vec<File>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChatStream;
+    use uuid::Uuid;
+
+    fn event(message_id: Option<Uuid>, user_message_id: Option<Uuid>) -> ChatStream {
+        ChatStream {
+            id: None,
+            content: None,
+            message_id,
+            user_message_id,
+            title: None,
+            is_new: None,
+            input_tokens: None,
+            output_tokens: None,
+            cached_input_tokens: None,
+            cache_creation_tokens: None,
+            latency_ms: None,
+            cost: None,
+            event: None,
+            tool_call: None,
+            tool_result: None,
+        }
+    }
+
+    #[test]
+    fn message_start_names_the_reply_and_the_message_it_answers() {
+        let reply = Uuid::new_v4();
+        let sent = Uuid::new_v4();
+        assert_eq!(
+            event(Some(reply), Some(sent)).to_string(),
+            format!(r#"{{"message_id":"{reply}","user_message_id":"{sent}"}}"#)
+        );
+    }
+
+    #[test]
+    fn other_events_leave_user_message_id_out() {
+        let reply = Uuid::new_v4();
+        assert_eq!(
+            event(Some(reply), None).to_string(),
+            format!(r#"{{"message_id":"{reply}"}}"#)
+        );
+    }
 }

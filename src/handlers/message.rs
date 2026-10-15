@@ -65,10 +65,10 @@ pub async fn delete_chat_message_by_id(
               })
             )),
             ("message_start" = (
-              description = "event:message_start — the new reply has started; use this message_id with POST /chat/stream/{message_id}/cancel.",
+              description = "event:message_start — the new reply has started; use this message_id with POST /chat/stream/{message_id}/cancel. user_message_id is the new version of the edited message, shown once the reply completes or is stopped; GET /chat/{chat_id} returns it with versions from then on.",
               value = json!({
                 "event": "message_start",
-                "data": { "message_id": "9b2f6c1e-4d7a-4f3b-8c55-2a1e0f9d7b10" }
+                "data": { "message_id": "9b2f6c1e-4d7a-4f3b-8c55-2a1e0f9d7b10", "user_message_id": "5d0f3c1e-8a2b-4b6e-9f3a-1c2d3e4f5a60" }
               })
             )),
             ("stream_finished" = (
