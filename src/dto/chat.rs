@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{dto::files::File, models::messages::ChatRole};
+use crate::{
+    dto::files::File,
+    models::messages::{ChatRole, StopReason},
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -84,6 +87,34 @@ pub struct MessageResponse {
     pub tools_results: Vec<serde_json::Value>,
     pub parts: MessageParts,
     pub usage: TokenUsage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub versions: Option<MessageVersions>,
+}
+
+#[derive(Serialize, ToSchema, Clone, Debug, PartialEq, Eq)]
+#[schema(
+    description = "Present on a message that has other versions, which edits create; render as \"< current / total >\". current is this message's 1-based position among its versions, total is how many there are, and message_ids lists every version oldest first. Send one of those ids to PUT /chat/{chat_id}/branch to show that version.",
+    example = json!({
+        "current": 2,
+        "total": 2,
+        "message_ids": ["5d0f3c1e-8a2b-4b6e-9f3a-1c2d3e4f5a60", "9b2f6c1e-4d7a-4f3b-8c55-2a1e0f9d7b10"]
+    })
+)]
+pub struct MessageVersions {
+    pub current: u32,
+    pub total: u32,
+    pub message_ids: Vec<Uuid>,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[schema(
+    description = "message_id is the message to show: usually one of a message's versions.message_ids from GET /chat/{chat_id}, but any message of the conversation is accepted.",
+    example = json!({ "message_id": "5d0f3c1e-8a2b-4b6e-9f3a-1c2d3e4f5a60" })
+)]
+pub struct SelectBranchRequest {
+    pub message_id: Uuid,
 }
 
 #[derive(Serialize, Deserialize, ToSchema, IntoParams)]

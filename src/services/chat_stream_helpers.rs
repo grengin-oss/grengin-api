@@ -2,22 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use chrono::Utc;
+use llm_plugin::ProviderError;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, prelude::Decimal, sea_query::Expr,
+    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, UpdateMany, prelude::Decimal,
+    sea_query::Expr,
 };
-use std::time::Duration;
+use serde_json::Value;
+use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::{
-    dto::models::ModelInfo,
+    dto::{chat_stream::ResponseStopped, models::ModelInfo},
     error::{AppError, ErrorDetailVariant, ErrorResponse},
-    models::{departments::ActionOnExceed, messages},
+    models::{departments::ActionOnExceed, messages, messages::StopReason},
     services::budget_allocation::{BudgetHealth, get_department_budget_status},
-    state::SharedState,
+    state::{SharedState, StreamCancel, StreamCancellations},
 };
 
 const CONTENT_SAVE_INTERVAL: Duration = Duration::from_millis(500);
+// The webapp sends Stop and closes the stream at the same time, so a disconnect waits this long
+// for the stop request before the reply stays recorded as a network error.
+const STOP_REQUEST_GRACE: Duration = Duration::from_secs(5);
 
 pub fn model_identifiers<'a>(
     requested: &'a str,
@@ -134,18 +140,39 @@ pub fn persistence_error_event_data() -> String {
 pub struct ContentCheckpoint {
     db: DatabaseConnection,
     message_id: Uuid,
+    cancel: Arc<StreamCancel>,
+    registry: StreamCancellations,
     last_saved_at: Option<Instant>,
     unsaved: Option<String>,
+    stop_reason_if_dropped: Option<StopReason>,
 }
 
 impl ContentCheckpoint {
-    pub fn new(db: DatabaseConnection, message_id: Uuid) -> Self {
+    pub fn new(
+        db: DatabaseConnection,
+        message_id: Uuid,
+        cancel: Arc<StreamCancel>,
+        registry: StreamCancellations,
+    ) -> Self {
         Self {
             db,
             message_id,
+            cancel,
+            registry,
             last_saved_at: None,
             unsaved: None,
+            stop_reason_if_dropped: Some(StopReason::NetworkError),
         }
+    }
+
+    // The reply's final state was saved, including any stop reason, so dropping the stream
+    // afterwards must not mark it as interrupted.
+    pub fn finish(&mut self) {
+        self.stop_reason_if_dropped = None;
+    }
+
+    pub fn fail_with(&mut self, reason: StopReason) {
+        self.stop_reason_if_dropped = Some(reason);
     }
 
     pub fn is_due(&self, now: Instant) -> bool {
@@ -163,35 +190,141 @@ impl ContentCheckpoint {
     }
 }
 
-// Covers streams dropped mid-response (client disconnect) between throttled saves.
+// Runs however the stream ends, after everything it did (an edit's commit included), so the
+// reply can be cancelled until then. A stream dropped mid-reply (client disconnect, or a
+// failure that ended it early) also keeps its latest text and is marked as stopped.
 impl Drop for ContentCheckpoint {
     fn drop(&mut self) {
-        let Some(content) = self.unsaved.take() else {
-            return;
-        };
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let db = self.db.clone();
-        let message_id = self.message_id;
-        runtime.spawn(async move {
-            let result = messages::Entity::update_many()
-                .col_expr(messages::Column::MessageContent, Expr::value(content))
-                .col_expr(messages::Column::UpdatedAt, Expr::value(Utc::now()))
-                .filter(messages::Column::Id.eq(message_id))
-                .exec(&db)
-                .await;
-            if let Err(error) = result {
-                eprintln!("deferred assistant content save error: {error}");
-            }
-        });
+        runtime.spawn(settle_reply(
+            self.db.clone(),
+            self.message_id,
+            self.unsaved.take(),
+            self.stop_reason_if_dropped.take(),
+            self.cancel.clone(),
+            self.registry.clone(),
+            STOP_REQUEST_GRACE,
+        ));
     }
+}
+
+async fn settle_reply(
+    db: DatabaseConnection,
+    message_id: Uuid,
+    content: Option<String>,
+    dropped_reason: Option<StopReason>,
+    cancel: Arc<StreamCancel>,
+    registry: StreamCancellations,
+    grace: Duration,
+) {
+    let reason = reason_when_dropped(dropped_reason, cancel.reason());
+    if content.is_some() || reason.is_some() {
+        save_interrupted_reply(&db, message_id, content, reason).await;
+    }
+    if reason == Some(StopReason::NetworkError)
+        && let Some(requested) = stop_request_within(&cancel, grace).await
+    {
+        save_interrupted_reply(&db, message_id, None, Some(requested)).await;
+    }
+    registry.write().await.remove(&message_id);
+}
+
+// A stop the user asked for explains a disconnect; it never replaces a reason the stream
+// recorded itself, and a reply that finished stays finished.
+fn reason_when_dropped(
+    dropped_reason: Option<StopReason>,
+    requested: Option<StopReason>,
+) -> Option<StopReason> {
+    match dropped_reason {
+        Some(StopReason::NetworkError) => requested.or(dropped_reason),
+        other => other,
+    }
+}
+
+async fn stop_request_within(cancel: &StreamCancel, grace: Duration) -> Option<StopReason> {
+    tokio::time::timeout(grace, cancel.cancelled())
+        .await
+        .ok()
+        .and_then(|_| cancel.reason())
+}
+
+pub async fn record_stop_reason(db: &DatabaseConnection, message_id: Uuid, reason: StopReason) {
+    save_interrupted_reply(db, message_id, None, Some(reason)).await;
+}
+
+async fn save_interrupted_reply(
+    db: &DatabaseConnection,
+    message_id: Uuid,
+    content: Option<String>,
+    reason: Option<StopReason>,
+) {
+    if let Err(error) = interrupted_reply_update(message_id, content, reason)
+        .exec(db)
+        .await
+    {
+        eprintln!("interrupted assistant reply save error: {error}");
+    }
+}
+
+fn interrupted_reply_update(
+    message_id: Uuid,
+    content: Option<String>,
+    reason: Option<StopReason>,
+) -> UpdateMany<messages::Entity> {
+    let mut update = messages::Entity::update_many()
+        .col_expr(messages::Column::UpdatedAt, Expr::value(Utc::now()))
+        .filter(messages::Column::Id.eq(message_id));
+    if let Some(content) = content {
+        update = update.col_expr(messages::Column::MessageContent, Expr::value(content));
+    }
+    if let Some(reason) = reason {
+        // SeaQuery has no jsonb merge, and the other metadata keys must be kept.
+        update = update.col_expr(
+            messages::Column::Metadata,
+            Expr::cust_with_values(
+                r#"COALESCE("metadata", '{}'::jsonb) || jsonb_build_object('stopReason', $1::text)"#,
+                [reason.as_str()],
+            ),
+        );
+    }
+    update
+}
+
+pub fn with_stop_reason(metadata: Option<Value>, reason: StopReason) -> Value {
+    let mut map = match metadata {
+        Some(Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    map.insert(
+        StopReason::METADATA_KEY.to_string(),
+        Value::String(reason.as_str().to_string()),
+    );
+    Value::Object(map)
+}
+
+// A provider that couldn't be reached or dropped the connection is a network problem;
+// anything it answered with is the provider's.
+pub fn stop_reason_for_provider_error(error: &ProviderError) -> StopReason {
+    match error {
+        ProviderError::Transport(_) | ProviderError::StreamEnded => StopReason::NetworkError,
+        _ => StopReason::ProviderError,
+    }
+}
+
+pub fn response_stopped_event_data(message_id: Uuid, reason: StopReason) -> String {
+    serde_json::to_string(&ResponseStopped {
+        message_id,
+        stop_reason: reason,
+    })
+    .unwrap_or_else(|_| "{}".to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{dto::models::ModelType, state::StreamCancel};
+    use crate::dto::models::ModelType;
 
     fn model(engine: &str, key: &str, name: &str) -> ModelInfo {
         ModelInfo {
@@ -225,6 +358,106 @@ mod tests {
 
     fn whitelist(entries: &[&str]) -> Vec<String> {
         entries.iter().map(|entry| entry.to_string()).collect()
+    }
+
+    fn checkpoint() -> ContentCheckpoint {
+        ContentCheckpoint::new(
+            DatabaseConnection::Disconnected,
+            Uuid::from_u128(5),
+            Arc::new(StreamCancel::new(Uuid::nil())),
+            StreamCancellations::default(),
+        )
+    }
+
+    #[test]
+    fn a_dropped_stream_is_marked_as_a_network_interruption_by_default() {
+        let mut checkpoint = checkpoint();
+        assert_eq!(
+            checkpoint.stop_reason_if_dropped,
+            Some(StopReason::NetworkError)
+        );
+        checkpoint.stop_reason_if_dropped = None;
+    }
+
+    #[test]
+    fn a_finished_reply_is_not_marked_when_the_stream_is_dropped() {
+        let mut checkpoint = checkpoint();
+        checkpoint.finish();
+        assert_eq!(checkpoint.stop_reason_if_dropped, None);
+    }
+
+    #[test]
+    fn a_failure_that_ends_the_stream_keeps_its_own_reason() {
+        let mut checkpoint = checkpoint();
+        checkpoint.fail_with(StopReason::ServerError);
+        assert_eq!(
+            checkpoint.stop_reason_if_dropped,
+            Some(StopReason::ServerError)
+        );
+        checkpoint.stop_reason_if_dropped = None;
+    }
+
+    #[test]
+    fn interrupted_reply_update_keeps_other_metadata_and_saves_the_text() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = interrupted_reply_update(
+            Uuid::from_u128(5),
+            Some("partial answer".to_string()),
+            Some(StopReason::NetworkError),
+        )
+        .build(DbBackend::Postgres)
+        .to_string();
+
+        assert!(
+            sql.contains(r#"COALESCE("metadata", '{}'::jsonb) ||"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("jsonb_build_object('stopReason', 'network_error'"),
+            "{sql}"
+        );
+        assert!(sql.contains("'partial answer'"), "{sql}");
+        assert!(
+            sql.contains(&format!(r#""id" = '{}'"#, Uuid::from_u128(5))),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn stop_reason_is_merged_into_existing_metadata() {
+        let metadata = serde_json::json!({"webSearch": true, "cancelled": true});
+        let merged = with_stop_reason(Some(metadata), StopReason::UserEdited);
+        assert_eq!(merged["webSearch"], true);
+        assert_eq!(merged["cancelled"], true);
+        assert_eq!(merged["stopReason"], "user_edited");
+        assert_eq!(
+            with_stop_reason(None, StopReason::ProviderError)["stopReason"],
+            "provider_error"
+        );
+    }
+
+    #[test]
+    fn unreachable_or_dropped_providers_are_network_errors() {
+        assert_eq!(
+            stop_reason_for_provider_error(&ProviderError::StreamEnded),
+            StopReason::NetworkError
+        );
+        assert_eq!(
+            stop_reason_for_provider_error(&ProviderError::QuotaExhausted),
+            StopReason::ProviderError
+        );
+        assert_eq!(
+            stop_reason_for_provider_error(&ProviderError::PaymentRequired),
+            StopReason::ProviderError
+        );
+    }
+
+    #[test]
+    fn response_stopped_event_names_the_message_and_the_reason() {
+        let data = response_stopped_event_data(Uuid::from_u128(5), StopReason::UserCancelled);
+        let value: Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(value["message_id"], Uuid::from_u128(5).to_string());
+        assert_eq!(value["stop_reason"], "user_cancelled");
     }
 
     #[test]
@@ -394,8 +627,8 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_sent_while_nobody_waits_is_not_lost() {
-        let handle = StreamCancel::new();
-        handle.cancel();
+        let handle = StreamCancel::new(Uuid::nil());
+        handle.cancel(StopReason::UserCancelled);
 
         let result = tokio::time::timeout(Duration::from_millis(100), handle.cancelled()).await;
 
@@ -404,13 +637,13 @@ mod tests {
 
     #[tokio::test]
     async fn waiting_stream_is_woken_by_cancel() {
-        let handle = std::sync::Arc::new(StreamCancel::new());
+        let handle = std::sync::Arc::new(StreamCancel::new(Uuid::nil()));
         let waiter = tokio::spawn({
             let handle = handle.clone();
             async move { handle.cancelled().await }
         });
         tokio::task::yield_now().await;
-        handle.cancel();
+        handle.cancel(StopReason::UserCancelled);
 
         let result = tokio::time::timeout(Duration::from_secs(1), waiter).await;
 
@@ -419,7 +652,7 @@ mod tests {
 
     #[tokio::test]
     async fn uncancelled_stream_keeps_waiting() {
-        let handle = StreamCancel::new();
+        let handle = StreamCancel::new(Uuid::nil());
 
         let result = tokio::time::timeout(Duration::from_millis(20), handle.cancelled()).await;
 
@@ -437,14 +670,14 @@ mod tests {
 
     #[test]
     fn first_content_chunk_is_saved_immediately() {
-        let checkpoint = ContentCheckpoint::new(DatabaseConnection::default(), Uuid::new_v4());
+        let checkpoint = checkpoint();
 
         assert!(checkpoint.is_due(Instant::now()));
     }
 
     #[test]
     fn content_chunks_inside_the_interval_are_deferred() {
-        let mut checkpoint = ContentCheckpoint::new(DatabaseConnection::default(), Uuid::new_v4());
+        let mut checkpoint = checkpoint();
         let start = Instant::now();
         checkpoint.saved(start);
 
@@ -453,7 +686,7 @@ mod tests {
 
     #[test]
     fn content_is_saved_again_once_the_interval_elapses() {
-        let mut checkpoint = ContentCheckpoint::new(DatabaseConnection::default(), Uuid::new_v4());
+        let mut checkpoint = checkpoint();
         let start = Instant::now();
         checkpoint.saved(start);
 
@@ -462,7 +695,7 @@ mod tests {
 
     #[test]
     fn deferred_content_keeps_only_the_latest_text() {
-        let mut checkpoint = ContentCheckpoint::new(DatabaseConnection::default(), Uuid::new_v4());
+        let mut checkpoint = checkpoint();
         checkpoint.defer("Hel");
         checkpoint.defer("Hello");
 
@@ -471,7 +704,7 @@ mod tests {
 
     #[test]
     fn a_save_clears_deferred_content() {
-        let mut checkpoint = ContentCheckpoint::new(DatabaseConnection::default(), Uuid::new_v4());
+        let mut checkpoint = checkpoint();
         checkpoint.defer("Hello");
         checkpoint.saved(Instant::now());
 
@@ -479,8 +712,107 @@ mod tests {
     }
 
     #[test]
+    fn a_disconnect_is_a_network_error_unless_the_user_asked_to_stop() {
+        assert_eq!(
+            reason_when_dropped(Some(StopReason::NetworkError), None),
+            Some(StopReason::NetworkError)
+        );
+        assert_eq!(
+            reason_when_dropped(
+                Some(StopReason::NetworkError),
+                Some(StopReason::UserCancelled)
+            ),
+            Some(StopReason::UserCancelled)
+        );
+    }
+
+    #[test]
+    fn a_stop_request_never_replaces_a_recorded_failure_or_a_finished_reply() {
+        assert_eq!(
+            reason_when_dropped(
+                Some(StopReason::ProviderError),
+                Some(StopReason::UserCancelled)
+            ),
+            Some(StopReason::ProviderError)
+        );
+        assert_eq!(
+            reason_when_dropped(None, Some(StopReason::UserCancelled)),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_request_arriving_just_after_the_disconnect_is_still_seen() {
+        let cancel = Arc::new(StreamCancel::new(Uuid::nil()));
+        let stopper = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            stopper.cancel(StopReason::UserCancelled);
+        });
+
+        let requested = stop_request_within(&cancel, Duration::from_secs(5)).await;
+
+        assert_eq!(requested, Some(StopReason::UserCancelled));
+    }
+
+    #[tokio::test]
+    async fn without_a_stop_request_the_grace_period_ends_empty() {
+        let cancel = StreamCancel::new(Uuid::nil());
+        assert_eq!(
+            stop_request_within(&cancel, Duration::from_millis(20)).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_settled_reply_releases_its_cancel_handle() {
+        let message_id = Uuid::new_v4();
+        let cancel = Arc::new(StreamCancel::new(Uuid::nil()));
+        let registry = StreamCancellations::default();
+        registry.write().await.insert(message_id, cancel.clone());
+
+        settle_reply(
+            DatabaseConnection::Disconnected,
+            message_id,
+            None,
+            None,
+            cancel,
+            registry.clone(),
+            Duration::from_millis(20),
+        )
+        .await;
+
+        assert!(registry.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_dropped_stream_releases_its_cancel_handle() {
+        let message_id = Uuid::new_v4();
+        let cancel = Arc::new(StreamCancel::new(Uuid::nil()));
+        let registry = StreamCancellations::default();
+        registry.write().await.insert(message_id, cancel.clone());
+        let mut checkpoint = ContentCheckpoint::new(
+            DatabaseConnection::Disconnected,
+            message_id,
+            cancel.clone(),
+            registry.clone(),
+        );
+        checkpoint.finish();
+
+        drop(checkpoint);
+        for _ in 0..100 {
+            if registry.read().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        assert!(registry.read().await.is_empty());
+    }
+
+    #[test]
     fn dropping_with_unsaved_content_outside_a_runtime_does_not_panic() {
-        let mut checkpoint = ContentCheckpoint::new(DatabaseConnection::default(), Uuid::new_v4());
+        let mut checkpoint = checkpoint();
         checkpoint.defer("Hello");
 
         drop(checkpoint);

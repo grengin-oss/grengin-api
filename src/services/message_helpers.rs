@@ -3,17 +3,21 @@
 
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection,
-    DatabaseTransaction, DeleteMany, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter,
-    QuerySelect, TransactionTrait, UpdateMany, sea_query,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
+    IntoActiveModel, QueryFilter, QuerySelect, TransactionTrait, UpdateMany, sea_query,
 };
 use uuid::Uuid;
 
 use crate::{
     dto::chat_stream::ChatInput,
     error::AppError,
-    models::{conversation_summaries, conversations, messages, messages::ChatRole},
-    services::conversation_access::can_access_conversation,
+    models::{conversations, messages, messages::ChatRole},
+    services::{
+        conversation_access::can_access_conversation,
+        message_branches::{
+            hide_as_other_version, recount_conversation, show_messages, stale_summary,
+        },
+    },
 };
 
 pub async fn soft_delete_message(
@@ -25,6 +29,7 @@ pub async fn soft_delete_message(
     let (_, message) = find_message_in_conversation(db, user_id, chat_id, message_id).await?;
     let mut active_model = message.into_active_model();
     active_model.deleted = Set(true);
+    active_model.inactive_branch = Set(false);
     active_model.updated_at = Set(Utc::now());
     active_model.update(db).await.map_err(|e| {
         eprintln!("db error :{}", e);
@@ -37,6 +42,8 @@ pub async fn soft_delete_message(
 pub struct PendingEdit {
     conversation_id: Uuid,
     from: DateTime<Utc>,
+    parent_id: Option<Uuid>,
+    request: i32,
 }
 
 pub async fn prepare_message_edit(
@@ -48,55 +55,75 @@ pub async fn prepare_message_edit(
 ) -> Result<PendingEdit, AppError> {
     let (conversation, message) =
         find_message_in_conversation(db, user_id, chat_id, message_id).await?;
-    if !accepts_edits(&conversation) {
+    if !accepts_edits(&conversation) || !is_editable(&message) {
         return Err(AppError::ResourceNotFound);
     }
+    let request = number_edit_request(db, chat_id).await?;
     pin_edit_conversation(req, chat_id);
     Ok(PendingEdit {
         conversation_id: chat_id,
         from: message.created_at,
+        parent_id: message.previous_message_id,
+        request,
     })
+}
+
+// Postgres numbers the requests, so which edit is newest never depends on a server clock.
+async fn number_edit_request(db: &DatabaseConnection, chat_id: Uuid) -> Result<i32, AppError> {
+    edit_request_counter(chat_id)
+        .exec_with_returning(db)
+        .await
+        .map_err(|e| {
+            eprintln!("edit request numbering error: {e}");
+            AppError::DbTimeout
+        })?
+        .first()
+        .map(|conversation| conversation.edit_requests)
+        .ok_or(AppError::ResourceNotFound)
+}
+
+fn edit_request_counter(chat_id: Uuid) -> UpdateMany<conversations::Entity> {
+    conversations::Entity::update_many()
+        .filter(conversations::Column::Id.eq(chat_id))
+        .col_expr(
+            conversations::Column::EditRequests,
+            sea_query::Expr::col(conversations::Column::EditRequests).add(1),
+        )
 }
 
 // Called by the stream once its provider, model, budget and access checks pass. Nothing is
 // hidden here: the stream leaves the edited messages out of the model's context, writes the
 // new turn hidden, and `commit` swaps the two in one transaction once the turn completes, so a
-// failed attempt needs no rollback and other messages in the conversation are never touched.
-pub async fn begin_pending_edit(
-    db: &DatabaseConnection,
+// failed attempt needs no rollback.
+pub fn begin_pending_edit(
     conversation_id: Uuid,
     edit: Option<PendingEdit>,
-) -> Result<Option<EditInProgress>, AppError> {
-    let Some(edit) = edit_for_conversation(edit, conversation_id) else {
-        return Ok(None);
-    };
-    let replaced_message_ids: Vec<Uuid> = messages::Entity::find()
-        .select_only()
-        .column(messages::Column::Id)
-        .filter(messages::Column::ConversationId.eq(edit.conversation_id))
-        .filter(messages::Column::Deleted.eq(false))
-        .filter(messages::Column::CreatedAt.gte(edit.from))
-        .into_tuple()
-        .all(db)
-        .await
-        .map_err(|e| {
-            eprintln!("db select edited messages error :{}", e);
-            AppError::DbTimeout
-        })?;
-    Ok(Some(EditInProgress {
+) -> Option<EditInProgress> {
+    let edit = edit_for_conversation(edit, conversation_id)?;
+    Some(EditInProgress {
         conversation_id: edit.conversation_id,
-        replaced_message_ids,
         history_cutoff: edit.from,
+        parent_id: edit.parent_id,
+        request: edit.request,
+        claimed: false,
         attempt_message_ids: Vec::new(),
-    }))
+    })
 }
 
 #[derive(Debug)]
 pub struct EditInProgress {
     conversation_id: Uuid,
-    replaced_message_ids: Vec<Uuid>,
     history_cutoff: DateTime<Utc>,
+    parent_id: Option<Uuid>,
+    request: i32,
+    claimed: bool,
     attempt_message_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum EditStatus {
+    Current,
+    Superseded,
 }
 
 impl EditInProgress {
@@ -104,110 +131,105 @@ impl EditInProgress {
         self.history_cutoff
     }
 
+    pub fn request(&self) -> i32 {
+        self.request
+    }
+
+    // The new version shares the edited message's parent, which makes the two siblings.
+    pub fn parent_id(&self) -> Option<Uuid> {
+        self.parent_id
+    }
+
     pub fn record_attempt_message(&mut self, message_id: Uuid) {
         self.attempt_message_ids.push(message_id);
     }
 
-    pub async fn commit(self, db: &DatabaseConnection) -> Result<(), AppError> {
+    // Taken once this edit's reply has started, so a request that never got that far cannot
+    // displace one that did. The newest request wins: an edit cannot claim a conversation a
+    // newer edit has claimed, and loses its claim to one that claims before it commits,
+    // whichever server instance the other edit ran on.
+    pub async fn claim(&mut self, db: &DatabaseConnection) -> Result<EditStatus, AppError> {
+        let claimed = self.claim_update().exec(db).await.map_err(|e| {
+            eprintln!("edit claim error: {e}");
+            AppError::DbTimeout
+        })?;
+        if claimed.rows_affected == 0 {
+            return Ok(EditStatus::Superseded);
+        }
+        self.claimed = true;
+        Ok(EditStatus::Current)
+    }
+
+    fn claim_update(&self) -> UpdateMany<conversations::Entity> {
+        conversations::Entity::update_many()
+            .filter(conversations::Column::Id.eq(self.conversation_id))
+            .filter(
+                Condition::any()
+                    .add(conversations::Column::EditClaim.is_null())
+                    .add(conversations::Column::EditClaim.lt(self.request)),
+            )
+            .col_expr(
+                conversations::Column::EditClaim,
+                sea_query::Expr::value(self.request),
+            )
+    }
+
+    fn holds_claim(&self, latest_claim: Option<i32>) -> bool {
+        self.claimed && latest_claim == Some(self.request)
+    }
+
+    pub async fn commit(self, db: &DatabaseConnection) -> Result<EditStatus, AppError> {
         let txn = db.begin().await.map_err(|e| {
             eprintln!("edit commit begin error: {e}");
             AppError::DbTimeout
         })?;
+        // Commits of one conversation run one at a time, and a claim waits for one in progress.
+        let latest_claim = conversations::Entity::find_by_id(self.conversation_id)
+            .lock_exclusive()
+            .one(&txn)
+            .await
+            .map_err(|e| {
+                eprintln!("edit commit lock error: {e}");
+                AppError::DbTimeout
+            })?
+            .and_then(|conversation| conversation.edit_claim);
+        if !self.holds_claim(latest_claim) {
+            return Ok(EditStatus::Superseded);
+        }
         for update in self.visibility_swap() {
             update.exec(&txn).await.map_err(|e| {
                 eprintln!("edit commit update error: {e}");
                 AppError::DbTimeout
             })?;
         }
-        self.stale_summary().exec(&txn).await.map_err(|e| {
-            eprintln!("edit commit summary reset error: {e}");
-            AppError::DbTimeout
-        })?;
-        self.recount_conversation(&txn).await?;
+        stale_summary(self.conversation_id, self.history_cutoff)
+            .exec(&txn)
+            .await
+            .map_err(|e| {
+                eprintln!("edit commit summary reset error: {e}");
+                AppError::DbTimeout
+            })?;
+        recount_conversation(&txn, self.conversation_id).await?;
         txn.commit().await.map_err(|e| {
             eprintln!("edit commit error: {e}");
             AppError::DbTimeout
-        })
+        })?;
+        Ok(EditStatus::Current)
     }
 
-    // The summary is cumulative and only ever extended, so one that already covers the edited
-    // message would keep the replaced content; dropping it lets the next update rebuild it from
-    // visible messages.
-    fn stale_summary(&self) -> DeleteMany<conversation_summaries::Entity> {
-        conversation_summaries::Entity::delete_many()
-            .filter(conversation_summaries::Column::ConversationId.eq(self.conversation_id))
-            .filter(
-                Condition::any()
-                    .add(conversation_summaries::Column::LastMessageAt.gte(self.history_cutoff))
-                    .add(conversation_summaries::Column::LastMessageAt.is_null()),
-            )
-    }
-
-    // message_count grows by the request's messages each turn, which in practice means user
-    // messages, so it is recounted the same way from what is visible after the swap.
-    async fn recount_conversation(&self, txn: &DatabaseTransaction) -> Result<(), AppError> {
-        let visible = messages::Entity::find()
-            .filter(messages::Column::ConversationId.eq(self.conversation_id))
-            .filter(messages::Column::Deleted.eq(false));
-        let user_messages = visible
-            .clone()
-            .filter(messages::Column::Role.eq(ChatRole::User))
-            .count(txn)
-            .await
-            .map_err(|e| {
-                eprintln!("edit commit message count error: {e}");
-                AppError::DbTimeout
-            })?;
-        let last_message_at: Option<DateTime<Utc>> = visible
-            .select_only()
-            .expr(sea_query::Expr::col(messages::Column::CreatedAt).max())
-            .into_tuple()
-            .one(txn)
-            .await
-            .map_err(|e| {
-                eprintln!("edit commit last message lookup error: {e}");
-                AppError::DbTimeout
-            })?
-            .flatten();
-        conversations::Entity::update_many()
-            .filter(conversations::Column::Id.eq(self.conversation_id))
-            .col_expr(
-                conversations::Column::MessageCount,
-                sea_query::Expr::value(i32::try_from(user_messages).unwrap_or(i32::MAX)),
-            )
-            .col_expr(
-                conversations::Column::LastMessageAt,
-                sea_query::Expr::value(last_message_at),
-            )
-            .col_expr(
-                conversations::Column::UpdatedAt,
-                sea_query::Expr::value(Utc::now()),
-            )
-            .exec(txn)
-            .await
-            .map_err(|e| {
-                eprintln!("edit commit conversation recount error: {e}");
-                AppError::DbTimeout
-            })?;
-        Ok(())
-    }
-
+    // An edit replaces the conversation from the edited message on, so everything visible from
+    // there becomes the previous version, including the turn of an edit that committed before
+    // this one claimed. The attempt is still hidden at this point, and the bound is the edited
+    // message itself rather than a clock reading, so servers with drifting clocks agree on it.
     fn visibility_swap(&self) -> [UpdateMany<messages::Entity>; 2] {
-        [
-            set_messages_deleted(&self.replaced_message_ids, true),
-            set_messages_deleted(&self.attempt_message_ids, false),
-        ]
+        let replaced = messages::Entity::update_many()
+            .filter(messages::Column::ConversationId.eq(self.conversation_id))
+            .filter(messages::Column::Deleted.eq(false))
+            .filter(messages::Column::CreatedAt.gte(self.history_cutoff));
+        let attempt = messages::Entity::update_many()
+            .filter(messages::Column::Id.is_in(self.attempt_message_ids.iter().copied()));
+        [hide_as_other_version(replaced), show_messages(attempt)]
     }
-}
-
-fn set_messages_deleted(ids: &[Uuid], deleted: bool) -> UpdateMany<messages::Entity> {
-    messages::Entity::update_many()
-        .filter(messages::Column::Id.is_in(ids.iter().copied()))
-        .col_expr(messages::Column::Deleted, sea_query::Expr::value(deleted))
-        .col_expr(
-            messages::Column::UpdatedAt,
-            sea_query::Expr::value(Utc::now()),
-        )
 }
 
 fn edit_for_conversation(edit: Option<PendingEdit>, conversation_id: Uuid) -> Option<PendingEdit> {
@@ -217,6 +239,12 @@ fn edit_for_conversation(edit: Option<PendingEdit>, conversation_id: Uuid) -> Op
 // The stream rejects archived chats, so deleting the edited tail first would lose history.
 fn accepts_edits(conversation: &conversations::Model) -> bool {
     conversation.archived_at.is_none()
+}
+
+// A replaced message is out of view and a reply is not the user's to rewrite, so editing
+// either would cut the conversation at a point the user cannot see.
+fn is_editable(message: &messages::Model) -> bool {
+    message.role == ChatRole::User && !message.deleted
 }
 
 fn pin_edit_conversation(req: &mut ChatInput, chat_id: Uuid) {
@@ -280,6 +308,8 @@ mod tests {
             total_cost: Default::default(),
             metadata: None,
             pinned: false,
+            edit_requests: 0,
+            edit_claim: None,
         }
     }
 
@@ -288,90 +318,194 @@ mod tests {
         update.clone().build(DbBackend::Postgres).to_string()
     }
 
-    #[test]
-    fn commit_hides_exactly_the_replaced_messages_and_reveals_exactly_the_attempt() {
-        let replaced = Uuid::from_u128(7);
-        let attempt = Uuid::from_u128(9);
-        let mut edit = EditInProgress {
-            conversation_id: Uuid::nil(),
-            replaced_message_ids: vec![replaced],
+    fn edit_in_progress(conversation_id: Uuid) -> EditInProgress {
+        EditInProgress {
+            conversation_id,
             history_cutoff: Utc::now(),
+            parent_id: None,
+            request: 4,
+            claimed: false,
             attempt_message_ids: Vec::new(),
-        };
-        edit.record_attempt_message(attempt);
-
-        let [hide, reveal] = edit.visibility_swap();
-        let (hide, reveal) = (sql(&hide), sql(&reveal));
-
-        assert!(hide.contains(r#"SET "deleted" = TRUE"#), "{hide}");
-        assert!(
-            hide.contains(&format!(r#""id" IN ('{replaced}')"#)),
-            "{hide}"
-        );
-        assert!(reveal.contains(r#"SET "deleted" = FALSE"#), "{reveal}");
-        assert!(
-            reveal.contains(&format!(r#""id" IN ('{attempt}')"#)),
-            "{reveal}"
-        );
+        }
     }
 
-    #[test]
-    fn commit_never_touches_messages_outside_the_two_id_lists() {
-        let edit = EditInProgress {
-            conversation_id: Uuid::nil(),
-            replaced_message_ids: vec![Uuid::from_u128(7)],
-            history_cutoff: Utc::now(),
-            attempt_message_ids: vec![Uuid::from_u128(9)],
-        };
-        for update in edit.visibility_swap() {
-            let sql = sql(&update);
-            assert!(!sql.contains("conversationId"), "{sql}");
-            assert!(!sql.contains("createdAt"), "{sql}");
+    fn claimed() -> EditInProgress {
+        let mut edit = edit_in_progress(Uuid::nil());
+        edit.claimed = true;
+        edit
+    }
+
+    fn message(role: ChatRole, deleted: bool) -> messages::Model {
+        let now = Utc::now();
+        messages::Model {
+            id: Uuid::new_v4(),
+            conversation_id: Uuid::new_v4(),
+            previous_message_id: None,
+            deleted,
+            inactive_branch: false,
+            role,
+            message_content: "hello".to_string(),
+            model_provider: "openai".to_string(),
+            model_name: "gpt-test".to_string(),
+            request_tokens: 0,
+            response_tokens: 0,
+            request_id: None,
+            tools_calls: Vec::new(),
+            tools_results: Vec::new(),
+            created_at: now,
+            updated_at: now,
+            total_tokens: 0,
+            latency: 0,
+            cost: Default::default(),
+            metadata: None,
         }
     }
 
     #[test]
-    fn commit_drops_only_this_conversations_summary_that_covers_the_edit() {
-        use sea_orm::{DbBackend, QueryTrait};
+    fn commit_hides_this_conversations_visible_messages_from_the_edited_one_on() {
         let conversation_id = Uuid::from_u128(3);
-        let edit = EditInProgress {
-            conversation_id,
-            replaced_message_ids: Vec::new(),
-            history_cutoff: Utc::now(),
-            attempt_message_ids: Vec::new(),
-        };
+        let edit = edit_in_progress(conversation_id);
 
-        let sql = edit.stale_summary().build(DbBackend::Postgres).to_string();
+        let [hide, _] = edit.visibility_swap();
+        let hide = sql(&hide);
 
+        assert!(hide.contains(r#"SET "deleted" = TRUE"#), "{hide}");
+        assert!(hide.contains(r#""inactiveBranch" = TRUE"#), "{hide}");
         assert!(
-            sql.starts_with(r#"DELETE FROM "conversation_summaries""#),
-            "{sql}"
+            hide.contains(&format!(r#""conversationId" = '{conversation_id}'"#)),
+            "{hide}"
         );
+        assert!(hide.contains(r#""deleted" = FALSE"#), "{hide}");
+        assert!(hide.contains(r#""createdAt" >= "#), "{hide}");
+    }
+
+    #[test]
+    fn what_a_commit_replaces_never_depends_on_a_clock_reading() {
+        let [hide, _] = edit_in_progress(Uuid::nil()).visibility_swap();
+        let hide = sql(&hide);
+        assert_eq!(hide.matches(r#""createdAt""#).count(), 1, "{hide}");
+    }
+
+    #[test]
+    fn commit_reveals_exactly_the_attempt_messages() {
+        let attempt = Uuid::from_u128(9);
+        let mut edit = edit_in_progress(Uuid::nil());
+        edit.record_attempt_message(attempt);
+
+        let [_, reveal] = edit.visibility_swap();
+        let reveal = sql(&reveal);
+
+        assert!(reveal.contains(r#"SET "deleted" = FALSE"#), "{reveal}");
+        assert!(reveal.contains(r#""inactiveBranch" = FALSE"#), "{reveal}");
         assert!(
-            sql.contains(&format!(r#""conversationId" = '{conversation_id}'"#)),
-            "{sql}"
+            reveal.contains(&format!(r#""id" IN ('{attempt}')"#)),
+            "{reveal}"
         );
-        assert!(sql.contains(r#""lastMessageAt" >= "#), "{sql}");
-        assert!(sql.contains(r#""lastMessageAt" IS NULL"#), "{sql}");
+        assert!(!reveal.contains("conversationId"), "{reveal}");
+        assert!(!reveal.contains("createdAt"), "{reveal}");
     }
 
     #[test]
     fn history_cutoff_is_the_edited_message_time() {
-        let from = Utc::now();
-        let edit = EditInProgress {
-            conversation_id: Uuid::nil(),
-            replaced_message_ids: Vec::new(),
-            history_cutoff: from,
-            attempt_message_ids: Vec::new(),
-        };
+        let conversation_id = Uuid::new_v4();
+        let from = Utc::now() - chrono::Duration::minutes(1);
+        let parent = Uuid::new_v4();
+        let edit = begin_pending_edit(
+            conversation_id,
+            Some(PendingEdit {
+                conversation_id,
+                from,
+                parent_id: Some(parent),
+                request: 7,
+            }),
+        )
+        .expect("edit for this conversation");
         assert_eq!(edit.history_cutoff(), from);
+        assert_eq!(edit.request(), 7);
+        assert!(!edit.claimed);
+        assert_eq!(edit.parent_id(), Some(parent));
     }
 
-    #[tokio::test]
-    async fn plain_streams_begin_no_edit_and_need_no_database() {
-        let edit =
-            begin_pending_edit(&DatabaseConnection::Disconnected, Uuid::new_v4(), None).await;
-        assert!(matches!(edit, Ok(None)));
+    #[test]
+    fn plain_streams_begin_no_edit() {
+        assert!(begin_pending_edit(Uuid::new_v4(), None).is_none());
+    }
+
+    #[test]
+    fn edit_requests_are_numbered_per_conversation() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let conversation_id = Uuid::from_u128(3);
+
+        let sql = edit_request_counter(conversation_id)
+            .build(DbBackend::Postgres)
+            .to_string();
+
+        assert!(
+            sql.contains(r#"SET "editRequests" = "editRequests" + 1"#),
+            "{sql}"
+        );
+        assert!(
+            sql.ends_with(&format!(r#""conversations"."id" = '{conversation_id}'"#)),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn an_edit_claims_only_its_conversation_and_only_over_older_requests() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let conversation_id = Uuid::from_u128(3);
+
+        let sql = edit_in_progress(conversation_id)
+            .claim_update()
+            .build(DbBackend::Postgres)
+            .to_string();
+
+        assert!(sql.contains(r#"SET "editClaim" = 4"#), "{sql}");
+        assert!(
+            sql.contains(&format!(r#""conversations"."id" = '{conversation_id}'"#)),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                r#"("conversations"."editClaim" IS NULL OR "conversations"."editClaim" < 4)"#
+            ),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn an_edit_still_holding_the_claim_commits() {
+        assert!(claimed().holds_claim(Some(4)));
+    }
+
+    #[test]
+    fn an_edit_claimed_by_a_newer_request_does_not_commit() {
+        assert!(!claimed().holds_claim(Some(5)));
+    }
+
+    #[test]
+    fn an_unclaimed_edit_does_not_commit() {
+        assert!(!edit_in_progress(Uuid::nil()).holds_claim(Some(4)));
+    }
+
+    #[test]
+    fn an_edit_of_a_deleted_conversation_does_not_commit() {
+        assert!(!claimed().holds_claim(None));
+    }
+
+    #[test]
+    fn visible_user_messages_are_editable() {
+        assert!(is_editable(&message(ChatRole::User, false)));
+    }
+
+    #[test]
+    fn assistant_replies_are_not_editable() {
+        assert!(!is_editable(&message(ChatRole::Assistant, false)));
+    }
+
+    #[test]
+    fn replaced_messages_are_not_editable() {
+        assert!(!is_editable(&message(ChatRole::User, true)));
     }
 
     #[test]
@@ -380,6 +514,8 @@ mod tests {
         let edit = PendingEdit {
             conversation_id,
             from: Utc::now(),
+            parent_id: None,
+            request: 1,
         };
         assert_eq!(
             edit_for_conversation(Some(edit), conversation_id),
