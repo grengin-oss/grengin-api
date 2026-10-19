@@ -15,6 +15,7 @@ pub mod auth_session;
 pub mod authorization;
 pub mod branding_helpers;
 pub mod budget_allocation;
+pub mod chat_attachments;
 pub mod chat_helpers;
 pub mod chat_stream_helpers;
 pub mod client_ip;

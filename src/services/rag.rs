@@ -22,6 +22,7 @@ use crate::{
     },
     services::{
         embedders_cache::get_model_dimensions,
+        embedding_helpers::storage_embedding_dimensions,
         provider_chat::{generate_provider_text, provider_error_class},
         provider_resolver::resolve_provider,
     },
@@ -561,7 +562,17 @@ pub async fn generate_embeddings(
     inputs: Vec<String>,
 ) -> Result<Option<Vec<Vec<f32>>>, AppError> {
     let provider = config.provider.to_lowercase();
-    let target_dim = match config.dimensions {
+    let dimensions = storage_embedding_dimensions(&app_state.database, config.dimensions)
+        .await
+        .map_err(|error| match error {
+            crate::auth::error::AuthError::InvalidRequest { .. } => {
+                AppError::ValidationMissingField {
+                    field: "embedding.dimensions",
+                }
+            }
+            _ => AppError::DbTimeout,
+        })?;
+    let target_dim = match dimensions {
         Some(d) => Some(d as usize),
         None => get_model_dimensions(&app_state.req_client, &provider, &config.model).await,
     };
@@ -577,9 +588,7 @@ pub async fn generate_embeddings(
         .embed(llm_plugin::EmbeddingRequest {
             model: llm_plugin::ModelId::new(config.model.clone()),
             inputs,
-            dimensions: config
-                .dimensions
-                .and_then(|value| u32::try_from(value).ok()),
+            dimensions: dimensions.and_then(|value| u32::try_from(value).ok()),
             options: serde_json::Value::Null,
         })
         .await
@@ -592,30 +601,16 @@ pub async fn generate_embeddings(
                 provider: provider.clone(),
             }
         })?;
-    Ok(Some(
-        response
-            .vectors
-            .into_iter()
-            .map(|embedding| normalize_to_target(embedding, target_dim))
-            .collect(),
-    ))
+    if !embedding_dimensions_match(&response.vectors, target_dim) {
+        return Err(AppError::ValidationMissingField {
+            field: "embedding.dimensions",
+        });
+    }
+    Ok(Some(response.vectors))
 }
 
-fn normalize_to_target(mut embedding: Vec<f32>, target_dim: Option<usize>) -> Vec<f32> {
-    let Some(target) = target_dim else {
-        return embedding;
-    };
-    match embedding.len().cmp(&target) {
-        std::cmp::Ordering::Equal => embedding,
-        std::cmp::Ordering::Greater => {
-            embedding.truncate(target);
-            embedding
-        }
-        std::cmp::Ordering::Less => {
-            embedding.resize(target, 0.0);
-            embedding
-        }
-    }
+fn embedding_dimensions_match(vectors: &[Vec<f32>], target: Option<usize>) -> bool {
+    target.is_none_or(|target| vectors.iter().all(|vector| vector.len() == target))
 }
 
 async fn generate_summary_text(
@@ -786,6 +781,26 @@ impl ChatRole {
 mod tests {
     use super::summary_usable_with_cutoff;
     use chrono::{Duration, Utc};
+
+    #[test]
+    fn incompatible_embeddings_are_rejected_not_silently_padded_or_truncated() {
+        assert!(super::embedding_dimensions_match(
+            &[vec![0.0; 1536]],
+            Some(1536)
+        ));
+        assert!(!super::embedding_dimensions_match(
+            &[vec![0.0; 768]],
+            Some(1536)
+        ));
+        assert!(!super::embedding_dimensions_match(
+            &[vec![0.0; 3072]],
+            Some(1536)
+        ));
+        assert!(!super::embedding_dimensions_match(
+            &[vec![0.0; 1536], vec![0.0; 768]],
+            Some(1536)
+        ));
+    }
 
     #[test]
     fn summary_is_used_normally_when_not_editing() {

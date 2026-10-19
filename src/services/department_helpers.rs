@@ -4,7 +4,9 @@
 use crate::{
     auth::{
         error::AuthError,
-        permissions::{PERMISSION_ROLES_ASSIGN, ROLE_DEPARTMENT_ADMIN},
+        permissions::{
+            PERMISSION_DEPARTMENTS_MANAGE, PERMISSION_ROLES_ASSIGN, ROLE_DEPARTMENT_ADMIN,
+        },
     },
     dto::admin_department::{DepartmentModelKey, RoleAssignmentPayload},
     models::{
@@ -154,6 +156,11 @@ pub async fn lock_department<C: ConnectionTrait>(
     conn: &C,
     department_id: Uuid,
 ) -> Result<(), AuthError> {
+    lock_department_hierarchy(conn).await?;
+    lock_department_node(conn, department_id).await.map(|_| ())
+}
+
+pub async fn lock_department_hierarchy<C: ConnectionTrait>(conn: &C) -> Result<(), AuthError> {
     // A queued request holds a pooled connection while it waits, so the wait is bounded rather
     // than letting a pile-up starve the request that holds the lock.
     conn.execute(Statement::from_string(
@@ -165,7 +172,18 @@ pub async fn lock_department<C: ConnectionTrait>(
         eprintln!("department lock timeout setting error: {e}");
         AuthError::DbTimeout
     })?;
-    lock_department_node(conn, department_id).await.map(|_| ())
+    // SeaORM cannot express advisory locks. Serialize hierarchy mutations before reading paths;
+    // row locks alone miss children inserted while an ancestor is being moved.
+    conn.execute(Statement::from_string(
+        DatabaseBackend::Postgres,
+        "SELECT pg_advisory_xact_lock(1769084371, 1)",
+    ))
+    .await
+    .map_err(|e| {
+        eprintln!("department hierarchy lock error: {e}");
+        AuthError::DbTimeout
+    })?;
+    Ok(())
 }
 
 // SeaORM has no typed API for transaction-scoped settings.
@@ -177,6 +195,7 @@ pub async fn reparent_department<C: ConnectionTrait>(
     new_parent_id: Option<Uuid>,
     updated_at: DateTime<Utc>,
 ) -> Result<(), AuthError> {
+    lock_department_hierarchy(conn).await?;
     let department = lock_department_node(conn, department_id).await?;
     let new_parent = match new_parent_id {
         Some(parent_id) => Some(lock_department_node(conn, parent_id).await?),
@@ -225,11 +244,44 @@ pub async fn reparent_department<C: ConnectionTrait>(
 pub async fn delete_department_with_scoped_assignments(
     db: &DatabaseConnection,
     department_id: Uuid,
+    actor_id: Uuid,
 ) -> Result<(), AuthError> {
     let txn = db.begin().await.map_err(|e| {
         eprintln!("department delete transaction error: {e}");
         AuthError::DbTimeout
     })?;
+    lock_department(&txn, department_id).await?;
+    AuthorizationService::new(db)
+        .ensure_permission(
+            actor_id,
+            PERMISSION_DEPARTMENTS_MANAGE,
+            Some(department_id),
+            PermissionScopeMode::RequireOrgWide,
+            Some(department_id),
+        )
+        .await?;
+    let assignments = user_role_assignments::Entity::find()
+        .filter(user_role_assignments::Column::ScopeDepartmentId.eq(department_id))
+        .all(&txn)
+        .await
+        .map_err(|e| {
+            eprintln!("department grants lookup error: {e}");
+            AuthError::DbTimeout
+        })?;
+    for assignment in assignments {
+        record_required_auth_event(
+            &txn,
+            "auth.role_unassigned",
+            Some(actor_id),
+            RoleAssignmentPayload {
+                assignment_id: assignment.id,
+                user_id: assignment.user_id,
+                role_id: assignment.role_id,
+                scope_department_id: assignment.scope_department_id,
+            },
+        )
+        .await?;
+    }
     user_role_assignments::Entity::delete_many()
         .filter(user_role_assignments::Column::ScopeDepartmentId.eq(department_id))
         .exec(&txn)

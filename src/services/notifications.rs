@@ -60,6 +60,13 @@ pub fn to_notification_dto(model: &notifications::Model) -> NotificationDto {
 }
 
 pub async fn emit_budget_alerts(state: &SharedState, department_id: Uuid) -> Result<(), AppError> {
+    let department_id =
+        crate::services::budget_allocation::budget_owner_id(&state.database, department_id)
+            .await
+            .map_err(|error| {
+                eprintln!("budget notification owner lookup failed: {error}");
+                AppError::DbTimeout
+            })?;
     let dept = departments::Entity::find()
         .select_only()
         .column(departments::Column::Name)

@@ -19,7 +19,7 @@ use crate::{
     },
     services::{
         authorization::{AuthorizationService, PermissionScopeMode},
-        role_assignment::ensure_user_management_allowed,
+        role_assignment::{ensure_user_management_allowed, ensure_user_unassignment_allowed},
     },
     state::SharedState,
 };
@@ -416,6 +416,8 @@ pub async fn update_user(
         active.name = Set(Some(name));
     }
     if req.unassign_department.unwrap_or(false) {
+        ensure_user_unassignment_allowed(&app_state.database, claims.user_id, Some(user_id))
+            .await?;
         if original_department_id.is_some() {
             department_changed = true;
         }

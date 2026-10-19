@@ -159,6 +159,30 @@ async fn load_vector_column_dimensions(db: &DatabaseConnection) -> Result<Vec<i3
     Ok(rows.into_iter().map(|row| row.dimensions).collect())
 }
 
+pub async fn storage_embedding_dimensions(
+    db: &DatabaseConnection,
+    requested: Option<i32>,
+) -> Result<Option<i32>, AuthError> {
+    let columns = load_vector_column_dimensions(db).await?;
+    dimensions_for_storage(requested, &columns).ok_or(AuthError::InvalidRequest {
+        field: "dimensions",
+    })
+}
+
+fn dimensions_for_storage(requested: Option<i32>, columns: &[i32]) -> Option<Option<i32>> {
+    if columns.is_empty() {
+        return None;
+    }
+    let resolved = requested.or_else(|| columns.iter().copied().find(|dimension| *dimension > 0));
+    match resolved {
+        Some(dimension) if dimensions_fit_vector_columns(dimension, columns) => {
+            Some(Some(dimension))
+        }
+        None if columns.iter().all(|dimension| *dimension < 0) => Some(None),
+        _ => None,
+    }
+}
+
 // A typmod of -1 means the column was declared as plain `vector` and accepts any dimension.
 fn dimensions_fit_vector_columns(requested: i32, column_dimensions: &[i32]) -> bool {
     requested > 0
@@ -170,7 +194,21 @@ fn dimensions_fit_vector_columns(requested: i32, column_dimensions: &[i32]) -> b
 
 #[cfg(test)]
 mod tests {
-    use super::dimensions_fit_vector_columns;
+    use super::{dimensions_fit_vector_columns, dimensions_for_storage};
+
+    #[test]
+    fn env_only_embedding_dimensions_follow_actual_storage_instead_of_native_model_size() {
+        assert_eq!(
+            dimensions_for_storage(None, &[1536, 1536]),
+            Some(Some(1536))
+        );
+        assert_eq!(dimensions_for_storage(None, &[-1, 1536]), Some(Some(1536)));
+        assert_eq!(dimensions_for_storage(None, &[-1, -1]), Some(None));
+        assert_eq!(dimensions_for_storage(None, &[1536, 768]), None);
+        assert_eq!(dimensions_for_storage(Some(768), &[1536, 1536]), None);
+        assert_eq!(dimensions_for_storage(Some(-1), &[-1]), None);
+        assert_eq!(dimensions_for_storage(None, &[]), None);
+    }
 
     #[test]
     fn dimension_matching_every_vector_column_is_accepted() {

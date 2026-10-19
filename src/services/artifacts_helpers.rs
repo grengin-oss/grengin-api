@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::{
     error::AppError,
     models::{artifacts, conversations, files},
-    services::file_storage::{read_model_bytes, remove_model_file},
+    services::file_storage::read_model_bytes,
 };
 
 pub struct ArtifactWithContent {
@@ -80,7 +80,6 @@ pub async fn list_conversation_artifacts_owned(
 
 pub async fn delete_artifact_owned(
     db: &DatabaseConnection,
-    file_storage_root: &Path,
     artifact_id: Uuid,
     user_id: Uuid,
 ) -> Result<Option<artifacts::Model>, AppError> {
@@ -99,27 +98,8 @@ pub async fn delete_artifact_owned(
         None => return Ok(None),
     };
 
-    let file = files::Entity::find_by_id(artifact.file_id)
-        .one(db)
-        .await
-        .map_err(|error| {
-            eprintln!("db artifact file lookup failed: {error}");
-            AppError::DbTimeout
-        })?;
-    if let Some(f) = file {
-        match remove_model_file(file_storage_root, &f).await {
-            Ok(()) | Err(AppError::ResourceNotFound) => {}
-            Err(error) => return Err(error),
-        }
-        files::Entity::delete_by_id(f.id)
-            .exec(db)
-            .await
-            .map_err(|error| {
-                eprintln!("db artifact file delete failed: {error}");
-                AppError::DbTimeout
-            })?;
-    }
-
+    // Files can also back project sources and chat attachments. Removing this association
+    // must not destroy their bytes; explicit file deletion remains the owner's operation.
     artifacts::Entity::delete_by_id(artifact.id)
         .exec(db)
         .await

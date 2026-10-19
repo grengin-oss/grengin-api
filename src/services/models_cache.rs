@@ -65,10 +65,24 @@ pub async fn load_plugin_urls_cached(
 
 pub async fn get_model_info_cached(
     req_client: &reqwest::Client,
+    provider_key: &str,
     model_key: &str,
 ) -> Result<Option<ModelInfo>, Error> {
     let cache = load_models_cache(req_client).await?;
-    Ok(cache.models_by_key.get(model_key).cloned())
+    Ok(find_provider_model(&cache.providers, provider_key, model_key).cloned())
+}
+
+fn find_provider_model<'a>(
+    providers: &'a [ProviderInfo],
+    provider_key: &str,
+    model_key: &str,
+) -> Option<&'a ModelInfo> {
+    providers
+        .iter()
+        .find(|provider| provider.key.eq_ignore_ascii_case(provider_key))?
+        .models
+        .iter()
+        .find(|model| model.key == model_key || model.name == model_key)
 }
 
 struct FetchedData {
@@ -502,6 +516,25 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
+
+    #[test]
+    fn shared_model_names_never_use_another_providers_prices_or_capabilities() {
+        let provider = |engine: &str, rate: f64| {
+            ProviderInfo {
+            key: engine.into(), name: engine.into(), icon: String::new(), icon_dark: String::new(), status: "active".into(),
+            models: vec![parse_text_model(&json!({"key": "shared-id", "name": "Shared Model", "engine": engine, "pricingPer1M": {"input": rate, "output": rate}})).expect("model")],
+        }
+        };
+        let providers = vec![provider("first", 1.0), provider("second", 7.0)];
+        for key in ["shared-id", "Shared Model"] {
+            let found =
+                find_provider_model(&providers, "SECOND", key).expect("second provider model");
+            assert_eq!(found.engine, "second");
+            assert_eq!(found.input_token_rate, Some(7.0));
+        }
+        assert!(find_provider_model(&providers, "unknown", "shared-id").is_none());
+        assert!(find_provider_model(&providers, "second", "unknown").is_none());
+    }
 
     #[tokio::test]
     async fn falls_back_to_legacy_catalog_path_during_rollout() {

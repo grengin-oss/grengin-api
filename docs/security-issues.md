@@ -13,6 +13,80 @@ find. All five are fixed.
 
 Fixes are on the `fix/security-issues` branch.
 
+## Completion Review (2026-10-19)
+
+Scope is a **single backend instance**. In-memory cancellation is intentional; this change
+does not introduce Redis or claim distributed cancellation, failover, or multi-instance support.
+`main` was merged locally before this review to retain the released chat edit/versioning fixes.
+The earlier test counts below are historical, not claims that those live suites were rerun today.
+
+The earlier "all fixed" summary missed real gaps. This review closes the following:
+
+- Incoming stored attachments are checked for ownership, status, containment and readability
+  **before any chat/conversation writes or title-generation request**. Image inputs require a
+  valid owned stored ID even if the caller supplies inline bytes. Existing inline text-chat
+  inputs retain their behavior. Hydration lives in `services/chat_attachments.rs`.
+- Scoped user managers cannot clear a user's department, including themselves, through either
+  user update or department membership removal. A destination outside their scope is not allowed.
+- Zero-allocation departments inherit the nearest funded ancestor's budget. Their spending
+  counts against it; funded children retain their separately reserved allocation. An entirely
+  unbudgeted tree is still unlimited. Allocation validation uses the post-change spending
+  membership so funding a previously unfunded child does not count its history twice; budget
+  refreshes and notifications resolve the same funded ancestor.
+- A positively budgeted department cannot invoke models with missing, negative or non-finite
+  required token prices (`400`, `model_pricing`). Explicit zero prices are supported. Image
+  models require all token rates the current image accounting uses; a per-image-only price is
+  not yet sufficient. Catalog lookups are provider-scoped, so colliding model names cannot use
+  another provider's prices or capabilities.
+- Department create/update/move/delete serialize hierarchy changes with a bounded transaction
+  advisory lock before reading paths. Create/update recheck scope after waiting. Deleting a
+  department records each removed scoped grant in the same transaction; audit failure rolls
+  back the deletion.
+- New JIT pending accounts require a verified usable email, preventing an unverified identity
+  from reserving someone else's address and later becoming active through approval. Existing
+  subject-linked identities retain their separate sign-in policy; first-install bootstrap is
+  unchanged.
+- MCP refresh responses preserve a non-rotated refresh token. Refresh writes compare the stored
+  connection revision and connected flag, so a delayed response cannot undo disconnect,
+  reauthorization or deletion. Omitted scope/type fields retain existing values. Legacy token
+  sealing uses the same guarded-update principle. A per-connection in-memory lock serializes
+  refreshes so concurrent tool calls do not redeem a rotating token twice; idle locks are not
+  retained. This is deliberately a single-instance mechanism.
+- sqlx-mcp clears session advisory locks before pool reuse, including error/timeout/cancellation
+  paths. Cleanup has a one-second limit; an unclean session is closed instead of reused.
+- Removing a chat artifact removes only that artifact association. Its file row/bytes remain
+  available to project sources and other attachments; explicit file deletion remains separate.
+  A failed DB deletion can no longer unlink the file first.
+- Binary-update base URLs must match the configured or official complete base URL, not merely
+  its origin. A request cannot append paths that trigger the companion installer's legacy
+  checksum exceptions. The separately deployed installer still needs its own integrity review.
+- Embedding requests derive omitted dimensions from the actual vector columns, including
+  environment-only configuration. Incompatible config/response dimensions are rejected rather
+  than silently padding/truncating vectors or failing later in a SQL insert.
+- Audit forwarding headers default to trusting loopback proxies only. Private-network load
+  balancers require explicit `TRUSTED_PROXIES`; being on a private network alone is not trust.
+
+Reproducible verification: `bash tests/security/run.sh --live`. This runs formatting, workspace
+tests/build and diff checks, starts an isolated Docker PostgreSQL database, copies the source
+database read-only with `pg_dump`, applies migrations there, and runs HTTP regressions against
+a local model fixture plus database-backed MCP tests. It never writes the source database,
+uses a temporary storage root instead of `/data/files`, makes no paid model calls, and removes
+the disposable server/database on exit. Use `--live-only` only to repeat HTTP checks against an
+already built binary; it deliberately skips the build/unit gates.
+
+Verification in this review: **715 workspace tests passed**, 0 failed (60 optional tests ignored
+by default); **23 HTTP scenarios passed** against the local fixture; **8 opt-in database tests
+passed** (MCP refresh CAS, concurrent uploads, and six sqlx-mcp checks). The live runner exited
+successfully and removed its backend, containers and temporary storage. Build, formatting and
+diff checks pass. Clippy reports existing repository lint debt; a new lock-map type-complexity
+warning was addressed without suppressing it. The existing dependency future-compatibility
+notice for `proc-macro-error2` remains.
+
+This is regression evidence, not a guarantee that no other security defects exist. It is not
+a fresh run of all previous Keycloak/provider/API suites, nor live paid-provider/image testing.
+Existing operational/product limitations remain listed below and must not be represented as
+completed features. These changes require staging validation before production deployment.
+
 ## Status Legend
 
 - **Fixed**: confirmed in the current code and fixed, with tests.
@@ -56,14 +130,14 @@ Fixes are on the `fix/security-issues` branch.
 | 29 | Low | Image gen | Gemini image API key goes in the URL and can surface in `ai_error` | Not reproducible |
 | 30 | Low | Audit | Audit IP trusts `X-Forwarded-For`; redaction hides token counts but stores tool calls and titles | Fixed |
 
-## How the Fixes Were Verified
+## Earlier Verification
 
-- **Cargo tests:** each access or validation decision was moved into a pure function and unit
+- **Cargo tests (earlier recorded run):** each access or validation decision was moved into a pure function and unit
   tested for the allowed case, the denied case and edge cases. `cargo test --workspace` passes:
   607 passed, 0 failed, 53 ignored (tests that need live services). `cargo build --workspace`
   reports no warnings, `cargo fmt --check` is clean, and `cargo clippy` reports no warnings that
-  `main` doesn't already have. There is no test database or sea-orm mock in this repo, so the DB
-  wiring itself is covered by the live checks below instead.
+  `main` doesn't already have. At that point there was no test database or sea-orm mock in the
+  repo, so the DB wiring was checked live. The current reproducible runner is described above.
 - **Live checks:** the branch build ran against a throwaway copy of a dev database, with real
   Keycloak logins, for a signed-in owner and a second plain user. Confirmed over HTTP: issue 1
   (404, nothing streamed or written to the other user's chat, and the owner can still continue
@@ -192,7 +266,8 @@ Fixes are on the `fix/security-issues` branch.
 - **Fix:** Azure uses the `xms_edov` claim when present; otherwise the email counts as verified
   only for a single-tenant authority. Apple no longer defaults to true. Proxy assertions honour
   an `email_verified` claim and are accepted only for providers with `use_grengin_proxy` set. A
-  configured allow-list rejects logins with no email or a placeholder email, and a placeholder
+  configured allow-list rejects logins with no email or a placeholder email. New pending JIT
+  accounts also require verified usable email even without an allow-list. A placeholder
   email never links. GitHub was already correct. The link checks and the identities update run
   in one transaction against the user row locked with `SELECT ... FOR UPDATE`, so concurrent
   callbacks can't link a different subject past each other's check or drop each other's identity.
@@ -411,8 +486,8 @@ Fixes are on the `fix/security-issues` branch.
 - **Status:** Fixed.
 - **Where:** `src/middleware/audit_log.rs`.
 - **Fix:** the server now records the connecting address. Forwarding headers are read only from
-  a trusted proxy, set by `TRUSTED_PROXIES` (IPs or CIDRs, or `none`; default loopback and
-  private ranges). `CF-Connecting-IP` is never trusted. Redaction now hides chat content (text,
+  a trusted proxy, set by `TRUSTED_PROXIES` (IPs or CIDRs, or `none`; default loopback only).
+  `CF-Connecting-IP` is never trusted. Redaction now hides chat content (text,
   tool calls and results, titles, attachment names, inline data) in conversation and message
   snapshots, and prompt bodies (`promptText`, `customPromptText`, `variables`) in role prompt and
   user prompt snapshots, while still recording which fields changed. Token counts stay visible,
@@ -479,20 +554,16 @@ Found and left as they are:
   too large for its column, renaming a role to an existing name, deleting a department that has
   children, and a NUL byte in chat search. All except the reparent case come from `main`, and
   the reparent case follows the create path. Nothing is written in any of them.
-- **Chat:** an attachment that can't be resolved (another user's or a deleted file) is saved with
-  the user message before the request fails, so every later turn in that chat fails with 404.
-  `main` has it too; it is best fixed on `feat/chat-edit`, which reworks that code.
+- **Legacy chat data:** newly submitted invalid stored attachments are now refused before
+  writes. Pre-existing messages with already deleted/unavailable attachments still need repair
+  or an explicit product policy for omitting unavailable historical attachments.
 - **Departments and analytics:** `POST /admin/departments/{id}/members` returns the department as
   it was before the change, and `GET /admin/analytics/departments` ignores `department_id` for
   org-wide callers. Both come from `main`. A scoped Department Admin can delete a funded
   top-level department it administers, and a parent with budget 0 (unlimited) can't fund
   children; these need a decision rather than a fix.
-- **MCP:** a provider refresh response without a `refresh_token` clears the stored one, so the
-  user has to authorize again later. `main` has it too.
-- **Edits:** the edit bugs fixed on `feat/chat-edit` (assistant replies and replaced messages
-  could be edited, overlapping edits could both stay visible, a rejected edit stopped the running
-  reply, and cancel handles were not released on disconnect) also exist on this branch. They are
-  not fixed twice, so the two branches merge cleanly.
+- **Edits:** the fixes released from `feat/chat-edit` are now incorporated through the local
+  merge of `main`, not reimplemented independently on this branch.
 
 ## Decisions to Confirm
 
@@ -515,14 +586,15 @@ be reversed.
 - **Issue 15:** a configured http release mirror is refused, and the webapp's checksum toggle
   now returns an error, so the toggle should be removed.
 - **Issue 18:** BMP, AVIF and HEIC images download instead of displaying inline.
-- **Issue 22:** models with no catalog or plugin price still cost 0. A non-whitelisted model
+- **Issue 22:** missing model pricing is refused in positively budgeted departments; unbudgeted
+  deployments may still use unpriced local models. A non-whitelisted model
   reuses error 6002, whose message mentions the department.
 - **Issue 28:** a budget of 0 with "block" no longer blocks all spending.
 - **Audit durability (follow-up 19):** if the audit event for a role or grant change can't be
   written, the change fails with 503 instead of committing unrecorded.
-- **Issue 30:** with the default `TRUSTED_PROXIES`, clients on private networks can still fake
-  their logged IP; behind CloudFront or Cloudflare, the edge IP is logged until those ranges are
-  added.
+- **Issue 30:** only loopback proxies are trusted by default. Configure the actual trusted
+  load-balancer addresses/CIDRs; behind CloudFront or Cloudflare, the edge IP is logged until
+  those ranges are added.
 
 ## Release Notes
 
@@ -547,9 +619,10 @@ be reversed.
 ## Noticed, Not Fixed
 
 - **Data audits:** existing `project_sources` rows may point at other users' files, and grants
-  widened by past department deletions can't be told apart from real org-wide grants.
-- **Auth:** JIT accepts unverified emails, so a pending account can be created under someone
-  else's address. Refresh tokens are not rotated or individually revocable. Open SSE and chat
+  widened by past department deletions can't be told apart from real org-wide grants. Review
+  pending accounts and subject links created from unverified emails before this hardening;
+  the new JIT rule does not retroactively verify old identities.
+- **Auth:** Refresh tokens are not rotated or individually revocable. Open SSE and chat
   streams survive deactivation. Nothing stops removing the last Super Admin.
 - **Chat:** after a provider parse error the stream still runs its end-of-stream path. A failed
   edit attempt leaves its messages as hidden rows. The stored `message_count` counts user messages
@@ -558,17 +631,16 @@ be reversed.
   unreachable, but the webapp's callback page closes or navigates away after any failure, so
   today a user still restarts the authorization. Offering "Try again" on that page would make the
   retry reachable.
-- **Projects:** a conversation linked to a project keeps pulling that project's documents after
-  the user loses access.
+- **Projects:** linked-project access is rechecked for each new chat request. Revoking access
+  does not retract context already sent to an in-flight provider request.
 - **MCP and system:** `api_service_name` goes unvalidated into `systemctl restart`; the update
   script pulls the API image by tag and never verifies the downloaded `.sig`; sqlx-mcp returns
   every row a query produces, with no row limit.
-- **AI engines:** a whitelist entry that matches no catalog model key or name (for example the
-  alias `claude-haiku-4-5` while the catalog lists `claude-haiku-4-5-20251001`) is not listed by
-  `GET /models`, but the stream still accepts it by that exact name and charges it 0, because it
-  has no price. Admins should re-save those whitelists.
-- **RAG:** an embedding model set only by environment variable uses its native dimension, so
-  non-1536 models still fail inserts.
+- **AI engines:** a whitelisted alias absent from the catalog is not listed by `GET /models`.
+  Positively budgeted requests now reject it if no price is available. Admins should re-save
+  stale whitelists.
+- **RAG:** a provider that cannot emit the database's declared dimension is refused; changing
+  embedding storage dimensions still requires a coordinated schema/re-embedding migration.
 - **Departments:** `DepartmentUpdate.budget_allocated` is `f32` and loses precision; `/move`
   doesn't check the new parent's available budget.
 - **Startup:** the catalog manifest prefetch has no retry, so a connection reset from the CDN

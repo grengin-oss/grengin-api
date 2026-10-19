@@ -34,12 +34,13 @@ use crate::{
             content_type_to_ext,
         },
         budget_allocation::refresh_department_budget_available,
+        chat_attachments::{hydrate_files, hydrate_prompt_files, validate_incoming_attachments},
         chat_helpers::{
             effective_max_tokens, effective_native_web_search, supports_native_web_search,
         },
         chat_stream_helpers::{
             ContentCheckpoint, DepartmentBudgetGate, ToolRoundOutcome, department_budget_status,
-            ensure_model_whitelisted, model_identifiers, next_tool_round,
+            ensure_budget_pricing, ensure_model_whitelisted, model_identifiers, next_tool_round,
             persistence_error_event_data, record_stop_reason, response_stopped_event_data,
             stop_reason_for_provider_error, with_stop_reason,
         },
@@ -48,9 +49,7 @@ use crate::{
             load_readable_linked_projects,
         },
         department_policies::check_model_allowed,
-        file_storage::{
-            FileWrite, StorageCategory, read_attachments_for_user, safe_file_name, store_file_bytes,
-        },
+        file_storage::{FileWrite, StorageCategory, safe_file_name, store_file_bytes},
         mcp_helpers::{
             McpOauthErrorPayload, McpOauthPrompt, McpOauthRequiredEvent, build_mcp_oauth_prompt,
             build_mcp_server_context, resolve_mcp_oauth_token, resolve_mcp_tool_descriptor,
@@ -103,71 +102,6 @@ use serde_json::{Value, json};
 use std::{collections::HashMap, convert::Infallible};
 use tokio::time::Instant;
 use uuid::Uuid;
-
-async fn hydrate_files(
-    files: &mut [File],
-    user_id: Uuid,
-    app_state: &SharedState,
-) -> Result<(), AppError> {
-    let file_ids = files
-        .iter()
-        .filter(|file| file.base64.is_none())
-        .map(|file| file.id)
-        .collect::<Vec<_>>();
-    let attachments = read_attachments_for_user(
-        &app_state.database,
-        &app_state.settings.file_storage_root,
-        user_id,
-        &file_ids,
-    )
-    .await?;
-
-    hydrate_files_from(&attachments, files)
-}
-
-fn hydrate_files_from(
-    attachments: &HashMap<Uuid, crate::dto::files::Attachment>,
-    files: &mut [File],
-) -> Result<(), AppError> {
-    for file in files {
-        if file.base64.is_some() {
-            continue;
-        }
-        let attachment = attachments
-            .get(&file.id)
-            .ok_or(AppError::ResourceNotFound)?;
-        file.base64 = attachment.get_base64();
-        if file.base64.is_none() {
-            return Err(AppError::ResourceNotFound);
-        }
-    }
-    Ok(())
-}
-
-async fn hydrate_prompt_files(
-    prompts: &mut [Prompt],
-    user_id: Uuid,
-    app_state: &SharedState,
-) -> Result<(), AppError> {
-    let file_ids = prompts
-        .iter()
-        .flat_map(|prompt| prompt.files.iter())
-        .filter(|file| file.base64.is_none())
-        .map(|file| file.id)
-        .collect::<Vec<_>>();
-    let attachments = read_attachments_for_user(
-        &app_state.database,
-        &app_state.settings.file_storage_root,
-        user_id,
-        &file_ids,
-    )
-    .await?;
-
-    for prompt in prompts {
-        hydrate_files_from(&attachments, &mut prompt.files)?;
-    }
-    Ok(())
-}
 
 #[utoipa::path(
     post,
@@ -576,6 +510,7 @@ pub async fn handle_chat_stream(
     }
     let model_name = req.model_name.clone();
     let mut budget_warning: Option<BudgetWarningPayload> = None;
+    let mut budget_configured = false;
     let user = users::Entity::find_by_id(claims.user_id)
         .one(&app_state.database)
         .await
@@ -603,8 +538,9 @@ pub async fn handle_chat_stream(
         }
 
         if let Some(department_id) = user.department_id {
-            let (budget_gate, budget_available) =
+            let (budget_gate, budget_available, configured) =
                 department_budget_status(&app_state.database, department_id).await?;
+            budget_configured = configured;
             match budget_gate {
                 DepartmentBudgetGate::Open => {}
                 DepartmentBudgetGate::Block => {
@@ -650,13 +586,14 @@ pub async fn handle_chat_stream(
     let plugin_model_supports_web_search = plugin_model_info
         .as_ref()
         .is_some_and(|model| model.supports_web_search);
-    let catalog_model = match get_model_info_cached(&app_state.req_client, &model_name).await {
-        Ok(model) => model,
-        Err(error) => {
-            eprintln!("models cache error: {error}");
-            None
-        }
-    };
+    let catalog_model =
+        match get_model_info_cached(&app_state.req_client, &provider_key, &model_name).await {
+            Ok(model) => model,
+            Err(error) => {
+                eprintln!("models cache error: {error}");
+                None
+            }
+        };
     let catalog_model_supports_web_search = catalog_model
         .as_ref()
         .is_some_and(|model| model.supports_web_search);
@@ -707,6 +644,10 @@ pub async fn handle_chat_stream(
         ),
     )
     .await?;
+    ensure_budget_pricing(
+        budget_configured,
+        catalog_model.as_ref().or(plugin_model_info.as_ref()),
+    )?;
     if !is_image_gen && provider_config.chat().is_none() {
         return Err(AppError::LlmProviderNotConfigured {
             provider: provider.clone(),
@@ -721,6 +662,7 @@ pub async fn handle_chat_stream(
         req.max_tokens,
         max_output_tokens.and_then(|value| u32::try_from(value).ok()),
     );
+    validate_incoming_attachments(&app_state, claims.user_id, &req.messages, is_image_gen).await?;
     if let Some(conversation_id) = req.conversation_id {
         chat_id = Some(Path(conversation_id));
     }

@@ -14,7 +14,9 @@ use uuid::Uuid;
 use crate::{
     auth::{
         error::AuthError,
-        permissions::{PERMISSION_ROLES_ASSIGN, ROLE_SUPER_ADMIN, permission_key},
+        permissions::{
+            PERMISSION_ROLES_ASSIGN, PERMISSION_USERS_MANAGE, ROLE_SUPER_ADMIN, permission_key,
+        },
     },
     dto::admin_roles::RoleChangeDeniedPayload,
     models::{permissions, role_permissions, roles},
@@ -116,6 +118,14 @@ pub fn check_user_management(
         Ok(())
     } else {
         Err(RoleChangeDenial::MissingRolePermissions(missing))
+    }
+}
+
+pub fn check_user_unassignment(actor: &PermissionGrants) -> Result<(), RoleChangeDenial> {
+    if actor.is_super_admin() || actor.holds(PERMISSION_USERS_MANAGE, DepartmentScope::OrgWide) {
+        Ok(())
+    } else {
+        Err(RoleChangeDenial::UserOutsideAssignerScope)
     }
 }
 
@@ -322,6 +332,18 @@ pub async fn ensure_user_management_allowed(
     match check_user_management(&actor, &target) {
         Ok(()) => Ok(()),
         Err(denial) => Err(deny(db, actor_id, denial, None, Some(target_user_id), None).await),
+    }
+}
+
+pub async fn ensure_user_unassignment_allowed(
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    target_user_id: Option<Uuid>,
+) -> Result<(), AuthError> {
+    let actor = PermissionGrants::load(db, actor_id).await?;
+    match check_user_unassignment(&actor) {
+        Ok(()) => Ok(()),
+        Err(denial) => Err(deny(db, actor_id, denial, None, target_user_id, None).await),
     }
 }
 
@@ -748,6 +770,64 @@ mod tests {
         assert_eq!(
             check_user_management(&scoped_admin_who_is_also_a_user("a"), &plain_user()),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn a_scoped_manager_cannot_unassign_a_plain_member() {
+        let actor = scoped_admin_who_is_also_a_user("a");
+        assert!(actor.holds(PERMISSION_USERS_MANAGE, DepartmentScope::Department("a.b")));
+        assert_eq!(check_user_management(&actor, &plain_user()), Ok(()));
+        assert_eq!(
+            check_user_unassignment(&actor),
+            Err(RoleChangeDenial::UserOutsideAssignerScope)
+        );
+    }
+
+    #[test]
+    fn a_scoped_manager_cannot_unassign_itself() {
+        let actor = scoped_admin_who_is_also_a_user("a");
+        assert_eq!(check_user_management(&actor, &actor), Ok(()));
+        assert_eq!(
+            check_user_unassignment(&actor),
+            Err(RoleChangeDenial::UserOutsideAssignerScope)
+        );
+    }
+
+    #[test]
+    fn an_org_wide_manager_can_unassign_a_member() {
+        let actor = PermissionGrants::from_rows(
+            &[role("HR Admin", None), role("User", None)],
+            vec![
+                grant("roles:assign", true, None),
+                grant("users:view", true, None),
+                grant(PERMISSION_USERS_MANAGE, true, None),
+                grant("chat:use", true, None),
+            ],
+        );
+        assert_eq!(check_user_management(&actor, &plain_user()), Ok(()));
+        assert_eq!(check_user_unassignment(&actor), Ok(()));
+    }
+
+    #[test]
+    fn an_org_wide_super_admin_can_unassign_itself_or_a_member() {
+        let actor = super_admin();
+        assert_eq!(check_user_management(&actor, &actor), Ok(()));
+        assert_eq!(check_user_management(&actor, &plain_user()), Ok(()));
+        assert_eq!(check_user_unassignment(&actor), Ok(()));
+        let role_only = PermissionGrants::from_rows(&[role(ROLE_SUPER_ADMIN, None)], vec![]);
+        assert_eq!(check_user_unassignment(&role_only), Ok(()));
+    }
+
+    #[test]
+    fn a_scoped_super_admin_cannot_unassign_users() {
+        let actor = PermissionGrants::from_rows(
+            &[role(ROLE_SUPER_ADMIN, Some(Uuid::new_v4()))],
+            vec![grant(PERMISSION_USERS_MANAGE, true, Some("a"))],
+        );
+        assert_eq!(
+            check_user_unassignment(&actor),
+            Err(RoleChangeDenial::UserOutsideAssignerScope)
         );
     }
 

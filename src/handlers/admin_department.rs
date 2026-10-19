@@ -28,7 +28,7 @@ use crate::{
         authorization::{AuthorizationService, PermissionScopeMode},
         budget_allocation::{
             period_bounds, refresh_department_budget_available, requested_budget_allocation,
-            sum_child_allocations, sum_department_cost_in_range,
+            sum_child_allocations, sum_parent_cost_after_allocation,
         },
         department_access::{
             BudgetSettings, budget_change_requires_allocate, ensure_budget_change_allowed,
@@ -39,13 +39,14 @@ use crate::{
             build_ltree_path, delete_department_with_scoped_assignments,
             department_budget_snapshot, departments_base_select, departments_tree_select,
             ensure_parent_outside_subtree, load_department_admin_ids_map, lock_department,
-            plan_department_admin_sync, plan_new_department_admins, reparent_department,
-            sync_department_allowed_models,
+            lock_department_hierarchy, plan_department_admin_sync, plan_new_department_admins,
+            reparent_department, sync_department_allowed_models,
         },
         department_policies::{
             load_allowed_models_map, validate_allowed_models_subset, validate_retention_days,
         },
         notifications::emit_budget_alerts,
+        role_assignment::ensure_user_unassignment_allowed,
     },
     state::SharedState,
 };
@@ -119,6 +120,22 @@ pub async fn create_department(
     let created_at = Utc::now();
     let updated_at = created_at;
 
+    let txn = app_state.database.begin().await.map_err(|e| {
+        eprintln!("department create transaction error: {e}");
+        AuthError::DbTimeout
+    })?;
+    lock_department_hierarchy(&txn).await?;
+    // Recheck after waiting for a concurrent move; its new path may be outside our scope.
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_DEPARTMENTS_MANAGE,
+            req.parent_id,
+            PermissionScopeMode::RequireOrgWide,
+            req.parent_id,
+        )
+        .await?;
+
     if let Some(models) = req.allowed_models.as_deref() {
         validate_allowed_models_subset(&app_state.database, req.parent_id, models)
             .await
@@ -140,7 +157,7 @@ pub async fn create_department(
         let parent = departments_base_select()
             .filter(departments::Column::Id.eq(parent_id))
             .into_model::<DepartmentRow>()
-            .one(&app_state.database)
+            .one(&txn)
             .await
             .map_err(|e| {
                 eprintln!("db error: {e}");
@@ -197,10 +214,6 @@ pub async fn create_department(
     .await?;
 
     let (sql, values) = insert.build(PostgresQueryBuilder);
-    let txn = app_state.database.begin().await.map_err(|e| {
-        eprintln!("department create transaction error: {e}");
-        AuthError::DbTimeout
-    })?;
     txn.execute(Statement::from_sql_and_values(
         DatabaseBackend::Postgres,
         sql,
@@ -814,6 +827,15 @@ pub async fn update_department(
         AuthError::DbTimeout
     })?;
     lock_department(&txn, department_id).await?;
+    authz
+        .ensure_permission(
+            claims.user_id,
+            PERMISSION_DEPARTMENTS_MANAGE,
+            Some(department_id),
+            PermissionScopeMode::RequireOrgWide,
+            Some(department_id),
+        )
+        .await?;
 
     let dept = departments_base_select()
         .filter(departments::Column::Id.eq(department_id))
@@ -893,13 +915,19 @@ pub async fn update_department(
 
             let now = Utc::now();
             let (p_start, p_end) = period_bounds(&parent.budget_period, now);
-            let parent_used =
-                sum_department_cost_in_range(&app_state.database, parent.id, p_start, p_end)
-                    .await
-                    .map_err(|e| {
-                        eprintln!("sum parent used error: {e}");
-                        AuthError::DbTimeout
-                    })?;
+            let parent_used = sum_parent_cost_after_allocation(
+                &app_state.database,
+                parent.id,
+                dept.id,
+                budget_allocated,
+                p_start,
+                p_end,
+            )
+            .await
+            .map_err(|e| {
+                eprintln!("sum parent used error: {e}");
+                AuthError::DbTimeout
+            })?;
 
             let parent_available_for_children =
                 (parent.budget_allocated - other_children_alloc - parent_used).max(Decimal::ZERO);
@@ -1044,6 +1072,11 @@ pub async fn move_department(
     Json(req): Json<DepartmentMove>,
 ) -> Result<(StatusCode, Json<Department>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
+    let txn = app_state.database.begin().await.map_err(|e| {
+        eprintln!("department move transaction error: {e}");
+        AuthError::DbTimeout
+    })?;
+    lock_department_hierarchy(&txn).await?;
     authz
         .ensure_permission(
             claims.user_id,
@@ -1125,10 +1158,6 @@ pub async fn move_department(
         .await?;
     }
 
-    let txn = app_state.database.begin().await.map_err(|e| {
-        eprintln!("department move transaction error: {e}");
-        AuthError::DbTimeout
-    })?;
     reparent_department(&txn, department_id, Some(new_parent.id), Utc::now()).await?;
     txn.commit().await.map_err(|e| {
         eprintln!("department move commit error: {e}");
@@ -1171,7 +1200,8 @@ pub async fn delete_department(
             Some(department_id),
         )
         .await?;
-    delete_department_with_scoped_assignments(&app_state.database, department_id).await?;
+    delete_department_with_scoped_assignments(&app_state.database, department_id, claims.user_id)
+        .await?;
     let _ = authz.recompute_effective_permissions_for_all_users().await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1273,6 +1303,8 @@ pub async fn remove_users_from_department(
     if force {
         ensure_member_release_to_parent_allowed(&app_state.database, claims.user_id, department_id)
             .await?;
+    } else {
+        ensure_user_unassignment_allowed(&app_state.database, claims.user_id, None).await?;
     }
 
     let users_t = Alias::new(users::Entity.table_name());

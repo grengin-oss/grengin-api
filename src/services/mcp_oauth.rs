@@ -3,7 +3,36 @@
 
 use chrono::{DateTime, Utc};
 use reqwest::Url;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Weak},
+};
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use uuid::Uuid;
+
+type RefreshLockMap = HashMap<(Uuid, Uuid), Weak<Mutex<()>>>;
+
+#[derive(Default)]
+pub struct OAuthRefreshLocks {
+    connections: Mutex<RefreshLockMap>,
+}
+
+impl OAuthRefreshLocks {
+    pub async fn lock(&self, user: Uuid, server: Uuid) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut connections = self.connections.lock().await;
+            connections.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = connections.get(&(user, server)).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(Mutex::new(()));
+                connections.insert((user, server), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        lock.lock_owned().await
+    }
+}
 
 use crate::{
     auth::encryption::{CryptoError, decrypt_key, encrypt_key},
@@ -101,6 +130,32 @@ mod tests {
 
     const KEY: [u8; 32] = [7u8; 32];
     const APP_URL: &str = "https://app.example.com";
+
+    #[tokio::test]
+    async fn refreshes_serialize_per_connection_without_retaining_idle_locks() {
+        let locks = Arc::new(OAuthRefreshLocks::default());
+        let user = Uuid::new_v4();
+        let server = Uuid::new_v4();
+        let first = locks.lock(user, server).await;
+        let next_locks = locks.clone();
+        let mut next = tokio::spawn(async move { next_locks.lock(user, server).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut next)
+                .await
+                .is_err()
+        );
+        let independent = locks.lock(user, Uuid::new_v4()).await;
+        drop(first);
+        let second = tokio::time::timeout(std::time::Duration::from_secs(1), next)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(second);
+        drop(independent);
+        let last = locks.lock(Uuid::new_v4(), Uuid::new_v4()).await;
+        assert_eq!(locks.connections.lock().await.len(), 1);
+        drop(last);
+    }
 
     fn oauth_state(user_id: Uuid, expires_at: Option<DateTime<Utc>>) -> mcp_oauth_states::Model {
         mcp_oauth_states::Model {
