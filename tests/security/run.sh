@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 set +x
+trap 'printf "Test harness failed at line %s.\n" "$LINENO" >&2' ERR
 cd "$(dirname "$0")/../.."
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target-security}"
 if [[ "${1:-}" != --live-only ]]; then
@@ -21,6 +22,7 @@ source "${GRENGIN_SECURITY_SECRETS_FILE:-/home/anurag/work/secrets/grengin.sh}"
 set +a
 : "${DATABASE_URL:?source database required}" "${JWT_SECRET:?JWT secret required}"
 source_database="$DATABASE_URL"
+printf 'Preparing disposable PostgreSQL test database...\n'
 scratch="$(mktemp -d /tmp/grengin-security-XXXXXX)"
 container="grengin-security-$(basename "$scratch" | tr '[:upper:]' '[:lower:]')"
 server_pid=''
@@ -64,6 +66,12 @@ for _ in $(seq 1 120); do
 done
 [[ "$ready" == true ]] || { printf 'Test backend readiness timed out.\n' >&2; exit 1; }
 node tests/security/http.mjs
+if [[ "${GRENGIN_EXTENSIVE_TESTS:-0}" == 1 ]]; then
+  node tests/security/extended-http.mjs
+fi
+if [[ "${GRENGIN_SHARE_CHAT_TESTS:-0}" == 1 ]]; then
+  node tests/share-chat/http.mjs
+fi
 cargo test --locked --workspace --jobs 2 refresh_cannot_undo_disconnect_reauthorization_or_deletion -- --ignored --test-threads=1
 docker exec "$container" createdb -U local grengin_upload_test
 GRENGIN_UPLOAD_TEST_DATABASE_URL="${DATABASE_URL%/*}/grengin_upload_test" \

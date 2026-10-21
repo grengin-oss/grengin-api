@@ -43,6 +43,8 @@ with pgvector.
 - **Administration**: users, budgets, prompts, branding, providers, and system metrics
 - **Analytics and audit**: usage accounting, exports, retention, and administrative audit logs
 - **OpenAPI**: generated API schema and a bundled Swagger UI
+- **Chat sharing**: revocable organization or department snapshots, scoped downloads,
+  and independent private copies. See [Share Chat](docs/share-chat.md).
 - **Database lifecycle**: versioned SeaORM migrations applied automatically at API startup
 
 ## LLM Provider Plugins

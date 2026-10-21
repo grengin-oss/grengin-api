@@ -44,6 +44,7 @@ use crate::dto::chat::{
     ArchiveChatRequest, ConversationResponse, MessageParts, MessageResponse, MessageVersions,
     PaginatedConversations, SelectBranchRequest, TokenUsage,
 };
+use crate::dto::chat_shares::*;
 use crate::dto::chat_stream::{ChatInput, ChatStream};
 use crate::dto::common::{PaginationQuery, SortRule};
 use crate::dto::discovery::{
@@ -92,6 +93,7 @@ use crate::dto::system_metrics::{
 };
 use crate::error::{AppError, ErrorDetail, ErrorDetailVariant, ErrorResponse};
 use crate::handlers::artifacts;
+use crate::handlers::chat_shares;
 use crate::handlers::{
     admin_ai, admin_ai_plugins, admin_analytics, admin_audit, admin_department,
     admin_department_budgets, admin_embedding, admin_mcp, admin_prompts, admin_reconfigure,
@@ -99,6 +101,7 @@ use crate::handlers::{
     discovery, file, mcp, me, me_prompts, me_skills, message, models, notifications, oidc,
     open_error, projects, skills,
 };
+use crate::models::chat_shares::ShareAccess;
 use crate::models::departments::{ActionOnExceed, BudgetPeriod};
 use crate::models::mcp_access_policies::{McpAccessType, McpPermission};
 use crate::models::mcp_servers::{McpDefaultAccess, McpTransportType};
@@ -109,6 +112,14 @@ use utoipa::OpenApi;
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        chat_shares::create_share,
+        chat_shares::list_shares,
+        chat_shares::update_share,
+        chat_shares::revoke_share,
+        chat_shares::view_share,
+        chat_shares::download_share_file,
+        chat_shares::fork_share,
+        chat_shares::resolve_shared_link,
         artifacts::get_artifact,
         artifacts::list_conversation_artifacts,
         artifacts::delete_artifact,
@@ -293,6 +304,8 @@ use utoipa::OpenApi;
     ),
     components(
         schemas(
+            ShareCreateRequest, ShareUpdateRequest, ChatShareLink, ShareAccess,
+            SharedChatView, SharedChatContent, SharedMessage, SharedFile, SharedArtifact, ForkedChat, SharedChatLink,
             ArtifactResponse,
             ArtifactListResponse,
             AuthInit,
@@ -497,6 +510,7 @@ use utoipa::OpenApi;
         )
     ),
     tags(
+        (name = "chat shares", description = "Frozen chat links and private copies"),
         (name = "auth", description = "Authentication & user endpoints"),
         (name = "branding", description = "Branding configuration endpoints"),
         (name = "admin", description = "Admin endpoints"),

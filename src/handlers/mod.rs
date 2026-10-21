@@ -19,6 +19,7 @@ pub mod artifacts;
 pub mod auth;
 pub mod branding;
 pub mod chat;
+pub mod chat_shares;
 pub mod chat_stream;
 pub mod discovery;
 pub mod file;

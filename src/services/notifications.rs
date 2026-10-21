@@ -187,6 +187,7 @@ pub async fn emit_budget_alerts(state: &SharedState, department_id: Uuid) -> Res
         inserts.push(notifications::ActiveModel {
             id: Set(id),
             user_id: Set(user_id),
+            share_id: Set(None),
             department_id: Set(Some(department_id)),
             kind: Set(kind.to_string()),
             title: Set(title.clone()),

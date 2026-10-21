@@ -13,4 +13,9 @@ CLAUDE.md
 !/tests/security/
 !/tests/security/*.sh
 !/tests/security/*.mjs
+!/tests/share-chat/
+!/tests/share-chat/*.sh
+!/tests/share-chat/*.mjs
+!/tests/staging/
+!/tests/staging/*.sh
 /llm-plugin/HANDOFF.md

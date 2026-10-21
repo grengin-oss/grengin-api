@@ -41,6 +41,9 @@ pub type StreamCancellations = Arc<RwLock<HashMap<Uuid, Arc<StreamCancel>>>>;
 
 pub struct AppState {
     pub database: DatabaseConnection,
+    pub share_rate_limiter: crate::services::share_access::ShareRateLimiter,
+    pub share_fork_slots: Arc<tokio::sync::Semaphore>,
+    pub share_index_slots: Arc<tokio::sync::Semaphore>,
     pub oidc_providers: RwLock<HashMap<String, OidcProviderRuntime>>,
     pub req_client: ReqwestClient,
     pub settings: Settings,
@@ -189,6 +192,9 @@ impl AppState {
             req_client,
             settings,
             mcp_clients: RwLock::new(HashMap::new()),
+            share_rate_limiter: Default::default(),
+            share_fork_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            share_index_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             mcp_refresh_locks: Default::default(),
             notification_hub,
             stream_cancellations: Arc::new(RwLock::new(HashMap::new())),
