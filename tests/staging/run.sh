@@ -13,6 +13,7 @@ run() {
 printf 'Reports: %s\n' "$report"
 git rev-parse HEAD > "$report/backend-commit.txt"
 run format cargo fmt --all --check
+run distribution-gate bash tests/staging/test-distribution-gate.sh
 run workspace cargo test --locked --workspace --jobs 2
 run build cargo build --locked --workspace --jobs 2
 run clippy cargo clippy --locked --workspace --all-targets --jobs 2

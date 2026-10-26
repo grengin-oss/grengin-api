@@ -47,6 +47,9 @@ export DB_URL="$DATABASE_URL"
 # Copied MCP configuration may point at real databases/services or spawn commands.
 # The dedicated MCP DB regressions use rows directly, not those external clients.
 psql -X -q -v ON_ERROR_STOP=1 "$DATABASE_URL" -c 'UPDATE mcp_servers SET enabled = false' >/dev/null
+if [[ "${GRENGIN_ENGINE_INSTALL_TESTS:-0}" == 1 ]]; then
+  psql -X -q -v ON_ERROR_STOP=1 "$DATABASE_URL" -c 'DELETE FROM ai_engines' >/dev/null
+fi
 export HOST=127.0.0.1
 export PORT="${GRENGIN_SECURITY_TEST_PORT:-18080}"
 export FILE_STORAGE_ROOT="$scratch/files"
@@ -56,6 +59,7 @@ export GRENGIN_SECURITY_TEST_URL="http://$HOST:$PORT"
 if curl --max-time 2 -fsS "$GRENGIN_SECURITY_TEST_URL/" >/dev/null 2>&1; then
   printf 'Test port is occupied; choose GRENGIN_SECURITY_TEST_PORT.\n' >&2; exit 1
 fi
+start_backend() {
 "$CARGO_TARGET_DIR/debug/grengin-api" >"$scratch/server.log" 2>&1 &
 server_pid=$!
 ready=false
@@ -65,6 +69,17 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 [[ "$ready" == true ]] || { printf 'Test backend readiness timed out.\n' >&2; exit 1; }
+}
+start_backend
+if [[ "${GRENGIN_ENGINE_INSTALL_TESTS:-0}" == 1 ]]; then
+  node tests/ai-engines/http.mjs
+  engine_count="$(psql -X -A -t "$DATABASE_URL" -c 'SELECT count(*) FROM ai_engines')"
+  kill "$server_pid"; wait "$server_pid" 2>/dev/null || true; server_pid=''
+  start_backend
+  [[ "$(psql -X -A -t "$DATABASE_URL" -c 'SELECT count(*) FROM ai_engines')" == "$engine_count" ]]
+  [[ "$(psql -X -A -t "$DATABASE_URL" -c "SELECT count(*) FROM ai_engines WHERE \"engineKey\"='groq'")" == 0 ]]
+  printf 'PASS: restart preserves installed rows and never reinstalls a deleted catalog engine.\n'
+fi
 node tests/security/http.mjs
 if [[ "${GRENGIN_EXTENSIVE_TESTS:-0}" == 1 ]]; then
   node tests/security/extended-http.mjs

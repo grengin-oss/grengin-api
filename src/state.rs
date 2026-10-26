@@ -15,7 +15,6 @@ use crate::{
     config::setting::{AzureSettings, ConfigError, GoogleSettings, OidcClient, Settings},
     dto::oauth::AuthProvider,
     models::{mcp_servers, messages::StopReason, sso_providers},
-    services::ai_engine_catalog::reconcile_catalog_ai_engines,
     services::discovery_catalog::DiscoveryCatalog,
     services::http_client::short_call_client,
     services::live_models_cache::LiveModelsCache,
@@ -170,9 +169,6 @@ impl AppState {
         .map_err(ConfigError::Custom)?;
         let discovery_catalog = DiscoveryCatalog::from_env(req_client.clone())
             .map_err(|error| ConfigError::Custom(error.to_string()))?;
-        let _ = reconcile_catalog_ai_engines(&database, &discovery_catalog)
-            .await
-            .map_err(|error| eprintln!("Catalog AI engine reconciliation failed: {error:#}"));
         let _ = settings
             .load_ai_engines_from_db(&database)
             .await

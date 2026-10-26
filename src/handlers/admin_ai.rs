@@ -20,6 +20,7 @@ use crate::{
         load_models_response, load_models_response_refreshed, sort_engines_by_readiness,
     },
     services::{
+        ai_engine_defaults::{enabled_after_key, starter_models},
         authorization::{AuthorizationService, PermissionScopeMode},
         provider_manifests,
         provider_models::{is_chat_selectable_model, to_model_info},
@@ -349,15 +350,62 @@ pub async fn update_ai_engines_by_key(
         })?
         .ok_or(AuthError::ResourceNotFound)?;
     let mut active_model = ai_engine.clone().into_active_model();
+    let first_key = ai_engine.api_key.is_none()
+        && req
+            .api_key
+            .as_ref()
+            .is_some_and(|key| !key.trim().is_empty());
+    if first_key && req.whitelisted_models.is_none() && ai_engine.whitelist_models.len() > 3 {
+        let config = match (req.plugin_config.as_ref(), ai_engine.plugin_config.as_ref()) {
+            (Some(config), _) => config.clone(),
+            (None, Some(config)) => {
+                parse_plugin_config(config).map_err(|_| AuthError::InvalidRequest {
+                    field: "plugin_config",
+                })?
+            }
+            (None, None) => {
+                let package = app_state
+                    .discovery_catalog
+                    .ai_provider(&ai_engine_key, None)
+                    .await
+                    .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
+                crate::models::ai_engines::PluginConfig {
+                    manifest: package.plugin,
+                    configuration: serde_json::json!({}),
+                    base_url_override: None,
+                    allow_insecure_http: false,
+                    allow_private_network: false,
+                }
+            }
+        };
+        let mut manifest = parse_manifest(&config).map_err(|_| AuthError::InvalidRequest {
+            field: "plugin_config",
+        })?;
+        manifest
+            .models
+            .retain(|model| ai_engine.whitelist_models.contains(&model.id));
+        let models = starter_models(&manifest);
+        if !models.is_empty() {
+            if req.default_model.is_none() {
+                active_model.default_model = Set(models[0].clone());
+            }
+            active_model.whitelist_models = Set(models);
+        }
+    }
     if let Some(display_name) = req.display_name {
         active_model.display_name = Set(display_name);
     }
     if let Some(api_key) = req.api_key {
-        let encrypted_api_key = encrypt_key(&app_state.settings.auth.app_key, api_key.as_bytes())
-            .map_err(|e| {
-            eprintln!("Encryption error for api key: {:?}", e);
-            AuthError::DbTimeout
-        })?;
+        if api_key.trim().is_empty() {
+            return Err(AuthError::InvalidRequest { field: "api_key" });
+        }
+        let encrypted_api_key =
+            encrypt_key(&app_state.settings.auth.app_key, api_key.trim().as_bytes()).map_err(
+                |e| {
+                    eprintln!("Encryption error for api key: {:?}", e);
+                    AuthError::DbTimeout
+                },
+            )?;
         active_model.api_key = Set(Some(encrypted_api_key));
         active_model.api_key_status = Set(ApiKeyStatus::NotValidated)
     }
@@ -387,8 +435,12 @@ pub async fn update_ai_engines_by_key(
     if let Some(whitelist_models) = req.whitelisted_models {
         active_model.whitelist_models = Set(whitelist_models);
     }
-    if let Some(is_enabled) = req.is_enabled {
-        active_model.is_enabled = Set(is_enabled);
+    if first_key || req.is_enabled.is_some() {
+        active_model.is_enabled = Set(enabled_after_key(
+            ai_engine.is_enabled,
+            first_key,
+            req.is_enabled,
+        ));
     }
     let model = active_model.clone().try_into_model().map_err(|e| {
         eprintln!("db error model parse error {e}");
@@ -438,7 +490,7 @@ pub async fn update_ai_engines_by_key(
     } else {
         None
     };
-    active_model
+    let model = active_model
         .update(&app_state.database)
         .await
         .map_err(|e| {

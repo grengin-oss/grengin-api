@@ -6,7 +6,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use llm_plugin::ProviderPlugin;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait,
+    IntoActiveModel, QueryFilter, Statement, TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -20,8 +21,9 @@ use crate::{
     dto::admin_ai::{
         AIEngineConnectionTest, AIEngineCreate, AIEngineDetail, AIEnginePluginValidationResponse,
     },
-    models::ai_engines::{self, ApiKeyStatus},
+    models::ai_engines::{self, ApiKeyStatus, PluginConfig},
     services::{
+        ai_engine_defaults::{enabled_after_key, starter_models},
         authorization::{AuthorizationService, PermissionScopeMode},
         provider_chat::provider_error_class,
         provider_runtime::{
@@ -182,11 +184,40 @@ pub async fn create_engine(
     state: &SharedState,
     request: AIEngineCreate,
 ) -> Result<AIEngineDetail, AuthError> {
-    let manifest =
-        parse_manifest(&request.plugin_config).map_err(|_| AuthError::InvalidRequest {
-            field: "plugin_config",
-        })?;
-    if RESERVED_ENGINE_KEYS.contains(&manifest.id.as_str()) {
+    let (config, catalog_install) = match (request.engine_key.as_deref(), request.plugin_config) {
+        (Some(key), None) if !key.trim().is_empty() => {
+            let package = state
+                .discovery_catalog
+                .ai_provider(key, None)
+                .await
+                .map_err(|error| match error {
+                    crate::services::discovery_catalog::DiscoveryError::NotFound => {
+                        AuthError::ResourceNotFound
+                    }
+                    _ => AuthError::ServiceTemporarilyUnavailable,
+                })?;
+            (
+                PluginConfig {
+                    manifest: package.plugin,
+                    configuration: serde_json::json!({}),
+                    base_url_override: None,
+                    allow_insecure_http: false,
+                    allow_private_network: false,
+                },
+                true,
+            )
+        }
+        (None, Some(config)) => (config, false),
+        _ => {
+            return Err(AuthError::InvalidRequest {
+                field: "engine_key/plugin_config",
+            });
+        }
+    };
+    let manifest = parse_manifest(&config).map_err(|_| AuthError::InvalidRequest {
+        field: "plugin_config",
+    })?;
+    if !catalog_install && RESERVED_ENGINE_KEYS.contains(&manifest.id.as_str()) {
         return Err(AuthError::InvalidRequest {
             field: "plugin_config.manifest.id",
         });
@@ -201,14 +232,18 @@ pub async fn create_engine(
         return Err(AuthError::DbConflict);
     }
 
-    let api_key = request
-        .api_key
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
+    let api_key = match request.api_key {
+        Some(value) if value.trim().is_empty() => {
+            return Err(AuthError::InvalidRequest { field: "api_key" });
+        }
+        Some(value) => Some(value.trim().to_string()),
+        None => None,
+    };
+    let is_enabled = enabled_after_key(false, api_key.is_some(), request.is_enabled);
     if manifest.credentials.is_empty() && api_key.is_some() {
         return Err(AuthError::InvalidRequest { field: "api_key" });
     }
-    if request.is_enabled
+    if is_enabled
         && manifest
             .credentials
             .first()
@@ -223,21 +258,16 @@ pub async fn create_engine(
             .first()
             .map(|_| "validation-placeholder".to_string())
     });
-    let provider = compile_provider(request.plugin_config.clone(), &manifest.id, compile_key)
-        .map_err(|_| AuthError::InvalidRequest {
+    let provider = compile_provider(config.clone(), &manifest.id, compile_key).map_err(|_| {
+        AuthError::InvalidRequest {
             field: "plugin_config",
-        })?;
+        }
+    })?;
 
     let now = Utc::now();
-    let whitelist_models = if request.whitelisted_models.is_empty() {
-        manifest
-            .models
-            .iter()
-            .map(|model| model.id.clone())
-            .collect()
-    } else {
-        request.whitelisted_models
-    };
+    let whitelist_models = request
+        .whitelisted_models
+        .unwrap_or_else(|| starter_models(&manifest));
     let default_model = request
         .default_model
         .or_else(|| whitelist_models.first().cloned())
@@ -247,16 +277,43 @@ pub async fn create_engine(
         .map(|value| encrypt_key(&state.settings.auth.app_key, value.as_bytes()))
         .transpose()
         .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
-    let plugin_config =
-        serde_json::to_value(&request.plugin_config).map_err(|_| AuthError::InvalidRequest {
-            field: "plugin_config",
-        })?;
+    let plugin_config = if catalog_install {
+        None
+    } else {
+        Some(
+            serde_json::to_value(&config).map_err(|_| AuthError::InvalidRequest {
+                field: "plugin_config",
+            })?,
+        )
+    };
+    let txn = state
+        .database
+        .begin()
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
+    // SeaORM cannot express PostgreSQL advisory locks; serialize same-key installations.
+    txn.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        [format!("grengin-engine:{}", manifest.id).into()],
+    ))
+    .await
+    .map_err(|_| AuthError::DbTimeout)?;
+    if ai_engines::Entity::find()
+        .filter(ai_engines::Column::EngineKey.eq(&manifest.id))
+        .one(&txn)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?
+        .is_some()
+    {
+        return Err(AuthError::DbConflict);
+    }
     let engine = ai_engines::ActiveModel {
         id: Set(Uuid::new_v4()),
         display_name: Set(request
             .display_name
             .unwrap_or_else(|| manifest.name.clone())),
-        is_enabled: Set(request.is_enabled),
+        is_enabled: Set(is_enabled),
         engine_key: Set(manifest.id.clone()),
         api_key_status: Set(if encrypted_api_key.is_some() {
             ApiKeyStatus::NotValidated
@@ -267,14 +324,15 @@ pub async fn create_engine(
         whitelist_models: Set(whitelist_models.clone()),
         default_model: Set(default_model),
         default_image_gen_model: Set(request.default_image_gen_model),
-        plugin_config: Set(Some(plugin_config)),
+        plugin_config: Set(plugin_config),
         api_key_validated_at: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
     }
-    .insert(&state.database)
+    .insert(&txn)
     .await
     .map_err(|_| AuthError::DbTimeout)?;
+    txn.commit().await.map_err(|_| AuthError::DbTimeout)?;
 
     state
         .settings

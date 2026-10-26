@@ -18,4 +18,7 @@ CLAUDE.md
 !/tests/share-chat/*.mjs
 !/tests/staging/
 !/tests/staging/*.sh
+!/tests/ai-engines/
+!/tests/ai-engines/*.sh
+!/tests/ai-engines/*.mjs
 /llm-plugin/HANDOFF.md
