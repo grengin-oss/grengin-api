@@ -145,6 +145,15 @@ Detailed logs: `/tmp/grengin-staging-validation-ekV3cZ`,
 
 ## Boundaries and Release Checklist
 
+Clean 0.9.5 release validation subsequently passed 732 workspace tests, the same
+533 HTTP/state assertions, 8 OAuth tests, 8 database tests and 9 publication-gate
+cases. Four MCP-client tests belong to excluded local work, explaining the change
+from the initial 736. Reports: `/tmp/grengin-staging-validation-xtPPD2` and
+`/tmp/grengin-v095-release-validation.log`. This run explicitly selected the
+existing 0.9.4 catalog for debug HTTP fixtures because its package allowlists are
+identical to the prepared 0.9.5 index. Production release builds ignore that debug
+override and require their matching 0.9.5 distribution.
+
 - This is single-instance testing. No Redis/distributed-runtime support is claimed.
 - No paid-provider, production OAuth, deployed Lambda, native mobile SDK or browser
   UI validation was performed. Local provider/token endpoints are controlled fixtures.
