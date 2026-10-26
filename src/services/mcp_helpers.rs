@@ -280,6 +280,9 @@ pub async fn resolve_mcp_oauth_token(
     user_id: Uuid,
     server_id: Uuid,
 ) -> Result<Option<String>, AppError> {
+    // One provider refresh per connection in this single-instance deployment. Waiting callers
+    // re-read the saved tokens instead of redeeming the same rotating refresh token twice.
+    let _refresh_lock = state.mcp_refresh_locks.lock(user_id, server_id).await;
     let connection = mcp_connections::Entity::find()
         .filter(mcp_connections::Column::UserId.eq(user_id))
         .filter(mcp_connections::Column::ServerId.eq(server_id))
@@ -347,9 +350,20 @@ pub async fn resolve_mcp_oauth_token(
         AppError::ServiceTemporarilyUnavailable
     })?;
 
+    let refreshed = retain_refresh_token(refreshed, refresh_token_value.secret());
     let refreshed_access_token = refreshed.access_token.clone();
-    store_oauth_tokens(state, user_id, server_id, &server.name, refreshed).await?;
-    Ok(Some(refreshed_access_token))
+    let saved =
+        store_refreshed_oauth_tokens(&state.database, app_key, &connection, refreshed).await?;
+    Ok(saved.then_some(refreshed_access_token))
+}
+
+fn retain_refresh_token(mut tokens: McpOAuthTokens, previous: &str) -> McpOAuthTokens {
+    // OAuth refresh responses may omit refresh_token when the current one stays valid.
+    // Do not apply this fallback to a fresh authorization, which may be a different account.
+    if tokens.refresh_token.is_none() {
+        tokens.refresh_token = Some(previous.to_string());
+    }
+    tokens
 }
 
 fn open_stored_token(app_key: &[u8; 32], stored: Option<&str>) -> Option<StoredToken> {
@@ -368,32 +382,62 @@ async fn seal_legacy_tokens(
     let sealed_refresh_token = refresh_token
         .map(|token| seal_token(app_key, token.secret()))
         .transpose()?;
-    let mut active: mcp_connections::ActiveModel = connection.into();
-    active.access_token = Set(Some(seal_token(app_key, access_token.secret())?));
-    active.refresh_token = Set(sealed_refresh_token);
-    active.update(&state.database).await.map_err(|e| {
-        eprintln!("mcp connection update error: {e}");
-        AppError::DbTimeout
-    })?;
+    let active = mcp_connections::ActiveModel {
+        access_token: Set(Some(seal_token(app_key, access_token.secret())?)),
+        refresh_token: Set(sealed_refresh_token),
+        ..Default::default()
+    };
+    mcp_connections::Entity::update_many()
+        .set(active)
+        .filter(mcp_connections::Column::Id.eq(connection.id))
+        .filter(mcp_connections::Column::Connected.eq(true))
+        .filter(mcp_connections::Column::UpdatedAt.eq(connection.updated_at))
+        .exec(&state.database)
+        .await
+        .map_err(|e| {
+            eprintln!("mcp connection update error: {e}");
+            AppError::DbTimeout
+        })?;
     Ok(())
 }
 
-pub async fn store_oauth_tokens(
-    state: &SharedState,
-    user_id: Uuid,
-    server_id: Uuid,
-    server_name: &str,
+async fn store_refreshed_oauth_tokens<C: ConnectionTrait>(
+    db: &C,
+    app_key: &[u8; 32],
+    expected: &mcp_connections::Model,
     tokens: McpOAuthTokens,
-) -> Result<(), AppError> {
-    store_oauth_tokens_with(
-        &state.database,
-        &state.settings.auth.app_key,
-        user_id,
-        server_id,
-        server_name,
-        tokens,
-    )
-    .await
+) -> Result<bool, AppError> {
+    let mut active = mcp_connections::ActiveModel {
+        access_token: Set(Some(seal_token(app_key, &tokens.access_token)?)),
+        refresh_token: Set(tokens
+            .refresh_token
+            .as_deref()
+            .map(|token| seal_token(app_key, token))
+            .transpose()?),
+        expires_at: Set(tokens.expires_at),
+        updated_at: Set(Utc::now()),
+        ..Default::default()
+    };
+    if !tokens.scopes.is_empty() {
+        active.scopes = Set(Some(serde_json::json!(tokens.scopes)));
+    }
+    if let Some(token_type) = tokens.token_type {
+        active.token_type = Set(Some(token_type));
+    }
+    // A disconnect or a new authorization while the provider was responding invalidates
+    // this refresh. Never recreate/reconnect that row or return its obsolete access token.
+    let updated = mcp_connections::Entity::update_many()
+        .set(active)
+        .filter(mcp_connections::Column::Id.eq(expected.id))
+        .filter(mcp_connections::Column::Connected.eq(true))
+        .filter(mcp_connections::Column::UpdatedAt.eq(expected.updated_at))
+        .exec(db)
+        .await
+        .map_err(|error| {
+            eprintln!("mcp oauth refresh store failed: {error}");
+            AppError::DbTimeout
+        })?;
+    Ok(updated.rows_affected == 1)
 }
 
 async fn store_oauth_tokens_with<C: ConnectionTrait>(
@@ -861,8 +905,148 @@ async fn delete_oauth_state(state: &SharedState, oauth_state_id: Uuid) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::OAuthCallbackOutcome;
-    use crate::services::mcp_client::McpClientError;
+    use super::{OAuthCallbackOutcome, retain_refresh_token};
+    use crate::services::mcp_client::{McpClientError, McpOAuthTokens};
+
+    #[tokio::test]
+    #[ignore = "requires DB_URL pointing at the isolated grengin_security_test database"]
+    async fn refresh_cannot_undo_disconnect_reauthorization_or_deletion() {
+        use super::*;
+        use sea_orm::{Database, IntoActiveModel};
+        let url = std::env::var("DB_URL").expect("test DB URL");
+        assert_eq!(
+            url::Url::parse(&url).unwrap().path(),
+            "/grengin_security_test"
+        );
+        let db = Database::connect(url).await.unwrap();
+        let txn = db.begin().await.unwrap();
+        let user = users::Entity::find()
+            .one(&txn)
+            .await
+            .unwrap()
+            .expect("fixture user");
+        let server = mcp_servers::Entity::find()
+            .one(&txn)
+            .await
+            .unwrap()
+            .expect("fixture MCP server");
+        mcp_connections::Entity::delete_many()
+            .filter(mcp_connections::Column::UserId.eq(user.id))
+            .filter(mcp_connections::Column::ServerId.eq(server.id))
+            .exec(&txn)
+            .await
+            .unwrap();
+        let key = [7u8; 32];
+        let now = Utc::now();
+        let existing = mcp_connections::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            user_id: Set(user.id),
+            server_id: Set(server.id),
+            server_name: Set(server.name),
+            connected: Set(true),
+            connected_at: Set(Some(now)),
+            expires_at: Set(Some(now)),
+            scopes: Set(Some(serde_json::json!(["existing-scope"]))),
+            token_type: Set(Some("Bearer".into())),
+            access_token: Set(Some(seal_token(&key, "old-access").unwrap())),
+            refresh_token: Set(Some(seal_token(&key, "old-refresh").unwrap())),
+            created_at: Set(now),
+            updated_at: Set(now),
+        }
+        .insert(&txn)
+        .await
+        .unwrap();
+        let mut disconnected = existing.clone().into_active_model();
+        disconnected.connected = Set(false);
+        disconnected.access_token = Set(None);
+        disconnected.refresh_token = Set(None);
+        disconnected.updated_at = Set(now + Duration::seconds(1));
+        let disconnected = disconnected.update(&txn).await.unwrap();
+        assert!(
+            !store_refreshed_oauth_tokens(&txn, &key, &existing, tokens(Some("late")))
+                .await
+                .unwrap()
+        );
+        let row = mcp_connections::Entity::find_by_id(existing.id)
+            .one(&txn)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!row.connected);
+        assert_eq!(row.access_token, None);
+        let mut reauthorized = disconnected.into_active_model();
+        reauthorized.connected = Set(true);
+        reauthorized.updated_at = Set(now + Duration::seconds(2));
+        let reauthorized = reauthorized.update(&txn).await.unwrap();
+        assert!(
+            !store_refreshed_oauth_tokens(&txn, &key, &existing, tokens(Some("late")))
+                .await
+                .unwrap()
+        );
+        let refreshed = retain_refresh_token(tokens(None), "old-refresh");
+        assert!(
+            store_refreshed_oauth_tokens(&txn, &key, &reauthorized, refreshed)
+                .await
+                .unwrap()
+        );
+        let row = mcp_connections::Entity::find_by_id(existing.id)
+            .one(&txn)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            StoredToken::open(&key, row.refresh_token.as_deref().unwrap())
+                .unwrap()
+                .secret(),
+            "old-refresh"
+        );
+        assert_eq!(row.scopes, Some(serde_json::json!(["existing-scope"])));
+        assert_eq!(row.token_type.as_deref(), Some("Bearer"));
+        mcp_connections::Entity::delete_by_id(existing.id)
+            .exec(&txn)
+            .await
+            .unwrap();
+        assert!(
+            !store_refreshed_oauth_tokens(&txn, &key, &row, tokens(Some("late")))
+                .await
+                .unwrap()
+        );
+        assert!(
+            mcp_connections::Entity::find_by_id(existing.id)
+                .one(&txn)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        txn.rollback().await.unwrap();
+    }
+
+    fn tokens(refresh_token: Option<&str>) -> McpOAuthTokens {
+        McpOAuthTokens {
+            access_token: "new-access".into(),
+            refresh_token: refresh_token.map(ToOwned::to_owned),
+            expires_at: None,
+            scopes: Vec::new(),
+            token_type: None,
+        }
+    }
+
+    #[test]
+    fn refresh_without_rotation_retains_the_previous_refresh_token() {
+        let refreshed = retain_refresh_token(tokens(None), "previous-refresh");
+        assert_eq!(refreshed.refresh_token.as_deref(), Some("previous-refresh"));
+        assert_eq!(refreshed.access_token, "new-access");
+    }
+
+    #[test]
+    fn refresh_rotation_replaces_the_previous_refresh_token() {
+        assert_eq!(
+            retain_refresh_token(tokens(Some("rotated")), "previous")
+                .refresh_token
+                .as_deref(),
+            Some("rotated")
+        );
+    }
 
     #[test]
     fn unreachable_token_endpoint_keeps_the_oauth_state_for_a_retry() {

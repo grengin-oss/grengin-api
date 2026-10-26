@@ -76,7 +76,7 @@ impl BinaryUpdateRejection {
             }
             Self::InsecureReleaseUrl => "release_base_url must use https",
             Self::ReleaseOriginNotAllowed => {
-                "release_base_url must be on the configured release origin (GRENGIN_RELEASE_BASE_URL) or the official Grengin release origin"
+                "release_base_url must match GRENGIN_RELEASE_BASE_URL or the official Grengin release base URL"
             }
             Self::ChecksumVerificationRequired => {
                 "Checksum verification cannot be disabled for binary updates"
@@ -95,7 +95,9 @@ pub fn resolve_release_base_url(
     };
     let requested = parse_release_url(requested)?;
     let official = parse_release_url(DEFAULT_RELEASE_BASE_URL)?;
-    if requested.origin() != configured.origin() && requested.origin() != official.origin() {
+    if canonical_release_url(&requested) != canonical_release_url(&configured)
+        && canonical_release_url(&requested) != canonical_release_url(&official)
+    {
         return Err(BinaryUpdateRejection::ReleaseOriginNotAllowed);
     }
     Ok(canonical_release_url(&requested))
@@ -523,10 +525,14 @@ mod tests {
     }
 
     #[test]
-    fn release_url_on_the_configured_origin_is_accepted() {
+    fn release_url_must_match_the_configured_path_too() {
         assert_eq!(
             resolve_release_base_url(Some("https://mirror.example.com/other/"), MIRROR),
-            Ok("https://mirror.example.com/other".to_string())
+            Err(BinaryUpdateRejection::ReleaseOriginNotAllowed)
+        );
+        assert_eq!(
+            resolve_release_base_url(Some(MIRROR), MIRROR),
+            Ok(MIRROR.to_string())
         );
     }
 
@@ -595,13 +601,20 @@ mod tests {
     }
 
     #[test]
-    fn release_url_reaches_the_script_in_canonical_form() {
+    fn same_origin_does_not_allow_selecting_another_release_path() {
         assert_eq!(
             resolve_release_base_url(
                 Some(r"HTTPS://Releases.Grengin.IO\@evil.com"),
                 DEFAULT_RELEASE_BASE_URL
             ),
-            Ok("https://releases.grengin.io/@evil.com".to_string())
+            Err(BinaryUpdateRejection::ReleaseOriginNotAllowed)
+        );
+        assert_eq!(
+            resolve_release_base_url(
+                Some("https://releases.grengin.io/github.com"),
+                DEFAULT_RELEASE_BASE_URL
+            ),
+            Err(BinaryUpdateRejection::ReleaseOriginNotAllowed)
         );
     }
 

@@ -119,14 +119,9 @@ pub async fn delete_artifact(
     Path(id): Path<Uuid>,
     State(app_state): State<SharedState>,
 ) -> Result<StatusCode, AppError> {
-    delete_artifact_owned(
-        &app_state.database,
-        &app_state.settings.file_storage_root,
-        id,
-        claims.user_id,
-    )
-    .await?
-    .ok_or(AppError::DbNotFound)?;
+    delete_artifact_owned(&app_state.database, id, claims.user_id)
+        .await?
+        .ok_or(AppError::DbNotFound)?;
 
     Ok(StatusCode::NO_CONTENT)
 }

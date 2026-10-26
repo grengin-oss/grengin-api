@@ -10,7 +10,7 @@ use chrono::Utc;
 use openssl::sha::sha256;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseBackend,
-    DatabaseConnection, DbErr, EntityTrait, QueryFilter, Statement, TransactionTrait,
+    DatabaseConnection, DbErr, EntityTrait, QueryFilter, Statement, TransactionTrait, TryIntoModel,
 };
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
@@ -223,6 +223,26 @@ where
     C: ConnectionTrait,
 {
     store_file_bytes_with(root, user_id, input, None, |active| active.insert(db)).await
+}
+
+// Staging lets callers finish slow disk I/O before acquiring a database transaction.
+pub async fn stage_file_bytes(
+    root: &Path,
+    user_id: Uuid,
+    input: FileWrite<'_>,
+) -> Result<files::Model, AppError> {
+    store_file_bytes_with(root, user_id, input, None, |active| async move {
+        active.try_into_model()
+    })
+    .await
+}
+
+pub async fn file_is_available(root: &Path, model: &files::Model) -> Result<bool, AppError> {
+    match contained_stored_path(root, model).await {
+        Ok(_) => Ok(true),
+        Err(AppError::ResourceNotFound) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 async fn store_file_bytes_with<F, Fut>(
@@ -441,6 +461,37 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tokio::fs;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn staged_files_need_no_database_and_missing_bytes_are_distinct_from_root_failure() {
+        let root = std::env::temp_dir().join(format!("grengin-stage-test-{}", Uuid::new_v4()));
+        prepare_storage_root(&root).await.unwrap();
+        let file = super::stage_file_bytes(
+            &root,
+            Uuid::new_v4(),
+            FileWrite {
+                id: Uuid::new_v4(),
+                category: StorageCategory::File,
+                name: "staged.txt",
+                content_type: "text/plain",
+                bytes: b"staged bytes",
+                content_sha256: None,
+                description: None,
+                metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(super::file_is_available(&root, &file).await.unwrap());
+        assert_eq!(
+            read_model_bytes(&root, &file).await.unwrap(),
+            b"staged bytes"
+        );
+        fs::remove_file(&file.local_path).await.unwrap();
+        assert!(!super::file_is_available(&root, &file).await.unwrap());
+        fs::remove_dir_all(&root).await.unwrap();
+        assert!(super::file_is_available(&root, &file).await.is_err());
+    }
 
     #[test]
     fn accepts_leaf_names_only() {

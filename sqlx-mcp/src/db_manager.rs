@@ -13,9 +13,13 @@ use sqlx::{
 use std::time::Duration;
 
 const READ_ONLY_BEGIN: &str = "BEGIN READ ONLY";
+// Scoped to the transaction (is_local = true), so it ends with the rollback.
+const STATEMENT_TIMEOUT_SQL: &str = "SELECT set_config('statement_timeout', $1, true)";
+const SESSION_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub struct DatabaseManager {
     pool: PgPool,
+    statement_timeout: Duration,
     read_only: bool,
 }
 
@@ -24,6 +28,7 @@ impl DatabaseManager {
         url: &str,
         max_connections: u32,
         timeout_seconds: u64,
+        statement_timeout_seconds: u64,
         read_only: bool,
     ) -> Result<Self> {
         if !is_postgres_url(url) {
@@ -35,10 +40,30 @@ impl DatabaseManager {
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
             .acquire_timeout(Duration::from_secs(timeout_seconds))
+            .after_release(|connection, _| {
+                Box::pin(async move {
+                    // This also runs after cancellation. Returning an error makes SQLx hard-close
+                    // the session rather than reuse it with locks that rollback cannot release.
+                    tokio::time::timeout(
+                        SESSION_CLEANUP_TIMEOUT,
+                        sqlx::query("SELECT pg_catalog.pg_advisory_unlock_all()")
+                            .execute(connection),
+                    )
+                    .await
+                    .map_err(|_| {
+                        sqlx::Error::Protocol("session advisory-lock cleanup timed out".to_string())
+                    })??;
+                    Ok(true)
+                })
+            })
             .connect_lazy(url)
             .context("failed to configure postgres pool")?;
 
-        Ok(Self { pool, read_only })
+        Ok(Self {
+            pool,
+            statement_timeout: Duration::from_secs(statement_timeout_seconds),
+            read_only,
+        })
     }
 
     pub async fn execute_query(&self, sql: &str, params: Vec<Value>) -> Result<Value> {
@@ -207,6 +232,12 @@ ORDER BY c.table_schema, c.table_name, c.ordinal_position";
             .begin_with(READ_ONLY_BEGIN)
             .await
             .context("failed to start read-only transaction")?;
+        // One slow query must not hold a pooled connection indefinitely.
+        sqlx::query(STATEMENT_TIMEOUT_SQL)
+            .bind(statement_timeout_setting(self.statement_timeout))
+            .execute(&mut *transaction)
+            .await
+            .context("failed to set the query time limit")?;
         let result = query_with(sql, arguments)
             .fetch_all(&mut *transaction)
             .await;
@@ -247,6 +278,10 @@ fn wrap_as_json_rows(sql: &str) -> String {
     format!(
         "SELECT COALESCE(json_agg(to_jsonb(_sqlx_mcp_row)), '[]'::json) AS rows FROM ({body}\n) AS _sqlx_mcp_row"
     )
+}
+
+fn statement_timeout_setting(limit: Duration) -> String {
+    format!("{}ms", limit.as_millis())
 }
 
 fn row_to_json(row: &PgRow) -> Value {
@@ -356,8 +391,178 @@ fn looks_like_non_postgres_table_listing_query(sql: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{DatabaseManager, QueryRoute, READ_ONLY_BEGIN, wrap_as_json_rows};
+    use super::{
+        DatabaseManager, QueryRoute, READ_ONLY_BEGIN, STATEMENT_TIMEOUT_SQL,
+        statement_timeout_setting, wrap_as_json_rows,
+    };
     use serde_json::json;
+    use sqlx::{Connection, PgConnection};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    async fn session_lock_test_context(
+        statement_timeout_seconds: u64,
+    ) -> (Arc<DatabaseManager>, PgConnection, i64) {
+        let db_url =
+            std::env::var("DB_URL").expect("DB_URL must point at an isolated test database");
+        let manager = Arc::new(
+            DatabaseManager::new(&db_url, 1, 10, statement_timeout_seconds, true)
+                .expect("manager init should pass"),
+        );
+        let mut observer = PgConnection::connect(&db_url)
+            .await
+            .expect("observer connection should succeed");
+        let observer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut observer)
+            .await
+            .expect("observer PID");
+        // Concurrent tests use distinct live observer PIDs, so their advisory keys cannot clash.
+        let key = i64::from(observer_pid) << 32;
+        (manager, observer, key)
+    }
+
+    async fn try_session_lock(observer: &mut PgConnection, key: i64) -> bool {
+        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+            .bind(key)
+            .fetch_one(&mut *observer)
+            .await
+            .expect("probe session lock");
+        if acquired {
+            let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+                .bind(key)
+                .fetch_one(observer)
+                .await
+                .expect("release observer lock");
+            assert!(unlocked);
+        }
+        acquired
+    }
+
+    async fn wait_for_session_lock(observer: &mut PgConnection, key: i64, released: bool) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if try_session_lock(observer, key).await == released {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("session lock did not reach the expected state");
+    }
+
+    async fn assert_manager_usable(manager: &DatabaseManager) {
+        let rows = manager
+            .execute_query("SELECT 1 AS ok", vec![])
+            .await
+            .expect("pool must remain usable after session cleanup");
+        assert_eq!(rows, json!([{ "ok": 1 }]));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DB_URL pointing at an isolated PostgreSQL test database"]
+    async fn successful_queries_release_reentrant_and_shared_session_locks() {
+        let (manager, mut observer, key) = session_lock_test_context(30).await;
+        manager
+            .execute_query(
+                "SELECT pg_advisory_lock($1) IS NULL AS first_lock, \
+                 pg_advisory_lock($1) IS NULL AS second_lock, \
+                 pg_advisory_lock_shared($2) IS NULL AS shared_lock",
+                vec![json!(key), json!(key + 1)],
+            )
+            .await
+            .expect("session lock query succeeds");
+
+        wait_for_session_lock(&mut observer, key, true).await;
+        wait_for_session_lock(&mut observer, key + 1, true).await;
+        assert_manager_usable(&manager).await;
+        manager.pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DB_URL pointing at an isolated PostgreSQL test database"]
+    async fn failed_queries_release_session_locks() {
+        let (manager, mut observer, key) = session_lock_test_context(30).await;
+        let error = manager
+            .execute_query(
+                "SELECT (pg_advisory_lock($1) IS NULL)::int / 0 AS broken",
+                vec![json!(key)],
+            )
+            .await
+            .expect_err("query fails after acquiring its session lock");
+        assert!(format!("{error:#}").contains("division by zero"));
+
+        wait_for_session_lock(&mut observer, key, true).await;
+        assert_manager_usable(&manager).await;
+        manager.pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DB_URL pointing at an isolated PostgreSQL test database"]
+    async fn timed_out_queries_release_session_locks() {
+        let (manager, mut observer, key) = session_lock_test_context(1).await;
+        let error = manager
+            .execute_query(
+                "SELECT pg_sleep(3 + (pg_advisory_lock($1) IS NULL)::int) IS NULL AS slept",
+                vec![json!(key)],
+            )
+            .await
+            .expect_err("query times out after acquiring its session lock");
+        assert!(format!("{error:#}").contains("statement timeout"));
+
+        wait_for_session_lock(&mut observer, key, true).await;
+        assert_manager_usable(&manager).await;
+        manager.pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DB_URL pointing at an isolated PostgreSQL test database"]
+    async fn aborted_query_futures_release_session_locks_and_replace_unclean_connections() {
+        let (manager, mut observer, key) = session_lock_test_context(0).await;
+        let original_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&manager.pool)
+            .await
+            .expect("original pooled backend PID");
+        let query_manager = Arc::clone(&manager);
+        let query = tokio::spawn(async move {
+            query_manager
+                .execute_query(
+                    "SELECT pg_sleep(3 + (pg_advisory_lock($1) IS NULL)::int) IS NULL AS slept",
+                    vec![json!(key)],
+                )
+                .await
+        });
+
+        wait_for_session_lock(&mut observer, key, false).await;
+        query.abort();
+        assert!(
+            query
+                .await
+                .expect_err("query task was aborted")
+                .is_cancelled()
+        );
+
+        let replacement_pid: i32 = tokio::time::timeout(
+            Duration::from_secs(5),
+            sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&manager.pool),
+        )
+        .await
+        .expect("session cleanup must not hold the pool indefinitely")
+        .expect("replacement pooled backend PID");
+        assert_ne!(original_pid, replacement_pid);
+        wait_for_session_lock(&mut observer, key, true).await;
+        assert_manager_usable(&manager).await;
+        manager.pool.close().await;
+    }
+
+    #[test]
+    fn the_time_limit_is_scoped_to_the_query_transaction() {
+        assert!(STATEMENT_TIMEOUT_SQL.contains("set_config('statement_timeout', $1, true)"));
+        assert_eq!(
+            statement_timeout_setting(Duration::from_secs(30)),
+            "30000ms"
+        );
+    }
 
     #[test]
     fn every_query_runs_in_a_read_only_transaction() {
@@ -386,9 +591,33 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires DB_URL to point at a reachable PostgreSQL instance"]
+    async fn a_query_running_past_the_time_limit_is_cancelled() {
+        let db_url = std::env::var("DB_URL").expect("DB_URL env var must be set");
+        let manager =
+            DatabaseManager::new(&db_url, 1, 10, 1, true).expect("manager init should pass");
+
+        let slow = manager
+            .execute_query("SELECT pg_sleep(3) IS NULL AS slept", vec![])
+            .await
+            .expect_err("a 3 second query must not finish under a 1 second limit");
+        assert!(
+            format!("{slow:#}").contains("statement timeout"),
+            "{slow:#}"
+        );
+
+        let rows = manager
+            .execute_query("SELECT 1 AS ok", vec![])
+            .await
+            .expect("the connection stays usable after a cancelled query");
+        assert_eq!(rows, json!([{ "ok": 1 }]));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DB_URL to point at a reachable PostgreSQL instance"]
     async fn smoke_executes_read_only_query_when_db_url_present() {
         let db_url = std::env::var("DB_URL").expect("DB_URL env var must be set");
-        let manager = DatabaseManager::new(&db_url, 1, 10, true).expect("manager init should pass");
+        let manager =
+            DatabaseManager::new(&db_url, 1, 10, 30, true).expect("manager init should pass");
 
         manager
             .test_connection()

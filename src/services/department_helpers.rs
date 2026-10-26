@@ -4,7 +4,9 @@
 use crate::{
     auth::{
         error::AuthError,
-        permissions::{PERMISSION_ROLES_ASSIGN, ROLE_DEPARTMENT_ADMIN},
+        permissions::{
+            PERMISSION_DEPARTMENTS_MANAGE, PERMISSION_ROLES_ASSIGN, ROLE_DEPARTMENT_ADMIN,
+        },
     },
     dto::admin_department::{DepartmentModelKey, RoleAssignmentPayload},
     models::{
@@ -13,11 +15,14 @@ use crate::{
         roles, user_role_assignments, users,
     },
     services::{
-        auth_audit::{build_audit_payload, record_auth_event},
+        auth_audit::record_required_auth_event,
         authorization::{AuthorizationService, PermissionScopeMode, is_path_within_scope},
         budget_allocation::{period_bounds, sum_child_allocations, sum_department_cost_in_range},
         permission_grants::{DepartmentScope, PermissionGrants, load_department_path},
-        role_assignment::{ensure_role_assignment_allowed, load_role_permission_keys},
+        role_assignment::{
+            ensure_role_assignment_allowed, ensure_role_assignment_allowed_at,
+            load_role_permission_keys,
+        },
     },
     utils::ltree::ltree_label_from_uuid,
 };
@@ -27,8 +32,8 @@ use rust_decimal::Decimal;
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::Set,
-    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect,
-    TransactionTrait,
+    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, QueryFilter,
+    QuerySelect, Statement, TransactionTrait,
     sea_query::Expr,
     sqlx::postgres::types::{PgLTree, PgLTreeLabel},
 };
@@ -145,12 +150,52 @@ async fn lock_department_node<C: ConnectionTrait>(
     .ok_or(AuthError::DbNotFound)
 }
 
+// Updates of one department queue on this lock, so each plans from what the previous one
+// committed rather than from a snapshot taken before it.
+pub async fn lock_department<C: ConnectionTrait>(
+    conn: &C,
+    department_id: Uuid,
+) -> Result<(), AuthError> {
+    lock_department_hierarchy(conn).await?;
+    lock_department_node(conn, department_id).await.map(|_| ())
+}
+
+pub async fn lock_department_hierarchy<C: ConnectionTrait>(conn: &C) -> Result<(), AuthError> {
+    // A queued request holds a pooled connection while it waits, so the wait is bounded rather
+    // than letting a pile-up starve the request that holds the lock.
+    conn.execute(Statement::from_string(
+        DatabaseBackend::Postgres,
+        DEPARTMENT_LOCK_TIMEOUT_SQL,
+    ))
+    .await
+    .map_err(|e| {
+        eprintln!("department lock timeout setting error: {e}");
+        AuthError::DbTimeout
+    })?;
+    // SeaORM cannot express advisory locks. Serialize hierarchy mutations before reading paths;
+    // row locks alone miss children inserted while an ancestor is being moved.
+    conn.execute(Statement::from_string(
+        DatabaseBackend::Postgres,
+        "SELECT pg_advisory_xact_lock(1769084371, 1)",
+    ))
+    .await
+    .map_err(|e| {
+        eprintln!("department hierarchy lock error: {e}");
+        AuthError::DbTimeout
+    })?;
+    Ok(())
+}
+
+// SeaORM has no typed API for transaction-scoped settings.
+const DEPARTMENT_LOCK_TIMEOUT_SQL: &str = "SELECT set_config('lock_timeout', '5s', true)";
+
 pub async fn reparent_department<C: ConnectionTrait>(
     conn: &C,
     department_id: Uuid,
     new_parent_id: Option<Uuid>,
     updated_at: DateTime<Utc>,
 ) -> Result<(), AuthError> {
+    lock_department_hierarchy(conn).await?;
     let department = lock_department_node(conn, department_id).await?;
     let new_parent = match new_parent_id {
         Some(parent_id) => Some(lock_department_node(conn, parent_id).await?),
@@ -199,11 +244,44 @@ pub async fn reparent_department<C: ConnectionTrait>(
 pub async fn delete_department_with_scoped_assignments(
     db: &DatabaseConnection,
     department_id: Uuid,
+    actor_id: Uuid,
 ) -> Result<(), AuthError> {
     let txn = db.begin().await.map_err(|e| {
         eprintln!("department delete transaction error: {e}");
         AuthError::DbTimeout
     })?;
+    lock_department(&txn, department_id).await?;
+    AuthorizationService::new(db)
+        .ensure_permission(
+            actor_id,
+            PERMISSION_DEPARTMENTS_MANAGE,
+            Some(department_id),
+            PermissionScopeMode::RequireOrgWide,
+            Some(department_id),
+        )
+        .await?;
+    let assignments = user_role_assignments::Entity::find()
+        .filter(user_role_assignments::Column::ScopeDepartmentId.eq(department_id))
+        .all(&txn)
+        .await
+        .map_err(|e| {
+            eprintln!("department grants lookup error: {e}");
+            AuthError::DbTimeout
+        })?;
+    for assignment in assignments {
+        record_required_auth_event(
+            &txn,
+            "auth.role_unassigned",
+            Some(actor_id),
+            RoleAssignmentPayload {
+                assignment_id: assignment.id,
+                user_id: assignment.user_id,
+                role_id: assignment.role_id,
+                scope_department_id: assignment.scope_department_id,
+            },
+        )
+        .await?;
+    }
     user_role_assignments::Entity::delete_many()
         .filter(user_role_assignments::Column::ScopeDepartmentId.eq(department_id))
         .exec(&txn)
@@ -228,13 +306,118 @@ pub async fn delete_department_with_scoped_assignments(
     })
 }
 
-pub async fn sync_department_admin_assignments(
+// PUT checks the new parent's budget before moving anything, so a move under the department
+// itself or one of its descendants is refused here first and answers 409, as /move does.
+pub async fn ensure_parent_outside_subtree(
+    db: &DatabaseConnection,
+    department_id: Uuid,
+    new_parent_id: Option<Uuid>,
+) -> Result<(), AuthError> {
+    let department_path = load_department_path(db, Some(department_id)).await?;
+    let parent_path = load_department_path(db, new_parent_id).await?;
+    match (department_path, parent_path) {
+        (Some(department), Some(parent)) if is_path_within_scope(&department, &parent) => {
+            Err(ReparentError::Cycle.into())
+        }
+        _ => Ok(()),
+    }
+}
+
+// For a department being created: it isn't visible to other connections until the creating
+// transaction commits, so the checks run against its path instead of reading it back by id.
+// The creator's automatic grant is planned here too, so it lands in the same transaction.
+pub async fn plan_new_department_admins(
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    department_id: Uuid,
+    department_path: &str,
+    department_admin_ids: &[Uuid],
+    assign_creator: bool,
+) -> Result<DepartmentAdminChanges, AuthError> {
+    let role = department_admin_role(db).await?;
+    let desired_ids: HashSet<Uuid> = department_admin_ids.iter().copied().collect();
+    ensure_users_exist(db, &desired_ids).await?;
+    let mut to_add: Vec<Uuid> = desired_ids.into_iter().collect();
+    ensure_role_assignment_allowed_at(
+        db,
+        actor_id,
+        &role,
+        Some(department_id),
+        Some(department_path),
+        &to_add,
+    )
+    .await?;
+    if assign_creator && !to_add.contains(&actor_id) {
+        let grants = PermissionGrants::load(db, actor_id).await?;
+        let role_permissions = load_role_permission_keys(db, role.id).await?;
+        if creator_may_receive_department_admin(
+            &grants,
+            &role_permissions,
+            DepartmentScope::Department(department_path),
+        ) {
+            to_add.push(actor_id);
+        }
+    }
+    Ok(DepartmentAdminChanges {
+        role_id: role.id,
+        department_id,
+        to_add,
+        to_remove: Vec::new(),
+    })
+}
+
+async fn department_admin_role(db: &DatabaseConnection) -> Result<roles::Model, AuthError> {
+    roles::Entity::find()
+        .filter(roles::Column::Name.eq(ROLE_DEPARTMENT_ADMIN))
+        .one(db)
+        .await
+        .map_err(|e| {
+            eprintln!("role lookup error: {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)
+}
+
+async fn ensure_users_exist(
+    db: &DatabaseConnection,
+    user_ids: &HashSet<Uuid>,
+) -> Result<(), AuthError> {
+    if user_ids.is_empty() {
+        return Ok(());
+    }
+    let existing_users = users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::Id.is_in(user_ids.iter().copied()))
+        .into_tuple::<Uuid>()
+        .all(db)
+        .await
+        .map_err(|e| {
+            eprintln!("user lookup error: {e}");
+            AuthError::DbTimeout
+        })?;
+    if existing_users.len() != user_ids.len() {
+        return Err(AuthError::ResourceNotFound);
+    }
+    Ok(())
+}
+
+pub struct DepartmentAdminChanges {
+    role_id: Uuid,
+    department_id: Uuid,
+    to_add: Vec<Uuid>,
+    to_remove: Vec<user_role_assignments::Model>,
+}
+
+// Runs every check and works out the changes without writing, so a caller can refuse the
+// request before committing its other updates.
+pub async fn plan_department_admin_sync(
     authz: &AuthorizationService<'_>,
     db: &DatabaseConnection,
     actor_id: Uuid,
     department_id: Uuid,
     department_admin_ids: &[Uuid],
-) -> Result<(), AuthError> {
+) -> Result<DepartmentAdminChanges, AuthError> {
     authz
         .ensure_permission(
             actor_id,
@@ -245,35 +428,9 @@ pub async fn sync_department_admin_assignments(
         )
         .await?;
 
-    let role = roles::Entity::find()
-        .filter(roles::Column::Name.eq(ROLE_DEPARTMENT_ADMIN))
-        .one(db)
-        .await
-        .map_err(|e| {
-            eprintln!("role lookup error: {e}");
-            AuthError::DbTimeout
-        })?
-        .ok_or(AuthError::ResourceNotFound)?;
-
+    let role = department_admin_role(db).await?;
     let desired_ids: HashSet<Uuid> = department_admin_ids.iter().copied().collect();
-
-    if !desired_ids.is_empty() {
-        let existing_users = users::Entity::find()
-            .select_only()
-            .column(users::Column::Id)
-            .filter(users::Column::Id.is_in(desired_ids.iter().copied()))
-            .into_tuple::<Uuid>()
-            .all(db)
-            .await
-            .map_err(|e| {
-                eprintln!("user lookup error: {e}");
-                AuthError::DbTimeout
-            })?;
-
-        if existing_users.len() != desired_ids.len() {
-            return Err(AuthError::ResourceNotFound);
-        }
-    }
+    ensure_users_exist(db, &desired_ids).await?;
 
     let existing_assignments = user_role_assignments::Entity::find()
         .filter(user_role_assignments::Column::RoleId.eq(role.id))
@@ -304,75 +461,121 @@ pub async fn sync_department_admin_assignments(
     ensure_role_assignment_allowed(db, actor_id, &role, Some(department_id), &changed_users)
         .await?;
 
-    let now = Utc::now();
-    let mut affected_users: HashSet<Uuid> = HashSet::new();
+    Ok(DepartmentAdminChanges {
+        role_id: role.id,
+        department_id,
+        to_add,
+        to_remove,
+    })
+}
 
-    for user_id in to_add {
-        let assignment_id = Uuid::new_v4();
-        let assignment = user_role_assignments::ActiveModel {
-            id: Set(assignment_id),
-            user_id: Set(user_id),
-            role_id: Set(role.id),
-            scope_department_id: Set(Some(department_id)),
-            assigned_by: Set(actor_id),
-            created_at: Set(now),
-            updated_at: Set(now),
-        };
+impl DepartmentAdminChanges {
+    // Writes inside the caller's transaction, so the grants change together with whatever else
+    // that transaction holds, or not at all.
+    pub async fn write<C: ConnectionTrait>(
+        self,
+        conn: &C,
+        actor_id: Uuid,
+    ) -> Result<WrittenAdminChanges, AuthError> {
+        let Self {
+            role_id,
+            department_id,
+            to_add,
+            to_remove,
+        } = self;
+        let now = Utc::now();
+        let mut written = WrittenAdminChanges::default();
 
-        assignment.insert(db).await.map_err(|e| {
-            let s = e.to_string();
-            if s.contains("duplicate key value violates unique constraint") {
-                AuthError::DbConflict
-            } else {
-                eprintln!("role assignment insert error: {e}");
-                AuthError::DbTimeout
-            }
-        })?;
+        for user_id in to_add {
+            let assignment_id = Uuid::new_v4();
+            let assignment = user_role_assignments::ActiveModel {
+                id: Set(assignment_id),
+                user_id: Set(user_id),
+                role_id: Set(role_id),
+                scope_department_id: Set(Some(department_id)),
+                assigned_by: Set(actor_id),
+                created_at: Set(now),
+                updated_at: Set(now),
+            };
 
-        if let Some(payload) = build_audit_payload(RoleAssignmentPayload {
-            assignment_id,
-            user_id,
-            role_id: role.id,
-            scope_department_id: Some(department_id),
-        }) {
-            let _ = record_auth_event(db, "auth.role_assigned", Some(actor_id), payload).await;
-        }
-
-        affected_users.insert(user_id);
-    }
-
-    for assignment in to_remove {
-        let assignment_id = assignment.id;
-        let user_id = assignment.user_id;
-
-        user_role_assignments::Entity::delete_by_id(assignment_id)
-            .exec(db)
-            .await
-            .map_err(|e| {
-                eprintln!("role assignment delete error: {e}");
-                AuthError::DbTimeout
+            assignment.insert(conn).await.map_err(|e| {
+                let s = e.to_string();
+                if s.contains("duplicate key value violates unique constraint") {
+                    AuthError::DbConflict
+                } else {
+                    eprintln!("role assignment insert error: {e}");
+                    AuthError::DbTimeout
+                }
             })?;
-
-        if let Some(payload) = build_audit_payload(RoleAssignmentPayload {
-            assignment_id,
-            user_id,
-            role_id: role.id,
-            scope_department_id: Some(department_id),
-        }) {
-            let _ = record_auth_event(db, "auth.role_unassigned", Some(actor_id), payload).await;
+            written
+                .record(
+                    conn,
+                    actor_id,
+                    "auth.role_assigned",
+                    RoleAssignmentPayload {
+                        assignment_id,
+                        user_id,
+                        role_id,
+                        scope_department_id: Some(department_id),
+                    },
+                )
+                .await?;
         }
 
-        affected_users.insert(user_id);
+        for assignment in to_remove {
+            user_role_assignments::Entity::delete_by_id(assignment.id)
+                .exec(conn)
+                .await
+                .map_err(|e| {
+                    eprintln!("role assignment delete error: {e}");
+                    AuthError::DbTimeout
+                })?;
+            written
+                .record(
+                    conn,
+                    actor_id,
+                    "auth.role_unassigned",
+                    RoleAssignmentPayload {
+                        assignment_id: assignment.id,
+                        user_id: assignment.user_id,
+                        role_id,
+                        scope_department_id: Some(department_id),
+                    },
+                )
+                .await?;
+        }
+
+        Ok(written)
+    }
+}
+
+// The audit events are written in the same transaction as the grants, so a grant never commits
+// without its event; the cached permissions are refreshed once it has committed.
+#[derive(Default)]
+pub struct WrittenAdminChanges {
+    affected_users: HashSet<Uuid>,
+}
+
+impl WrittenAdminChanges {
+    async fn record<C: ConnectionTrait>(
+        &mut self,
+        conn: &C,
+        actor_id: Uuid,
+        event: &str,
+        payload: RoleAssignmentPayload,
+    ) -> Result<(), AuthError> {
+        self.affected_users.insert(payload.user_id);
+        record_required_auth_event(conn, event, Some(actor_id), payload).await
     }
 
-    if !affected_users.is_empty() {
-        let affected: Vec<Uuid> = affected_users.into_iter().collect();
-        let _ = authz
-            .recompute_effective_permissions_for_users(&affected)
-            .await;
+    pub async fn finish(self, authz: &AuthorizationService<'_>) {
+        if !self.affected_users.is_empty() {
+            let affected: Vec<Uuid> = self.affected_users.into_iter().collect();
+            let _ = authz
+                .recompute_effective_permissions_for_users(&affected)
+                .await;
+        }
     }
-
-    Ok(())
 }
 
 pub fn creator_may_receive_department_admin(
@@ -383,82 +586,8 @@ pub fn creator_may_receive_department_admin(
     creator.is_super_admin() || creator.missing(role_permissions, department).is_empty()
 }
 
-pub async fn ensure_department_admin_assignment(
-    authz: &AuthorizationService<'_>,
-    db: &DatabaseConnection,
-    actor_id: Uuid,
-    user_id: Uuid,
-    department_id: Uuid,
-) -> Result<(), AuthError> {
-    let role = roles::Entity::find()
-        .filter(roles::Column::Name.eq(ROLE_DEPARTMENT_ADMIN))
-        .one(db)
-        .await
-        .map_err(|e| {
-            eprintln!("role lookup error: {e}");
-            AuthError::DbTimeout
-        })?
-        .ok_or(AuthError::ResourceNotFound)?;
-
-    let exists = user_role_assignments::Entity::find()
-        .filter(user_role_assignments::Column::UserId.eq(user_id))
-        .filter(user_role_assignments::Column::RoleId.eq(role.id))
-        .filter(user_role_assignments::Column::ScopeDepartmentId.eq(department_id))
-        .one(db)
-        .await
-        .map_err(|e| {
-            eprintln!("role assignment lookup error: {e}");
-            AuthError::DbTimeout
-        })?
-        .is_some();
-    if exists {
-        return Ok(());
-    }
-
-    let grants = PermissionGrants::load(db, user_id).await?;
-    let role_permissions = load_role_permission_keys(db, role.id).await?;
-    let department_path = load_department_path(db, Some(department_id)).await?;
-    if !creator_may_receive_department_admin(
-        &grants,
-        &role_permissions,
-        DepartmentScope::from_path(department_path.as_deref()),
-    ) {
-        return Ok(());
-    }
-
-    let assignment_id = Uuid::new_v4();
-    let now = Utc::now();
-    user_role_assignments::ActiveModel {
-        id: Set(assignment_id),
-        user_id: Set(user_id),
-        role_id: Set(role.id),
-        scope_department_id: Set(Some(department_id)),
-        assigned_by: Set(actor_id),
-        created_at: Set(now),
-        updated_at: Set(now),
-    }
-    .insert(db)
-    .await
-    .map_err(|e| {
-        eprintln!("creator role assignment insert error: {e}");
-        AuthError::DbTimeout
-    })?;
-
-    if let Some(payload) = build_audit_payload(RoleAssignmentPayload {
-        assignment_id,
-        user_id,
-        role_id: role.id,
-        scope_department_id: Some(department_id),
-    }) {
-        let _ = record_auth_event(db, "auth.role_assigned", Some(actor_id), payload).await;
-    }
-
-    authz.recompute_effective_permissions(user_id).await?;
-    Ok(())
-}
-
-pub async fn sync_department_allowed_models(
-    db: &DatabaseConnection,
+pub async fn sync_department_allowed_models<C: ConnectionTrait>(
+    db: &C,
     department_id: Uuid,
     models: Option<&[DepartmentModelKey]>,
 ) -> Result<(), AuthError> {

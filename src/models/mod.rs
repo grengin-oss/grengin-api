@@ -7,6 +7,8 @@ pub mod artifacts;
 pub mod audit_logs;
 pub mod auth_audit_events;
 pub mod branding;
+pub mod chat_share_departments;
+pub mod chat_shares;
 pub mod conversation_projects;
 pub mod conversation_skills;
 pub mod conversation_summaries;

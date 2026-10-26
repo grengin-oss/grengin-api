@@ -77,6 +77,7 @@ mod m20261008_000001_add_sha256_to_files;
 mod m20261013_000001_add_edit_ordering_to_conversations;
 mod m20261014_000001_add_message_branches;
 mod m20261015_000001_disable_seeded_system_prompts;
+mod m20261019_000001_create_chat_shares;
 
 pub struct Migrator;
 
@@ -178,6 +179,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261013_000001_add_edit_ordering_to_conversations::Migration),
             Box::new(m20261014_000001_add_message_branches::Migration),
             Box::new(m20261015_000001_disable_seeded_system_prompts::Migration),
+            Box::new(m20261019_000001_create_chat_shares::Migration),
         ]
     }
 }

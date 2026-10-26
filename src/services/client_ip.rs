@@ -60,17 +60,13 @@ pub struct TrustedProxies {
 }
 
 impl TrustedProxies {
-    fn private_networks() -> Self {
-        let private_networks = [
+    fn loopback() -> Self {
+        let networks = [
             (IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)), 8),
-            (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)), 8),
-            (IpAddr::V4(Ipv4Addr::new(172, 16, 0, 0)), 12),
-            (IpAddr::V4(Ipv4Addr::new(192, 168, 0, 0)), 16),
             (IpAddr::V6(Ipv6Addr::LOCALHOST), 128),
-            (IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0)), 7),
         ];
         Self {
-            ranges: private_networks
+            ranges: networks
                 .into_iter()
                 .map(|(network, prefix_len)| IpRange {
                     network,
@@ -83,7 +79,7 @@ impl TrustedProxies {
     pub fn from_setting(raw: Option<&str>) -> Option<Self> {
         let raw = raw.map(str::trim).unwrap_or_default();
         if raw.is_empty() {
-            return Some(Self::private_networks());
+            return Some(Self::loopback());
         }
         if raw.eq_ignore_ascii_case("none") {
             return Some(Self { ranges: Vec::new() });
@@ -174,6 +170,13 @@ mod tests {
         TrustedProxies::from_setting(None).expect("default trusted proxies")
     }
 
+    fn configured_private_proxies() -> TrustedProxies {
+        TrustedProxies::from_setting(Some(
+            "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1",
+        ))
+        .unwrap()
+    }
+
     #[test]
     fn direct_public_peer_ignores_spoofed_forwarded_for() {
         let spoofed = headers(&[("x-forwarded-for", "1.2.3.4"), ("x-real-ip", "5.6.7.8")]);
@@ -193,10 +196,14 @@ mod tests {
     }
 
     #[test]
-    fn private_network_load_balancer_forwards_the_real_client_ip() {
+    fn private_network_load_balancer_requires_explicit_trust() {
         let forwarded = headers(&[("x-forwarded-for", "198.51.100.7")]);
         assert_eq!(
             defaults().client_ip(Some(ip("10.0.3.17")), &forwarded),
+            Some(ip("10.0.3.17"))
+        );
+        assert_eq!(
+            configured_private_proxies().client_ip(Some(ip("10.0.3.17")), &forwarded),
             Some(ip("198.51.100.7"))
         );
     }
@@ -217,7 +224,7 @@ mod tests {
             ("x-forwarded-for", "172.20.0.2"),
         ]);
         assert_eq!(
-            defaults().client_ip(Some(ip("127.0.0.1")), &forwarded),
+            configured_private_proxies().client_ip(Some(ip("127.0.0.1")), &forwarded),
             Some(ip("198.51.100.7"))
         );
     }
@@ -226,7 +233,7 @@ mod tests {
     fn chain_of_only_trusted_hops_resolves_to_the_leftmost_hop() {
         let forwarded = headers(&[("x-forwarded-for", "192.168.1.20, 10.0.0.5")]);
         assert_eq!(
-            defaults().client_ip(Some(ip("127.0.0.1")), &forwarded),
+            configured_private_proxies().client_ip(Some(ip("127.0.0.1")), &forwarded),
             Some(ip("192.168.1.20"))
         );
     }
@@ -235,7 +242,7 @@ mod tests {
     fn unparsable_hop_stops_the_walk_at_the_last_trusted_address() {
         let forwarded = headers(&[("x-forwarded-for", "198.51.100.7, garbage, 10.0.0.5")]);
         assert_eq!(
-            defaults().client_ip(Some(ip("127.0.0.1")), &forwarded),
+            configured_private_proxies().client_ip(Some(ip("127.0.0.1")), &forwarded),
             Some(ip("10.0.0.5"))
         );
     }
@@ -244,7 +251,7 @@ mod tests {
     fn forwarded_hops_with_ports_are_accepted() {
         let forwarded = headers(&[("x-forwarded-for", "198.51.100.7:51234")]);
         assert_eq!(
-            defaults().client_ip(Some(ip("10.1.0.4")), &forwarded),
+            configured_private_proxies().client_ip(Some(ip("10.1.0.4")), &forwarded),
             Some(ip("198.51.100.7"))
         );
         let forwarded_v6 = headers(&[("x-forwarded-for", "[2001:db8::7]:443")]);
@@ -314,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_proxy_list_replaces_the_private_network_default() {
+    fn explicit_proxy_list_replaces_the_loopback_default() {
         let trusted =
             TrustedProxies::from_setting(Some("203.0.113.0/24, 2001:db8::1")).expect("list");
         let forwarded = headers(&[("x-forwarded-for", "198.51.100.7")]);
@@ -333,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn blank_setting_uses_the_private_network_default() {
+    fn blank_setting_uses_the_loopback_default() {
         assert_eq!(TrustedProxies::from_setting(Some("  ")), Some(defaults()));
     }
 

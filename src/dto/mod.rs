@@ -16,6 +16,7 @@ pub mod audit_logs;
 pub mod auth;
 pub mod branding;
 pub mod chat;
+pub mod chat_shares;
 pub mod chat_stream;
 pub mod common;
 pub mod deployment;

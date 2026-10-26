@@ -15,7 +15,6 @@ use crate::{
     config::setting::{AzureSettings, ConfigError, GoogleSettings, OidcClient, Settings},
     dto::oauth::AuthProvider,
     models::{mcp_servers, messages::StopReason, sso_providers},
-    services::ai_engine_catalog::reconcile_catalog_ai_engines,
     services::discovery_catalog::DiscoveryCatalog,
     services::http_client::short_call_client,
     services::live_models_cache::LiveModelsCache,
@@ -41,10 +40,14 @@ pub type StreamCancellations = Arc<RwLock<HashMap<Uuid, Arc<StreamCancel>>>>;
 
 pub struct AppState {
     pub database: DatabaseConnection,
+    pub share_rate_limiter: crate::services::share_access::ShareRateLimiter,
+    pub share_fork_slots: Arc<tokio::sync::Semaphore>,
+    pub share_index_slots: Arc<tokio::sync::Semaphore>,
     pub oidc_providers: RwLock<HashMap<String, OidcProviderRuntime>>,
     pub req_client: ReqwestClient,
     pub settings: Settings,
     pub mcp_clients: RwLock<HashMap<Uuid, Arc<McpServerClient>>>,
+    pub mcp_refresh_locks: crate::services::mcp_oauth::OAuthRefreshLocks,
     pub notification_hub: broadcast::Sender<NotificationEvent>,
     pub stream_cancellations: StreamCancellations,
     pub provider_registry: ProviderRegistry,
@@ -166,9 +169,6 @@ impl AppState {
         .map_err(ConfigError::Custom)?;
         let discovery_catalog = DiscoveryCatalog::from_env(req_client.clone())
             .map_err(|error| ConfigError::Custom(error.to_string()))?;
-        let _ = reconcile_catalog_ai_engines(&database, &discovery_catalog)
-            .await
-            .map_err(|error| eprintln!("Catalog AI engine reconciliation failed: {error:#}"));
         let _ = settings
             .load_ai_engines_from_db(&database)
             .await
@@ -188,6 +188,10 @@ impl AppState {
             req_client,
             settings,
             mcp_clients: RwLock::new(HashMap::new()),
+            share_rate_limiter: Default::default(),
+            share_fork_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            share_index_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            mcp_refresh_locks: Default::default(),
             notification_hub,
             stream_cancellations: Arc::new(RwLock::new(HashMap::new())),
             provider_registry: ProviderRegistry::new(),

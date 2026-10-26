@@ -246,6 +246,24 @@ fn email_link_allowed(
         && linked_subject.is_none_or(|linked| linked == subject)
 }
 
+fn ensure_pending_account_email(
+    email: Option<&str>,
+    email_verified: bool,
+) -> Result<(), AuthError> {
+    let Some(email) = email else {
+        return Err(AuthError::InvalidToken);
+    };
+    let usable = email.split_once('@').is_some_and(|(local, domain)| {
+        !local.is_empty() && !domain.is_empty() && !domain.contains('@')
+    }) && !email.chars().any(|c| c.is_whitespace() || c.is_control())
+        && !is_placeholder_email(email);
+    if email_verified && usable {
+        Ok(())
+    } else {
+        Err(AuthError::InvalidToken)
+    }
+}
+
 // Called only once tokens are granted. Accounts created before tourGuide
 // existed have no stored value and are left alone, so they read as
 // firstLogin: false. Returns None when nothing changed.
@@ -673,15 +691,7 @@ pub async fn oidc_oauth_callback(
             if let Some(user_id) = user.as_ref().map(|u| u.id) {
                 let txn = begin_login_transaction(&app_state.database).await?;
                 let u = lock_user_for_login(&txn, user_id).await?;
-                match &u.status {
-                    UserStatus::Deactivated | UserStatus::Suspended => {
-                        return Err(AuthError::AccountDeactivated);
-                    }
-                    UserStatus::Pending => {
-                        return Err(AuthError::AccountPendingApproval);
-                    }
-                    _ => (),
-                }
+                // A login that may not claim this account learns nothing about it, not even its status.
                 let linked_identity = u.identity_for(&normalized_provider);
                 if !email_link_allowed(
                     &runtime.configuration.email_linking,
@@ -693,6 +703,15 @@ pub async fn oidc_oauth_callback(
                     &sub,
                 ) {
                     return Err(AuthError::InvalidToken);
+                }
+                match &u.status {
+                    UserStatus::Deactivated | UserStatus::Suspended => {
+                        return Err(AuthError::AccountDeactivated);
+                    }
+                    UserStatus::Pending => {
+                        return Err(AuthError::AccountPendingApproval);
+                    }
+                    _ => (),
                 }
                 let can_link_google = google_id.is_some() && u.google_id.is_none();
                 let can_link_azure = azure_id.is_some() && u.azure_id.is_none();
@@ -738,6 +757,7 @@ pub async fn oidc_oauth_callback(
         let initial_status = if is_first_user {
             UserStatus::Active
         } else {
+            ensure_pending_account_email(email.as_deref(), email_verified)?;
             UserStatus::Pending
         };
         let new_user = users::ActiveModel {
@@ -1220,6 +1240,65 @@ mod tests {
     #[test]
     fn any_email_passes_when_no_allow_list_is_configured() {
         assert!(ensure_email_domain_allowed(Some("ada@anywhere.com"), false, &[]).is_ok());
+    }
+
+    #[test]
+    fn pending_account_requires_verified_email_even_without_an_allow_list() {
+        assert!(ensure_email_domain_allowed(Some("ada@corp.com"), false, &[]).is_ok());
+        assert!(matches!(
+            ensure_pending_account_email(Some("ada@corp.com"), false),
+            Err(AuthError::InvalidToken)
+        ));
+    }
+
+    #[test]
+    fn pending_account_accepts_a_verified_usable_email() {
+        assert!(ensure_pending_account_email(Some("Ada@CORP.com"), true).is_ok());
+    }
+
+    #[test]
+    fn pending_account_rejects_missing_or_malformed_email_even_if_verified() {
+        for email in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("not-an-email"),
+            Some("@corp.com"),
+            Some("ada@"),
+            Some("ada@@corp.com"),
+            Some(" ada@corp.com"),
+            Some("ada@corp.com "),
+            Some("ada@corp.\ncom"),
+            Some("ada\0@corp.com"),
+        ] {
+            assert!(
+                matches!(
+                    ensure_pending_account_email(email, true),
+                    Err(AuthError::InvalidToken)
+                ),
+                "{email:?} must not create a pending account"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_account_rejects_placeholder_email_even_if_verified() {
+        let email = format!("subject@{}", PLACEHOLDER_EMAIL_DOMAIN.to_uppercase());
+        assert!(matches!(
+            ensure_pending_account_email(Some(&email), true),
+            Err(AuthError::InvalidToken)
+        ));
+    }
+
+    #[test]
+    fn existing_subject_domain_policy_still_allows_missing_or_unverified_email_without_allow_list()
+    {
+        assert!(ensure_email_domain_allowed(None, false, &[]).is_ok());
+        assert!(ensure_email_domain_allowed(Some("ada@corp.com"), false, &[]).is_ok());
+        assert!(matches!(
+            ensure_email_domain_allowed(Some("not-an-email"), false, &[]),
+            Err(AuthError::EmailDomainNotAllowed { domain: None })
+        ));
     }
 
     #[test]

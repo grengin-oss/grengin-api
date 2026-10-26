@@ -10,4 +10,15 @@ CLAUDE.md
 !/tests/auth/
 !/tests/auth/*.sh
 !/tests/discovery_api.sh
+!/tests/security/
+!/tests/security/*.sh
+!/tests/security/*.mjs
+!/tests/share-chat/
+!/tests/share-chat/*.sh
+!/tests/share-chat/*.mjs
+!/tests/staging/
+!/tests/staging/*.sh
+!/tests/ai-engines/
+!/tests/ai-engines/*.sh
+!/tests/ai-engines/*.mjs
 /llm-plugin/HANDOFF.md

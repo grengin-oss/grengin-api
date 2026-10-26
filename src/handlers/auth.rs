@@ -17,11 +17,9 @@ use reqwest::StatusCode;
     request_body = RefreshToken,
     responses(
        (status = 400, content_type = "application/json", body = Error, description = "Missing credentials (code=6102)"),
-       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired refresh token (code=6103)"),
+       (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired refresh token, or the user was deleted (code=6103)"),
        (status = 401, content_type = "application/json", body = Error, description = "Account deactivated or suspended (code=6105)"),
        (status = 403, content_type = "application/json", body = Error, description = "Account pending approval (code=6107)"),
-       (status = 404, content_type = "application/json", body = Error, description = "Email does not exist (code=6101)"),
-       (status = 404, content_type = "application/json", body = Error, description = "User not found (code=5003)"),
        (status = 503, content_type = "application/json", body = Error, description = "DB timeout/unavailable (code=5001/5000)"),
     )
 )]

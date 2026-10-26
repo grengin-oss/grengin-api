@@ -31,6 +31,10 @@ struct Args {
     #[arg(long, default_value = "30")]
     timeout: u64,
 
+    /// Longest a single query may run, in seconds (0 for no limit)
+    #[arg(long, default_value = "30")]
+    statement_timeout: u64,
+
     /// Log level (error/warn/info/debug/trace)
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -64,6 +68,7 @@ async fn main() -> Result<()> {
         &args.database_url,
         args.max_connections,
         args.timeout,
+        args.statement_timeout,
         read_only,
     )?;
     let db_manager = Arc::new(db_manager);

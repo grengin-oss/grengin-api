@@ -10,6 +10,11 @@ pub struct PermissionDefinition {
 
 pub const PERMISSIONS: &[PermissionDefinition] = &[
     PermissionDefinition {
+        domain: "chats",
+        action: "share",
+        is_scopeable: false,
+    },
+    PermissionDefinition {
         domain: "ai_platform",
         action: "manage",
         is_scopeable: false,
@@ -135,6 +140,7 @@ pub const PERMISSION_ROLES_ASSIGN: &str = "roles:assign";
 pub const PERMISSION_SYSTEM_MAINTAIN: &str = "system:maintain";
 pub const PERMISSION_SKILLS_VIEW: &str = "skills:view";
 pub const PERMISSION_SKILLS_MANAGE: &str = "skills:manage";
+pub const PERMISSION_CHATS_SHARE: &str = "chats:share";
 
 pub fn permission_key(domain: &str, action: &str) -> String {
     format!("{domain}:{action}")

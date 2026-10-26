@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, fmt};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+};
 
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait,
@@ -11,7 +14,9 @@ use uuid::Uuid;
 use crate::{
     auth::{
         error::AuthError,
-        permissions::{PERMISSION_ROLES_ASSIGN, ROLE_SUPER_ADMIN, permission_key},
+        permissions::{
+            PERMISSION_ROLES_ASSIGN, PERMISSION_USERS_MANAGE, ROLE_SUPER_ADMIN, permission_key,
+        },
     },
     dto::admin_roles::RoleChangeDeniedPayload,
     models::{permissions, role_permissions, roles},
@@ -88,6 +93,42 @@ pub fn check_role_definition(
     check_permissions_held(editor, added_permissions, DepartmentScope::OrgWide)
 }
 
+// Changing a user's profile, status or account reaches every right that user holds, so the
+// actor must hold each of the target's permissions at the scope it was granted, and only an
+// org-wide Super Admin manages a Super Admin. Otherwise a scoped admin could disable an org-wide
+// admin, or change its email and take the account over at the next sign-in.
+pub fn check_user_management(
+    actor: &PermissionGrants,
+    target: &PermissionGrants,
+) -> Result<(), RoleChangeDenial> {
+    if actor.is_super_admin() {
+        return Ok(());
+    }
+    if target.is_super_admin() {
+        return Err(RoleChangeDenial::SuperAdminOnly);
+    }
+    let mut missing: Vec<String> = target
+        .effective()
+        .filter(|(permission, scope)| !actor.holds(permission, *scope))
+        .map(|(permission, _)| permission.to_string())
+        .collect();
+    missing.sort_unstable();
+    missing.dedup();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(RoleChangeDenial::MissingRolePermissions(missing))
+    }
+}
+
+pub fn check_user_unassignment(actor: &PermissionGrants) -> Result<(), RoleChangeDenial> {
+    if actor.is_super_admin() || actor.holds(PERMISSION_USERS_MANAGE, DepartmentScope::OrgWide) {
+        Ok(())
+    } else {
+        Err(RoleChangeDenial::UserOutsideAssignerScope)
+    }
+}
+
 pub fn added_permissions(existing: &[String], requested: &[String]) -> Vec<String> {
     let existing: HashSet<&String> = existing.iter().collect();
     let mut added: Vec<String> = requested
@@ -142,6 +183,46 @@ pub async fn load_role_permission_keys(
         .collect())
 }
 
+// Resolved before anything is written, so an unknown or repeated key cannot leave a role
+// half-saved: a new role row without its permissions, or an existing role stripped of them.
+pub async fn resolve_permission_ids(
+    db: &DatabaseConnection,
+    keys: &[String],
+) -> Result<Vec<(String, Uuid)>, AuthError> {
+    let catalog: HashMap<String, Uuid> = permissions::Entity::find()
+        .all(db)
+        .await
+        .map_err(|e| {
+            eprintln!("permissions lookup error: {e}");
+            AuthError::DbTimeout
+        })?
+        .into_iter()
+        .map(|permission| {
+            (
+                permission_key(&permission.domain, &permission.action),
+                permission.id,
+            )
+        })
+        .collect();
+    match_permission_keys(&catalog, keys)
+}
+
+fn match_permission_keys(
+    catalog: &HashMap<String, Uuid>,
+    keys: &[String],
+) -> Result<Vec<(String, Uuid)>, AuthError> {
+    let mut seen = HashSet::new();
+    keys.iter()
+        .filter(|key| seen.insert(key.as_str()))
+        .map(|key| {
+            catalog
+                .get(key)
+                .map(|id| (key.clone(), *id))
+                .ok_or(AuthError::ResourceNotFound)
+        })
+        .collect()
+}
+
 pub async fn ensure_role_assignment_allowed(
     db: &DatabaseConnection,
     actor_id: Uuid,
@@ -152,9 +233,33 @@ pub async fn ensure_role_assignment_allowed(
     if user_ids.is_empty() {
         return Ok(());
     }
+    let scope_path = load_department_path(db, scope_department_id).await?;
+    ensure_role_assignment_allowed_at(
+        db,
+        actor_id,
+        role,
+        scope_department_id,
+        scope_path.as_deref(),
+        user_ids,
+    )
+    .await
+}
+
+// For a scope that is not committed yet, such as a department being created, whose path is
+// known but can't be read back by id.
+pub async fn ensure_role_assignment_allowed_at(
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    role: &roles::Model,
+    scope_department_id: Option<Uuid>,
+    scope_path: Option<&str>,
+    user_ids: &[Uuid],
+) -> Result<(), AuthError> {
+    if user_ids.is_empty() {
+        return Ok(());
+    }
     let assigner = PermissionGrants::load(db, actor_id).await?;
     let role_permissions = load_role_permission_keys(db, role.id).await?;
-    let scope_path = load_department_path(db, scope_department_id).await?;
     let user_paths = load_user_department_paths(db, user_ids).await?;
 
     for user_id in user_ids {
@@ -162,7 +267,7 @@ pub async fn ensure_role_assignment_allowed(
         let request = RoleAssignmentRequest {
             role_name: &role.name,
             role_permissions: &role_permissions,
-            scope: DepartmentScope::from_path(scope_path.as_deref()),
+            scope: DepartmentScope::from_path(scope_path),
             user_department: DepartmentScope::from_path(user_path.as_deref()),
         };
         if let Err(denial) = check_role_assignment(&assigner, &request) {
@@ -214,6 +319,31 @@ pub async fn ensure_role_definition_allowed(
     match check_role_definition(&editor, added_permissions) {
         Ok(()) => Ok(()),
         Err(denial) => Err(deny(db, actor_id, denial, role_id, None, None).await),
+    }
+}
+
+pub async fn ensure_user_management_allowed(
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    target_user_id: Uuid,
+) -> Result<(), AuthError> {
+    let actor = PermissionGrants::load(db, actor_id).await?;
+    let target = PermissionGrants::load(db, target_user_id).await?;
+    match check_user_management(&actor, &target) {
+        Ok(()) => Ok(()),
+        Err(denial) => Err(deny(db, actor_id, denial, None, Some(target_user_id), None).await),
+    }
+}
+
+pub async fn ensure_user_unassignment_allowed(
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    target_user_id: Option<Uuid>,
+) -> Result<(), AuthError> {
+    let actor = PermissionGrants::load(db, actor_id).await?;
+    match check_user_unassignment(&actor) {
+        Ok(()) => Ok(()),
+        Err(denial) => Err(deny(db, actor_id, denial, None, target_user_id, None).await),
     }
 }
 
@@ -580,6 +710,189 @@ mod tests {
         assert_eq!(
             RoleChangeDenial::MissingRolePermissions(vec![]).to_string(),
             "missing_role_permissions"
+        );
+    }
+
+    fn catalog() -> HashMap<String, Uuid> {
+        HashMap::from([
+            ("users:view".to_string(), Uuid::from_u128(1)),
+            ("budget:view".to_string(), Uuid::from_u128(2)),
+        ])
+    }
+
+    #[test]
+    fn permission_keys_resolve_in_request_order() {
+        assert_eq!(
+            match_permission_keys(&catalog(), &keys(&["budget:view", "users:view"])).ok(),
+            Some(vec![
+                ("budget:view".to_string(), Uuid::from_u128(2)),
+                ("users:view".to_string(), Uuid::from_u128(1)),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_repeated_permission_key_is_kept_once() {
+        assert_eq!(
+            match_permission_keys(&catalog(), &keys(&["users:view", "users:view"])).ok(),
+            Some(vec![("users:view".to_string(), Uuid::from_u128(1))])
+        );
+    }
+
+    #[test]
+    fn an_unknown_permission_key_rejects_the_whole_list() {
+        assert!(matches!(
+            match_permission_keys(&catalog(), &keys(&["users:view", "nope:nope"])),
+            Err(AuthError::ResourceNotFound)
+        ));
+    }
+
+    fn plain_user() -> PermissionGrants {
+        PermissionGrants::from_rows(&[role("User", None)], vec![grant("chat:use", true, None)])
+    }
+
+    fn scoped_admin_who_is_also_a_user(scope: &str) -> PermissionGrants {
+        PermissionGrants::from_rows(
+            &[
+                role("User", None),
+                role(ROLE_DEPARTMENT_ADMIN, Some(Uuid::new_v4())),
+            ],
+            vec![
+                grant("chat:use", true, None),
+                grant("users:manage", true, Some(scope)),
+                grant("users:view", true, Some(scope)),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_scoped_admin_can_manage_a_plain_member() {
+        assert_eq!(
+            check_user_management(&scoped_admin_who_is_also_a_user("a"), &plain_user()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_scoped_manager_cannot_unassign_a_plain_member() {
+        let actor = scoped_admin_who_is_also_a_user("a");
+        assert!(actor.holds(PERMISSION_USERS_MANAGE, DepartmentScope::Department("a.b")));
+        assert_eq!(check_user_management(&actor, &plain_user()), Ok(()));
+        assert_eq!(
+            check_user_unassignment(&actor),
+            Err(RoleChangeDenial::UserOutsideAssignerScope)
+        );
+    }
+
+    #[test]
+    fn a_scoped_manager_cannot_unassign_itself() {
+        let actor = scoped_admin_who_is_also_a_user("a");
+        assert_eq!(check_user_management(&actor, &actor), Ok(()));
+        assert_eq!(
+            check_user_unassignment(&actor),
+            Err(RoleChangeDenial::UserOutsideAssignerScope)
+        );
+    }
+
+    #[test]
+    fn an_org_wide_manager_can_unassign_a_member() {
+        let actor = PermissionGrants::from_rows(
+            &[role("HR Admin", None), role("User", None)],
+            vec![
+                grant("roles:assign", true, None),
+                grant("users:view", true, None),
+                grant(PERMISSION_USERS_MANAGE, true, None),
+                grant("chat:use", true, None),
+            ],
+        );
+        assert_eq!(check_user_management(&actor, &plain_user()), Ok(()));
+        assert_eq!(check_user_unassignment(&actor), Ok(()));
+    }
+
+    #[test]
+    fn an_org_wide_super_admin_can_unassign_itself_or_a_member() {
+        let actor = super_admin();
+        assert_eq!(check_user_management(&actor, &actor), Ok(()));
+        assert_eq!(check_user_management(&actor, &plain_user()), Ok(()));
+        assert_eq!(check_user_unassignment(&actor), Ok(()));
+        let role_only = PermissionGrants::from_rows(&[role(ROLE_SUPER_ADMIN, None)], vec![]);
+        assert_eq!(check_user_unassignment(&role_only), Ok(()));
+    }
+
+    #[test]
+    fn a_scoped_super_admin_cannot_unassign_users() {
+        let actor = PermissionGrants::from_rows(
+            &[role(ROLE_SUPER_ADMIN, Some(Uuid::new_v4()))],
+            vec![grant(PERMISSION_USERS_MANAGE, true, Some("a"))],
+        );
+        assert_eq!(
+            check_user_unassignment(&actor),
+            Err(RoleChangeDenial::UserOutsideAssignerScope)
+        );
+    }
+
+    #[test]
+    fn a_scoped_admin_can_manage_a_peer_admin_of_its_department() {
+        assert_eq!(
+            check_user_management(
+                &scoped_admin_who_is_also_a_user("a"),
+                &scoped_admin_who_is_also_a_user("a.b")
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn only_an_org_wide_super_admin_manages_a_super_admin() {
+        assert_eq!(
+            check_user_management(&scoped_admin_who_is_also_a_user("a"), &super_admin()),
+            Err(RoleChangeDenial::SuperAdminOnly)
+        );
+        assert_eq!(
+            check_user_management(&org_wide_hr_admin(), &super_admin()),
+            Err(RoleChangeDenial::SuperAdminOnly)
+        );
+        assert_eq!(
+            check_user_management(&super_admin(), &super_admin()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_scoped_admin_cannot_manage_a_user_with_org_wide_rights_it_lacks() {
+        assert_eq!(
+            check_user_management(&scoped_admin_who_is_also_a_user("a"), &org_wide_hr_admin()),
+            Err(RoleChangeDenial::MissingRolePermissions(keys(&[
+                "roles:assign",
+                "users:manage",
+                "users:view"
+            ])))
+        );
+    }
+
+    #[test]
+    fn a_scoped_admin_cannot_manage_a_user_with_rights_in_another_department() {
+        assert_eq!(
+            check_user_management(
+                &scoped_admin_who_is_also_a_user("a"),
+                &scoped_admin_who_is_also_a_user("b")
+            ),
+            Err(RoleChangeDenial::MissingRolePermissions(keys(&[
+                "users:manage",
+                "users:view"
+            ])))
+        );
+    }
+
+    #[test]
+    fn a_scoped_grant_of_a_permission_that_cannot_be_scoped_grants_nothing_to_protect() {
+        let target = PermissionGrants::from_rows(
+            &[role("Odd", Some(Uuid::new_v4()))],
+            vec![grant("system:maintain", false, Some("b"))],
+        );
+        assert_eq!(
+            check_user_management(&scoped_admin_who_is_also_a_user("a"), &target),
+            Ok(())
         );
     }
 }

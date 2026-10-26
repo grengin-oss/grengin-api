@@ -135,6 +135,22 @@ jobs:
       packages: write
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify published compatibility distribution
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+            --retry 30 --retry-all-errors --retry-delay 10 --max-time 20 \
+            "https://meta.grengin.com/distributions/grengin-api/$RELEASE_VERSION/index.json" \
+            --output "$RUNNER_TEMP/distribution.json"
+          bash scripts/verify-release-distribution.sh \
+            "$RUNNER_TEMP/distribution.json" "$RELEASE_VERSION" "$RELEASE_REVISION"
+
       - name: Download digests
         uses: actions/download-artifact@v4
         with:

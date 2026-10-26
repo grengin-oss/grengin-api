@@ -121,6 +121,7 @@ pub async fn validate_ai_engine_plugin(
     post,
     path = "/admin/ai-engines",
     tag = "admin",
+    description = "Install one discovery engine using engine_key, or one custom engine using plugin_config (exactly one). A first API key enables the engine unless is_enabled is explicit. Omitted whitelisted_models selects at most three recent generators; explicit lists, including [], are preserved. Catalog manifests are not stored in the database.",
     request_body = AIEngineCreate,
     responses(
         (status = 201, body = AIEngineDetail),
@@ -160,11 +161,6 @@ pub async fn delete_ai_engine(
 ) -> Result<StatusCode, AuthError> {
     ensure_manage(&claims, &state).await?;
     let engine = find_engine(&state, &engine_key).await?;
-    if engine.plugin_config.is_none() {
-        return Err(AuthError::InvalidRequest {
-            field: "engine_key",
-        });
-    }
     ai_engines::Entity::delete_by_id(engine.id)
         .exec(&state.database)
         .await

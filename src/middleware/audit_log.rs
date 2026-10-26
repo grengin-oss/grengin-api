@@ -147,6 +147,7 @@ pub async fn audit_log_middleware(
             .resource_param
             .and_then(|param| extract_path_param(&route_path, &request_path, param))
     });
+    let request_path = redact_path_credentials(&route_path, &request_path);
 
     let action_name = route_action
         .map(|a| a.action.to_string())
@@ -501,6 +502,25 @@ fn sanitize_value(value: Value, content: SnapshotContent) -> Value {
     }
 }
 
+fn redact_path_credentials(route: &str, path: &str) -> String {
+    let template = route.split('/').collect::<Vec<_>>();
+    path.split('/')
+        .enumerate()
+        .map(|(index, segment)| {
+            if template
+                .get(index)
+                .is_some_and(|parameter| parameter.starts_with('{') && is_credential_key(parameter))
+                || (index == 2 && path.starts_with("/share/"))
+            {
+                "[REDACTED]"
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn redact_query(query: &str) -> String {
     query
         .split('&')
@@ -583,6 +603,25 @@ fn generic_mutation_action_name(method: &Method, route: &str) -> String {
 }
 
 fn resolve_audit_action(method: &Method, route: &str) -> Option<AuditRouteAction> {
+    let share_action = match (method.as_str(), route) {
+        ("POST", "/chat/{chat_id}/shares") => Some(("chat_share_created", Some("chat_id"))),
+        ("PUT", "/chat/{chat_id}/shares/{share_id}") => {
+            Some(("chat_share_updated", Some("share_id")))
+        }
+        ("DELETE", "/chat/{chat_id}/shares/{share_id}") => {
+            Some(("chat_share_revoked", Some("share_id")))
+        }
+        ("POST", "/share/{token}/fork") => Some(("chat_share_forked", None)),
+        _ => None,
+    };
+    if let Some((action, resource_param)) = share_action {
+        return Some(AuditRouteAction {
+            action,
+            resource_type: Some("chat_share"),
+            resource_param,
+            snapshot_target: SnapshotTarget::None,
+        });
+    }
     match (method.as_str(), route) {
         ("GET", "/auth/{provider}/callback") | ("POST", "/auth/{provider}/callback") => {
             Some(AuditRouteAction {
@@ -1114,7 +1153,39 @@ fn extract_user_id(headers: &HeaderMap) -> Option<Uuid> {
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{SnapshotContent, SnapshotTarget, redact_query, redact_snapshots, sanitize_value};
+    use super::{
+        SnapshotContent, SnapshotTarget, redact_path_credentials, redact_query, redact_snapshots,
+        resolve_audit_action, sanitize_value,
+    };
+
+    #[test]
+    fn share_tokens_are_redacted_from_paths_and_never_used_as_resource_ids() {
+        for (template, path) in [
+            ("/share/{token}/fork", "/share/secret/fork"),
+            ("/share/{token}/files/{file_id}", "/share/secret/files/file"),
+            ("/share/secret/fork", "/share/secret/fork"),
+        ] {
+            assert!(!redact_path_credentials(template, path).contains("secret"));
+        }
+        for (method, path) in [
+            (axum::http::Method::POST, "/chat/{chat_id}/shares"),
+            (axum::http::Method::PUT, "/chat/{chat_id}/shares/{share_id}"),
+            (
+                axum::http::Method::DELETE,
+                "/chat/{chat_id}/shares/{share_id}",
+            ),
+            (axum::http::Method::POST, "/share/{token}/fork"),
+        ] {
+            let action = resolve_audit_action(&method, path).unwrap();
+            assert!(matches!(action.snapshot_target, SnapshotTarget::None));
+            assert_ne!(action.resource_param, Some("token"));
+            assert!(
+                crate::dto::audit_logs::AuditLogAction::all()
+                    .iter()
+                    .any(|entry| entry.as_str() == action.action)
+            );
+        }
+    }
 
     const REDACTED: &str = "[REDACTED]";
 

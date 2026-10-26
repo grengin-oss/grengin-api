@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod ai_engine_catalog;
+pub mod ai_engine_defaults;
 pub mod ai_engine_helpers;
 pub mod ai_plugin;
 pub mod analytics;
@@ -15,7 +15,10 @@ pub mod auth_session;
 pub mod authorization;
 pub mod branding_helpers;
 pub mod budget_allocation;
+pub mod chat_attachments;
 pub mod chat_helpers;
+pub mod chat_share_notifications;
+pub mod chat_shares_helpers;
 pub mod chat_stream_helpers;
 pub mod client_ip;
 pub mod conversation_access;
@@ -59,6 +62,7 @@ pub mod rag;
 pub mod reconfigure;
 pub mod role_assignment;
 pub mod search;
+pub mod share_access;
 pub mod skill_access;
 pub mod skills_helpers;
 pub mod sso_seed;

@@ -17,7 +17,10 @@ use crate::{
         departments, roles, user_role_assignments,
         users::{self, TourGuideMetadata, UserStatus},
     },
-    services::authorization::{AuthorizationService, PermissionScopeMode},
+    services::{
+        authorization::{AuthorizationService, PermissionScopeMode},
+        role_assignment::{ensure_user_management_allowed, ensure_user_unassignment_allowed},
+    },
     state::SharedState,
 };
 use axum::{
@@ -397,6 +400,7 @@ pub async fn update_user(
             Some(user_id),
         )
         .await?;
+    ensure_user_management_allowed(&app_state.database, claims.user_id, user_id).await?;
 
     let original_department_id = model.department_id;
     let mut active: users::ActiveModel = model.into();
@@ -412,6 +416,8 @@ pub async fn update_user(
         active.name = Set(Some(name));
     }
     if req.unassign_department.unwrap_or(false) {
+        ensure_user_unassignment_allowed(&app_state.database, claims.user_id, Some(user_id))
+            .await?;
         if original_department_id.is_some() {
             department_changed = true;
         }
@@ -506,6 +512,7 @@ pub async fn patch_user_status(
             Some(user_id),
         )
         .await?;
+    ensure_user_management_allowed(&app_state.database, claims.user_id, user_id).await?;
     let mut active: users::ActiveModel = model.into();
     active.status = Set(req.status);
     active.updated_at = Set(Utc::now());
@@ -553,6 +560,7 @@ pub async fn delete_user(
             Some(user_id),
         )
         .await?;
+    ensure_user_management_allowed(&app_state.database, claims.user_id, user_id).await?;
     let mut active_model = user.into_active_model();
     active_model.updated_at = Set(Utc::now());
     active_model.status = Set(UserStatus::Deleted);

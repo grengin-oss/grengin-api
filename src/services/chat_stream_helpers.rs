@@ -95,7 +95,7 @@ pub fn department_budget_gate(
 pub async fn department_budget_status(
     db: &DatabaseConnection,
     department_id: Uuid,
-) -> Result<(DepartmentBudgetGate, Decimal), AppError> {
+) -> Result<(DepartmentBudgetGate, Decimal, bool), AppError> {
     let status = get_department_budget_status(db, department_id)
         .await
         .map_err(|e| {
@@ -105,7 +105,33 @@ pub async fn department_budget_status(
     Ok((
         department_budget_gate(status.allocated, status.available, &status.action_on_exceed),
         status.available,
+        status.allocated > Decimal::ZERO,
     ))
+}
+
+pub fn ensure_budget_pricing(
+    budget_configured: bool,
+    model: Option<&ModelInfo>,
+) -> Result<(), AppError> {
+    if !budget_configured {
+        return Ok(());
+    }
+    let valid_rate =
+        |rate: Option<f64>| rate.is_some_and(|value| value.is_finite() && value >= 0.0);
+    let priced = model.is_some_and(|model| {
+        valid_rate(model.input_token_rate)
+            && valid_rate(model.output_token_rate)
+            && (model.model_type != crate::dto::models::ModelType::ImageGenerator
+                || (valid_rate(model.image_input_token_rate)
+                    && valid_rate(model.image_output_token_rate)))
+    });
+    if priced {
+        Ok(())
+    } else {
+        Err(AppError::ValidationMissingField {
+            field: "model_pricing",
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -358,6 +384,48 @@ mod tests {
 
     fn whitelist(entries: &[&str]) -> Vec<String> {
         entries.iter().map(|entry| entry.to_string()).collect()
+    }
+
+    #[test]
+    fn configured_budgets_refuse_unknown_and_partly_priced_models() {
+        assert!(ensure_budget_pricing(true, None).is_err());
+        let mut info = model("custom", "model", "Model");
+        assert!(ensure_budget_pricing(true, Some(&info)).is_err());
+        info.input_token_rate = Some(1.0);
+        assert!(ensure_budget_pricing(true, Some(&info)).is_err());
+        info.output_token_rate = Some(2.0);
+        assert!(ensure_budget_pricing(true, Some(&info)).is_ok());
+    }
+
+    #[test]
+    fn explicit_free_models_and_unbudgeted_departments_are_supported() {
+        assert!(ensure_budget_pricing(false, None).is_ok());
+        let mut info = model("local", "model", "Model");
+        info.input_token_rate = Some(0.0);
+        info.output_token_rate = Some(0.0);
+        assert!(ensure_budget_pricing(true, Some(&info)).is_ok());
+    }
+
+    #[test]
+    fn invalid_rates_cannot_bypass_budget_accounting() {
+        for rate in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let mut info = model("custom", "model", "Model");
+            info.input_token_rate = Some(rate);
+            info.output_token_rate = Some(1.0);
+            assert!(ensure_budget_pricing(true, Some(&info)).is_err());
+        }
+    }
+
+    #[test]
+    fn image_budgets_require_the_rates_used_by_image_accounting() {
+        let mut info = model("custom", "image", "Image");
+        info.model_type = ModelType::ImageGenerator;
+        info.input_token_rate = Some(1.0);
+        info.output_token_rate = Some(2.0);
+        assert!(ensure_budget_pricing(true, Some(&info)).is_err());
+        info.image_input_token_rate = Some(3.0);
+        info.image_output_token_rate = Some(4.0);
+        assert!(ensure_budget_pricing(true, Some(&info)).is_ok());
     }
 
     fn checkpoint() -> ContentCheckpoint {

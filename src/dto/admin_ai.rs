@@ -12,15 +12,14 @@ use utoipa::ToSchema;
 #[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct AIEngineCreate {
+    pub engine_key: Option<String>,
     pub display_name: Option<String>,
     pub api_key: Option<String>,
-    #[serde(default)]
-    pub is_enabled: bool,
-    #[serde(default)]
-    pub whitelisted_models: Vec<String>,
+    pub is_enabled: Option<bool>,
+    pub whitelisted_models: Option<Vec<String>>,
     pub default_model: Option<String>,
     pub default_image_gen_model: Option<String>,
-    pub plugin_config: PluginConfig,
+    pub plugin_config: Option<PluginConfig>,
 }
 
 #[derive(Deserialize, ToSchema)]

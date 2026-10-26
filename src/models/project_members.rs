@@ -13,8 +13,10 @@ pub enum ProjectMemberRole {
 }
 
 impl ProjectMemberRole {
+    // Members added through the API as "owner" edit content; only the project owner and the
+    // "admin" role manage project settings such as MCP servers, as before roles were typed.
     pub fn can_write(self) -> bool {
-        matches!(self, Self::Owner | Self::Admin)
+        matches!(self, Self::Admin)
     }
 }
 

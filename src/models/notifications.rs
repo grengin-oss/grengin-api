@@ -12,6 +12,7 @@ pub struct Model {
     #[sea_orm(primary_key, unique)]
     pub id: Uuid,
     pub user_id: Uuid,
+    pub share_id: Option<Uuid>,
     pub department_id: Option<Uuid>,
     pub kind: String,
     pub title: String,

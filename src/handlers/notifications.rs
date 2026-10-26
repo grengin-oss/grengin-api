@@ -24,7 +24,10 @@ use crate::{
     dto::notifications::{NotificationDto, NotificationsListQuery, NotificationsListResponse},
     error::AppError,
     models::notifications,
-    services::notifications::to_notification_dto,
+    services::{
+        chat_share_notifications::{event_is_visible, visible_condition},
+        notifications::to_notification_dto,
+    },
     state::SharedState,
 };
 
@@ -55,6 +58,7 @@ pub async fn list_my_notifications(
 
     let mut base = notifications::Entity::find()
         .filter(notifications::Column::UserId.eq(claims.user_id))
+        .filter(visible_condition(claims.user_id))
         .order_by_desc(notifications::Column::CreatedAt);
     if query.unread_only.unwrap_or(false) {
         base = base.filter(notifications::Column::ReadAt.is_null());
@@ -112,6 +116,7 @@ pub async fn mark_notification_read(
         .col_expr(notifications::Column::ReadAt, Expr::value(Utc::now()))
         .filter(notifications::Column::Id.eq(notification_id))
         .filter(notifications::Column::UserId.eq(claims.user_id))
+        .filter(visible_condition(claims.user_id))
         .exec(&state.database)
         .await
         .map_err(|e| {
@@ -146,7 +151,7 @@ pub async fn stream_my_notifications(
         loop {
             match rx.recv().await {
                 Ok(event) => {
-                    if event.user_id == user_id {
+                    if event_is_visible(&state, &event, user_id).await {
                         let data = serde_json::to_string(&event.notification)
                             .unwrap_or_else(|_| "{}".to_string());
                         yield Event::default().event("notification").data(data);

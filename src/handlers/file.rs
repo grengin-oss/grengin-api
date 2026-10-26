@@ -200,7 +200,7 @@ pub async fn get_files(
 ) -> Result<Json<FilePaginatedResponse>, AppError> {
     let limit = query.limit.unwrap_or(30);
     let offset = query.offset.unwrap_or(0);
-    let page = offset / limit;
+    let page = offset.checked_div(limit).unwrap_or(0);
     let mut response = FilePaginatedResponse {
         files: Vec::new(),
         total: 0,
