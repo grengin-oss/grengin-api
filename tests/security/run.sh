@@ -71,6 +71,9 @@ done
 [[ "$ready" == true ]] || { printf 'Test backend readiness timed out.\n' >&2; exit 1; }
 }
 start_backend
+if [[ "${GRENGIN_CATEGORY_TESTS:-0}" == 1 ]]; then
+  node tests/discovery/categories-http.mjs
+fi
 if [[ "${GRENGIN_ENGINE_INSTALL_TESTS:-0}" == 1 ]]; then
   node tests/ai-engines/http.mjs
   engine_count="$(psql -X -A -t "$DATABASE_URL" -c 'SELECT count(*) FROM ai_engines')"

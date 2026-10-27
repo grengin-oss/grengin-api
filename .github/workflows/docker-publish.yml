@@ -5,6 +5,12 @@ on:
     branches: ["main"]
     tags: ["v*.*.*"]
   workflow_dispatch:
+    inputs:
+      compatibility_revision:
+        description: Original distribution revision for an approved same-version container hotfix
+        required: false
+        type: string
+        default: ""
 
 env:
   IMAGE_NAME: ghcr.io/grengin-oss/grengin-api
@@ -23,6 +29,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Resolve release metadata
         id: release
@@ -60,6 +68,22 @@ jobs:
 
       - name: Test
         run: cargo test --locked --workspace --jobs 2
+
+      - name: Validate reused distribution against hotfix runtime
+        if: github.event_name == 'workflow_dispatch' && inputs.compatibility_revision != ''
+        env:
+          COMPATIBILITY_REVISION: ${{ inputs.compatibility_revision }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+            --retry 3 --max-time 30 \
+            "https://meta.grengin.com/distributions/grengin-api/$RELEASE_VERSION/index.json" \
+            --output "$RUNNER_TEMP/hotfix-distribution.json"
+          bash scripts/verify-hotfix-distribution.sh \
+            "$RUNNER_TEMP/hotfix-distribution.json" "$RELEASE_VERSION" \
+            "$COMPATIBILITY_REVISION" "$GITHUB_SHA"
 
   build-and-push:
     name: Build image (${{ matrix.arch }})
@@ -142,6 +166,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.build.outputs.version }}
           RELEASE_REVISION: ${{ github.sha }}
+          COMPATIBILITY_REVISION: ${{ github.event_name == 'workflow_dispatch' && inputs.compatibility_revision || '' }}
         run: |
           set -euo pipefail
           curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
@@ -149,7 +174,7 @@ jobs:
             "https://meta.grengin.com/distributions/grengin-api/$RELEASE_VERSION/index.json" \
             --output "$RUNNER_TEMP/distribution.json"
           bash scripts/verify-release-distribution.sh \
-            "$RUNNER_TEMP/distribution.json" "$RELEASE_VERSION" "$RELEASE_REVISION"
+            "$RUNNER_TEMP/distribution.json" "$RELEASE_VERSION" "${COMPATIBILITY_REVISION:-$RELEASE_REVISION}"
 
       - name: Download digests
         uses: actions/download-artifact@v4

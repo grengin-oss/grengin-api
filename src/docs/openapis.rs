@@ -48,8 +48,8 @@ use crate::dto::chat_shares::*;
 use crate::dto::chat_stream::{ChatInput, ChatStream};
 use crate::dto::common::{PaginationQuery, SortRule};
 use crate::dto::discovery::{
-    AiProviderDiscoveryResponse, AuthProviderDiscoveryResponse, DiscoveryListResponse,
-    DiscoveryProviderSummary, DiscoveryVersion,
+    AiProviderDiscoveryResponse, AuthProviderDiscoveryResponse, DiscoveryCategory,
+    DiscoveryListResponse, DiscoveryProviderSummary, DiscoveryVersion,
 };
 use crate::dto::files::{Attachment, File, FileResponse, FileUploadRequest};
 use crate::dto::mcp::{
@@ -503,6 +503,7 @@ use utoipa::OpenApi;
             AIEnginePluginValidationResponse,
             AIEngineConnectionTest,
             DiscoveryVersion,
+            DiscoveryCategory,
             DiscoveryProviderSummary,
             DiscoveryListResponse,
             AuthProviderDiscoveryResponse,

@@ -19,8 +19,8 @@ use tokio::sync::{Mutex, RwLock};
 use crate::{
     auth::provider_config::OidcProviderConfiguration,
     dto::discovery::{
-        AiProviderDiscoveryResponse, AuthProviderDiscoveryResponse, DiscoveryListResponse,
-        DiscoveryProviderSummary, DiscoveryVersion,
+        AiProviderDiscoveryResponse, AuthProviderDiscoveryResponse, DiscoveryCategory,
+        DiscoveryListResponse, DiscoveryProviderSummary, DiscoveryVersion,
     },
 };
 
@@ -61,6 +61,21 @@ pub struct DiscoveryCatalog {
     distribution_version: String,
     documents: Arc<RwLock<HashMap<String, CachedDocument>>>,
     fetch_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    categories: Arc<Mutex<Option<CachedCategories>>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProviderCategories {
+    format_version: String,
+    grengin_api_version: String,
+    categories: Vec<DiscoveryCategory>,
+    providers: HashMap<String, String>,
+}
+
+struct CachedCategories {
+    value: Option<ProviderCategories>,
+    fetched_at: Instant,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -217,6 +232,7 @@ impl DiscoveryCatalog {
             distribution_version: distribution_version.to_string(),
             documents: Arc::new(RwLock::new(HashMap::new())),
             fetch_locks: Arc::new(Mutex::new(HashMap::new())),
+            categories: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -313,6 +329,11 @@ impl DiscoveryCatalog {
         let selector = parse_selector(requested_version)?;
         let distribution = self.load_distribution().await?;
         let index = kind.index(&distribution).clone();
+        let categories = if matches!(kind, CatalogKind::Ai) {
+            self.load_categories(&index).await
+        } else {
+            None
+        };
         let mut providers = Vec::new();
         for provider in index.providers {
             let compatible = compatible_versions(&provider, &selector)?;
@@ -329,6 +350,10 @@ impl DiscoveryCatalog {
                 })
                 .collect::<Vec<_>>();
             providers.push(DiscoveryProviderSummary {
+                category: categories
+                    .as_ref()
+                    .and_then(|metadata| metadata.providers.get(&provider.id))
+                    .cloned(),
                 id: provider.id,
                 name: provider.name,
                 description: provider.description,
@@ -349,7 +374,46 @@ impl DiscoveryCatalog {
             catalog_type: kind.label().to_string(),
             catalog_version: index.catalog_version,
             providers,
+            categories: categories
+                .map(|metadata| metadata.categories)
+                .unwrap_or_default(),
         })
+    }
+
+    async fn load_categories(&self, index: &CatalogIndex) -> Option<ProviderCategories> {
+        // Negative caching keeps an optional sidecar outage from becoming a request storm.
+        let mut cache = self.categories.lock().await;
+        if let Some(cached) = cache.as_ref()
+            && cached.fetched_at.elapsed() < CATALOG_CACHE_TTL
+        {
+            return cached.value.clone();
+        }
+        let path = format!(
+            "distributions/grengin-api/{}/categories.json",
+            self.distribution_version
+        );
+        let result = match self.fetch_document(&path).await {
+            Ok(bytes) => serde_json::from_slice::<ProviderCategories>(&bytes)
+                .map_err(|error| DiscoveryError::InvalidCatalog(error.to_string()))
+                .and_then(|metadata| {
+                    validate_categories(&metadata, &self.distribution_version, index)?;
+                    Ok(metadata)
+                }),
+            Err(error) => Err(error),
+        };
+        let value = match result {
+            Ok(metadata) => Some(metadata),
+            Err(DiscoveryError::NotFound) => None,
+            Err(error) => {
+                eprintln!("optional discovery categories unavailable: {error}");
+                None
+            }
+        };
+        *cache = Some(CachedCategories {
+            value: value.clone(),
+            fetched_at: Instant::now(),
+        });
+        value
     }
 
     async fn provider_candidates(
@@ -481,6 +545,38 @@ impl DiscoveryCatalog {
             .insert(path.to_string(), document.clone());
         Ok(document.body)
     }
+}
+
+fn validate_categories(
+    metadata: &ProviderCategories,
+    expected_version: &str,
+    index: &CatalogIndex,
+) -> Result<(), DiscoveryError> {
+    let mut ids = HashSet::new();
+    let valid = metadata.format_version == "1.0"
+        && metadata.grengin_api_version == expected_version
+        && !metadata.categories.is_empty()
+        && metadata.categories.len() <= 100
+        && metadata.categories.iter().all(|category| {
+            validate_provider_id(&category.id).is_ok()
+                && ids.insert(category.id.as_str())
+                && !category.label.trim().is_empty()
+                && category.label.len() <= 100
+                && category.description.len() <= 1000
+        })
+        && metadata.providers.len() == index.providers.len()
+        && index.providers.iter().all(|provider| {
+            metadata
+                .providers
+                .get(&provider.id)
+                .is_some_and(|category| ids.contains(category.as_str()))
+        });
+    if !valid {
+        return Err(DiscoveryError::InvalidCatalog(
+            "invalid distribution categories".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn configured_distribution_version() -> String {
@@ -876,6 +972,159 @@ mod tests {
             default_version: default_version.to_string(),
             versions,
         }
+    }
+
+    fn categories_fixture() -> Value {
+        serde_json::json!({
+            "formatVersion": "1.0",
+            "grenginApiVersion": env!("CARGO_PKG_VERSION"),
+            "categories": [{"id": "frontier", "label": "Frontier Labs", "description": "Foundation model labs"}],
+            "providers": {"test-ai": "frontier"}
+        })
+    }
+
+    async fn categories_catalog(
+        body: Value,
+        status: StatusCode,
+        requests: Arc<AtomicUsize>,
+    ) -> DiscoveryCatalog {
+        let index = auth_distribution(
+            "example",
+            "1.0",
+            serde_json::json!([{
+                "version":"1.0", "schemaVersion":"1.0", "configurationVersion":"1.0", "sha256":"0".repeat(64)
+            }]),
+        );
+        let path = format!(
+            "/distributions/grengin-api/{}/categories.json",
+            env!("CARGO_PKG_VERSION")
+        );
+        let base = serve(
+            Router::new()
+                .route(
+                    TEST_DISTRIBUTION_PATH,
+                    get(move || {
+                        let index = index.clone();
+                        async move { index }
+                    }),
+                )
+                .route(
+                    &path,
+                    get(move || {
+                        let body = body.clone();
+                        let requests = requests.clone();
+                        async move {
+                            requests.fetch_add(1, Ordering::SeqCst);
+                            (status, axum::Json(body))
+                        }
+                    }),
+                ),
+        )
+        .await;
+        DiscoveryCatalog::new(test_client(), &base).unwrap()
+    }
+
+    #[tokio::test]
+    async fn ai_discovery_merges_category_sidecar_without_changing_version_selection() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let catalog =
+            categories_catalog(categories_fixture(), StatusCode::OK, requests.clone()).await;
+        for selector in [None, Some("1"), Some("1.0")] {
+            let response = catalog.list_ai(selector).await.unwrap();
+            assert_eq!(response.providers.len(), 1);
+            assert_eq!(response.providers[0].category.as_deref(), Some("frontier"));
+            assert_eq!(response.providers[0].selected_version, "1.0");
+            assert_eq!(response.categories[0].label, "Frontier Labs");
+            let json = serde_json::to_value(&response).unwrap();
+            assert_eq!(json["providers"][0]["category"], "frontier");
+            assert_eq!(json["distribution_version"], env!("CARGO_PKG_VERSION"));
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn auth_discovery_never_fetches_or_returns_ai_categories() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let catalog =
+            categories_catalog(categories_fixture(), StatusCode::OK, requests.clone()).await;
+        let response = serde_json::to_value(catalog.list_auth(None).await.unwrap()).unwrap();
+        assert!(response.get("categories").is_none());
+        assert!(response["providers"][0].get("category").is_none());
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn optional_category_errors_are_negative_cached_without_breaking_discovery() {
+        for status in [StatusCode::NOT_FOUND, StatusCode::SERVICE_UNAVAILABLE] {
+            let requests = Arc::new(AtomicUsize::new(0));
+            let catalog = categories_catalog(categories_fixture(), status, requests.clone()).await;
+            for _ in 0..2 {
+                let response = serde_json::to_value(catalog.list_ai(None).await.unwrap()).unwrap();
+                assert_eq!(response["providers"].as_array().unwrap().len(), 1);
+                assert!(response.get("categories").is_none());
+                assert!(response["providers"][0].get("category").is_none());
+            }
+            assert_eq!(requests.load(Ordering::SeqCst), 1);
+            catalog.categories.lock().await.as_mut().unwrap().fetched_at =
+                Instant::now() - CATALOG_CACHE_TTL;
+            catalog.list_ai(None).await.unwrap();
+            assert_eq!(requests.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_category_metadata_is_ignored_without_expanding_the_allowlist() {
+        let valid = categories_fixture();
+        let mut mutations = Vec::new();
+        for (field, value) in [
+            ("formatVersion", Value::String("2.0".into())),
+            ("grenginApiVersion", Value::String("0.9.4".into())),
+            ("categories", serde_json::json!([])),
+            ("providers", serde_json::json!({"foreign": "frontier"})),
+            ("providers", serde_json::json!({"test-ai": "unknown"})),
+            (
+                "providers",
+                serde_json::json!({"test-ai": "frontier", "foreign": "frontier"}),
+            ),
+            ("providers", serde_json::json!({})),
+        ] {
+            let mut body = valid.clone();
+            body[field] = value;
+            mutations.push(body);
+        }
+        let mut duplicate = valid.clone();
+        duplicate["categories"]
+            .as_array_mut()
+            .unwrap()
+            .push(valid["categories"][0].clone());
+        mutations.push(duplicate);
+        let mut blank = valid.clone();
+        blank["categories"][0]["label"] = Value::String("  ".into());
+        mutations.push(blank);
+        let mut path = valid.clone();
+        path["categories"][0]["id"] = Value::String("../escape".into());
+        mutations.push(path);
+        mutations.push(serde_json::json!({"wrong": true}));
+        for body in mutations {
+            let requests = Arc::new(AtomicUsize::new(0));
+            let catalog = categories_catalog(body, StatusCode::OK, requests.clone()).await;
+            let response = catalog.list_ai(None).await.unwrap();
+            assert_eq!(response.providers.len(), 1);
+            assert_eq!(response.providers[0].id, "test-ai");
+            assert!(response.providers[0].category.is_none());
+            assert!(response.categories.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_category_requests_are_single_flight() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let catalog =
+            categories_catalog(categories_fixture(), StatusCode::OK, requests.clone()).await;
+        let (first, second) = tokio::join!(catalog.list_ai(None), catalog.list_ai(None));
+        assert!(first.unwrap().providers[0].category.is_some());
+        assert!(second.unwrap().providers[0].category.is_some());
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 
     #[test]

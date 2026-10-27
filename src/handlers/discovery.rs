@@ -192,6 +192,7 @@ mod tests {
             catalog_type: "auth_providers".to_string(),
             catalog_version: "1.0.0".to_string(),
             providers: Vec::new(),
+            categories: Vec::new(),
         };
         let first = discovery_response(&HeaderMap::new(), &value).expect("discovery response");
         let etag = first.headers()[header::ETAG].clone();

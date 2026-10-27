@@ -30,3 +30,13 @@ if bash "$root/scripts/verify-release-distribution.sh" "$scratch/missing.json" 0
   printf 'FAIL: missing catalog accepted\n' >&2; exit 1
 fi
 printf 'PASS: missing catalog is rejected\n'
+
+if bash "$root/scripts/verify-hotfix-distribution.sh" "$scratch/valid.json" 0.9.5 "$revision" not-a-commit 2>/dev/null; then
+  printf 'FAIL: malformed hotfix revision accepted\n' >&2; exit 1
+fi
+printf 'PASS: malformed hotfix revision rejected\n'
+actual_revision=$(git -C "$root" rev-parse HEAD)
+if bash "$root/scripts/verify-hotfix-distribution.sh" "$scratch/valid.json" 0.9.5 "$revision" "$actual_revision" 2>/dev/null; then
+  printf 'FAIL: non-ancestor distribution revision accepted\n' >&2; exit 1
+fi
+printf 'PASS: non-ancestor distribution revision rejected\n'

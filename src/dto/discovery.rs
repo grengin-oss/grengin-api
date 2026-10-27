@@ -27,9 +27,19 @@ pub struct DiscoveryProviderSummary {
     pub status: String,
     pub icon: Option<String>,
     pub icon_dark: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
     pub selected_version: String,
     pub latest_version: String,
     pub available_versions: Vec<DiscoveryVersion>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryCategory {
+    pub id: String,
+    pub label: String,
+    pub description: String,
 }
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
@@ -38,6 +48,8 @@ pub struct DiscoveryListResponse {
     pub catalog_type: String,
     pub catalog_version: String,
     pub providers: Vec<DiscoveryProviderSummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<DiscoveryCategory>,
 }
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
