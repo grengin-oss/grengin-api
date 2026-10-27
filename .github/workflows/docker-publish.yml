@@ -64,7 +64,7 @@ jobs:
             io.grengin.migration-head=${{ steps.release.outputs.migration_head }}
 
       - name: Build
-        run: cargo build --release --locked --workspace --jobs 2
+        run: cargo build --locked --workspace --jobs 2
 
       - name: Test
         run: cargo test --locked --workspace --jobs 2

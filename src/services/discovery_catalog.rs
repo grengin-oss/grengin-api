@@ -108,6 +108,8 @@ struct CatalogProvider {
     icon: Option<String>,
     #[serde(default)]
     icon_dark: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
     default_version: String,
     versions: Vec<CatalogArtifactVersion>,
 }
@@ -350,10 +352,12 @@ impl DiscoveryCatalog {
                 })
                 .collect::<Vec<_>>();
             providers.push(DiscoveryProviderSummary {
-                category: categories
-                    .as_ref()
-                    .and_then(|metadata| metadata.providers.get(&provider.id))
-                    .cloned(),
+                category: provider.category.clone().or_else(|| {
+                    categories
+                        .as_ref()
+                        .and_then(|metadata| metadata.providers.get(&provider.id))
+                        .cloned()
+                }),
                 id: provider.id,
                 name: provider.name,
                 description: provider.description,
@@ -569,7 +573,13 @@ fn validate_categories(
             metadata
                 .providers
                 .get(&provider.id)
-                .is_some_and(|category| ids.contains(category.as_str()))
+                .is_some_and(|category| {
+                    ids.contains(category.as_str())
+                        && provider
+                            .category
+                            .as_ref()
+                            .is_none_or(|inline| inline == category)
+                })
         });
     if !valid {
         return Err(DiscoveryError::InvalidCatalog(
@@ -648,6 +658,9 @@ fn validate_catalog_index(kind: &CatalogKind, index: &CatalogIndex) -> Result<()
         if provider.name.trim().is_empty()
             || provider.status.trim().is_empty()
             || provider.versions.is_empty()
+            || provider.category.as_ref().is_some_and(|category| {
+                matches!(kind, CatalogKind::Auth) || validate_provider_id(category).is_err()
+            })
         {
             return Err(DiscoveryError::InvalidCatalog(
                 "distribution contains incomplete provider metadata".to_string(),
@@ -969,6 +982,7 @@ mod tests {
             status: "stable".to_string(),
             icon: None,
             icon_dark: None,
+            category: None,
             default_version: default_version.to_string(),
             versions,
         }
@@ -995,6 +1009,15 @@ mod tests {
                 "version":"1.0", "schemaVersion":"1.0", "configurationVersion":"1.0", "sha256":"0".repeat(64)
             }]),
         );
+        categories_catalog_from_index(body, status, requests, index).await
+    }
+
+    async fn categories_catalog_from_index(
+        body: Value,
+        status: StatusCode,
+        requests: Arc<AtomicUsize>,
+        index: Vec<u8>,
+    ) -> DiscoveryCatalog {
         let path = format!(
             "/distributions/grengin-api/{}/categories.json",
             env!("CARGO_PKG_VERSION")
@@ -1022,6 +1045,85 @@ mod tests {
         )
         .await;
         DiscoveryCatalog::new(test_client(), &base).unwrap()
+    }
+
+    fn inline_distribution(category: &str) -> Value {
+        let bytes = auth_distribution(
+            "example",
+            "1.0",
+            serde_json::json!([{
+                "version":"1.0", "schemaVersion":"1.0", "configurationVersion":"1.0", "sha256":"0".repeat(64)
+            }]),
+        );
+        let mut index: Value = serde_json::from_slice(&bytes).unwrap();
+        index["aiProviders"]["providers"][0]["category"] = category.into();
+        index
+    }
+
+    #[test]
+    fn inline_categories_preserve_strict_distribution_validation() {
+        for category in ["frontier", "fast-inference", "future-category"] {
+            let index: ApiDistribution =
+                serde_json::from_value(inline_distribution(category)).unwrap();
+            validate_distribution(&index, env!("CARGO_PKG_VERSION")).unwrap();
+            assert_eq!(
+                index.ai_providers.providers[0].category.as_deref(),
+                Some(category)
+            );
+        }
+        for category in ["", "../escape", "Frontier", "has spaces"] {
+            let index: ApiDistribution =
+                serde_json::from_value(inline_distribution(category)).unwrap();
+            assert!(validate_distribution(&index, env!("CARGO_PKG_VERSION")).is_err());
+        }
+        let mut unknown = inline_distribution("frontier");
+        unknown["aiProviders"]["providers"][0]["extra"] = true.into();
+        assert!(serde_json::from_value::<ApiDistribution>(unknown).is_err());
+        let mut wrong_type = inline_distribution("frontier");
+        wrong_type["aiProviders"]["providers"][0]["category"] = 123.into();
+        assert!(serde_json::from_value::<ApiDistribution>(wrong_type).is_err());
+        let mut auth_category = inline_distribution("frontier");
+        auth_category["authProviders"]["providers"][0]["category"] = "frontier".into();
+        let index: ApiDistribution = serde_json::from_value(auth_category).unwrap();
+        assert!(validate_distribution(&index, env!("CARGO_PKG_VERSION")).is_err());
+    }
+
+    #[tokio::test]
+    async fn inline_categories_survive_optional_sidecar_failures() {
+        for status in [
+            StatusCode::OK,
+            StatusCode::NOT_FOUND,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            let catalog = categories_catalog_from_index(
+                categories_fixture(),
+                status,
+                Arc::new(AtomicUsize::new(0)),
+                serde_json::to_vec(&inline_distribution("frontier")).unwrap(),
+            )
+            .await;
+            let listing = catalog.list_ai(Some("1")).await.unwrap();
+            assert_eq!(listing.providers[0].category.as_deref(), Some("frontier"));
+            assert_eq!(listing.providers[0].selected_version, "1.0");
+            assert_eq!(!listing.categories.is_empty(), status == StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn disagreeing_sidecar_never_overrides_inline_categories() {
+        let catalog = categories_catalog_from_index(
+            categories_fixture(),
+            StatusCode::OK,
+            Arc::new(AtomicUsize::new(0)),
+            serde_json::to_vec(&inline_distribution("independent")).unwrap(),
+        )
+        .await;
+        let listing = catalog.list_ai(None).await.unwrap();
+        assert_eq!(
+            listing.providers[0].category.as_deref(),
+            Some("independent")
+        );
+        assert!(listing.categories.is_empty());
     }
 
     #[tokio::test]
