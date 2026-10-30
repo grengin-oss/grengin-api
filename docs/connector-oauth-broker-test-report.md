@@ -216,7 +216,7 @@ at confirmation and a narrowed scope allowlist before unexpired-token checkout.
 | REL-04 | Duplicate user/server bindings returned 503 | Map the actual unique constraint violation to 409; live test verifies only one connection exists |
 | REL-05 | Revoked installation could not clean up its credentials | Allow only signed, correctly bound disconnect after installation revocation. Start/checkout still fail. Unit tests verify both boundaries |
 | REL-06 | Generic OAuth compatibility details | JSON Accept header, exact PKCE/redirect binding, proper basic credential encoding, safe response_type=code, rejection of unknown auth modes, optional token expiry and unsupported token-type rejection |
-| REL-07 | Slack's successful user-only token response was rejected, while a generic Bearer shape was accepted | Restrict the adapter to the Slack provider and exact official authorization/token/MCP endpoints; require ok=true and token_type=user. Mock approval, refresh, malformed/error/bot responses, endpoint impersonation and generic-provider isolation pass |
+| REL-07 | Slack user-token parsing was first too permissive, then too strict for a live token response | Keep exact official Slack authorization/token/MCP endpoint binding. Accept the documented ok=true/token_type=user response; bearer-shaped or standard OAuth responses additionally require Slack auth.test to confirm a user identity with no bot identity. Explicit bot/error responses and unverified credentials remain rejected. See the real-vendor follow-up below |
 | REL-08 | Deleted owners could leave broker credentials without a retrying local cleanup | Retain encrypted grants, deny the deleted user's session immediately, and run bounded cleanup on the persistent single-instance backend. Broker/provider failures are retried, successful cleanup removes grants, and required audit events identify system actions. The user FK now restricts hard deletion until cleanup; temporarily deactivated accounts retain settings |
 
 ### SEC-11: OAuth App Identity Was Not Bound Across Consent
@@ -245,6 +245,47 @@ Slack's response contract is documented in the official
 The adapter does not add support for Slack bot OAuth, verify an app registration,
 or establish that the registered redirect URI/scopes have been accepted by Slack.
 
+### Live Slack Follow-Up: Token Shape And Diagnostics
+
+Real browser consent reached the local broker, which received an access token
+but rejected its token-type validation. This proves a live parser failure, not
+a completed Slack connection or tool call. The original mocked successful Slack
+response did not cover that format. Failed codes cannot be replayed for recovery.
+
+Bearer-shaped responses from the exact Slack user-only endpoints now require
+server-side verification through Slack auth.test. A valid user_id without a bot
+identity is required; verification failures and outages fail closed. Provider
+errors use fixed allowlisted diagnostic codes and token-shape booleans, never raw
+payloads, credentials, user identities or token values. Slack invalid/reused codes
+and invalid refresh tokens map to reconnect-required rather than generic 503.
+
+Local-only frontend integration now uses the real webapp settings/callback/chat
+components and a snapshot of the existing development database. The original
+database remains unchanged. An isolated callback override uses the already
+registered http://localhost:5173/mcp/oauth/callback, not a production relaxation
+of HTTPS callback rules. The browser still requires explicit owner confirmation.
+No frontend or follow-up changes were pushed.
+
+The subsequent real Slack retry completed successfully on 2026-10-30. Independent
+API checks confirmed broker-verified status=connected, connected=true in both
+MCP server and user-connection listings, and 27 available tools after live Slack
+tool synchronization. The user also confirmed the real webapp connection worked.
+This verifies consent, owner confirmation, credential checkout and direct MCP
+initialization/tool listing, not a business tool invocation or model-led chat.
+
+The user reported that the LLM provider keys were unavailable following an
+attack, so real model inference and model-led Slack tool execution were not run.
+The mocked model/tool loop passed previously. A full live chat test remains
+required after replacement provider keys are configured; do not describe it as
+already verified or infer the attack's scope from the connection test.
+
+Follow-up checks: 408 Worker tests (63 broker tests), Worker typecheck, 47 actual
+backend HTTP regressions and migration round-trip, frontend API-helper security
+cases, and real-account local API/proxy checks passed. The complete Rust test,
+build and disposable HTTP/migration checks were repeated after bumping the
+package to 0.9.7: 758 workspace tests passed and 61 remained ignored. Full webapp
+typechecking still reports an unchanged ProjectDetailPage generic-props error.
+
 ## Existing Security Controls Rechecked
 
 - Ed25519 proofs bind exact body, method, path, installation, timestamp and nonce.
@@ -259,20 +300,21 @@ or establish that the registered redirect URI/scopes have been accepted by Slack
   approval followed by local-save failure recovers via GET status, not code replay.
 - Operator allowlists prevent catalog changes from expanding scopes or changing
   OAuth endpoints/MCP origins silently. No user-provided endpoints/secrets are used.
-- SSO configuration, frontend files, dev database and real vendor registrations
-  are not modified. No Redis/distributed backend machinery is introduced.
+- Core verification did not modify SSO configuration, frontend files, the original
+  dev database or real vendor registrations. The subsequent local-only frontend
+  and database-copy work is distinguished above. No Redis is introduced.
 
 ## Verification Results
 
-Final verification on the resulting working tree:
+Core verification, including the 0.9.7 package-bump rerun:
 
 | Check | Result |
 | --- | --- |
-| Rust workspace | 758 passed, 0 failed; 61 live/environment-dependent tests ignored |
+| Rust workspace, 0.9.7 | 758 passed, 0 failed; 61 live/environment-dependent tests ignored |
 | Compiled backend HTTP/security suite | 47 named checks passed, including actual MCP tools/call, chat continuation, HTML edge 429, matching runtime/DB/source migration heads and deleted-owner outage/recovery cleanup |
 | SeaORM connector migration up/down/up | Passed against disposable PostgreSQL |
-| Worker full suite | 402 passed, 0 failed |
-| Focused broker suite | 57 passed; included in the Worker total |
+| Worker full suite | 408 passed, 0 failed |
+| Focused broker suite | 63 passed; included in the Worker total |
 | Real catalog shapes against mock OAuth vendors | 33 templates passed as subcases, not 33 live vendor integrations |
 | Saved Slack settings / published-catalog preflight | Passed: immutable package SHA-256, operator settings, PKCE, exact service callback, encrypted pending state and idempotency; no vendor consent/token call |
 | Worker typecheck | Passed |

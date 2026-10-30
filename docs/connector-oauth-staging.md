@@ -194,9 +194,9 @@ was executed as part of the local verification or branch publication.
 ### 1. Preserve Newer Main Changes
 
 Check both feature branches against current main before replacing an existing
-staging deployment. At publication preparation, backend main was one release-only
-commit ahead (the 0.9.6 bump), while website main had 50 newer commits, including
-workspace, billing and email changes. Those changes were deliberately not
+staging deployment. The connector branch began before the backend 0.9.6 release
+commit, while website main subsequently gained workspace, billing and email
+changes. Those main changes were deliberately not
 merged into the locally verified feature branches. Do not deploy the older
 website checkout over a staging service that needs those newer features.
 
@@ -248,6 +248,14 @@ five minutes. Backend cleanup additionally needs a persistent running instance.
 No website frontend deployment is needed for these Worker-only changes.
 
 ### 3. Build The Backend Feature Branch, Not A Stable Tag
+
+The backend manifest and lockfile now identify this candidate as 0.9.7. Publish
+its reviewed compatibility index at
+https://meta.grengin.com/distributions/grengin-api/0.9.7/index.json before deploying
+a release-mode build. Discovery selects the compiled package version; merely
+bumping Cargo.toml without publishing that index would leave discovery broken.
+The index must pin the exact commit being built. Preparing a local catalog file
+does not approve its R2 publication or create a release.
 
 The existing v0.9.6 image does not contain this feature. The release workflow
 verifies that the catalog pins the exact backend commit, including on manual
@@ -316,7 +324,8 @@ servers, containers and scratch storage. Rust uses at most two jobs. Mock vendor
 and model calls do not spend model credits. Preflight fetches public metadata
 but does not contact Slack's token endpoint. GUI work was explicitly removed.
 
-The backend branch is one release-only commit behind main (the 0.9.6 release
-bump). Its local manifest still says 0.9.5; this is not a new released artifact.
-Integrate main and repeat the audit before the staging build. No release,
-shared migration or deployment was performed during these tests.
+The backend candidate is 0.9.7; this is not a newly published image or release.
+Review main integration and the matching catalog before the staging build, then
+repeat affected checks after any merge. No release, shared migration or deployed
+staging changes were performed during these tests. Local frontend integration
+and its manual consent harness remain separate from the production commits.
