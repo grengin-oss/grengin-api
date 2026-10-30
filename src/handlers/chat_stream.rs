@@ -2364,7 +2364,7 @@ pub async fn handle_chat_stream(
                                        }
                                    };
                                    let auth_token = if requires_oauth {
-                                       match resolve_mcp_oauth_token(&app_state, claims.user_id, tool_ref.server_id)
+                                       match resolve_mcp_oauth_token(&app_state, claims.user_id, tool_ref.server_id,client.as_ref().and_then(|value|value.http_url_for_transport().ok()))
                                            .await
                                        {
                                            Ok(token) => token,

@@ -112,6 +112,11 @@ use utoipa::OpenApi;
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        crate::handlers::connectors::list,
+        crate::handlers::connectors::connect,
+        crate::handlers::connectors::status,
+        crate::handlers::connectors::disconnect,
+        crate::handlers::connectors::complete,
         chat_shares::create_share,
         chat_shares::list_shares,
         chat_shares::update_share,

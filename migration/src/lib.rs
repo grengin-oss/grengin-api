@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub use sea_orm_migration::prelude::*;
+mod m20261028_000001_create_connectors;
 
 mod m20250102_000001_add_redirect_url_to_sso_providers;
 mod m20250107_000001_create_usage_logs;
@@ -180,6 +181,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261014_000001_add_message_branches::Migration),
             Box::new(m20261015_000001_disable_seeded_system_prompts::Migration),
             Box::new(m20261019_000001_create_chat_shares::Migration),
+            Box::new(m20261028_000001_create_connectors::Migration),
         ]
     }
 }

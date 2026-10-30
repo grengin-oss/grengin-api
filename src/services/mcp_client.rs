@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::models::mcp_servers::McpTransportType;
-use crate::services::http_client::long_lived_stream_client;
+use crate::services::http_client::HttpTimeouts;
 use chrono::{DateTime, Duration, Utc};
 use oauth2::{
     EndpointNotSet as OAuthEndpointNotSet, EndpointSet as OAuthEndpointSet, basic::BasicClient,
@@ -13,7 +13,10 @@ use openidconnect::{
     RefreshToken, RequestTokenError, Scope, TokenUrl,
     core::{CoreAuthenticationFlow, CoreClient, CoreJsonWebKeySet},
 };
-use reqwest::{Client as ReqwestClient, header::ACCEPT};
+use reqwest::{
+    Client as ReqwestClient,
+    header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderName, HeaderValue},
+};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::{
     ServiceExt,
@@ -23,9 +26,10 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::process::Command;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use uuid::Uuid;
 
 const MAX_USER_HTTP_CLIENTS: usize = 256;
@@ -62,6 +66,16 @@ pub struct McpOAuthConfig {
     pub flow: McpOAuthFlow,
     #[serde(default = "default_use_pkce")]
     pub use_pkce: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_endpoint_auth_method: Option<McpTokenEndpointAuthMethod>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTokenEndpointAuthMethod {
+    ClientSecretPost,
+    ClientSecretBasic,
+    None,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -94,6 +108,8 @@ struct McpOAuthConfigInput {
     pub flow: McpOAuthFlow,
     #[serde(default)]
     pub use_pkce: Option<bool>,
+    #[serde(default)]
+    pub token_endpoint_auth_method: Option<McpTokenEndpointAuthMethod>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -130,6 +146,7 @@ type OAuth2Client = BasicClient<
 >;
 
 fn build_oidc_client(config: &McpOAuthConfig) -> Result<OAuthClient, McpClientError> {
+    validate_token_auth(config)?;
     let issuer = IssuerUrl::new(config.issuer_url.clone())
         .map_err(|e| McpClientError::OAuthConfig(e.to_string()))?;
     let auth_url = AuthUrl::new(config.auth_url.clone())
@@ -139,7 +156,7 @@ fn build_oidc_client(config: &McpOAuthConfig) -> Result<OAuthClient, McpClientEr
     let redirect_url = RedirectUrl::new(config.redirect_url.clone())
         .map_err(|e| McpClientError::OAuthConfig(e.to_string()))?;
 
-    let client = CoreClient::new(
+    let mut client = CoreClient::new(
         ClientId::new(config.client_id.clone()),
         issuer,
         CoreJsonWebKeySet::new(Vec::new()),
@@ -147,6 +164,12 @@ fn build_oidc_client(config: &McpOAuthConfig) -> Result<OAuthClient, McpClientEr
     .set_auth_uri(auth_url)
     .set_token_uri(token_url)
     .set_redirect_uri(redirect_url);
+    if let Some(method) = config.token_endpoint_auth_method {
+        client = client.set_auth_type(match method {
+            McpTokenEndpointAuthMethod::ClientSecretBasic => openidconnect::AuthType::BasicAuth,
+            _ => openidconnect::AuthType::RequestBody,
+        });
+    }
 
     Ok(match config.client_secret.as_ref() {
         Some(secret) => client.set_client_secret(ClientSecret::new(secret.clone())),
@@ -388,18 +411,11 @@ pub async fn exchange_code(
                 ("grant_type".to_string(), "authorization_code".to_string()),
                 ("code".to_string(), code.to_string()),
                 ("redirect_uri".to_string(), config.redirect_url.clone()),
-                ("client_id".to_string(), config.client_id.clone()),
             ];
-            if let Some(secret) = config.client_secret.as_ref() {
-                form.push(("client_secret".to_string(), secret.clone()));
-            }
             if config.use_pkce {
                 form.push(("code_verifier".to_string(), pkce_verifier.to_string()));
             }
-            let response = http_client
-                .post(&config.token_url)
-                .header(ACCEPT, "application/json")
-                .form(&form)
+            let response = oauth2_token_request(config, http_client, form)?
                 .send()
                 .await
                 .map_err(|e| McpClientError::OAuthUnreachable(e.to_string()))?;
@@ -435,18 +451,11 @@ pub async fn refresh_token(
             Ok(tokens_from_response(&token_response))
         }
         McpOAuthFlow::Oauth2 => {
-            let mut form = vec![
+            let form = vec![
                 ("grant_type".to_string(), "refresh_token".to_string()),
                 ("refresh_token".to_string(), refresh_token.to_string()),
-                ("client_id".to_string(), config.client_id.clone()),
             ];
-            if let Some(secret) = config.client_secret.as_ref() {
-                form.push(("client_secret".to_string(), secret.clone()));
-            }
-            let response = http_client
-                .post(&config.token_url)
-                .header(ACCEPT, "application/json")
-                .form(&form)
+            let response = oauth2_token_request(config, http_client, form)?
                 .send()
                 .await
                 .map_err(|e| McpClientError::OAuth(e.to_string()))?;
@@ -466,6 +475,58 @@ pub async fn refresh_token(
     }
 }
 
+fn validate_token_auth(config: &McpOAuthConfig) -> Result<(), McpClientError> {
+    match config.token_endpoint_auth_method {
+        Some(McpTokenEndpointAuthMethod::ClientSecretBasic)
+            if config.client_secret.as_deref().is_none_or(str::is_empty) =>
+        {
+            Err(McpClientError::OAuthConfig(
+                "client_secret_basic requires a client secret".to_string(),
+            ))
+        }
+        Some(McpTokenEndpointAuthMethod::None) if config.client_secret.is_some() => {
+            Err(McpClientError::OAuthConfig(
+                "public client authentication must not configure a client secret".to_string(),
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn oauth2_token_request(
+    config: &McpOAuthConfig,
+    http_client: &ReqwestClient,
+    mut form: Vec<(String, String)>,
+) -> Result<reqwest::RequestBuilder, McpClientError> {
+    validate_token_auth(config)?;
+    let mut request = http_client
+        .post(&config.token_url)
+        .header(ACCEPT, "application/json");
+    match config
+        .token_endpoint_auth_method
+        .unwrap_or(McpTokenEndpointAuthMethod::ClientSecretPost)
+    {
+        McpTokenEndpointAuthMethod::ClientSecretBasic => {
+            let encode = |value: &str| {
+                url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>()
+            };
+            request = request.basic_auth(
+                encode(&config.client_id),
+                config.client_secret.as_deref().map(encode),
+            );
+        }
+        method => {
+            form.push(("client_id".to_string(), config.client_id.clone()));
+            if method == McpTokenEndpointAuthMethod::ClientSecretPost {
+                if let Some(secret) = config.client_secret.as_ref() {
+                    form.push(("client_secret".to_string(), secret.clone()));
+                }
+            }
+        }
+    }
+    Ok(request.form(&form))
+}
+
 pub fn oauth_config_from_connection(
     connection_config: &Value,
     client_id: &str,
@@ -480,7 +541,7 @@ pub fn oauth_config_from_connection(
         .issuer_url
         .clone()
         .unwrap_or_else(|| input.auth_url.clone());
-    Ok(McpOAuthConfig {
+    let config = McpOAuthConfig {
         issuer_url,
         auth_url: input.auth_url,
         token_url: input.token_url,
@@ -491,7 +552,10 @@ pub fn oauth_config_from_connection(
         extra_params: input.extra_params,
         flow: input.flow,
         use_pkce: input.use_pkce.unwrap_or(true),
-    })
+        token_endpoint_auth_method: input.token_endpoint_auth_method,
+    };
+    validate_token_auth(&config)?;
+    Ok(config)
 }
 
 fn rmcp_args_from_value(args: Value) -> Result<Option<JsonObject>, McpClientError> {
@@ -520,17 +584,46 @@ async fn connect_rmcp_stdio(
 async fn connect_rmcp_http(
     base_url: &str,
     auth_header: Option<String>,
+    connection_config: &Value,
 ) -> Result<rmcp::service::RunningService<rmcp::service::RoleClient, ()>, McpClientError> {
     let mut config = StreamableHttpClientTransportConfig::with_uri(base_url);
     if let Some(token) = auth_header {
         config = config.auth_header(token);
     }
-    let client = long_lived_stream_client()
-        .map_err(|e| McpClientError::Rmcp(format!("http client build failed: {e}")))?;
+    let client = mcp_http_client(connection_config)?;
     let transport = StreamableHttpClientTransport::with_client(client, config);
     ().serve(transport)
         .await
         .map_err(|e| McpClientError::Rmcp(format!("rmcp connect failed: {e}")))
+}
+
+fn mcp_http_client(connection_config: &Value) -> Result<ReqwestClient, McpClientError> {
+    let config: TransportConfigInput = serde_json::from_value(
+        connection_config
+            .get("transport_config")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({})),
+    )
+    .map_err(|e| McpClientError::Config(format!("invalid transport_config: {e}")))?;
+    let mut headers = HeaderMap::new();
+    for (name, value) in config.headers.unwrap_or_default() {
+        let header = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| McpClientError::Config(format!("invalid HTTP header name: {name}")))?;
+        // OAuth user tokens and static Bearer tokens are selected per connection.
+        if header == AUTHORIZATION {
+            continue;
+        }
+        let resolved = resolve_env_placeholders(&value)?;
+        let value = HeaderValue::from_str(&resolved)
+            .map_err(|_| McpClientError::Config(format!("invalid HTTP header value for {name}")))?;
+        headers.insert(header, value);
+    }
+    HttpTimeouts::LONG_LIVED_STREAM
+        .apply(ReqwestClient::builder())
+        .redirect(reqwest::redirect::Policy::none())
+        .default_headers(headers)
+        .build()
+        .map_err(|e| McpClientError::Config(format!("http client build failed: {e}")))
 }
 
 pub struct McpServerClient {
@@ -541,7 +634,7 @@ pub struct McpServerClient {
     pub connection_config: Value,
     pub db_url: Option<String>,
     client: Mutex<Option<rmcp::service::RunningService<rmcp::service::RoleClient, ()>>>,
-    http_clients: Mutex<HashMap<Uuid, UserHttpClient>>,
+    http_clients: Mutex<HashMap<Uuid, Arc<Mutex<Option<UserHttpClient>>>>>,
     connected: Mutex<bool>,
 }
 
@@ -599,7 +692,8 @@ impl McpServerClient {
                     eprintln!("rmcp streamable http ignores sse_url; using base_url only");
                 }
                 let auth_header = extract_auth_header(&self.connection_config)?;
-                let service = connect_rmcp_http(base_url, auth_header).await?;
+                let service =
+                    connect_rmcp_http(base_url, auth_header, &self.connection_config).await?;
                 let mut client = self.client.lock().await;
                 *client = Some(service);
             }
@@ -620,6 +714,51 @@ impl McpServerClient {
         Ok(())
     }
 
+    async fn http_client_slot(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Arc<Mutex<Option<UserHttpClient>>>, McpClientError> {
+        let mut clients = self.http_clients.lock().await;
+        if let Some(entry) = clients.get(&user_id) {
+            return Ok(entry.clone());
+        }
+        if clients.len() >= MAX_USER_HTTP_CLIENTS {
+            let idle = clients
+                .iter()
+                .find_map(|(id, entry)| (Arc::strong_count(entry) == 1).then_some(*id));
+            let Some(idle) = idle else {
+                return Err(McpClientError::Rmcp(
+                    "mcp client capacity reached; retry later".into(),
+                ));
+            };
+            clients.remove(&idle);
+        }
+        let entry = Arc::new(Mutex::new(None));
+        clients.insert(user_id, entry.clone());
+        Ok(entry)
+    }
+
+    async fn authenticated_http_client(
+        &self,
+        token: String,
+        user_id: Uuid,
+    ) -> Result<OwnedMutexGuard<Option<UserHttpClient>>, McpClientError> {
+        let mut entry = self.http_client_slot(user_id).await?.lock_owned().await;
+        if entry.as_ref().is_none_or(|client| client.token != token) {
+            let service = connect_rmcp_http(
+                self.http_url_for_transport()?,
+                Some(token.clone()),
+                &self.connection_config,
+            )
+            .await?;
+            *entry = Some(UserHttpClient {
+                token,
+                client: service,
+            });
+        }
+        Ok(entry)
+    }
+
     pub async fn call_tool(
         &self,
         tool_name: &str,
@@ -629,28 +768,8 @@ impl McpServerClient {
     ) -> Result<CallToolResult, McpClientError> {
         match (self.transport_type, auth_token, user_id) {
             (McpTransportType::Http | McpTransportType::Sse, Some(token), Some(user_id)) => {
-                let base_url = self.http_url_for_transport()?;
-                let mut clients = self.http_clients.lock().await;
-                let replace_client = match clients.get(&user_id) {
-                    Some(entry) => entry.token != token,
-                    None => true,
-                };
-                if replace_client {
-                    if clients.len() >= MAX_USER_HTTP_CLIENTS && !clients.contains_key(&user_id) {
-                        if let Some(oldest_key) = clients.keys().next().cloned() {
-                            clients.remove(&oldest_key);
-                        }
-                    }
-                    let service = connect_rmcp_http(base_url, Some(token.clone())).await?;
-                    clients.insert(
-                        user_id,
-                        UserHttpClient {
-                            token: token.clone(),
-                            client: service,
-                        },
-                    );
-                }
-                let entry = clients.get_mut(&user_id).ok_or_else(|| {
+                let client = self.authenticated_http_client(token, user_id).await?;
+                let entry = client.as_ref().ok_or_else(|| {
                     McpClientError::Rmcp("rmcp client not initialized".to_string())
                 })?;
                 let arguments = rmcp_args_from_value(args)?;
@@ -707,28 +826,8 @@ impl McpServerClient {
     ) -> Result<Vec<Tool>, McpClientError> {
         match (self.transport_type, auth_token, user_id) {
             (McpTransportType::Http | McpTransportType::Sse, Some(token), Some(user_id)) => {
-                let base_url = self.http_url_for_transport()?;
-                let mut clients = self.http_clients.lock().await;
-                let replace_client = match clients.get(&user_id) {
-                    Some(entry) => entry.token != token,
-                    None => true,
-                };
-                if replace_client {
-                    if clients.len() >= MAX_USER_HTTP_CLIENTS && !clients.contains_key(&user_id) {
-                        if let Some(oldest_key) = clients.keys().next().cloned() {
-                            clients.remove(&oldest_key);
-                        }
-                    }
-                    let service = connect_rmcp_http(base_url, Some(token.clone())).await?;
-                    clients.insert(
-                        user_id,
-                        UserHttpClient {
-                            token: token.clone(),
-                            client: service,
-                        },
-                    );
-                }
-                let entry = clients.get_mut(&user_id).ok_or_else(|| {
+                let client = self.authenticated_http_client(token, user_id).await?;
+                let entry = client.as_ref().ok_or_else(|| {
                     McpClientError::Rmcp("rmcp client not initialized".to_string())
                 })?;
                 entry
@@ -744,7 +843,7 @@ impl McpServerClient {
         }
     }
 
-    fn http_url_for_transport(&self) -> Result<&str, McpClientError> {
+    pub fn http_url_for_transport(&self) -> Result<&str, McpClientError> {
         match self.transport_type {
             McpTransportType::Http => self
                 .url
@@ -886,6 +985,9 @@ fn resolve_env_var(name: &str) -> Result<String, McpClientError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
+    use base64::Engine;
+    use std::sync::Mutex as StdMutex;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -903,6 +1005,7 @@ mod tests {
             extra_params: HashMap::new(),
             flow: McpOAuthFlow::Oauth2,
             use_pkce: true,
+            token_endpoint_auth_method: None,
         }
     }
 
@@ -974,5 +1077,313 @@ mod tests {
 
         assert_eq!(tokens.access_token, "at");
         assert_eq!(tokens.refresh_token.as_deref(), Some("rt"));
+    }
+
+    #[tokio::test]
+    async fn code_exchange_and_refresh_follow_the_configured_client_auth_method() {
+        let captured = Arc::new(StdMutex::new(Vec::new()));
+        let received = captured.clone();
+        let router = Router::new().route(
+            "/token",
+            post(move |headers: HeaderMap, body: String| {
+                let received = received.clone();
+                async move {
+                    received.lock().unwrap().push((headers, body));
+                    Json(serde_json::json!({"access_token":"at", "refresh_token":"rt", "token_type":"Bearer"}))
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = ReqwestClient::new();
+        let cases = [
+            (McpOAuthFlow::Oauth2, None, false, false),
+            (
+                McpOAuthFlow::Oauth2,
+                Some(McpTokenEndpointAuthMethod::ClientSecretPost),
+                false,
+                false,
+            ),
+            (
+                McpOAuthFlow::Oauth2,
+                Some(McpTokenEndpointAuthMethod::ClientSecretBasic),
+                true,
+                false,
+            ),
+            (
+                McpOAuthFlow::Oauth2,
+                Some(McpTokenEndpointAuthMethod::None),
+                false,
+                true,
+            ),
+            (McpOAuthFlow::Oauth2, None, false, true),
+            (McpOAuthFlow::Oidc, None, true, false),
+            (
+                McpOAuthFlow::Oidc,
+                Some(McpTokenEndpointAuthMethod::ClientSecretPost),
+                false,
+                false,
+            ),
+            (
+                McpOAuthFlow::Oidc,
+                Some(McpTokenEndpointAuthMethod::ClientSecretBasic),
+                true,
+                false,
+            ),
+            (
+                McpOAuthFlow::Oidc,
+                Some(McpTokenEndpointAuthMethod::None),
+                false,
+                true,
+            ),
+        ];
+        for (flow, method, basic, public) in cases {
+            let mut config = oauth2_config(url.clone());
+            config.flow = flow;
+            config.client_id = "client: id".to_string();
+            config.client_secret = (!public).then(|| "s+e&cret".to_string());
+            config.token_endpoint_auth_method = method;
+            exchange_code(&config, "code", "verifier", &client)
+                .await
+                .unwrap();
+            refresh_token(&config, "refresh", &client).await.unwrap();
+            let requests = std::mem::take(&mut *captured.lock().unwrap());
+            assert_eq!(requests.len(), 2);
+            for (index, (headers, body)) in requests.into_iter().enumerate() {
+                let form: HashMap<_, _> = url::form_urlencoded::parse(body.as_bytes())
+                    .into_owned()
+                    .collect();
+                assert_eq!(
+                    form.get("grant_type").map(String::as_str),
+                    Some(if index == 0 {
+                        "authorization_code"
+                    } else {
+                        "refresh_token"
+                    })
+                );
+                if basic {
+                    let expected = format!(
+                        "Basic {}",
+                        base64::engine::general_purpose::STANDARD
+                            .encode(b"client%3A+id:s%2Be%26cret")
+                    );
+                    assert_eq!(headers.get(AUTHORIZATION).unwrap(), expected.as_str());
+                    assert!(!form.contains_key("client_secret"));
+                } else {
+                    assert!(!headers.contains_key(AUTHORIZATION));
+                    assert_eq!(
+                        form.get("client_id").map(String::as_str),
+                        Some("client: id")
+                    );
+                    assert_eq!(
+                        form.get("client_secret").map(String::as_str),
+                        if public { None } else { Some("s+e&cret") }
+                    );
+                }
+            }
+        }
+        server.abort();
+    }
+
+    #[test]
+    fn invalid_client_auth_configuration_is_rejected() {
+        let mut config = oauth2_config("https://example.test/token".to_string());
+        config.token_endpoint_auth_method = Some(McpTokenEndpointAuthMethod::ClientSecretBasic);
+        assert!(validate_token_auth(&config).is_err());
+        config.client_secret = Some("secret".to_string());
+        assert!(validate_token_auth(&config).is_ok());
+        config.token_endpoint_auth_method = Some(McpTokenEndpointAuthMethod::None);
+        assert!(validate_token_auth(&config).is_err());
+    }
+
+    #[tokio::test]
+    async fn custom_headers_reach_initialize_listing_and_calls_with_the_user_token() {
+        let captured = Arc::new(StdMutex::new(Vec::new()));
+        let received = captured.clone();
+        let router = Router::new().route(
+            "/mcp",
+            post(move |headers: HeaderMap, Json(message): Json<Value>| {
+                let received = received.clone();
+                async move {
+                    received.lock().unwrap().push((message["method"].clone(), headers));
+                    if message.get("id").is_none() {
+                        return StatusCode::ACCEPTED.into_response();
+                    }
+                    let result = match message["method"].as_str().unwrap() {
+                        "initialize" => serde_json::json!({
+                            "protocolVersion":message["params"]["protocolVersion"],
+                            "capabilities":{"tools":{}}, "serverInfo":{"name":"test", "version":"1"}
+                        }),
+                        "tools/list" => serde_json::json!({"tools":[{"name":"ping", "description":"Ping", "inputSchema":{"type":"object"}}]}),
+                        "tools/call" => serde_json::json!({"content":[{"type":"text", "text":"pong"}]}),
+                        _ => panic!("unexpected method"),
+                    };
+                    Json(serde_json::json!({"jsonrpc":"2.0", "id":message["id"], "result":result})).into_response()
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let config = serde_json::json!({"transport_config":{"headers":{
+            "User-Agent":"partner_app_Grengin", "Authorization":"Bearer wrong-token"
+        }}});
+        let service = connect_rmcp_http(&url, Some("per-user-token".to_string()), &config)
+            .await
+            .unwrap();
+        assert_eq!(service.list_all_tools().await.unwrap().len(), 1);
+        service
+            .call_tool(CallToolRequestParams {
+                meta: None,
+                name: "ping".into(),
+                arguments: None,
+                task: None,
+            })
+            .await
+            .unwrap();
+        for method in ["initialize", "tools/list", "tools/call"] {
+            let requests = captured.lock().unwrap();
+            let (_, headers) = requests.iter().find(|(name, _)| name == method).unwrap();
+            assert_eq!(headers["user-agent"], "partner_app_Grengin");
+            assert_eq!(headers[AUTHORIZATION], "Bearer per-user-token");
+        }
+        service.cancel().await.unwrap();
+        server.abort();
+    }
+
+    #[test]
+    fn invalid_custom_headers_are_configuration_errors() {
+        for headers in [
+            serde_json::json!({"Bad\nName":"value"}),
+            serde_json::json!({"User-Agent":"bad\r\nvalue"}),
+        ] {
+            assert!(
+                mcp_http_client(&serde_json::json!({"transport_config":{"headers":headers}}))
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_oauth_user_does_not_block_other_users_on_same_mcp_server() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let router = Router::new().route(
+            "/mcp",
+            post({
+                let entered = entered.clone();
+                let release = release.clone();
+                move |headers: HeaderMap, Json(message): Json<Value>| {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        if message.get("id").is_none() {
+                            return StatusCode::ACCEPTED.into_response();
+                        }
+                        let result = match message["method"].as_str().unwrap() {
+                            "initialize" => serde_json::json!({
+                                "protocolVersion":message["params"]["protocolVersion"],
+                                "capabilities":{"tools":{}}, "serverInfo":{"name":"concurrency", "version":"1"}
+                            }),
+                            "tools/list" => serde_json::json!({"tools":[]}),
+                            "tools/call" => {
+                                if headers.get(AUTHORIZATION).unwrap() == "Bearer slow-user" {
+                                    entered.notify_one();
+                                    release.notified().await;
+                                }
+                                serde_json::json!({"content":[{"type":"text","text":"ok"}]})
+                            }
+                            _ => panic!("unexpected MCP method"),
+                        };
+                        Json(serde_json::json!({"jsonrpc":"2.0", "id":message["id"], "result":result})).into_response()
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Arc::new(McpServerClient::new(
+            Uuid::new_v4(),
+            "concurrency".into(),
+            McpTransportType::Http,
+            Some(url),
+            serde_json::json!({}),
+            None,
+        ));
+        let slow = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .call_tool(
+                        "ping",
+                        serde_json::json!({}),
+                        Some("slow-user".into()),
+                        Some(Uuid::new_v4()),
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        let fast_user = Uuid::new_v4();
+        let fast = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            client
+                .list_tools_with_auth(Some("fast-user".into()), Some(fast_user))
+                .await?;
+            client
+                .call_tool(
+                    "ping",
+                    serde_json::json!({}),
+                    Some("rotated-fast-user".into()),
+                    Some(fast_user),
+                )
+                .await
+        })
+        .await;
+        release.notify_one();
+        slow.await.unwrap().unwrap();
+        server.abort();
+        assert!(
+            fast.is_ok(),
+            "another user's network call held the entire client-cache lock"
+        );
+        fast.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn oauth_client_cache_is_bounded_and_never_evicts_an_in_use_entry() {
+        let client = McpServerClient::new(
+            Uuid::new_v4(),
+            "capacity".into(),
+            McpTransportType::Http,
+            Some("https://example.invalid/mcp".into()),
+            serde_json::json!({}),
+            None,
+        );
+        let first_user = Uuid::new_v4();
+        let first = client.http_client_slot(first_user).await.unwrap();
+        assert!(Arc::ptr_eq(
+            &first,
+            &client.http_client_slot(first_user).await.unwrap()
+        ));
+        let mut active = vec![first];
+        for _ in 1..MAX_USER_HTTP_CLIENTS {
+            active.push(client.http_client_slot(Uuid::new_v4()).await.unwrap());
+        }
+        assert!(client.http_client_slot(Uuid::new_v4()).await.is_err());
+        active.pop();
+        let replacement = client.http_client_slot(Uuid::new_v4()).await.unwrap();
+        assert_eq!(
+            client.http_clients.lock().await.len(),
+            MAX_USER_HTTP_CLIENTS
+        );
+        assert!(Arc::ptr_eq(
+            &active[0],
+            &client.http_client_slot(first_user).await.unwrap()
+        ));
+        drop(replacement);
     }
 }

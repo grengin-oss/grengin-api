@@ -526,7 +526,11 @@ fn redact_query(query: &str) -> String {
         .split('&')
         .map(|pair| {
             let key = pair.split_once('=').map_or(pair, |(key, _)| key);
-            let normalized = normalize_key(key);
+            let decoded = url::form_urlencoded::parse(pair.as_bytes())
+                .next()
+                .map(|(key, _)| key.into_owned())
+                .unwrap_or_default();
+            let normalized = normalize_key(&decoded);
             // OAuth callbacks carry the authorization code or a signed proxy assertion here.
             if is_credential_key(&normalized) || matches!(normalized.as_str(), "code" | "assertion")
             {
@@ -562,6 +566,9 @@ fn is_credential_key(key: &str) -> bool {
         "apikey",
         "authorization",
         "cookie",
+        "confirmationcode",
+        "connectiongrant",
+        "privatekey",
     ]
     .iter()
     .any(|sensitive| key.contains(sensitive))
@@ -1346,6 +1353,16 @@ mod tests {
         assert_eq!(
             redact_query("access_token=abc&page=2&archived&api-key=k"),
             "access_token=[REDACTED]&page=2&archived&api-key=[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn connector_receipts_grants_and_encoded_keys_never_survive_query_redaction() {
+        assert_eq!(
+            redact_query(
+                "confirmation_code=receipt&confirmation%5Fcode=receipt&connection_grant=grant&private-key=key&page=2"
+            ),
+            "confirmation_code=[REDACTED]&confirmation%5Fcode=[REDACTED]&connection_grant=[REDACTED]&private-key=[REDACTED]&page=2"
         );
     }
 

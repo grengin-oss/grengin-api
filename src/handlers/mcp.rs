@@ -212,8 +212,10 @@ pub async fn list_public_mcp_servers(
 
     let mut response = Vec::new();
     let now = Utc::now();
+    let broker_statuses =
+        crate::services::connectors_helpers::cached_mcp_statuses(&state, claims.user_id).await?;
     for server in servers {
-        let connected = match server.transport_type {
+        let legacy_connected = match server.transport_type {
             mcp_servers::McpTransportType::Http
             | mcp_servers::McpTransportType::Sse
             | mcp_servers::McpTransportType::Websocket => connections_by_server
@@ -225,6 +227,10 @@ pub async fn list_public_mcp_servers(
                 .unwrap_or(false),
             mcp_servers::McpTransportType::Stdio => server.status.as_deref() == Some("connected"),
         };
+        let connected = broker_statuses
+            .get(&server.id)
+            .copied()
+            .unwrap_or(legacy_connected);
 
         if let Some(connected_filter) = query.connected {
             if connected_filter != connected {
@@ -583,7 +589,14 @@ pub async fn sync_mcp_server_tools(
         mcp_servers::McpTransportType::Http | mcp_servers::McpTransportType::Sse
     ) && server.connection_config.get("oauth").is_some();
     let oauth_token = if requires_oauth {
-        match resolve_mcp_oauth_token(&state, claims.user_id, server_id).await {
+        match resolve_mcp_oauth_token(
+            &state,
+            claims.user_id,
+            server_id,
+            client.http_url_for_transport().ok(),
+        )
+        .await
+        {
             Ok(token) => token,
             Err(err) => {
                 eprintln!("mcp oauth token lookup error: {:?}", err);
@@ -1278,6 +1291,12 @@ pub async fn list_mcp_connections(
                 .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok()),
         })
         .collect();
+    let connections = crate::services::connectors_helpers::merge_mcp_connections(
+        &state,
+        claims.user_id,
+        connections,
+    )
+    .await?;
     Ok(Json(McpUserConnections { connections }))
 }
 
@@ -1353,6 +1372,12 @@ pub async fn disconnect_mcp_connection(
     State(state): State<SharedState>,
     Path(server_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::services::connectors_helpers::disconnect_linked_connection(
+        &state,
+        claims.user_id,
+        server_id,
+    )
+    .await?;
     upsert_connection(&state, claims.user_id, server_id, false).await?;
     Ok(Json(serde_json::json!({
         "success": true,

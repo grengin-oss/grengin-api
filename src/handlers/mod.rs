@@ -21,6 +21,7 @@ pub mod branding;
 pub mod chat;
 pub mod chat_shares;
 pub mod chat_stream;
+pub mod connectors;
 pub mod discovery;
 pub mod file;
 pub mod mcp;

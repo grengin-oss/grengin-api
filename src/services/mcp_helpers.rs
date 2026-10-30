@@ -279,7 +279,15 @@ pub async fn resolve_mcp_oauth_token(
     state: &SharedState,
     user_id: Uuid,
     server_id: Uuid,
+    client_url: Option<&str>,
 ) -> Result<Option<String>, AppError> {
+    if let Some(token) = crate::services::connectors_helpers::resolve_mcp_connection_token(
+        state, user_id, server_id, client_url,
+    )
+    .await?
+    {
+        return Ok(token);
+    }
     // One provider refresh per connection in this single-instance deployment. Waiting callers
     // re-read the saved tokens instead of redeeming the same rotating refresh token twice.
     let _refresh_lock = state.mcp_refresh_locks.lock(user_id, server_id).await;
@@ -684,6 +692,16 @@ pub async fn start_oauth_authorization(
 
     if !server.enabled {
         return Err(AppError::McpServerNotFound);
+    }
+
+    if let Some(authorization_url) =
+        crate::services::connectors_helpers::pending_authorization(state, user_id, server_id)
+            .await?
+    {
+        return Ok(McpOauthPrompt {
+            authorization_url,
+            server_name: server.name,
+        });
     }
 
     if !matches!(
