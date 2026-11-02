@@ -7,11 +7,18 @@ or migrate a shared database.
 
 ## Readiness
 
+The [latest-docs and sync review](connector-oauth-latest-docs-and-sync-audit-2026-11-02.md)
+confirms the local pinned-provider suite passes but the branches are not integrated with main.
+Read-only merge simulations find conflicts in both repos. Strict resource and
+callback-issuer contracts remain unimplemented; do not infer full latest-MCP
+authorization support from the existing mock-vendor tests.
+
 The [2026-11-02 re-audit](connector-oauth-broker-audit-2026-11-02.md) reproduced
 and patched three further Worker lifecycle defects. Include Worker commit
 0680fc3bbb5b6e3af437c4bfcb4476a3a8cba116; deploying the older fe72fce alone omits
-these fixes. Both repos remain on feat/connector-oauth-broker; the remediation
-and regression tests are committed locally, not pushed, merged or deployed.
+these fixes. Both repos remain on feat/connector-oauth-broker; remediation
+and regression tests are recorded in feature-branch commits. Publishing these
+branches does not authorize a main merge, deployment or remote migration.
 The service branch is missing 55
 commits from origin/main at f357f45. Review/integrate those changes and retest
 before replacing a shared staging service, or use an isolated staging service.

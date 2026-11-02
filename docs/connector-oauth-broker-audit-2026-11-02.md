@@ -1,5 +1,10 @@
 # Connector OAuth Re-Audit: 2026-11-02
 
+Follow-up: [the latest-docs and sync review](connector-oauth-latest-docs-and-sync-audit-2026-11-02.md)
+confirms these fixes, but records unresolved resource/issuer contracts for
+strict MCP authorization and actual main-merge conflicts. Use that review for
+the latest synchronization and standards-alignment verdict.
+
 ## Verdict
 
 The checked-in candidate had three additional reproducible Worker lifecycle
