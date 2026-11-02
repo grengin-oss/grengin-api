@@ -28,9 +28,9 @@ pub async fn list(
     ))
 }
 
-#[utoipa::path(post,path="/connectors/{connector_key}/connect",tag="connectors",description="Start or resume explicit vendor OAuth consent through Grengin's broker. Pin an exact catalog version. Optional server_id must identify an accessible Streamable HTTP MCP server at the same catalog URL. No OAuth client secret is accepted.",
+#[utoipa::path(post,path="/connectors/{connector_key}/connect",tag="connectors",description="Start or resume explicit vendor OAuth consent through Grengin's broker without instance registration. Pin an exact catalog version. Optional server_id must identify an accessible Streamable HTTP MCP server at the same catalog URL. No OAuth client secret or installation credential is accepted.",
     params(("connector_key"=String,Path,description="Catalog connector key")),request_body=ConnectConnectorRequest,
-    responses((status=200,body=ConnectorConnection),(status=400,description="Unsupported connector or invalid request"),(status=401,description="Sign-in required"),(status=403,description="Installation not authorized"),(status=404,description="Invalid connector or inaccessible MCP server"),(status=409,description="Disconnect the existing connection before changing its catalog version or server"),(status=422,description="Invalid JSON fields"),(status=429,description="Rate limit; obey Retry-After"),(status=503,description="Broker unavailable, disabled or not configured")))]
+    responses((status=200,body=ConnectorConnection),(status=400,description="Unsupported connector or invalid request"),(status=401,description="Sign-in required"),(status=403,description="Connection proof not authorized"),(status=404,description="Invalid connector or inaccessible MCP server"),(status=409,description="Disconnect existing or legacy connections before changing the binding or protocol"),(status=422,description="Invalid JSON fields"),(status=429,description="Rate limit; obey Retry-After"),(status=503,description="Broker unavailable, disabled or not configured")))]
 pub async fn connect(
     claims: Claims,
     State(state): State<SharedState>,
@@ -44,7 +44,7 @@ pub async fn connect(
 }
 
 #[utoipa::path(get,path="/connectors/{connection_id}",tag="connectors",description="Verify a connection's current status with the broker, restricted to its local owner. Broker outages never fall back to claiming a cached connection is verified.",
-    params(("connection_id"=Uuid,Path,description="User connection UUID")),responses((status=200,body=ConnectorConnection),(status=401,description="Sign-in required"),(status=403,description="Installation not authorized"),(status=404,description="Connection not found or not owned by caller"),(status=429,description="Rate limit; obey Retry-After"),(status=503,description="Broker unavailable")))]
+    params(("connection_id"=Uuid,Path,description="User connection UUID")),responses((status=200,body=ConnectorConnection),(status=401,description="Sign-in required"),(status=403,description="Connection proof not authorized"),(status=404,description="Connection not found or not owned by caller"),(status=409,description="Legacy connection requires cleanup with its original client"),(status=429,description="Rate limit; obey Retry-After"),(status=503,description="Broker unavailable")))]
 pub async fn status(
     claims: Claims,
     State(state): State<SharedState>,
@@ -57,7 +57,7 @@ pub async fn status(
 }
 
 #[utoipa::path(post,path="/connectors/{connection_id}/disconnect",tag="connectors",description="Disable local use immediately, then revoke the broker grant and remove local credentials. An outage leaves revoked status with revocation_pending=true; retry this operation to complete cleanup. Does not change SSO or another user's connection.",
-    params(("connection_id"=Uuid,Path,description="User connection UUID")),responses((status=200,body=ConnectorConnection),(status=401,description="Sign-in required"),(status=403,description="Installation proof invalid"),(status=404,description="Connection not found or not owned by caller"),(status=429,description="Rate limit; obey Retry-After"),(status=503,description="Broker unavailable or persistence failure; refresh status and retry")))]
+    params(("connection_id"=Uuid,Path,description="User connection UUID")),responses((status=200,body=ConnectorConnection),(status=401,description="Sign-in required"),(status=403,description="Connection proof invalid"),(status=404,description="Connection not found or not owned by caller"),(status=409,description="Legacy connection requires cleanup with its original client"),(status=429,description="Rate limit; obey Retry-After"),(status=503,description="Broker unavailable or persistence failure; refresh status and retry")))]
 pub async fn disconnect(
     claims: Claims,
     State(state): State<SharedState>,
@@ -71,7 +71,7 @@ pub async fn disconnect(
 
 #[utoipa::path(post,path="/connectors/{connection_id}/complete",tag="connectors",description="Activate a connection only after its signed-in owner submits the one-time code delivered in the vendor callback browser. Polling never returns this code.",
 params(("connection_id"=Uuid,Path,description="User connection UUID")),request_body=CompleteConnectorRequest,
-responses((status=200,body=ConnectorConnection),(status=400,description="Invalid confirmation code format"),(status=401,description="Sign-in required"),(status=403,description="Installation not authorized"),(status=404,description="Connection not owned by caller"),(status=409,description="Code expired, incorrect or already used"),(status=429,description="Rate limit; obey Retry-After"),(status=503,description="Broker unavailable")))]
+responses((status=200,body=ConnectorConnection),(status=400,description="Invalid confirmation code format"),(status=401,description="Sign-in required"),(status=403,description="Connection proof not authorized"),(status=404,description="Connection not owned by caller"),(status=409,description="Code expired, incorrect, already used or from a legacy connection"),(status=429,description="Rate limit; obey Retry-After"),(status=503,description="Broker unavailable")))]
 pub async fn complete(
     claims: Claims,
     State(state): State<SharedState>,

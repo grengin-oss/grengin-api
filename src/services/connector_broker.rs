@@ -46,7 +46,8 @@ impl BrokerIssue {
             Some(
                 "connector_reconnect_required"
                 | "connector_confirmation_invalid"
-                | "connector_state_expired_or_used",
+                | "connector_state_expired_or_used"
+                | "connector_legacy_reconnect_required",
             ) => Self::ReconnectRequired,
             Some("connector_rate_limited" | "connector_refresh_busy") => {
                 Self::rate_limited(retry_after)
@@ -109,8 +110,8 @@ impl IntoResponse for ConnectorError {
             ),
             BrokerIssue::Forbidden => (
                 StatusCode::FORBIDDEN,
-                "The installation cannot authorize this connector.",
-                "Ask an administrator to verify the installation connection.",
+                "This connector request could not be authorized.",
+                "Restart the connection from the original signed-in account.",
             ),
             BrokerIssue::ReconnectRequired => (
                 StatusCode::CONFLICT,
@@ -166,8 +167,6 @@ impl IntoResponse for ConnectorError {
 
 pub struct ConnectorBroker {
     base: Url,
-    installation: String,
-    key: PKey<openssl::pkey::Private>,
     client: reqwest::Client,
 }
 
@@ -210,7 +209,8 @@ fn service_url(raw: &str) -> Option<Url> {
 }
 
 pub fn proof_message(
-    installation: &str,
+    connection: &str,
+    user: &str,
     timestamp: i64,
     nonce: &str,
     path: &str,
@@ -219,7 +219,7 @@ pub fn proof_message(
     let digest =
         hash(MessageDigest::sha256(), body).map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
     Ok(format!(
-        "grengin-connectors-v1\n{installation}\n{timestamp}\n{nonce}\nPOST\n{path}\n{}",
+        "grengin-connectors-v2\n{connection}\n{user}\n{timestamp}\n{nonce}\nPOST\n{path}\n{}",
         hex(&digest)
     ))
 }
@@ -232,32 +232,12 @@ impl ConnectorBroker {
                 .unwrap_or_else(|_| "https://service.grengin.com".into()),
         )
         .ok_or_else(unavailable)?;
-        let installation =
-            std::env::var("GRENGIN_CONNECTOR_INSTALLATION_ID").map_err(|_| unavailable())?;
-        if installation.is_empty()
-            || installation.len() > 128
-            || !installation
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        {
-            return Err(unavailable());
-        }
-        let seed =
-            decode_key(&std::env::var("GRENGIN_CONNECTOR_PRIVATE_KEY").map_err(|_| unavailable())?)
-                .ok_or_else(unavailable)?;
-        let key =
-            PKey::private_key_from_raw_bytes(&seed, Id::ED25519).map_err(|_| unavailable())?;
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(15))
             .build()
             .map_err(|_| unavailable())?;
-        Ok(Self {
-            base,
-            installation,
-            key,
-            client,
-        })
+        Ok(Self { base, client })
     }
 
     pub async fn post<T: Serialize, R: DeserializeOwned>(
@@ -265,22 +245,70 @@ impl ConnectorBroker {
         path: &str,
         payload: &T,
     ) -> Result<R, ConnectorError> {
+        let mut value =
+            serde_json::to_value(payload).map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
+        let object = value
+            .as_object_mut()
+            .ok_or(AppError::ServiceTemporarilyUnavailable)?;
+        let seed = object
+            .remove("connection_grant")
+            .and_then(|v| v.as_str().and_then(decode_key))
+            .ok_or(AppError::ServiceTemporarilyUnavailable)?;
+        let user = object
+            .get("user_id")
+            .and_then(|v| v.as_str())
+            .and_then(|v| uuid::Uuid::parse_str(v).ok())
+            .ok_or(AppError::ServiceTemporarilyUnavailable)?
+            .to_string();
+        let url = self
+            .base
+            .join(path)
+            .map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
+        let segments = url
+            .path_segments()
+            .ok_or(AppError::ServiceTemporarilyUnavailable)?
+            .collect::<Vec<_>>();
+        if url.origin() != self.base.origin()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || segments.len() < 3
+            || segments[0] != "v1"
+            || segments[1] != "connectors"
+        {
+            return Err(AppError::ServiceTemporarilyUnavailable.into());
+        }
+        let connection = if segments.as_slice() == ["v1", "connectors", "start"] {
+            object
+                .get("connection_id")
+                .and_then(|v| v.as_str())
+                .and_then(|v| uuid::Uuid::parse_str(v).ok())
+        } else if segments.len() == 4
+            && ["status", "token", "complete", "disconnect"].contains(&segments[3])
+        {
+            uuid::Uuid::parse_str(segments[2]).ok()
+        } else {
+            None
+        }
+        .ok_or(AppError::ServiceTemporarilyUnavailable)?
+        .to_string();
         let body =
-            serde_json::to_vec(payload).map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
+            serde_json::to_vec(&value).map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
+        let key = PKey::private_key_from_raw_bytes(&seed, Id::ED25519)
+            .map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
+        let public_key = key
+            .raw_public_key()
+            .map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
         let timestamp = chrono::Utc::now().timestamp();
         let nonce = random_secret()?;
-        let message = proof_message(&self.installation, timestamp, &nonce, path, &body)?;
-        let signature = Signer::new_without_digest(&self.key)
+        let message = proof_message(&connection, &user, timestamp, &nonce, url.path(), &body)?;
+        let signature = Signer::new_without_digest(&key)
             .and_then(|mut signer| signer.sign_oneshot_to_vec(message.as_bytes()))
             .map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
         let response = self
             .client
-            .post(
-                self.base
-                    .join(path)
-                    .map_err(|_| AppError::ServiceTemporarilyUnavailable)?,
-            )
-            .header("X-Grengin-Installation", &self.installation)
+            .post(url)
+            .header("X-Grengin-Connection", connection)
+            .header("X-Grengin-Public-Key", hex(&public_key))
             .header("X-Grengin-Timestamp", timestamp.to_string())
             .header("X-Grengin-Nonce", nonce)
             .header("X-Grengin-Signature", hex(&signature))
@@ -337,6 +365,7 @@ mod tests {
             ("installation_disconnected", 403),
             ("invalid_connector_request", 400),
             ("connector_reconnect_required", 409),
+            ("connector_legacy_reconnect_required", 409),
             ("connector_rate_limited", 429),
             ("UNTRUSTED_SECRET", 503),
         ] {
@@ -390,18 +419,62 @@ mod tests {
 
     #[test]
     fn proof_is_bound_to_operation_identity_and_exact_body() {
-        let proof = proof_message("inst_1", 123, "nonce", "/v1/connectors/start", b"{}").unwrap();
+        let proof = proof_message(
+            "connection_1",
+            "user_1",
+            123,
+            "nonce",
+            "/v1/connectors/start",
+            b"{}",
+        )
+        .unwrap();
         assert_ne!(
             proof,
-            proof_message("inst_2", 123, "nonce", "/v1/connectors/start", b"{}").unwrap()
+            proof_message(
+                "connection_1",
+                "user_2",
+                123,
+                "nonce",
+                "/v1/connectors/start",
+                b"{}"
+            )
+            .unwrap()
         );
         assert_ne!(
             proof,
-            proof_message("inst_1", 123, "nonce", "/v1/connectors/start", b"{ }").unwrap()
+            proof_message(
+                "connection_2",
+                "user_1",
+                123,
+                "nonce",
+                "/v1/connectors/start",
+                b"{}"
+            )
+            .unwrap()
         );
         assert_ne!(
             proof,
-            proof_message("inst_1", 123, "nonce", "/v1/connectors/token", b"{}").unwrap()
+            proof_message(
+                "connection_1",
+                "user_1",
+                123,
+                "nonce",
+                "/v1/connectors/start",
+                b"{ }"
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            proof,
+            proof_message(
+                "connection_1",
+                "user_1",
+                123,
+                "nonce",
+                "/v1/connectors/token",
+                b"{}"
+            )
+            .unwrap()
         );
         assert_eq!(decode_key(&"a".repeat(64)).unwrap(), [0xaa; 32]);
         assert!(decode_key(&"z".repeat(64)).is_none());

@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { createHmac,randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
-import { createRequire } from 'node:module';
 import { readFile,open } from 'node:fs/promises';
 import { execFileSync,spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -14,17 +13,9 @@ const db = new URL(process.env.DATABASE_URL);
 assert.equal(db.hostname,'127.0.0.1'); assert.equal(db.pathname,'/grengin_connectors_test');
 const {createDatabase} = await import(pathToFileURL(`${website}/workers/test/helpers/sqlite-d1.mjs`));
 const {handleConnectorBroker} = await import(pathToFileURL(`${website}/workers/src/services/connector-broker.ts`));
-const require = createRequire(`${website}/workers/package.json`);
-const {getPublicKeyAsync} = await import(pathToFileURL(require.resolve('@noble/ed25519')));
 const originalFetch = globalThis.fetch;
 const {db:workerDb,sqlite} = createDatabase();
 const user = randomUUID(); const other = randomUUID();
-const installation = `inst_connector_${randomUUID().replaceAll('-','')}`;
-const privateKey = crypto.getRandomValues(new Uint8Array(32));
-const publicKey = Buffer.from(await getPublicKeyAsync(privateKey)).toString('hex');
-sqlite.prepare("INSERT INTO organizations (id,name,created_at,updated_at) VALUES ('org_connector','Connector tests','now','now')").run();
-sqlite.prepare(`INSERT INTO installations(id,organization_id,name,public_key,environment,is_revoked,created_at,instance_uuid,connection_status,kind)
-  VALUES (?,'org_connector','Local tests',?,'prod',0,'now',?,'connected','standalone')`).run(installation,publicKey,user);
 const oauth = {auth_url:'https://vendor.test/authorize',token_url:'https://vendor.test/token',provider:'vendor',type:'oauth',scopes:['read:tools'],token_endpoint_auth_method:'client_secret_post'};
 const env = {DB:workerDb,SERVICE_BASE_URL:'https://service.grengin.com',CONNECTOR_BROKER_ENABLED:'true',CONNECTOR_TOKEN_KEYS:JSON.stringify({'1':'b'.repeat(64)}),
   CONNECTOR_TOKEN_KEY_VERSION:'1',CONNECTOR_OAUTH_CLIENTS:JSON.stringify({vendor:{client_id:'connector-client',client_secret:'FAKE_CLIENT_SECRET',auth_url:oauth.auth_url,token_url:oauth.token_url}})};
@@ -98,7 +89,7 @@ try{
   const reservation=createServer();const port=await listen(reservation);await new Promise(resolve=>reservation.close(resolve));api=`http://127.0.0.1:${port}`;
   const childEnv={PATH:process.env.PATH,HOME:process.env.HOME,DATABASE_URL:process.env.DATABASE_URL,APP_KEY:process.env.APP_KEY,JWT_SECRET:process.env.JWT_SECRET,
     HOST:'127.0.0.1',PORT:String(port),REDIRECT_URL:'http://localhost:5173',RAG_ENABLED:'false',FILE_STORAGE_ROOT:`${scratch}/files`,
-    GRENGIN_SERVICE_URL:broker,GRENGIN_CONNECTOR_INSTALLATION_ID:installation,GRENGIN_CONNECTOR_PRIVATE_KEY:Buffer.from(privateKey).toString('hex'),SSL_CERT_FILE:`${scratch}/cert.pem`};
+    GRENGIN_SERVICE_URL:broker,SSL_CERT_FILE:`${scratch}/cert.pem`};
   childEnv.GRENGIN_CONNECTOR_CLEANUP_INTERVAL_SECS='5';
   server=spawn(process.env.GRENGIN_BACKEND_BINARY,[],{cwd:root,env:childEnv,stdio:['ignore',log.fd,log.fd]});
   let ready=false;
@@ -127,7 +118,7 @@ try{
   sql(`CREATE FUNCTION reject_connector_test_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event LIKE 'connector.%' THEN RAISE EXCEPTION 'forced connector audit failure'; END IF; RETURN NEW; END $$;
     CREATE TRIGGER reject_connector_test_audit BEFORE INSERT ON auth_audit_events FOR EACH ROW EXECUTE FUNCTION reject_connector_test_audit()`);
   await expect('POST','/connectors/github/connect',payload,503);
-  check('required audit failure rolls back the local connection and prevents remote creation',[sql('SELECT count(*) FROM connectors'),sqlite.prepare('SELECT count(*) AS n FROM connector_connections').get().n],['0',0]);
+  check('required audit failure rolls back the local connection and prevents remote creation',[sql('SELECT count(*) FROM connectors'),sqlite.prepare('SELECT count(*) AS n FROM open_connector_connections').get().n],['0',0]);
   sql('DROP TRIGGER reject_connector_test_audit ON auth_audit_events; DROP FUNCTION reject_connector_test_audit()');
   const start=await expect('POST','/connectors/github/connect',payload,200);const info=start.json();
   await expect('POST','/connectors/another-key/connect',payload,409);
@@ -211,10 +202,8 @@ try{
   redirectVendor=true;
   await expect('POST',`/admin/mcp-servers/${created.id}/sync-tools`,{},503);redirectVendor=false;
   check('authenticated MCP requests never follow a TLS-to-HTTP redirect',leakedRequests,0);
-  sqlite.prepare('UPDATE installations SET is_revoked=1').run();
-  await expect('POST',`/admin/mcp-servers/${created.id}/sync-tools`,{},503);
-  check('revoked installation cannot retrieve new MCP credentials',true,true);
-  sqlite.prepare('UPDATE installations SET is_revoked=0').run();
+  check('broker tool use needs no registered installation',sqlite.prepare('SELECT count(*) AS n FROM installations').get().n,0);
+  await expect('POST',`/admin/mcp-servers/${created.id}/sync-tools`,{},200);
   availability=false;
   await expect('POST',`/connectors/${info.id}/disconnect`,{},503);
   const pendingRevocation=(await expect('GET',`/connectors/${info.id}`,undefined,200)).json();
@@ -224,10 +213,10 @@ try{
   check('broker recovery cannot resurrect a locally revoked connection',noResurrection.status,'revoked');
   const disconnected=(await expect('POST',`/mcp/connections/${created.id}/disconnect`,{},200)).json();assert(disconnected.success);
   check('existing disconnect endpoint removes broker credentials',sql('SELECT count(*) FROM connectors'),'0');
-  check('broker disconnect destroys encrypted vendor tokens',sqlite.prepare('SELECT secret_payload FROM connector_connections').get().secret_payload,null);
+  check('broker disconnect destroys encrypted vendor tokens',sqlite.prepare('SELECT secret_payload FROM open_connector_connections').get().secret_payload,null);
   await expect('POST','/connectors/unconfigured/connect',{version:'1.0.0'},503);
   const abandoned=(await expect('GET','/connectors',undefined,200)).json().find(item=>item.connector_key==='unconfigured');assert(abandoned);
-  assert.equal(sqlite.prepare('SELECT id FROM connector_connections WHERE id=?').get(abandoned.id),undefined);
+  assert.equal(sqlite.prepare('SELECT id FROM open_connector_connections WHERE id=?').get(abandoned.id),undefined);
   await expect('POST',`/connectors/${abandoned.id}/disconnect`,{},200);
   check('a start that never created a broker row can be disconnected cleanly',sql(`SELECT count(*) FROM connectors WHERE id=${quote(abandoned.id)}`),'0');
   const reconnected=(await expect('POST','/connectors/github/connect',payload,200)).json();assert.notEqual(reconnected.id,info.id);
@@ -246,7 +235,7 @@ try{
   const deferred=(await expect('POST',`/connectors/${reconnected.id}/disconnect`,{},200)).json();
   check('vendor revocation failure disables local use but retains an encrypted retry handle',[deferred.status,deferred.revocation_pending,deferred.provider_revocation],['revoked',true,'pending']);
   await expect('POST',`/admin/mcp-servers/${created.id}/sync-tools`,{},503);
-  assert(sqlite.prepare('SELECT secret_payload FROM connector_connections WHERE id=?').get(reconnected.id).secret_payload);
+  assert(sqlite.prepare('SELECT secret_payload FROM open_connector_connections WHERE id=?').get(reconnected.id).secret_payload);
   revocationAvailable=true;
   const finished=(await expect('POST',`/connectors/${reconnected.id}/disconnect`,{},200)).json();
   check('retry completes vendor revocation and removes local credentials',[finished.revocation_pending,finished.provider_revocation,sql('SELECT count(*) FROM connectors')],[false,'revoked','0']);
@@ -259,10 +248,13 @@ try{
   const limited=randomUUID();
   sql(`INSERT INTO users(id,status,email,"emailVerified",name,"mfaEnabled","createdAt","updatedAt","lastLoginAt","isIndependent") VALUES
     (${quote(limited)},'active','limited@example.invalid',true,'Limited test',false,now(),now(),now(),true)`);
+  // Isolate the backend's per-user limiter from the independently tested public IP quota.
+  sqlite.exec('DELETE FROM open_connector_admission');
   for(let i=0;i<20;i++)await expect('POST',`/connectors/bogus-${i}/connect`,{version:'1.0.0'},503,token(limited));
   const throttled=await expect('POST','/connectors/bogus-extra/connect',{version:'1.0.0'},429,token(limited));
   assert(Number(throttled.headers.get('retry-after'))>0);
   check('local throttling rejects bogus-key floods before additional database writes',sql(`SELECT count(*) FROM connectors WHERE "userId"=${quote(limited)}`),'20');
+  sqlite.exec('DELETE FROM open_connector_admission');
 
   const ownerConnection=(await expect('POST','/connectors/github/connect',{version:'1.0.0'},200,token(other))).json();
   const ownerState=new URL(ownerConnection.authorization_url).searchParams.get('state');
@@ -285,13 +277,13 @@ try{
   await eventually(()=>sql(`SELECT status FROM connectors WHERE id=${quote(ownerConnection.id)}`)==='revoked','deleted-owner cleanup did not disable local use');
   check('deleted-owner cleanup retains its encrypted grant during a broker outage',sql(`SELECT "encryptedGrant" IS NOT NULL FROM connectors WHERE id=${quote(ownerConnection.id)}`),'t');
   revocationAvailable=false;availability=true;
-  await eventually(()=>sqlite.prepare('SELECT status FROM connector_connections WHERE id=?').get(ownerConnection.id)?.status==='revoked','broker cleanup was not retried');
+  await eventually(()=>sqlite.prepare('SELECT status FROM open_connector_connections WHERE id=?').get(ownerConnection.id)?.status==='revoked','broker cleanup was not retried');
   check('vendor revocation outage retains both retry records',[
     sql(`SELECT "encryptedGrant" IS NOT NULL FROM connectors WHERE id=${quote(ownerConnection.id)}`),
-    !!sqlite.prepare('SELECT secret_payload FROM connector_connections WHERE id=?').get(ownerConnection.id)?.secret_payload],['t',true]);
+    !!sqlite.prepare('SELECT secret_payload FROM open_connector_connections WHERE id=?').get(ownerConnection.id)?.secret_payload],['t',true]);
   revocationAvailable=true;
   await eventually(()=>sql(`SELECT count(*) FROM connectors WHERE id=${quote(ownerConnection.id)}`)==='0','deleted-owner credentials were not cleaned after recovery');
-  check('background cleanup erases broker credentials after provider recovery',sqlite.prepare('SELECT secret_payload FROM connector_connections WHERE id=?').get(ownerConnection.id).secret_payload,null);
+  check('background cleanup erases broker credentials after provider recovery',sqlite.prepare('SELECT secret_payload FROM open_connector_connections WHERE id=?').get(ownerConnection.id).secret_payload,null);
   check('automatic cleanup audits a system action rather than impersonating the deleted user',sql(`SELECT count(*) FROM auth_audit_events WHERE event='connector.disconnected' AND "actorId" IS NULL AND payload->>'owner_user_id'=${quote(other)} AND payload->>'system_cleanup'='true'`),'1');
   check('deleted-owner cleanup does not sweep active users connections',sql(`SELECT count(*) FROM connectors WHERE "userId"=${quote(limited)}`),'20');
 
@@ -314,7 +306,7 @@ try{
 
   const leased=(await expect('POST','/connectors/github/connect',payload,200)).json();
   const leaseState=new URL(leased.authorization_url).searchParams.get('state');
-  sqlite.prepare('UPDATE connector_connections SET expires_at=? WHERE id=?').run(Math.floor(Date.now()/1000)+1,leased.id);
+  sqlite.prepare('UPDATE open_connector_connections SET expires_at=? WHERE id=?').run(Math.floor(Date.now()/1000)+1,leased.id);
   let release,enter;const wait=new Promise(resolve=>{release=resolve;});const entered=new Promise(resolve=>{enter=resolve;});
   exchangeGate={wait,enter};
   const pendingCallback=handleConnectorBroker(new Request(`https://service.grengin.com/v1/connectors/callback/github?state=${leaseState}&code=lease-code`),env);
@@ -338,7 +330,7 @@ try{
   const rotatedCode=(await rotatedCallback.text()).match(/\n([a-f0-9]{64})\n/)?.[1];assert(rotatedCode);
   await expect('POST',`/connectors/${rotated.id}/complete`,{confirmation_code:rotatedCode},200);
   tokenReply={access_token:'FAKE_VENDOR_ACCESS',refresh_token:'ROTATED_HTTP_REFRESH',expires_in:3600,token_type:'Bearer'};
-  sqlite.exec("CREATE TRIGGER reject_http_refresh_audit BEFORE INSERT ON connector_audit_events WHEN NEW.event='connector.refreshed' BEGIN SELECT RAISE(ABORT,'forced HTTP refresh audit failure'); END");
+  sqlite.exec("CREATE TRIGGER reject_http_refresh_audit BEFORE INSERT ON open_connector_audit_events WHEN NEW.event='connector.refreshed' BEGIN SELECT RAISE(ABORT,'forced HTTP refresh audit failure'); END");
   revocationAvailable=false;
   await expect('POST',`/admin/mcp-servers/${created.id}/sync-tools`,{},503);
   const failedRefresh=(await expect('GET',`/connectors/${rotated.id}`,undefined,200)).json();

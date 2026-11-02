@@ -114,7 +114,7 @@ application envelope. Do not branch on raw provider error text.
 | --- | --- |
 | 400 / 422 | Invalid payload, code format or unsupported connector |
 | 401 | Local sign-in missing/invalid or user deleted |
-| 403 | Installation/proof authorization refused; do not sign the local user out |
+| 403 | Connection proof authorization refused; do not sign the local user out |
 | 404 | Unknown connection or one owned by someone else |
 | 409 | Wrong/expired/reused confirmation, changed OAuth identity, incompatible existing binding, or capacity conflict |
 | 429 | Authenticated quota; honor Retry-After |
@@ -127,7 +127,9 @@ connector_service_unavailable. After an uncertain complete response, GET status
 before restarting: approval may have committed before the local save failed.
 
 Limits: 16 KiB connector JSON bodies, 20 local starts/minute, 64 stored
-connections/user and 120 signed service requests/minute/installation/user.
+connections/user and 120 signed service requests/minute/connection. Public
+new-connection starts additionally allow 20/IP/minute and 120/minute globally;
+retries of existing connections do not spend the new-connection quota.
 Use explicit refresh/backoff, not a tight polling loop. Revocation may be
 revoked, pending, unsupported or not_applicable. Unsupported means the broker
 erased its credentials, not that the vendor removed account consent.
@@ -139,13 +141,17 @@ configuration, plus:
 
 - GRENGIN_SERVICE_URL: staging service origin, without a /v1 suffix. Default is
   https://service.grengin.com; set staging explicitly, not accidentally production.
-- GRENGIN_CONNECTOR_INSTALLATION_ID: an installation connected in that service.
-- GRENGIN_CONNECTOR_PRIVATE_KEY: the corresponding registered Ed25519 seed,
-  32 bytes encoded as 64 hexadecimal characters. Keep it server-side.
 - GRENGIN_CONNECTOR_CLEANUP_INTERVAL_SECS: optional 5-3600 seconds, default 60;
   prefer the default for normal resource use. Tests use five seconds.
 
-grengin-service requires its existing session/installation bindings, plus:
+No instance registration, Grengin.com pairing, installation ID or manually
+configured signing key is required. Each connection automatically generates
+its own signing identity, encrypted with APP_KEY; its private seed never leaves
+the backend. The signed-in user must still approve vendor OAuth and submit
+the one-time confirmation. See [connector-open-access.md](connector-open-access.md)
+for protocol and upgrade boundaries.
+
+grengin-service keeps its other existing bindings and requires:
 
 - CONNECTOR_BROKER_ENABLED=true; otherwise broker routes return 404.
 - SERVICE_BASE_URL: the exact staging service origin used to form callbacks.
@@ -269,7 +275,8 @@ The backend manifest and lockfile identify this candidate as 0.9.7. Its reviewed
 compatibility index was published on 2026-10-30 at
 https://meta.grengin.com/distributions/grengin-api/0.9.7/index.json and pins backend
 89d512701cd95fef1b68165f194b04d2cadd3a45. This re-audit does not change the backend
-production code, version or catalog: API-side changes are tests and documentation.
+catalog or package version. The registration-free refactor does change backend
+production code: rebuild and replace the old image after the service is deployed.
 Discovery selects the compiled package version. The published index must remain
 unchanged; do not rewrite it to pass an image gate for a different commit.
 
@@ -291,6 +298,7 @@ version=$(cargo metadata --no-deps --format-version 1 | \
   jq -r '.packages[] | select(.name == "grengin-api") | .version')
 image="ghcr.io/grengin-oss/grengin-api:staging-connectors-${revision:0:12}"
 docker build --platform linux/amd64 \
+  --build-arg TARGETARCH=amd64 \
   --build-arg CARGO_BUILD_JOBS=2 \
   --build-arg IMAGE_VERSION="$version" \
   --build-arg IMAGE_REVISION="$revision" \
@@ -299,15 +307,25 @@ docker build --platform linux/amd64 \
 docker push "$image"
 ```
 
+Pass TARGETARCH explicitly for compatibility with legacy Docker builders, which
+do not populate BuildKit's automatic platform arguments. The Dockerfile also
+falls back to the native architecture when the argument is absent.
+
 GHCR write authentication is required for the push. For a native arm64 staging
-builder and host, use linux/arm64 instead; this is a single-architecture staging
+builder and host, use --platform linux/arm64 and --build-arg TARGETARCH=arm64;
+this is a single-architecture staging
 image, not a multi-architecture release. Pin the resulting digest in deployment.
 These are operator commands only; no Docker image build or push was executed
 for this handoff. Never substitute latest or a stable version tag.
 
-Set the backend service URL explicitly to https://service-staging.grengin.com
-and supply the staging installation ID and its matching registered private seed.
-That installation must be connected in the staging Worker database. Preserve
+Set the backend service URL explicitly to https://service-staging.grengin.com.
+Do not add GRENGIN_CONNECTOR_INSTALLATION_ID or GRENGIN_CONNECTOR_PRIVATE_KEY.
+Apply the service's additive 0028_open_connector_broker.sql migration before
+deploying its updated Worker. The unshipped 0028_managed_connector_identities.sql
+draft and Hatchery managed-registration changes are superseded, not prerequisites.
+Disconnect legacy registered connections with the old backend before upgrading,
+then reconnect; the broker still accepts old clients during a rolling upgrade.
+Preserve
 APP_KEY so existing encrypted records remain readable, keep PostgreSQL and
 storage isolated from production, and apply the backend migration before serving
 requests if GRENGIN_AUTO_MIGRATE=false.
@@ -325,7 +343,7 @@ cd /home/anurag/work/grengin-api
 bash tests/connectors/audit-core.sh
 
 # Individual suites:
-bash tests/connectors/run.sh
+GRENGIN_WEBSITE_ROOT=/home/anurag/work/grengin-service-staging bash tests/connectors/run.sh
 bash tests/connectors/slack-preflight.sh
 
 cd /home/anurag/work/grengin-website/workers

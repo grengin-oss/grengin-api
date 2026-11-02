@@ -3,7 +3,11 @@ set -euo pipefail
 set +x
 umask 077
 root=$(cd "$(dirname "$0")/../.." && pwd)
-website=${GRENGIN_WEBSITE_ROOT:-/home/anurag/work/grengin-website}
+website=${GRENGIN_WEBSITE_ROOT:-$root/../grengin-website}
+if [[ ! -f "$website/workers/migrations/0028_open_connector_broker.sql" ]]; then
+  printf '%s\n' 'Set GRENGIN_WEBSITE_ROOT to the matching registration-free service checkout.' >&2
+  exit 1
+fi
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$root/target-security}
 cd "$root"
 if [[ ${1:-} != --live-only ]]; then
