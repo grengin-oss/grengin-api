@@ -8,8 +8,10 @@ logs=$(mktemp -d /tmp/grengin-connector-core-audit.XXXXXX)
 trap 'printf "Core audit evidence: %s\n" "$logs"' EXIT
 cd "$root"
 git diff --check
-bash -n tests/connectors/run.sh tests/connectors/slack-preflight.sh
+git -C "$website" diff --check
+bash -n tests/connectors/audit-core.sh tests/connectors/run.sh tests/connectors/slack-preflight.sh
 node --check tests/connectors/http.mjs
+node --check "$website/workers/test/connector-broker.test.mjs"
 printf 'Checking the Worker, broker, and local migration chain...\n'
 (
   cd "$website/workers"

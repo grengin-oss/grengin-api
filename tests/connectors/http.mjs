@@ -29,6 +29,7 @@ const oauth = {auth_url:'https://vendor.test/authorize',token_url:'https://vendo
 const env = {DB:workerDb,SERVICE_BASE_URL:'https://service.grengin.com',CONNECTOR_BROKER_ENABLED:'true',CONNECTOR_TOKEN_KEYS:JSON.stringify({'1':'b'.repeat(64)}),
   CONNECTOR_TOKEN_KEY_VERSION:'1',CONNECTOR_OAUTH_CLIENTS:JSON.stringify({vendor:{client_id:'connector-client',client_secret:'FAKE_CLIENT_SECRET',auth_url:oauth.auth_url,token_url:oauth.token_url}})};
 let vendorUrl; let api; let server; let providerCalls=0; let toolCalls=0; let modelCalls=0; let availability=true;let brokerFault;let redirectVendor=false;let leakUrl;let leakedRequests=0;let revocationAvailable=true;
+let tokenReply;let exchangeGate;const revokedTokens=[];
 const mcpRequests=[];
 const log = await open(`${scratch}/backend.log`,'a');
 const sql = query=>execFileSync('psql',['-X','-A','-t','-v','ON_ERROR_STOP=1',process.env.DATABASE_URL,'-c',query],{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
@@ -81,8 +82,12 @@ const bridge=createServer(async(req,res)=>{
 });
 globalThis.fetch=async(url,init={})=>{
   if(String(url)==='https://meta.grengin.com/connectors/github/versions/1.0.0.json')return Response.json({key:'github',version:'1.0.0',protocols:[{transport:'streamable_http'}],connection:{transport_type:'http',url:vendorUrl,auth:oauth}});
-  if(String(url)==='https://vendor.test/token'){providerCalls++;return Response.json({access_token:'FAKE_VENDOR_ACCESS',refresh_token:'FAKE_VENDOR_REFRESH',expires_in:3600,token_type:'Bearer'});}
-  if(String(url)==='https://vendor.test/revoke')return new Response(null,{status:revocationAvailable?200:503});
+  if(String(url)==='https://vendor.test/token'){
+    providerCalls++;const gate=exchangeGate;
+    if(gate&&new URLSearchParams(init.body).get('grant_type')==='authorization_code'){gate.enter();await gate.wait;}
+    return Response.json(tokenReply??{access_token:'FAKE_VENDOR_ACCESS',refresh_token:'FAKE_VENDOR_REFRESH',expires_in:3600,token_type:'Bearer'});
+  }
+  if(String(url)==='https://vendor.test/revoke'){revokedTokens.push(new URLSearchParams(init.body).get('token'));return new Response(null,{status:revocationAvailable?200:503});}
   throw new Error('Unexpected broker outbound request');
 };
 try{
@@ -289,6 +294,61 @@ try{
   check('background cleanup erases broker credentials after provider recovery',sqlite.prepare('SELECT secret_payload FROM connector_connections WHERE id=?').get(ownerConnection.id).secret_payload,null);
   check('automatic cleanup audits a system action rather than impersonating the deleted user',sql(`SELECT count(*) FROM auth_audit_events WHERE event='connector.disconnected' AND "actorId" IS NULL AND payload->>'owner_user_id'=${quote(other)} AND payload->>'system_cleanup'='true'`),'1');
   check('deleted-owner cleanup does not sweep active users connections',sql(`SELECT count(*) FROM connectors WHERE "userId"=${quote(limited)}`),'20');
+
+  tokenReply={access_token:'FAKE_VENDOR_ACCESS',expires_in:20,token_type:'Bearer'};
+  const short=(await expect('POST','/connectors/github/connect',payload,200)).json();
+  const shortState=new URL(short.authorization_url).searchParams.get('state');
+  const shortCallback=await handleConnectorBroker(new Request(`https://service.grengin.com/v1/connectors/callback/github?state=${shortState}&code=short-code`),env);
+  const shortCode=(await shortCallback.text()).match(/\n([a-f0-9]{64})\n/)?.[1];assert(shortCode);
+  await expect('POST',`/connectors/${short.id}/complete`,{confirmation_code:shortCode},200);
+  check('short-lived tokens without refresh credentials still initialize the actual MCP client',
+    (await expect('POST',`/admin/mcp-servers/${created.id}/sync-tools`,{},200)).json().success,true);
+  const realNow=Date.now;const expiredNow=realNow()+21000;
+  try{
+    Date.now=()=>expiredNow;
+    const expired=(await expect('GET',`/connectors/${short.id}`,undefined,200)).json();
+    check('expired non-refreshable credentials reconcile through the real backend without losing cleanup state',
+      [expired.status,expired.revocation_pending,sql(`SELECT "encryptedGrant" IS NULL FROM connectors WHERE id=${quote(short.id)}`)],['expired',false,'t']);
+  }finally{Date.now=realNow;}
+  await expect('POST',`/connectors/${short.id}/disconnect`,{},200);tokenReply=undefined;
+
+  const leased=(await expect('POST','/connectors/github/connect',payload,200)).json();
+  const leaseState=new URL(leased.authorization_url).searchParams.get('state');
+  sqlite.prepare('UPDATE connector_connections SET expires_at=? WHERE id=?').run(Math.floor(Date.now()/1000)+1,leased.id);
+  let release,enter;const wait=new Promise(resolve=>{release=resolve;});const entered=new Promise(resolve=>{enter=resolve;});
+  exchangeGate={wait,enter};
+  const pendingCallback=handleConnectorBroker(new Request(`https://service.grengin.com/v1/connectors/callback/github?state=${leaseState}&code=lease-code`),env);
+  await entered;let observed;
+  try{
+    const leasedNow=realNow()+2000;Date.now=()=>leasedNow;
+    observed=(await expect('GET',`/connectors/${leased.id}`,undefined,200)).json();
+  }finally{Date.now=realNow;release();exchangeGate=undefined;}
+  const completedCallback=await pendingCallback;assert.equal(completedCallback.status,200);
+  check('polling during a live callback lease preserves the actual encrypted backend grant',
+    [observed.status,sql(`SELECT "encryptedGrant" IS NOT NULL FROM connectors WHERE id=${quote(leased.id)}`)],['pending','t']);
+  const leaseCode=(await completedCallback.text()).match(/\n([a-f0-9]{64})\n/)?.[1];assert(leaseCode);
+  check('owner confirmation succeeds after polling across the original consent deadline',
+    (await expect('POST',`/connectors/${leased.id}/complete`,{confirmation_code:leaseCode},200)).json().status,'connected');
+  await expect('POST',`/connectors/${leased.id}/disconnect`,{},200);
+
+  tokenReply={access_token:'FAKE_VENDOR_ACCESS',refresh_token:'INITIAL_REFRESH',expires_in:1,token_type:'Bearer'};
+  const rotated=(await expect('POST','/connectors/github/connect',payload,200)).json();
+  const rotatedState=new URL(rotated.authorization_url).searchParams.get('state');
+  const rotatedCallback=await handleConnectorBroker(new Request(`https://service.grengin.com/v1/connectors/callback/github?state=${rotatedState}&code=rotate-code`),env);
+  const rotatedCode=(await rotatedCallback.text()).match(/\n([a-f0-9]{64})\n/)?.[1];assert(rotatedCode);
+  await expect('POST',`/connectors/${rotated.id}/complete`,{confirmation_code:rotatedCode},200);
+  tokenReply={access_token:'FAKE_VENDOR_ACCESS',refresh_token:'ROTATED_HTTP_REFRESH',expires_in:3600,token_type:'Bearer'};
+  sqlite.exec("CREATE TRIGGER reject_http_refresh_audit BEFORE INSERT ON connector_audit_events WHEN NEW.event='connector.refreshed' BEGIN SELECT RAISE(ABORT,'forced HTTP refresh audit failure'); END");
+  revocationAvailable=false;
+  await expect('POST',`/admin/mcp-servers/${created.id}/sync-tools`,{},503);
+  const failedRefresh=(await expect('GET',`/connectors/${rotated.id}`,undefined,200)).json();
+  check('failed refresh persistence disables actual backend use while retaining the revocation grant',
+    [failedRefresh.status,failedRefresh.revocation_pending,sql(`SELECT "encryptedGrant" IS NOT NULL FROM connectors WHERE id=${quote(rotated.id)}`)],['failed',true,'t']);
+  sqlite.exec('DROP TRIGGER reject_http_refresh_audit');revocationAvailable=true;
+  await expect('POST',`/connectors/${rotated.id}/disconnect`,{},200);
+  check('cleanup after a failed refresh reaches the rotated credential instead of the spent grant',
+    [revokedTokens.includes('ROTATED_HTTP_REFRESH'),sql(`SELECT count(*) FROM connectors WHERE id=${quote(rotated.id)}`)],[true,'0']);
+  tokenReply=undefined;
   console.log(`Connector end-to-end suite: ${passed} checks passed; ${modelCalls} fixture model requests; no paid provider calls.`);
 }catch(error){
   const logs=await readFile(`${scratch}/backend.log`,'utf8');console.error('Backend diagnostic tail:',logs.slice(-6000));throw error;

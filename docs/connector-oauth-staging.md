@@ -1,11 +1,20 @@
 # Connector OAuth: Staging API Handoff
 
-Updated 2026-10-30. Core backend/service only; no admin or end-user GUI is part
+Updated 2026-11-02. Core backend/service only; no admin or end-user GUI is part
 of this patch. Both repositories use the feat/connector-oauth-broker branch.
 Committing or pushing these branches is not permission to deploy, merge to main
 or migrate a shared database.
 
 ## Readiness
+
+The [2026-11-02 re-audit](connector-oauth-broker-audit-2026-11-02.md) reproduced
+and patched three further Worker lifecycle defects. Include Worker commit
+0680fc3bbb5b6e3af437c4bfcb4476a3a8cba116; deploying the older fe72fce alone omits
+these fixes. Both repos remain on feat/connector-oauth-broker; the remediation
+and regression tests are committed locally, not pushed, merged or deployed.
+The service branch is missing 55
+commits from origin/main at f357f45. Review/integrate those changes and retest
+before replacing a shared staging service, or use an isolated staging service.
 
 Ready for controlled staging API testing after the branch integration check,
 additive migrations and operator configuration below. Local verification exercises the
@@ -249,19 +258,20 @@ No website frontend deployment is needed for these Worker-only changes.
 
 ### 3. Build The Backend Feature Branch, Not A Stable Tag
 
-The backend manifest and lockfile now identify this candidate as 0.9.7. Publish
-its reviewed compatibility index at
-https://meta.grengin.com/distributions/grengin-api/0.9.7/index.json before deploying
-a release-mode build. Discovery selects the compiled package version; merely
-bumping Cargo.toml without publishing that index would leave discovery broken.
-The index must pin the exact commit being built. Preparing a local catalog file
-does not approve its R2 publication or create a release.
+The backend manifest and lockfile identify this candidate as 0.9.7. Its reviewed
+compatibility index was published on 2026-10-30 at
+https://meta.grengin.com/distributions/grengin-api/0.9.7/index.json and pins backend
+89d512701cd95fef1b68165f194b04d2cadd3a45. This re-audit does not change the backend
+production code, version or catalog: API-side changes are tests and documentation.
+Discovery selects the compiled package version. The published index must remain
+unchanged; do not rewrite it to pass an image gate for a different commit.
 
 The existing v0.9.6 image does not contain this feature. The release workflow
-verifies that the catalog pins the exact backend commit, including on manual
-feature-branch dispatches. A connector staging commit is not that released
-commit, so do not use that workflow or rewrite a released catalog for this test.
-The stable publication checks remain unchanged.
+normally verifies that the catalog pins the exact backend commit, including on
+manual feature-branch dispatches. The published 0.9.7 pin matches 89d5127. Do not
+overwrite a stable tag or rewrite that catalog for a different staging commit.
+The workflow's explicit same-version-hotfix approval mechanism is not exercised
+or approved by this audit. The stable publication checks remain unchanged.
 
 For a staging platform that builds directly from Git, select this feature branch
 and its Dockerfile in the staging service, not the production service. Otherwise,
@@ -325,7 +335,7 @@ and model calls do not spend model credits. Preflight fetches public metadata
 but does not contact Slack's token endpoint. GUI work was explicitly removed.
 
 The backend candidate is 0.9.7; this is not a newly published image or release.
-Review main integration and the matching catalog before the staging build, then
+Review main integration and the matching published catalog before the staging build, then
 repeat affected checks after any merge. No release, shared migration or deployed
 staging changes were performed during these tests. Local frontend integration
 and its manual consent harness remain separate from the production commits.

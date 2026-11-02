@@ -1,5 +1,10 @@
 # Connector Broker Security Test And Remediation Report
 
+Latest re-audit: see [the 2026-11-02 report](connector-oauth-broker-audit-2026-11-02.md).
+It records three additional reproduced Worker defects, their local patches,
+414 Worker tests and 53 compiled-backend HTTP checks. The results below retain
+the earlier 2026-10-30 history; they are not the latest deployment sign-off.
+
 Updated: 2026-10-30. Both backend/service repositories use the
 `feat/connector-oauth-broker` branches. This report records local verification;
 branch publication does not deploy or remotely migrate either service. The separately approved
