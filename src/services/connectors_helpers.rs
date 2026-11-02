@@ -255,6 +255,7 @@ pub async fn start_connection(
     if !valid_catalog_selection(&key, &request.version) {
         return Err(AppError::ResourceNotFound.into());
     }
+    let redirect_uri = connector_redirect_uri(&state.settings.auth.redirect_url)?;
     START_LIMITER
         .admit(user, std::time::Instant::now())
         .map_err(|retry| ConnectorError::Broker(BrokerIssue::RateLimited(retry)))?;
@@ -325,10 +326,35 @@ pub async fn start_connection(
     ) {
         return Err(AppError::DbConflict.into());
     }
-    let body = json!({"connection_id":row.id,"user_id":user,"connector_key":key,"version":request.version,"connection_grant":grant(state,&row)?});
+    let body = json!({"connection_id":row.id,"user_id":user,"connector_key":key,"version":request.version,
+        "connection_grant":grant(state,&row)?,"redirect_uri":redirect_uri});
     let reply: BrokerStatus = broker.post("/v1/connectors/start", &body).await?;
     row = save_status(state, user, row, reply).await?;
     Ok(public(row))
+}
+
+fn connector_redirect_uri(configured: &str) -> Result<String, AppError> {
+    let mut url =
+        url::Url::parse(configured).map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
+    let loopback = url.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    if !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+    {
+        return Err(AppError::ServiceTemporarilyUnavailable);
+    }
+    url.set_path("/mcp/oauth/callback");
+    Ok(url.into())
 }
 
 pub async fn connection_status(
@@ -689,6 +715,50 @@ pub async fn disconnect_linked_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connector_callback_is_derived_only_from_the_configured_instance() {
+        for (base, callback) in [
+            (
+                "https://customer.example",
+                "https://customer.example/mcp/oauth/callback",
+            ),
+            (
+                "http://localhost:5173/",
+                "http://localhost:5173/mcp/oauth/callback",
+            ),
+            (
+                "http://127.0.0.2:5173",
+                "http://127.0.0.2:5173/mcp/oauth/callback",
+            ),
+            ("http://[::1]:5173", "http://[::1]:5173/mcp/oauth/callback"),
+        ] {
+            assert_eq!(connector_redirect_uri(base).unwrap(), callback);
+        }
+        for base in [
+            "",
+            "javascript:alert(1)",
+            "http://customer.example",
+            "https://user:password@customer.example",
+            "https://customer.example/path",
+            "https://customer.example?next=elsewhere",
+            "https://customer.example#fragment",
+        ] {
+            assert!(connector_redirect_uri(base).is_err());
+        }
+    }
+
+    #[test]
+    fn connector_start_cannot_override_the_instance_callback() {
+        assert!(
+            serde_json::from_value::<ConnectConnectorRequest>(json!({"version":"1.0.0"})).is_ok()
+        );
+        for key in ["redirect_uri", "return_url", "browser_state"] {
+            let mut body = json!({"version":"1.0.0"});
+            body[key] = json!("https://attacker.example/mcp/oauth/callback");
+            assert!(serde_json::from_value::<ConnectConnectorRequest>(body).is_err());
+        }
+    }
 
     #[test]
     fn deleted_owner_cleanup_interval_is_bounded_and_defaults_safely() {

@@ -1,37 +1,55 @@
 # Connector Frontend Contract
 
-Backend/service implementation only. The real webapp is not modified or tested
-by this patch. All requests below use the normal signed-in API bearer token;
+All requests below use the normal signed-in API bearer token;
 never forward that bearer token to the vendor or Grengin service.
+The local frontend integration is in `work/fresh/webapp`; it is not published
+with the backend/service changes. Deploy a compatible webapp alongside them.
 
 ## Start And Confirm
 
 1. POST `/connectors/{catalog_key}/connect` with an exact `version` and optional
-   `server_id`. Save the returned connection ID in the signed-in tab.
-2. Open its `authorization_url`. It is present only for pending consent.
-3. The vendor callback does NOT activate access. It displays a one-time,
-   ten-minute confirmation code in that browser's response body.
-4. The user returns to their original signed-in account and pastes the code.
-   POST `/connectors/{connection_id}/complete`:
+   `server_id`. Save the returned connection ID, authorization URL's `state`,
+   signed-in user ID and ten-minute expiry in the initiating browser session.
+2. Open its `authorization_url`. It is present only for pending consent. For a
+   popup, copy this context into its same-origin sessionStorage before navigating
+   to the vendor. Do not depend on an unvalidated `postMessage` or opener.
+3. The vendor still redirects only to the shared service callback. grengin-api
+   signs the instance return URL derived from REDIRECT_URL, so the operator does
+   not register every instance URL with Slack. Public instances require HTTPS;
+   plain HTTP is allowed only for localhost/loopback testing.
+4. The broker does NOT activate access from that anonymous callback. It redirects
+   to `<REDIRECT_URL>/mcp/oauth/callback` with a fragment containing
+   `connector_approval`, `connection_id` and the original `state`. Remove the
+   fragment immediately, before asynchronous work. Refuse missing, duplicated or
+   unexpected fields, mismatched state/connection/user, absent browser context
+   and expired attempts. Only then automatically POST to the signed-in API:
 
 ```json
 {"confirmation_code":"<64 lowercase hex characters>"}
 ```
 
-5. Render the returned state. Do not show connected merely because the popup
+5. Verify connected status with GET, clear the stored transaction, then render
+   success. Do not show connected merely because the popup
    closed, a callback loaded, or a status says awaiting_confirmation.
 
 The application-level receipt is not OAuth Device Authorization or proof of
 the vendor account's email. It stops callback-only activation of a local
 connection. It does not make forwarded codes/social engineering impossible.
-Do not auto-complete from a URL parameter, accept a connection ID from an
-untrusted link, or send the code to an arbitrary opener/origin. A future popup
-implementation needs independent owner, window-state and origin validation.
+Do not auto-complete from URL parameters alone, accept a connection ID from an
+untrusted link, or send the code to an arbitrary opener/origin. The returned
+receipt is usable only after independent owner and browser-transaction checks.
 
 The code is not a provider token and cannot call MCP. Nonetheless treat it as
-a transient secret: never log it, put it in URLs, analytics or persistent browser
-storage. Polling and listing endpoints intentionally never return it. A lost code
+a transient secret: never log it, put it in query strings, analytics or persistent
+browser storage. The return fragment is browser-only and must be scrubbed at once.
+Polling and listing endpoints intentionally never return it. A lost code
 requires disconnect/restart, not a recovery endpoint that reveals the code.
+
+Old backend starts without a signed instance `redirect_uri` retain the manual
+code page for compatibility. Existing pending attempts must be disconnected and
+restarted after upgrading; their return destination cannot be changed in flight.
+No vendor token, backend bearer token, private key or OAuth authorization code
+is delivered to the instance callback.
 
 ## States
 
@@ -39,7 +57,7 @@ requires disconnect/restart, not a recovery endpoint that reveals the code.
 | --- | --- |
 | No row | Disconnected; user may start |
 | pending | Show consent action; refresh status with backoff |
-| awaiting_confirmation | Ask for the browser receipt; no MCP access yet |
+| awaiting_confirmation | Complete only from the verified browser return; no MCP access yet |
 | connected | Consent confirmed; actual tool access still follows existing MCP policies |
 | expired | Restart after disconnect; finish cleanup first if revocation_pending |
 | revoked | Disabled; retry disconnect if revocation_pending |
@@ -55,7 +73,7 @@ No browser response includes vendor access/refresh tokens or a broker grant.
 ## Retry And Disconnect
 
 Use explicit status refresh/backoff; do not poll tightly. Broker quotas are per
-installation/local user. Honor HTTP 429 Retry-After (bounded 1-300 seconds).
+connection. Honor HTTP 429 Retry-After (bounded 1-300 seconds).
 Starts also have a local pre-write limit of 20 per minute and at most 64 stored
 connections per user. A capacity conflict requires disconnecting unused rows,
 not repeatedly retrying. Connector JSON requests are limited to 16 KiB.

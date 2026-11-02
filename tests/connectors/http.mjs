@@ -32,6 +32,17 @@ const token = id=>{
 };
 let passed=0;
 function check(name,actual,expected){assert.deepEqual(actual,expected,name);console.log(`PASS ${++passed}: ${name}`);}
+async function callbackReceipt(response,connectionId,state) {
+  assert.equal(response.status,303);
+  assert.equal(await response.text(),'');
+  const target=new URL(response.headers.get('location'));
+  assert.equal(target.origin+target.pathname,'http://localhost:5173/mcp/oauth/callback');
+  assert.equal(target.search,'');
+  const params=new URLSearchParams(target.hash.slice(1));
+  assert.equal(params.get('connection_id'),connectionId);assert.equal(params.get('state'),state);
+  const receipt=params.get('connector_approval');assert.match(receipt,/^[a-f0-9]{64}$/);
+  return receipt;
+}
 async function call(method,path,body,bearer=token(user)){
   const response=await originalFetch(`${api}${path}`,{method,headers:{'Content-Type':'application/json',...(bearer?{Authorization:`Bearer ${bearer}`}:{})},
     body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(45000)});
@@ -134,8 +145,10 @@ try{
   check('other users cannot read or disconnect a connection',sql('SELECT count(*) FROM connectors'),'1');
   const state=new URL(info.authorization_url).searchParams.get('state');
   const callback=new Request(`https://service.grengin.com/v1/connectors/callback/github?state=${state}&code=test-code`);
-  const callbackResponse=await handleConnectorBroker(callback,env);assert.equal(callbackResponse.status,200);
-  const confirmation=(await callbackResponse.text()).match(/\n([a-f0-9]{64})\n/)?.[1];assert(confirmation);
+  const callbackResponse=await handleConnectorBroker(callback,env);
+  const confirmation=await callbackReceipt(callbackResponse,info.id,state);
+  check('real backend selects the local instance callback without registration or vendor tokens in its URL',
+    callbackResponse.headers.get('referrer-policy'),'no-referrer');
   assert.equal((await handleConnectorBroker(callback.clone(),env)).status,409);
   const waiting=await expect('GET',`/connectors/${info.id}`,undefined,200);
   check('provider callback alone leaves the backend connection inactive',waiting.json().status,'awaiting_confirmation');
@@ -223,7 +236,7 @@ try{
   check('reconnect uses a fresh connection and explicit consent',reconnected.status,'pending');
   const secondState=new URL(reconnected.authorization_url).searchParams.get('state');
   const secondCallback=await handleConnectorBroker(new Request(`https://service.grengin.com/v1/connectors/callback/github?state=${secondState}&code=second-code`),env);
-  const secondCode=(await secondCallback.text()).match(/\n([a-f0-9]{64})\n/)?.[1];assert(secondCode);
+  const secondCode=await callbackReceipt(secondCallback,reconnected.id,secondState);
   await expect('POST',`/connectors/${reconnected.id}/complete?confirmation%5Fcode=${secondCode}&connection_grant=QUERY_GRANT_SENTINEL`,{confirmation_code:secondCode},200);
   const auditPath=`/connectors/${reconnected.id}/complete`;
   for(let i=0;i<30 && sql(`SELECT count(*) FROM audit_logs WHERE details->>'path'=${quote(auditPath)}`)==='0';i++)await new Promise(resolve=>setTimeout(resolve,20));
@@ -259,7 +272,7 @@ try{
   const ownerConnection=(await expect('POST','/connectors/github/connect',{version:'1.0.0'},200,token(other))).json();
   const ownerState=new URL(ownerConnection.authorization_url).searchParams.get('state');
   const ownerCallback=await handleConnectorBroker(new Request(`https://service.grengin.com/v1/connectors/callback/github?state=${ownerState}&code=owner-code`),env);
-  const ownerCode=(await ownerCallback.text()).match(/\n([a-f0-9]{64})\n/)?.[1];assert(ownerCode);
+  const ownerCode=await callbackReceipt(ownerCallback,ownerConnection.id,ownerState);
   await expect('POST',`/connectors/${ownerConnection.id}/complete`,{confirmation_code:ownerCode},200,token(other));
   assert.throws(()=>sql(`DELETE FROM users WHERE id=${quote(other)}`),/fk_connectors_user/);
   check('hard deletion cannot cascade away a grant awaiting broker cleanup',sql(`SELECT count(*) FROM connectors WHERE id=${quote(ownerConnection.id)}`),'1');
@@ -291,7 +304,7 @@ try{
   const short=(await expect('POST','/connectors/github/connect',payload,200)).json();
   const shortState=new URL(short.authorization_url).searchParams.get('state');
   const shortCallback=await handleConnectorBroker(new Request(`https://service.grengin.com/v1/connectors/callback/github?state=${shortState}&code=short-code`),env);
-  const shortCode=(await shortCallback.text()).match(/\n([a-f0-9]{64})\n/)?.[1];assert(shortCode);
+  const shortCode=await callbackReceipt(shortCallback,short.id,shortState);
   await expect('POST',`/connectors/${short.id}/complete`,{confirmation_code:shortCode},200);
   check('short-lived tokens without refresh credentials still initialize the actual MCP client',
     (await expect('POST',`/admin/mcp-servers/${created.id}/sync-tools`,{},200)).json().success,true);
@@ -315,10 +328,10 @@ try{
     const leasedNow=realNow()+2000;Date.now=()=>leasedNow;
     observed=(await expect('GET',`/connectors/${leased.id}`,undefined,200)).json();
   }finally{Date.now=realNow;release();exchangeGate=undefined;}
-  const completedCallback=await pendingCallback;assert.equal(completedCallback.status,200);
+  const completedCallback=await pendingCallback;
   check('polling during a live callback lease preserves the actual encrypted backend grant',
     [observed.status,sql(`SELECT "encryptedGrant" IS NOT NULL FROM connectors WHERE id=${quote(leased.id)}`)],['pending','t']);
-  const leaseCode=(await completedCallback.text()).match(/\n([a-f0-9]{64})\n/)?.[1];assert(leaseCode);
+  const leaseCode=await callbackReceipt(completedCallback,leased.id,leaseState);
   check('owner confirmation succeeds after polling across the original consent deadline',
     (await expect('POST',`/connectors/${leased.id}/complete`,{confirmation_code:leaseCode},200)).json().status,'connected');
   await expect('POST',`/connectors/${leased.id}/disconnect`,{},200);
@@ -327,7 +340,7 @@ try{
   const rotated=(await expect('POST','/connectors/github/connect',payload,200)).json();
   const rotatedState=new URL(rotated.authorization_url).searchParams.get('state');
   const rotatedCallback=await handleConnectorBroker(new Request(`https://service.grengin.com/v1/connectors/callback/github?state=${rotatedState}&code=rotate-code`),env);
-  const rotatedCode=(await rotatedCallback.text()).match(/\n([a-f0-9]{64})\n/)?.[1];assert(rotatedCode);
+  const rotatedCode=await callbackReceipt(rotatedCallback,rotated.id,rotatedState);
   await expect('POST',`/connectors/${rotated.id}/complete`,{confirmation_code:rotatedCode},200);
   tokenReply={access_token:'FAKE_VENDOR_ACCESS',refresh_token:'ROTATED_HTTP_REFRESH',expires_in:3600,token_type:'Bearer'};
   sqlite.exec("CREATE TRIGGER reject_http_refresh_audit BEFORE INSERT ON open_connector_audit_events WHEN NEW.event='connector.refreshed' BEGIN SELECT RAISE(ABORT,'forced HTTP refresh audit failure'); END");
