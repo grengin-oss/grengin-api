@@ -1,0 +1,617 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ConnectorManifest",
+  "type": "object",
+  "properties": {
+    "auth": {
+      "$ref": "#/$defs/ConnectorAuth"
+    },
+    "base_url": {
+      "type": "string"
+    },
+    "base_url_policy": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BaseUrlPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "configuration_schema": true,
+    "credential_delivery": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CredentialDelivery"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "id": {
+      "type": "string"
+    },
+    "mappings": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/MappingExpression"
+      },
+      "default": {}
+    },
+    "name": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "tools": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ConnectorTool"
+      }
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "version",
+    "name",
+    "base_url",
+    "auth"
+  ],
+  "$defs": {
+    "ArrayExpression": {
+      "type": "object",
+      "properties": {
+        "$array": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$array"
+      ]
+    },
+    "Base64Expression": {
+      "type": "object",
+      "properties": {
+        "$base64": {
+          "$ref": "#/$defs/MappingExpression"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$base64"
+      ]
+    },
+    "BaseUrlPolicy": {
+      "type": "object",
+      "properties": {
+        "allowed_host_suffixes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "required_override": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "allowed_host_suffixes"
+      ]
+    },
+    "CoalesceExpression": {
+      "description": "Yields the first entry that resolves to a non-null value.\n\nNeeded wherever a provider requires a field the canonical request treats as optional, such as\nAnthropic's mandatory `max_tokens`, which otherwise fails the whole payload when unset.",
+      "type": "object",
+      "properties": {
+        "$coalesce": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$coalesce"
+      ]
+    },
+    "ConcatExpression": {
+      "description": "Flattens several arrays into one, the array counterpart of `$merge`.\n\nNeeded whenever a provider takes a single list that the runtime assembles from more than one\nsource, such as `tools` holding both mapped client tools and a literal provider-native tool.\nEntries that evaluate to nothing are skipped, so an absent optional list contributes nothing.",
+      "type": "object",
+      "properties": {
+        "$concat": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$concat"
+      ]
+    },
+    "ConnectorAuth": {
+      "type": "string",
+      "enum": [
+        "none",
+        "oauth2",
+        "api_key"
+      ]
+    },
+    "ConnectorRequest": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          },
+          "default": {}
+        },
+        "method": {
+          "$ref": "#/$defs/HttpMethod"
+        },
+        "path": {
+          "type": "string"
+        },
+        "path_parameters": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          },
+          "default": {}
+        },
+        "query": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "path"
+      ]
+    },
+    "ConnectorResponse": {
+      "type": "object",
+      "properties": {
+        "error_array_pointer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error_if": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "pagination": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NextLinkPagination"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConnectorTool": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "destructive": {
+          "type": "boolean",
+          "default": false
+        },
+        "input_schema": true,
+        "name": {
+          "type": "string"
+        },
+        "read_only": {
+          "type": "boolean"
+        },
+        "request": {
+          "$ref": "#/$defs/ConnectorRequest"
+        },
+        "required_scopes": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "response": {
+          "$ref": "#/$defs/ConnectorResponse",
+          "default": {
+            "error_if": null,
+            "pagination": null,
+            "result": null
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description",
+        "input_schema",
+        "read_only",
+        "request"
+      ]
+    },
+    "CredentialDelivery": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "location": {
+              "type": "string",
+              "const": "header"
+            },
+            "name": {
+              "type": "string"
+            },
+            "prefix": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "location",
+            "name"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string"
+            },
+            "location": {
+              "type": "string",
+              "const": "json_body"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "location",
+            "field"
+          ]
+        }
+      ]
+    },
+    "FlatMapExpression": {
+      "type": "object",
+      "properties": {
+        "$flatMap": {
+          "type": "string"
+        },
+        "using": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$flatMap",
+        "using"
+      ]
+    },
+    "GetExpression": {
+      "type": "object",
+      "properties": {
+        "$get": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$get"
+      ]
+    },
+    "HttpMethod": {
+      "type": "string",
+      "enum": [
+        "GET",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE"
+      ]
+    },
+    "IfExpression": {
+      "type": "object",
+      "properties": {
+        "$if": {
+          "$ref": "#/$defs/MappingExpression"
+        },
+        "else": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "then": {
+          "$ref": "#/$defs/MappingExpression"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$if",
+        "then"
+      ]
+    },
+    "JsonEncodeExpression": {
+      "type": "object",
+      "properties": {
+        "$jsonEncode": {
+          "$ref": "#/$defs/MappingExpression"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$jsonEncode"
+      ]
+    },
+    "LiteralExpression": {
+      "type": "object",
+      "properties": {
+        "$literal": true
+      },
+      "additionalProperties": false,
+      "required": [
+        "$literal"
+      ]
+    },
+    "MapExpression": {
+      "type": "object",
+      "properties": {
+        "$map": {
+          "type": "string"
+        },
+        "using": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$map",
+        "using"
+      ]
+    },
+    "MappingExpression": {
+      "description": "A declarative payload expression.\n\nVariant order is load-bearing for `untagged` deserialization and must not be rearranged:\n\n* `ArrayValue` comes first because serde also derives struct-from-sequence for the operator\n  variants below, so a bare JSON array like `[a, b]` would otherwise be read as\n  `IfExpression { condition: a, then: b }`.\n* The `$`-prefixed operator structs come before `ObjectValue` so `{\"$get\": …}` is read as an\n  operator instead of a one-key object literal.\n* `Scalar` comes last because [`Value`] accepts anything.",
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        },
+        {
+          "$ref": "#/$defs/LiteralExpression"
+        },
+        {
+          "$ref": "#/$defs/GetExpression"
+        },
+        {
+          "$ref": "#/$defs/OmitIfNullExpression"
+        },
+        {
+          "$ref": "#/$defs/JsonEncodeExpression"
+        },
+        {
+          "$ref": "#/$defs/Base64Expression"
+        },
+        {
+          "$ref": "#/$defs/MapExpression"
+        },
+        {
+          "$ref": "#/$defs/FlatMapExpression"
+        },
+        {
+          "$ref": "#/$defs/IfExpression"
+        },
+        {
+          "$ref": "#/$defs/SwitchExpression"
+        },
+        {
+          "$ref": "#/$defs/MergeExpression"
+        },
+        {
+          "$ref": "#/$defs/ConcatExpression"
+        },
+        {
+          "$ref": "#/$defs/StringConcatExpression"
+        },
+        {
+          "$ref": "#/$defs/CoalesceExpression"
+        },
+        {
+          "$ref": "#/$defs/ObjectExpression"
+        },
+        {
+          "$ref": "#/$defs/ArrayExpression"
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        },
+        true
+      ]
+    },
+    "MergeExpression": {
+      "type": "object",
+      "properties": {
+        "$merge": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$merge"
+      ]
+    },
+    "NextLinkPagination": {
+      "type": "object",
+      "properties": {
+        "items_pointer": {
+          "type": "string"
+        },
+        "max_pages": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "next_pointer": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "items_pointer",
+        "next_pointer",
+        "max_pages"
+      ]
+    },
+    "ObjectExpression": {
+      "type": "object",
+      "properties": {
+        "$object": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$object"
+      ]
+    },
+    "OmitIfNullExpression": {
+      "type": "object",
+      "properties": {
+        "$omitIfNull": {
+          "$ref": "#/$defs/MappingExpression"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$omitIfNull"
+      ]
+    },
+    "StringConcatExpression": {
+      "type": "object",
+      "properties": {
+        "$stringConcat": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$stringConcat"
+      ]
+    },
+    "SwitchExpression": {
+      "type": "object",
+      "properties": {
+        "$switch": {
+          "$ref": "#/$defs/MappingExpression"
+        },
+        "cases": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        },
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$switch",
+        "cases"
+      ]
+    }
+  }
+}

@@ -19,8 +19,9 @@ use tokio::sync::{Mutex, RwLock};
 use crate::{
     auth::provider_config::OidcProviderConfiguration,
     dto::discovery::{
-        AiProviderDiscoveryResponse, AuthProviderDiscoveryResponse, DiscoveryCategory,
-        DiscoveryListResponse, DiscoveryProviderSummary, DiscoveryVersion,
+        AiProviderDiscoveryResponse, AuthProviderDiscoveryResponse,
+        ConnectorPluginDiscoveryResponse, DiscoveryCategory, DiscoveryListResponse,
+        DiscoveryProviderSummary, DiscoveryVersion,
     },
 };
 
@@ -87,6 +88,8 @@ struct ApiDistribution {
     catalog_commit: String,
     auth_providers: CatalogIndex,
     ai_providers: CatalogIndex,
+    #[serde(default)]
+    connector_plugins: Option<CatalogIndex>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -124,6 +127,8 @@ struct CatalogArtifactVersion {
     #[serde(default)]
     manifest_version: Option<String>,
     sha256: String,
+    #[serde(default)]
+    setup_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -150,6 +155,7 @@ enum VersionSelector {
 enum CatalogKind {
     Auth,
     Ai,
+    Connector,
 }
 
 impl CatalogKind {
@@ -157,6 +163,7 @@ impl CatalogKind {
         match self {
             Self::Auth => "auth_providers",
             Self::Ai => "ai_providers",
+            Self::Connector => "connector_plugins",
         }
     }
 
@@ -166,20 +173,24 @@ impl CatalogKind {
                 format!("auth-providers/{provider}/versions/{version}/provider.json")
             }
             Self::Ai => format!("ai-providers/{provider}/versions/{version}/plugin.json"),
+            Self::Connector => {
+                format!("connector-plugins/{provider}/versions/{version}/plugin.json")
+            }
         }
     }
 
-    fn index<'a>(&self, distribution: &'a ApiDistribution) -> &'a CatalogIndex {
+    fn index<'a>(&self, distribution: &'a ApiDistribution) -> Option<&'a CatalogIndex> {
         match self {
-            Self::Auth => &distribution.auth_providers,
-            Self::Ai => &distribution.ai_providers,
+            Self::Auth => Some(&distribution.auth_providers),
+            Self::Ai => Some(&distribution.ai_providers),
+            Self::Connector => distribution.connector_plugins.as_ref(),
         }
     }
 
     fn contract_version<'a>(&self, version: &'a CatalogArtifactVersion) -> &'a str {
         match self {
             Self::Auth => version.configuration_version.as_deref().unwrap_or_default(),
-            Self::Ai => version.manifest_version.as_deref().unwrap_or_default(),
+            Self::Ai | Self::Connector => version.manifest_version.as_deref().unwrap_or_default(),
         }
     }
 }
@@ -250,6 +261,76 @@ impl DiscoveryCatalog {
         requested_version: Option<&str>,
     ) -> Result<DiscoveryListResponse, DiscoveryError> {
         self.list(CatalogKind::Ai, requested_version).await
+    }
+
+    pub async fn list_connector_plugins(
+        &self,
+        requested_version: Option<&str>,
+    ) -> Result<DiscoveryListResponse, DiscoveryError> {
+        self.list(CatalogKind::Connector, requested_version).await
+    }
+
+    pub async fn connector_plugin(
+        &self,
+        provider: &str,
+        requested_version: Option<&str>,
+    ) -> Result<ConnectorPluginDiscoveryResponse, DiscoveryError> {
+        let kind = CatalogKind::Connector;
+        let (provider, candidates) = self
+            .provider_candidates(&kind, provider, requested_version)
+            .await?;
+        for version in candidates {
+            let bytes = match self
+                .fetch_document(&kind.artifact_path(&provider.id, &version.version))
+                .await
+            {
+                Ok(bytes) => bytes,
+                Err(DiscoveryError::NotFound) => continue,
+                Err(error) => return Err(error),
+            };
+            verify_digest(&bytes, &version.sha256)?;
+            let plugin: Value = serde_json::from_slice(&bytes)
+                .map_err(|error| DiscoveryError::InvalidCatalog(error.to_string()))?;
+            let compiled = validate_connector_plugin(&provider.id, &version, &plugin)?;
+            let installation = if let Some(digest) = &version.setup_sha256 {
+                let bytes = self
+                    .fetch_document(&format!(
+                        "connector-plugins/{}/versions/{}/setup.json",
+                        provider.id, version.version
+                    ))
+                    .await?;
+                verify_digest(&bytes, digest)?;
+                let setup: Value = serde_json::from_slice(&bytes).map_err(|_| {
+                    DiscoveryError::InvalidCatalog("invalid connector installation metadata".into())
+                })?;
+                if setup["schema_version"] != 1
+                    || setup["plugin_id"] != provider.id
+                    || setup["plugin_version"] != version.version
+                    || !setup["authentication"].is_object()
+                {
+                    return Err(DiscoveryError::InvalidCatalog(
+                        "connector installation identity differs from index".into(),
+                    ));
+                }
+                Some(setup)
+            } else {
+                None
+            };
+            return Ok(ConnectorPluginDiscoveryResponse {
+                distribution_version: self.distribution_version.clone(),
+                id: provider.id,
+                version: version.version,
+                manifest_version: version.manifest_version.unwrap_or_default(),
+                runtime_version: connector_server_plugin::runtime_version().into(),
+                sha256: version.sha256,
+                tool_groups: serde_json::to_value(compiled.manifest().tool_groups())
+                    .map_err(|error| DiscoveryError::InvalidCatalog(error.to_string()))?,
+                plugin,
+                installation,
+                installation_sha256: version.setup_sha256,
+            });
+        }
+        Err(DiscoveryError::NotFound)
     }
 
     pub async fn auth_provider(
@@ -330,7 +411,10 @@ impl DiscoveryCatalog {
     ) -> Result<DiscoveryListResponse, DiscoveryError> {
         let selector = parse_selector(requested_version)?;
         let distribution = self.load_distribution().await?;
-        let index = kind.index(&distribution).clone();
+        let index = kind
+            .index(&distribution)
+            .ok_or(DiscoveryError::NotFound)?
+            .clone();
         let categories = if matches!(kind, CatalogKind::Ai) {
             self.load_categories(&index).await
         } else {
@@ -429,7 +513,7 @@ impl DiscoveryCatalog {
         let provider_id = validate_provider_id(provider_id)?;
         let selector = parse_selector(requested_version)?;
         let distribution = self.load_distribution().await?;
-        let index = kind.index(&distribution);
+        let index = kind.index(&distribution).ok_or(DiscoveryError::NotFound)?;
         let provider = index
             .providers
             .iter()
@@ -637,6 +721,9 @@ fn validate_distribution(
     }
     validate_catalog_index(&CatalogKind::Auth, &distribution.auth_providers)?;
     validate_catalog_index(&CatalogKind::Ai, &distribution.ai_providers)?;
+    if let Some(index) = &distribution.connector_plugins {
+        validate_catalog_index(&CatalogKind::Connector, index)?;
+    }
     Ok(())
 }
 
@@ -689,6 +776,15 @@ fn validate_catalog_index(kind: &CatalogKind, index: &CatalogIndex) -> Result<()
                     "distribution contains an invalid SHA-256 digest".to_string(),
                 ));
             }
+            if version
+                .setup_sha256
+                .as_ref()
+                .is_some_and(|digest| !matches!(kind, CatalogKind::Connector) || !is_sha256(digest))
+            {
+                return Err(DiscoveryError::InvalidCatalog(
+                    "invalid connector installation digest".into(),
+                ));
+            }
             match kind {
                 CatalogKind::Auth
                     if version.configuration_version.is_none()
@@ -698,7 +794,7 @@ fn validate_catalog_index(kind: &CatalogKind, index: &CatalogIndex) -> Result<()
                         "auth package is missing its configuration contract".to_string(),
                     ));
                 }
-                CatalogKind::Ai
+                CatalogKind::Ai | CatalogKind::Connector
                     if version.manifest_version.is_none()
                         || version.configuration_version.is_some() =>
                 {
@@ -822,6 +918,31 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn validate_connector_plugin(
+    expected_id: &str,
+    version: &CatalogArtifactVersion,
+    manifest: &Value,
+) -> Result<connector_server_plugin::CompiledConnector, DiscoveryError> {
+    let compiled = connector_server_plugin::CompiledConnector::compile(
+        connector_server_plugin::ConnectorPluginConfig {
+            manifest: manifest.clone(),
+            ..Default::default()
+        },
+    )
+    .map_err(|error| DiscoveryError::InvalidCatalog(error.to_string()))?;
+    let schema = ReleaseVersion([u64::from(compiled.manifest().schema_version), 0, 0]);
+    if compiled.manifest().id != expected_id
+        || compiled.manifest().version != version.version
+        || parse_release_version(&version.schema_version)? != schema
+        || parse_release_version(version.manifest_version.as_deref().unwrap_or_default())? != schema
+    {
+        return Err(DiscoveryError::InvalidCatalog(
+            "connector plugin identity, version or schema differs from its index".into(),
+        ));
+    }
+    Ok(compiled)
 }
 
 fn validate_auth_template(
@@ -971,7 +1092,248 @@ mod tests {
             configuration_version: configuration.map(str::to_string),
             manifest_version: manifest.map(str::to_string),
             sha256: "0".repeat(64),
+            setup_sha256: None,
         }
+    }
+
+    fn connector_manifest(release: &str) -> Vec<u8> {
+        let mut manifest: Value =
+            serde_json::from_str(include_str!("../../connector-server-plugin/example.json"))
+                .unwrap();
+        manifest["id"] = serde_json::json!("test-connector");
+        manifest["version"] = serde_json::json!(release);
+        serde_json::to_vec(&manifest).unwrap()
+    }
+
+    fn connector_distribution(default: &str, packages: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut index:Value=serde_json::from_slice(&auth_distribution("test-auth","1.0",serde_json::json!([{
+            "version":"1.0","schemaVersion":"1.0","configurationVersion":"1.0","sha256":"0".repeat(64)
+        }]))).unwrap();
+        index["connectorPlugins"] = serde_json::json!({"catalogVersion":"1.0.0","providers":[{
+            "id":"test-connector","name":"Test connector","status":"preview","defaultVersion":default,
+            "versions":packages.iter().map(|(release,bytes)|serde_json::json!({"version":release,"schemaVersion":"1.0","manifestVersion":"1.0","sha256":sha256_hex(bytes)})).collect::<Vec<_>>()
+        }]});
+        serde_json::to_vec(&index).unwrap()
+    }
+
+    async fn connector_catalog(
+        index: Vec<u8>,
+        artifacts: Vec<(&str, Vec<u8>, StatusCode)>,
+    ) -> DiscoveryCatalog {
+        let mut router = Router::new().route(
+            TEST_DISTRIBUTION_PATH,
+            get(move || {
+                let index = index.clone();
+                async move { index }
+            }),
+        );
+        for (release, body, status) in artifacts {
+            router = router.route(
+                &format!("/connector-plugins/test-connector/versions/{release}/plugin.json"),
+                get(move || {
+                    let body = body.clone();
+                    async move { (status, body) }
+                }),
+            );
+        }
+        DiscoveryCatalog::new(test_client(), &serve(router).await).unwrap()
+    }
+
+    #[tokio::test]
+    async fn connector_discovery_resolves_versions_hashes_and_tool_categories_without_installing() {
+        let old = connector_manifest("1.0.0");
+        let new = connector_manifest("1.1.0");
+        let index = connector_distribution("1.1.0", &[("1.0.0", &old), ("1.1.0", &new)]);
+        let catalog = connector_catalog(
+            index,
+            vec![
+                ("1.0.0", old.clone(), StatusCode::OK),
+                ("1.1.0", new.clone(), StatusCode::OK),
+            ],
+        )
+        .await;
+        let list = catalog.list_connector_plugins(None).await.unwrap();
+        assert_eq!(list.catalog_type, "connector_plugins");
+        assert_eq!(list.providers[0].selected_version, "1.1.0");
+        assert_eq!(list.providers[0].available_versions.len(), 2);
+        let latest = catalog
+            .connector_plugin("test-connector", Some("1"))
+            .await
+            .unwrap();
+        assert_eq!(latest.version, "1.1.0");
+        assert_eq!(
+            latest.runtime_version,
+            connector_server_plugin::runtime_version()
+        );
+        assert_eq!(latest.sha256, sha256_hex(&new));
+        assert_eq!(
+            latest.tool_groups["read_write"],
+            serde_json::json!(["create_mail_draft"])
+        );
+        let exact = catalog
+            .connector_plugin("test-connector", Some("1.0.0"))
+            .await
+            .unwrap();
+        assert_eq!(exact.version, "1.0.0");
+        assert_eq!(exact.sha256, sha256_hex(&old));
+        assert!(matches!(
+            catalog.connector_plugin("test-connector", Some("2")).await,
+            Err(DiscoveryError::NotFound)
+        ));
+        assert!(matches!(
+            catalog.connector_plugin("../private", None).await,
+            Err(DiscoveryError::NotFound)
+        ));
+        assert!(matches!(
+            catalog.list_connector_plugins(Some("../../")).await,
+            Err(DiscoveryError::InvalidVersion)
+        ));
+    }
+
+    #[tokio::test]
+    async fn connector_installation_metadata_is_versioned_hash_verified_and_identity_bound() {
+        let plugin = connector_manifest("1.0.0");
+        let good = serde_json::json!({"schema_version":1,"plugin_id":"test-connector","plugin_version":"1.0.0","authentication":{"kind":"oauth2","oauth":{"auth_url":"https://example.com/authorize","token_url":"https://example.com/token","scopes":[]}}});
+        for scenario in ["valid", "corrupt", "wrong_identity", "missing"] {
+            let mut setup = good.clone();
+            if scenario == "wrong_identity" {
+                setup["plugin_id"] = serde_json::json!("other");
+            }
+            let bytes = serde_json::to_vec(&setup).unwrap();
+            let mut index: Value =
+                serde_json::from_slice(&connector_distribution("1.0.0", &[("1.0.0", &plugin)]))
+                    .unwrap();
+            index["connectorPlugins"]["providers"][0]["versions"][0]["setupSha256"] =
+                serde_json::json!(if scenario == "corrupt" {
+                    "0".repeat(64)
+                } else {
+                    sha256_hex(&bytes)
+                });
+            let index = serde_json::to_vec(&index).unwrap();
+            let package = plugin.clone();
+            let mut router = Router::new()
+                .route(
+                    TEST_DISTRIBUTION_PATH,
+                    get(move || {
+                        let index = index.clone();
+                        async move { index }
+                    }),
+                )
+                .route(
+                    "/connector-plugins/test-connector/versions/1.0.0/plugin.json",
+                    get(move || {
+                        let package = package.clone();
+                        async move { package }
+                    }),
+                );
+            if scenario != "missing" {
+                router = router.route(
+                    "/connector-plugins/test-connector/versions/1.0.0/setup.json",
+                    get(move || {
+                        let bytes = bytes.clone();
+                        async move { bytes }
+                    }),
+                );
+            }
+            let catalog = DiscoveryCatalog::new(test_client(), &serve(router).await).unwrap();
+            let result = catalog.connector_plugin("test-connector", None).await;
+            if scenario == "valid" {
+                let detail = result.unwrap();
+                assert_eq!(detail.installation, Some(good.clone()));
+                assert_eq!(
+                    detail.installation_sha256,
+                    Some(sha256_hex(&serde_json::to_vec(&good).unwrap()))
+                );
+            } else {
+                assert!(result.is_err(), "{scenario}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn connector_fallback_applies_only_to_missing_packages_not_corruption_or_outages() {
+        let old = connector_manifest("1.0.0");
+        let new = connector_manifest("1.1.0");
+        let index = connector_distribution("1.1.0", &[("1.0.0", &old), ("1.1.0", &new)]);
+        let missing =
+            connector_catalog(index.clone(), vec![("1.0.0", old.clone(), StatusCode::OK)]).await;
+        assert_eq!(
+            missing
+                .connector_plugin("test-connector", None)
+                .await
+                .unwrap()
+                .version,
+            "1.0.0"
+        );
+        assert!(matches!(
+            missing
+                .connector_plugin("test-connector", Some("1.1.0"))
+                .await,
+            Err(DiscoveryError::NotFound)
+        ));
+        let corrupt = connector_catalog(
+            index.clone(),
+            vec![
+                ("1.0.0", old.clone(), StatusCode::OK),
+                ("1.1.0", b"tampered".to_vec(), StatusCode::OK),
+            ],
+        )
+        .await;
+        assert!(matches!(
+            corrupt.connector_plugin("test-connector", None).await,
+            Err(DiscoveryError::InvalidCatalog(_))
+        ));
+        let outage = connector_catalog(
+            index,
+            vec![
+                ("1.0.0", old, StatusCode::OK),
+                ("1.1.0", b"outage".to_vec(), StatusCode::SERVICE_UNAVAILABLE),
+            ],
+        )
+        .await;
+        assert!(matches!(
+            outage.connector_plugin("test-connector", None).await,
+            Err(DiscoveryError::Unavailable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn connector_catalog_absence_is_backward_compatible_with_existing_distributions() {
+        let mut index: Value = serde_json::from_slice(&connector_distribution(
+            "1.0.0",
+            &[("1.0.0", &connector_manifest("1.0.0"))],
+        ))
+        .unwrap();
+        index.as_object_mut().unwrap().remove("connectorPlugins");
+        let catalog = connector_catalog(serde_json::to_vec(&index).unwrap(), vec![]).await;
+        assert!(catalog.list_auth(None).await.is_ok());
+        assert!(catalog.list_ai(None).await.is_ok());
+        assert!(matches!(
+            catalog.list_connector_plugins(None).await,
+            Err(DiscoveryError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn connector_packages_must_match_index_identity_schema_and_runtime_policy() {
+        let manifest: Value = serde_json::from_slice(&connector_manifest("1.0.0")).unwrap();
+        let package = version("1.0.0", "1.0", None, Some("1.0"));
+        assert!(validate_connector_plugin("test-connector", &package, &manifest).is_ok());
+        for (field, value) in [
+            ("id", serde_json::json!("other")),
+            ("version", serde_json::json!("1.1.0")),
+            ("schema_version", serde_json::json!(2)),
+            ("base_url", serde_json::json!("http://169.254.169.254")),
+        ] {
+            let mut bad = manifest.clone();
+            bad[field] = value;
+            assert!(
+                validate_connector_plugin("test-connector", &package, &bad).is_err(),
+                "{field}"
+            );
+        }
+        let unsupported = version("1.0.0", "2.0", None, Some("1.0"));
+        assert!(validate_connector_plugin("test-connector", &unsupported, &manifest).is_err());
     }
 
     fn provider(default_version: &str, versions: Vec<CatalogArtifactVersion>) -> CatalogProvider {
@@ -1683,6 +2045,7 @@ mod tests {
                 configuration_version: Some(configuration_version.to_string()),
                 manifest_version: None,
                 sha256: sha256_hex(&bytes),
+                setup_sha256: None,
             };
             validate_auth_template(provider_id, &indexed, &template)
                 .unwrap_or_else(|error| panic!("{}: {error}", Path::new(&path).display()));
@@ -1734,6 +2097,23 @@ mod tests {
                 assert_eq!(manifest.id, provider.id, "{}", artifact.display());
                 assert_eq!(manifest.version, version.version, "{}", artifact.display());
                 checked_packages += 1;
+            }
+        }
+
+        if let Some(index) = &distribution.connector_plugins {
+            for provider in &index.providers {
+                for version in &provider.versions {
+                    let artifact = Path::new(&root)
+                        .join(CatalogKind::Connector.artifact_path(&provider.id, &version.version));
+                    let bytes = fs::read(&artifact).expect("read connector plugin package");
+                    verify_digest(&bytes, &version.sha256)
+                        .unwrap_or_else(|error| panic!("{}: {error}", artifact.display()));
+                    let manifest: Value =
+                        serde_json::from_slice(&bytes).expect("parse connector plugin");
+                    validate_connector_plugin(&provider.id, version, &manifest)
+                        .unwrap_or_else(|error| panic!("{}: {error}", artifact.display()));
+                    checked_packages += 1;
+                }
             }
         }
 

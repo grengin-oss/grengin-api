@@ -448,7 +448,7 @@ async fn store_refreshed_oauth_tokens<C: ConnectionTrait>(
     Ok(updated.rows_affected == 1)
 }
 
-async fn store_oauth_tokens_with<C: ConnectionTrait>(
+pub(crate) async fn store_oauth_tokens_with<C: ConnectionTrait>(
     db: &C,
     app_key: &[u8; 32],
     user_id: Uuid,
@@ -681,17 +681,19 @@ pub async fn start_oauth_authorization(
     user_id: Uuid,
     redirect_uri: Option<&str>,
 ) -> Result<McpOauthPrompt, AppError> {
-    let server = mcp_servers::Entity::find_by_id(server_id)
-        .one(&state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("mcp server lookup error: {e}");
-            AppError::DbTimeout
-        })?
-        .ok_or(AppError::McpServerNotFound)?;
-
-    if !server.enabled {
-        return Err(AppError::McpServerNotFound);
+    let server = require_server_access(state, user_id, server_id).await?;
+    if server.connection_config.get("connector_plugin").is_some() {
+        let plugin = crate::services::mcp_plugin_helpers::compile_plugin(
+            &server.connection_config,
+            server.transport_type,
+            server.url.as_deref(),
+        )
+        .map_err(|_| AppError::ResourceNotFound)?;
+        if plugin.is_some_and(|plugin| {
+            plugin.manifest().auth != connector_server_plugin::ConnectorAuth::Oauth2
+        }) {
+            return Err(AppError::ResourceNotFound);
+        }
     }
 
     if let Some(authorization_url) =
@@ -763,6 +765,23 @@ pub async fn complete_oauth_authorization(
         })?
         .ok_or(AppError::ResourceNotFound)?;
 
+    if oauth_state.user_id != caller_user_id {
+        return Err(AppError::ResourceNotFound);
+    }
+    let _lock = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        state
+            .mcp_refresh_locks
+            .lock(caller_user_id, oauth_state.server_id),
+    )
+    .await
+    .map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
+    let oauth_state = mcp_oauth_states::Entity::find_by_id(oauth_state.id)
+        .one(&state.database)
+        .await
+        .map_err(|_| AppError::DbTimeout)?
+        .ok_or(AppError::ResourceNotFound)?;
+
     match check_oauth_state(&oauth_state, caller_user_id, Utc::now()) {
         Ok(()) => {}
         Err(OAuthStateRejection::Expired) => {
@@ -783,8 +802,11 @@ pub async fn complete_oauth_authorization(
         .as_deref()
         .and_then(|uri| allowed_redirect_uri(uri, &state.settings.auth.redirect_url));
 
-    if let Some(error) = callback.error {
-        eprintln!("mcp oauth error: {error} {:?}", callback.error_description);
+    if callback.error.is_some() {
+        eprintln!(
+            "mcp oauth consent rejected for server {}",
+            oauth_state.server_id
+        );
         finish_oauth_state(state, oauth_state.id, OAuthCallbackOutcome::ProviderError).await;
         return Ok(build_oauth_callback_response(
             redirect_uri.as_deref(),
@@ -797,14 +819,7 @@ pub async fn complete_oauth_authorization(
         .code
         .ok_or(AppError::ValidationMissingField { field: "code" })?;
 
-    let server = mcp_servers::Entity::find_by_id(oauth_state.server_id)
-        .one(&state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("mcp server lookup error: {e}");
-            AppError::DbTimeout
-        })?
-        .ok_or(AppError::McpServerNotFound)?;
+    let server = require_server_access(state, caller_user_id, oauth_state.server_id).await?;
 
     let oauth_config = build_oauth_config(state, &server)?;
     let exchange = exchange_code(
@@ -822,6 +837,11 @@ pub async fn complete_oauth_authorization(
         eprintln!("mcp oauth token exchange error: {e}");
         AppError::ServiceTemporarilyUnavailable
     })?;
+
+    let fresh = require_server_access(state, caller_user_id, server.id).await?;
+    if oauth_binding_changed(&server, &fresh) {
+        return Err(AppError::ResourceNotFound);
+    }
 
     redeem_oauth_state(state, oauth_state.id, oauth_state.user_id, &server, tokens).await?;
 
@@ -871,6 +891,15 @@ async fn redeem_oauth_state(
         eprintln!("mcp oauth redeem begin error: {e}");
         AppError::DbTimeout
     })?;
+    let fresh = mcp_servers::Entity::find_by_id(server.id)
+        .lock_exclusive()
+        .one(&txn)
+        .await
+        .map_err(|_| AppError::DbTimeout)?
+        .ok_or(AppError::ResourceNotFound)?;
+    if !fresh.enabled || oauth_binding_changed(server, &fresh) {
+        return Err(AppError::ResourceNotFound);
+    }
     let removed = mcp_oauth_states::Entity::delete_by_id(oauth_state_id)
         .exec(&txn)
         .await
@@ -894,6 +923,50 @@ async fn redeem_oauth_state(
         eprintln!("mcp oauth redeem commit error: {e}");
         AppError::DbTimeout
     })
+}
+
+fn oauth_binding_changed(old: &mcp_servers::Model, current: &mcp_servers::Model) -> bool {
+    old.connection_config != current.connection_config
+        || old.url != current.url
+        || old.transport_type != current.transport_type
+        || old.client_id != current.client_id
+        || old.client_secret != current.client_secret
+}
+
+pub(crate) async fn require_server_access(
+    state: &SharedState,
+    user: Uuid,
+    server: Uuid,
+) -> Result<mcp_servers::Model, AppError> {
+    use crate::services::mcp_access::{
+        build_access_context, load_server_rules, resolve_server_access_with_rules,
+    };
+    let owner = users::Entity::find_by_id(user)
+        .one(&state.database)
+        .await
+        .map_err(|_| AppError::DbTimeout)?
+        .ok_or(AppError::ResourceNotFound)?;
+    if owner.status != users::UserStatus::Active {
+        return Err(AppError::ResourceNotFound);
+    }
+    let server = mcp_servers::Entity::find_by_id(server)
+        .one(&state.database)
+        .await
+        .map_err(|_| AppError::DbTimeout)?
+        .ok_or(AppError::ResourceNotFound)?;
+    if !server.enabled {
+        return Err(AppError::ResourceNotFound);
+    }
+    let context = build_access_context(&state.database, user).await?;
+    let rules = load_server_rules(&state.database, &[server.id]).await?;
+    if resolve_server_access_with_rules(&state.database, &context, &server, &rules)
+        .await?
+        .permission
+        == mcp_access_policies::McpPermission::Denied
+    {
+        return Err(AppError::ResourceNotFound);
+    }
+    Ok(server)
 }
 
 // Best-effort for rejected codes and provider-reported errors: the provider won't accept the

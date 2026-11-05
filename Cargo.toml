@@ -1,12 +1,12 @@
 [package]
 name = "grengin-api"
-version = "0.9.7"
+version = "0.9.8"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/grengin-oss/grengin-api"
 
 [workspace]
-members = [".", "llm-plugin", "migration", "sqlx-mcp"]
+members = [".", "llm-plugin", "connector-server-plugin", "migration", "sqlx-mcp"]
 
 [dependencies]
 anyhow = { version = "1.0.100", features = ["backtrace"] }
@@ -35,11 +35,13 @@ openssl = { version = "0.10.75", features = ["vendored"] }
 num-traits = "0.2.19"
 futures-util = "0.3.31"
 llm-plugin = { path = "llm-plugin" }
+connector-server-plugin = { path = "connector-server-plugin" }
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum", "vendored"] }
 utoipa = { version = "5.4.0", features = ["axum_extras", "chrono", "url", "uuid"] }
 url = "2.5"
 aes-gcm = "0.10.3"
-rmcp = { version = "0.15.0", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "3.8.0", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+reqwest-mcp = { package = "reqwest", version = "0.13.2", default-features = false, features = ["json", "stream", "rustls"] }
 sysinfo = "0.37.2"
 calamine = "0.36"
 flate2 = "1"

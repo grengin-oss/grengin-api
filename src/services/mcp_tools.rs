@@ -312,6 +312,9 @@ pub async fn filter_tools_for_user(
         let Some(server) = servers.get(&tool.server_id) else {
             continue;
         };
+        if !server.enabled {
+            continue;
+        }
         let server_access = match server_access_cache.get(&tool.server_id) {
             Some(access) => access,
             None => {

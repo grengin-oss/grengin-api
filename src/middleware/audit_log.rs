@@ -569,6 +569,7 @@ fn is_credential_key(key: &str) -> bool {
         "confirmationcode",
         "connectiongrant",
         "privatekey",
+        "credential",
     ]
     .iter()
     .any(|sensitive| key.contains(sensitive))

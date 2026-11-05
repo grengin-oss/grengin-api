@@ -74,3 +74,22 @@ pub struct AiProviderDiscoveryResponse {
     #[schema(value_type = Object)]
     pub plugin: Value,
 }
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ConnectorPluginDiscoveryResponse {
+    pub distribution_version: String,
+    pub id: String,
+    pub version: String,
+    pub manifest_version: String,
+    pub runtime_version: String,
+    pub sha256: String,
+    #[schema(value_type = Object)]
+    pub tool_groups: Value,
+    #[schema(value_type = Object)]
+    pub plugin: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub installation: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installation_sha256: Option<String>,
+}

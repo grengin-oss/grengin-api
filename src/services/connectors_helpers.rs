@@ -129,7 +129,10 @@ async fn allowed_server(
         .await
         .map_err(database_error)?
         .ok_or(AppError::ResourceNotFound)?;
-    if !server.enabled || server.transport_type != McpTransportType::Http {
+    if !server.enabled
+        || server.transport_type != McpTransportType::Http
+        || server.connection_config.get("connector_plugin").is_some()
+    {
         return Err(AppError::ResourceNotFound);
     }
     if !server

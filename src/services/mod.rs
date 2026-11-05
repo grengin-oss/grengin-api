@@ -41,6 +41,7 @@ pub mod mcp_access;
 pub mod mcp_client;
 pub mod mcp_helpers;
 pub mod mcp_oauth;
+pub mod mcp_plugin_helpers;
 pub mod mcp_service;
 pub mod mcp_tools;
 pub mod me_helpers;

@@ -48,16 +48,16 @@ use crate::dto::chat_shares::*;
 use crate::dto::chat_stream::{ChatInput, ChatStream};
 use crate::dto::common::{PaginationQuery, SortRule};
 use crate::dto::discovery::{
-    AiProviderDiscoveryResponse, AuthProviderDiscoveryResponse, DiscoveryCategory,
-    DiscoveryListResponse, DiscoveryProviderSummary, DiscoveryVersion,
+    AiProviderDiscoveryResponse, AuthProviderDiscoveryResponse, ConnectorPluginDiscoveryResponse,
+    DiscoveryCategory, DiscoveryListResponse, DiscoveryProviderSummary, DiscoveryVersion,
 };
 use crate::dto::files::{Attachment, File, FileResponse, FileUploadRequest};
 use crate::dto::mcp::{
     BulkToolAccessUpdate, BulkToolAccessUpdateResponse, McpAccessRule, McpAccessRuleInput,
-    McpAuthorize, McpDisconnect, McpEffectiveAccessResponse, McpEffectiveServerAccess,
-    McpEffectiveToolAccess, McpOauthCallback, McpResolvedVia, McpServer, McpServerAccessList,
-    McpServerAccessUpdate, McpServerCatalogEntry, McpServerCatalogResponse, McpServerCreate,
-    McpServerTestResult, McpServerUpdate, McpSyncResult, McpTool, McpToolAccess,
+    McpAuthorize, McpCredentialRequest, McpDisconnect, McpEffectiveAccessResponse,
+    McpEffectiveServerAccess, McpEffectiveToolAccess, McpOauthCallback, McpResolvedVia, McpServer,
+    McpServerAccessList, McpServerAccessUpdate, McpServerCatalogEntry, McpServerCatalogResponse,
+    McpServerCreate, McpServerTestResult, McpServerUpdate, McpSyncResult, McpTool, McpToolAccess,
     McpToolAccessUpdate, McpToolExecution, McpToolSummary, McpTools, McpUserConnection,
     McpUserConnections, PaginatedMcpServers, PaginatedMcpToolExecutions,
 };
@@ -139,6 +139,8 @@ use utoipa::OpenApi;
         discovery::list_auth_provider_templates,
         discovery::get_auth_provider_template,
         discovery::list_ai_provider_plugins,
+        discovery::list_connector_plugins,
+        discovery::get_connector_plugin,
         discovery::get_ai_provider_plugin,
         chat::get_chat_by_id,
         chat::get_chats,
@@ -254,6 +256,7 @@ use utoipa::OpenApi;
         mcp::list_mcp_tools,
         mcp::list_mcp_connections,
         mcp::authorize_mcp_connection,
+        mcp::save_mcp_credential,
         mcp::disconnect_mcp_connection,
         mcp::mcp_oauth_callback,
         mcp::get_mcp_effective_access,
@@ -435,6 +438,7 @@ use utoipa::OpenApi;
             McpUserConnection,
             McpUserConnections,
             McpAuthorize,
+            McpCredentialRequest,
             McpDisconnect,
             McpOauthCallback,
             EffectivePermissionsResponse,
@@ -513,6 +517,7 @@ use utoipa::OpenApi;
             DiscoveryListResponse,
             AuthProviderDiscoveryResponse,
             AiProviderDiscoveryResponse,
+            ConnectorPluginDiscoveryResponse,
         )
     ),
     tags(

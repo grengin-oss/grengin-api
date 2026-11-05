@@ -340,6 +340,13 @@ pub struct McpAuthorize {
     pub message: Option<String>,
 }
 
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct McpCredentialRequest {
+    pub credential: String,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct McpDisconnect {
     pub success: bool,

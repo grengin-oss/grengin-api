@@ -43,9 +43,12 @@ export GRENGIN_BACKEND_BINARY="$CARGO_TARGET_DIR/debug/grengin-api"
 export GRENGIN_BACKEND_ROOT="$root"
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost \
   -addext 'subjectAltName=DNS:localhost' \
+  -addext 'basicConstraints=critical,CA:FALSE' \
+  -addext 'keyUsage=critical,digitalSignature,keyEncipherment' \
+  -addext 'extendedKeyUsage=serverAuth' \
   -keyout "$GRENGIN_CONNECTOR_TEST_ROOT/key.pem" -out "$GRENGIN_CONNECTOR_TEST_ROOT/cert.pem" >/dev/null 2>&1
 cd "$website"
 node --import tsx "$root/tests/connectors/http.mjs"
 cd "$root"
-cargo test --locked --workspace --jobs 2 --config 'profile.test.incremental=false' --config 'profile.test.package.grengin-api.debug=0' --config 'profile.test.package.grengin-api.codegen-units=16' connector_migration_round_trip -- --ignored --test-threads=1
+cargo test --locked --workspace --jobs "${GRENGIN_CARGO_JOBS:-2}" --config 'profile.test.incremental=false' --config 'profile.test.package.grengin-api.debug=0' --config "profile.test.package.grengin-api.codegen-units=${GRENGIN_TEST_CODEGEN_UNITS:-16}" connector_migration_round_trip -- --ignored --test-threads=1
 printf 'Connector regressions passed; disposable database and credentials are being removed.\n'

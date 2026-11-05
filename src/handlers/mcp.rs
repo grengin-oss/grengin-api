@@ -5,7 +5,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use chrono::Utc;
 use sea_orm::sea_query::Expr;
@@ -26,9 +26,9 @@ use crate::{
     dto::mcp::{
         BulkToolAccessUpdate, BulkToolAccessUpdateResponse, ListExecutionsQuery,
         ListPublicMcpServersQuery, ListServersQuery, ListToolsQuery, McpAuthorize,
-        McpAuthorizeQuery, McpDisconnect, McpEffectiveAccessResponse, McpEffectiveServerAccess,
-        McpEffectiveToolAccess, McpOauthCallback, McpOauthCallbackQuery, McpServer,
-        McpServerAccessList, McpServerAccessUpdate, McpServerCatalogEntry,
+        McpAuthorizeQuery, McpCredentialRequest, McpDisconnect, McpEffectiveAccessResponse,
+        McpEffectiveServerAccess, McpEffectiveToolAccess, McpOauthCallback, McpOauthCallbackQuery,
+        McpServer, McpServerAccessList, McpServerAccessUpdate, McpServerCatalogEntry,
         McpServerCatalogResponse, McpServerCreate, McpServerTestResult, McpServerUpdate,
         McpSyncResult, McpTool, McpToolAccess, McpToolAccessUpdate, McpToolSummary, McpTools,
         McpUserConnection, McpUserConnections, PaginatedMcpServers, PaginatedMcpToolExecutions,
@@ -259,8 +259,12 @@ pub async fn list_public_mcp_servers(
     path = "/admin/mcp-servers",
     tag = "admin",
     request_body = McpServerCreate,
+    description = "Install an MCP server or a declarative connector plugin. For plugins, set transport_type=http, url=manifest.base_url, and put the manifest under connection_config.connector_plugin.manifest. Plugin tools are validated and saved atomically; OAuth credentials remain in the existing encrypted credential fields.",
     responses(
         (status = 201, body = McpServer),
+        (status = 400, description = "Invalid connector manifest, unsafe destination or inconsistent configuration"),
+        (status = 401, description = "Authentication required"),
+        (status = 403, description = "Organization-wide MCP administration permission required"),
         (status = 500, description = "Database error")
     )
 )]
@@ -280,7 +284,6 @@ pub async fn create_mcp_server(
         )
         .await?;
     let now = Utc::now();
-    let server_name = req.name.clone();
     let mut connection_config = req.connection_config;
     encrypt_db_url_in_config(&state.settings.auth.app_key, &mut connection_config)
         .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
@@ -311,20 +314,9 @@ pub async fn create_mcp_server(
         created_at: Set(now),
         updated_at: Set(now),
     };
-    let saved = model.insert(&state.database).await.map_err(|e| {
-        let s = e.to_string();
-        if s.contains("duplicate key value violates unique constraint")
-            || s.contains("uq-mcp-servers-name")
-        {
-            AuthError::McpServerNameConflict {
-                name: Some(server_name.clone()),
-            }
-        } else {
-            eprintln!("Db create error {}", e);
-            AuthError::DbTimeout
-        }
-    })?;
-    state.upsert_mcp_client(&saved).await;
+    let saved =
+        crate::services::mcp_plugin_helpers::save_server(&state, model, true, claims.user_id)
+            .await?;
     Ok((
         StatusCode::CREATED,
         Json(to_server_dto(&state, saved, false)),
@@ -378,6 +370,7 @@ pub async fn get_mcp_server(
         ("server_id" = Uuid, Path, description = "MCP server id")
     ),
     request_body = McpServerUpdate,
+    description = "Update a configured server. Connector manifests are validated before saving; invalid updates leave the previous runtime intact. Tool IDs, disabled flags and access overrides are preserved for unchanged tool names. Changing a plugin's OAuth identity or destination invalidates existing user tokens and requires reconnection.",
     responses(
         (status = 200, body = McpServer),
         (status = 404, description = "Server not found")
@@ -405,7 +398,6 @@ pub async fn update_mcp_server(
         .map_err(|_| AuthError::DbUnavailable)?
         .ok_or(AuthError::ResourceNotFound)?;
     let mut active: mcp_servers::ActiveModel = server.into();
-    let requested_name = req.name.clone();
     if let Some(name) = req.name {
         active.name = Set(name);
     }
@@ -452,20 +444,9 @@ pub async fn update_mcp_server(
         active.default_access = Set(default_access);
     }
     active.updated_at = Set(Utc::now());
-    let saved = active.update(&state.database).await.map_err(|e| {
-        let s = e.to_string();
-        if s.contains("duplicate key value violates unique constraint")
-            || s.contains("uq-mcp-servers-name")
-        {
-            AuthError::McpServerNameConflict {
-                name: requested_name.clone(),
-            }
-        } else {
-            eprintln!("Db get error {}", e);
-            AuthError::DbTimeout
-        }
-    })?;
-    state.upsert_mcp_client(&saved).await;
+    let saved =
+        crate::services::mcp_plugin_helpers::save_server(&state, active, false, claims.user_id)
+            .await?;
     let connected = resolve_server_connected(&state, &saved).await?;
     Ok(Json(to_server_dto(&state, saved, connected)))
 }
@@ -497,14 +478,7 @@ pub async fn delete_mcp_server(
             Some(server_id),
         )
         .await?;
-    mcp_servers::Entity::delete_by_id(server_id)
-        .exec(&state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("Db get error {}", e);
-            AuthError::DbTimeout
-        })?;
-    state.remove_mcp_client(&server_id).await;
+    crate::services::mcp_plugin_helpers::delete_server(&state, server_id, claims.user_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -569,6 +543,15 @@ pub async fn sync_mcp_server_tools(
             Some(server_id),
         )
         .await?;
+    if let Some(result) = crate::services::mcp_plugin_helpers::sync_installed_plugin(
+        &state,
+        server_id,
+        claims.user_id,
+    )
+    .await?
+    {
+        return Ok(Json(result));
+    }
     let server = mcp_servers::Entity::find_by_id(server_id)
         .one(&state.database)
         .await
@@ -1330,6 +1313,30 @@ pub async fn authorize_mcp_connection(
         authorization_url: Some(prompt.authorization_url),
         message: Some("Authorize via provided URL".into()),
     }))
+}
+
+#[utoipa::path(post,path="/mcp/connections/{server_id}/credentials",tag="mcp",
+    description="Save this signed-in user's API key or bearer credential for an accessible API-key connector plugin. Encrypted at rest, never returned or shared with other users. OAuth plugins must use authorize instead.",
+    params(("server_id"=Uuid,Path,description="Installed MCP server UUID")),request_body=McpCredentialRequest,
+    responses((status=200,body=McpUserConnection),(status=400,description="Invalid credential or expiry"),(status=401,description="Sign-in required"),(status=404,description="Disabled, inaccessible or unsupported server"),(status=429,description="Rate limit; obey Retry-After"),(status=503,description="Persistence or audit unavailable")))]
+pub async fn save_mcp_credential(
+    claims: Claims,
+    State(state): State<SharedState>,
+    Path(server_id): Path<Uuid>,
+    Json(request): Json<McpCredentialRequest>,
+) -> Result<impl IntoResponse, crate::services::connector_broker::ConnectorError> {
+    Ok((
+        [("Cache-Control", "private, no-store")],
+        Json(
+            crate::services::mcp_plugin_helpers::save_credential(
+                &state,
+                claims.user_id,
+                server_id,
+                request,
+            )
+            .await?,
+        ),
+    ))
 }
 
 #[utoipa::path(

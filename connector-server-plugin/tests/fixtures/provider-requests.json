@@ -1,0 +1,2623 @@
+[
+  {
+    "plugin": "outlook-mail",
+    "tool": "list_messages",
+    "args": {},
+    "path": "/v1.0/me/messages",
+    "query": {
+      "$top": "10",
+      "$select": "id,subject,from,receivedDateTime,bodyPreview",
+      "$orderby": "receivedDateTime desc"
+    }
+  },
+  {
+    "plugin": "outlook-mail",
+    "tool": "get_message",
+    "args": {
+      "message_id": "mail+id="
+    },
+    "path": "/v1.0/me/messages/mail+id=",
+    "query": {
+      "$select": "id,subject,from,toRecipients,receivedDateTime,bodyPreview,body"
+    }
+  },
+  {
+    "plugin": "outlook-calendar",
+    "tool": "list_calendars",
+    "args": {},
+    "path": "/v1.0/me/calendars",
+    "query": {}
+  },
+  {
+    "plugin": "outlook-calendar",
+    "tool": "list_events",
+    "args": {
+      "start_time": "2026-11-01T00:00:00Z",
+      "end_time": "2026-11-02T00:00:00Z",
+      "limit": 5
+    },
+    "path": "/v1.0/me/calendar/calendarView",
+    "query": {
+      "startDateTime": "2026-11-01T00:00:00Z",
+      "endDateTime": "2026-11-02T00:00:00Z",
+      "$top": "5",
+      "$select": "id,subject,start,end,location,organizer,webLink"
+    }
+  },
+  {
+    "plugin": "onedrive",
+    "tool": "list_root_files",
+    "args": {},
+    "path": "/v1.0/me/drive/root/children",
+    "query": {
+      "$top": "25",
+      "$select": "id,name,size,webUrl,lastModifiedDateTime,file,folder"
+    }
+  },
+  {
+    "plugin": "onedrive",
+    "tool": "get_file_metadata",
+    "args": {
+      "item_id": "file-1"
+    },
+    "path": "/v1.0/me/drive/items/file-1",
+    "query": {
+      "$select": "id,name,size,webUrl,lastModifiedDateTime,file,folder"
+    }
+  },
+  {
+    "plugin": "sharepoint",
+    "tool": "get_root_site",
+    "args": {},
+    "path": "/v1.0/sites/root",
+    "query": {}
+  },
+  {
+    "plugin": "sharepoint",
+    "tool": "list_site_lists",
+    "args": {
+      "site_id": "example.sharepoint.com,site-guid,web-guid"
+    },
+    "path": "/v1.0/sites/example.sharepoint.com,site-guid,web-guid/lists",
+    "query": {}
+  },
+  {
+    "plugin": "microsoft-teams",
+    "tool": "list_joined_teams",
+    "args": {},
+    "path": "/v1.0/me/joinedTeams",
+    "query": {}
+  },
+  {
+    "plugin": "microsoft-teams",
+    "tool": "list_channels",
+    "args": {
+      "team_id": "team-1"
+    },
+    "path": "/v1.0/teams/team-1/channels",
+    "query": {}
+  },
+  {
+    "plugin": "gmail",
+    "tool": "list_messages",
+    "args": {
+      "query": "from:alice@example.com",
+      "limit": 7,
+      "page_token": "opaque+/="
+    },
+    "path": "/gmail/v1/users/me/messages",
+    "query": {
+      "q": "from:alice@example.com",
+      "maxResults": "7",
+      "pageToken": "opaque+/="
+    }
+  },
+  {
+    "plugin": "gmail",
+    "tool": "get_message_metadata",
+    "args": {
+      "message_id": "mail-1"
+    },
+    "path": "/gmail/v1/users/me/messages/mail-1",
+    "query": {
+      "format": "metadata"
+    }
+  },
+  {
+    "plugin": "google-calendar",
+    "tool": "list_calendars",
+    "args": {},
+    "path": "/calendar/v3/users/me/calendarList",
+    "query": {
+      "maxResults": "25"
+    }
+  },
+  {
+    "plugin": "google-calendar",
+    "tool": "list_events",
+    "args": {},
+    "path": "/calendar/v3/calendars/primary/events",
+    "query": {
+      "maxResults": "25",
+      "singleEvents": "true",
+      "orderBy": "startTime"
+    }
+  },
+  {
+    "plugin": "google-drive",
+    "tool": "list_files",
+    "args": {},
+    "path": "/drive/v3/files",
+    "query": {
+      "pageSize": "25",
+      "q": "trashed = false",
+      "fields": "nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink,description)"
+    }
+  },
+  {
+    "plugin": "google-drive",
+    "tool": "get_file_metadata",
+    "args": {
+      "file_id": "file-1"
+    },
+    "path": "/drive/v3/files/file-1",
+    "query": {
+      "fields": "id,name,mimeType,modifiedTime,webViewLink,description"
+    }
+  },
+  {
+    "plugin": "outlook-mail",
+    "tool": "search_messages",
+    "args": {
+      "query": "\"invoice\""
+    },
+    "path": "/v1.0/me/messages",
+    "query": {
+      "$search": "\"invoice\"",
+      "$top": "25",
+      "$select": "id,subject,from,receivedDateTime,bodyPreview"
+    }
+  },
+  {
+    "plugin": "outlook-mail",
+    "tool": "list_sent_messages",
+    "args": {},
+    "path": "/v1.0/me/mailFolders/sentitems/messages",
+    "query": {
+      "$top": "25",
+      "$select": "id,subject,from,receivedDateTime,bodyPreview"
+    }
+  },
+  {
+    "plugin": "outlook-mail",
+    "tool": "list_attachments",
+    "args": {
+      "message_id": "mail-1"
+    },
+    "path": "/v1.0/me/messages/mail-1/attachments",
+    "query": {
+      "$select": "id,name,contentType,size,isInline"
+    }
+  },
+  {
+    "plugin": "outlook-calendar",
+    "tool": "get_event",
+    "args": {
+      "event_id": "event-1"
+    },
+    "path": "/v1.0/me/events/event-1",
+    "query": {}
+  },
+  {
+    "plugin": "outlook-calendar",
+    "tool": "list_calendar_events",
+    "args": {
+      "calendar_id": "calendar-1"
+    },
+    "path": "/v1.0/me/calendars/calendar-1/events",
+    "query": {
+      "$top": "25"
+    }
+  },
+  {
+    "plugin": "onedrive",
+    "tool": "get_drive",
+    "args": {},
+    "path": "/v1.0/me/drive",
+    "query": {}
+  },
+  {
+    "plugin": "onedrive",
+    "tool": "list_folder_files",
+    "args": {
+      "folder_id": "folder-1"
+    },
+    "path": "/v1.0/me/drive/items/folder-1/children",
+    "query": {
+      "$top": "25"
+    }
+  },
+  {
+    "plugin": "sharepoint",
+    "tool": "search_sites",
+    "args": {
+      "query": "marketing"
+    },
+    "path": "/v1.0/sites",
+    "query": {
+      "search": "marketing"
+    }
+  },
+  {
+    "plugin": "sharepoint",
+    "tool": "list_document_libraries",
+    "args": {
+      "site_id": "site-1"
+    },
+    "path": "/v1.0/sites/site-1/drives",
+    "query": {}
+  },
+  {
+    "plugin": "sharepoint",
+    "tool": "get_default_library",
+    "args": {
+      "site_id": "site-1"
+    },
+    "path": "/v1.0/sites/site-1/drive",
+    "query": {}
+  },
+  {
+    "plugin": "sharepoint",
+    "tool": "list_columns",
+    "args": {
+      "site_id": "site-1",
+      "list_id": "list-1"
+    },
+    "path": "/v1.0/sites/site-1/lists/list-1/columns",
+    "query": {}
+  },
+  {
+    "plugin": "sharepoint",
+    "tool": "list_items",
+    "args": {
+      "site_id": "site-1",
+      "list_id": "list-1"
+    },
+    "path": "/v1.0/sites/site-1/lists/list-1/items",
+    "query": {
+      "$expand": "fields",
+      "$top": "25"
+    }
+  },
+  {
+    "plugin": "sharepoint",
+    "tool": "get_item",
+    "args": {
+      "site_id": "site-1",
+      "list_id": "list-1",
+      "item_id": "1"
+    },
+    "path": "/v1.0/sites/site-1/lists/list-1/items/1",
+    "query": {
+      "$expand": "fields"
+    }
+  },
+  {
+    "plugin": "sharepoint",
+    "tool": "list_folder_files",
+    "args": {
+      "drive_id": "drive-1",
+      "folder_id": "folder-1"
+    },
+    "path": "/v1.0/drives/drive-1/items/folder-1/children",
+    "query": {
+      "$top": "25"
+    }
+  },
+  {
+    "plugin": "sharepoint",
+    "tool": "get_file_metadata",
+    "args": {
+      "drive_id": "drive-1",
+      "item_id": "item-1"
+    },
+    "path": "/v1.0/drives/drive-1/items/item-1",
+    "query": {}
+  },
+  {
+    "plugin": "microsoft-teams",
+    "tool": "get_team",
+    "args": {
+      "team_id": "team-1"
+    },
+    "path": "/v1.0/teams/team-1",
+    "query": {}
+  },
+  {
+    "plugin": "microsoft-teams",
+    "tool": "get_channel",
+    "args": {
+      "team_id": "team-1",
+      "channel_id": "19:channel@thread.tacv2"
+    },
+    "path": "/v1.0/teams/team-1/channels/19:channel@thread.tacv2",
+    "query": {}
+  },
+  {
+    "plugin": "microsoft-teams",
+    "tool": "list_chats",
+    "args": {},
+    "path": "/v1.0/me/chats",
+    "query": {
+      "$top": "25"
+    }
+  },
+  {
+    "plugin": "microsoft-teams",
+    "tool": "get_chat",
+    "args": {
+      "chat_id": "19:chat@thread.v2"
+    },
+    "path": "/v1.0/chats/19:chat@thread.v2",
+    "query": {}
+  },
+  {
+    "plugin": "microsoft-teams",
+    "tool": "list_chat_messages",
+    "args": {
+      "chat_id": "19:chat@thread.v2"
+    },
+    "path": "/v1.0/chats/19:chat@thread.v2/messages",
+    "query": {
+      "$top": "25"
+    }
+  },
+  {
+    "plugin": "microsoft-teams",
+    "tool": "get_chat_message",
+    "args": {
+      "chat_id": "19:chat@thread.v2",
+      "message_id": "123"
+    },
+    "path": "/v1.0/chats/19:chat@thread.v2/messages/123",
+    "query": {}
+  },
+  {
+    "plugin": "microsoft-teams",
+    "tool": "list_channel_messages",
+    "args": {
+      "team_id": "team-1",
+      "channel_id": "19:channel@thread.tacv2"
+    },
+    "path": "/v1.0/teams/team-1/channels/19:channel@thread.tacv2/messages",
+    "query": {
+      "$top": "25"
+    }
+  },
+  {
+    "plugin": "microsoft-teams",
+    "tool": "list_channel_replies",
+    "args": {
+      "team_id": "team-1",
+      "channel_id": "19:channel@thread.tacv2",
+      "message_id": "123"
+    },
+    "path": "/v1.0/teams/team-1/channels/19:channel@thread.tacv2/messages/123/replies",
+    "query": {}
+  },
+  {
+    "plugin": "microsoft-teams",
+    "tool": "list_team_members",
+    "args": {
+      "team_id": "team-1"
+    },
+    "path": "/v1.0/teams/team-1/members",
+    "query": {}
+  },
+  {
+    "plugin": "microsoft-teams",
+    "tool": "list_channel_members",
+    "args": {
+      "team_id": "team-1",
+      "channel_id": "19:channel@thread.tacv2"
+    },
+    "path": "/v1.0/teams/team-1/channels/19:channel@thread.tacv2/members",
+    "query": {}
+  },
+  {
+    "plugin": "microsoft-teams",
+    "tool": "list_chat_members",
+    "args": {
+      "chat_id": "19:chat@thread.v2"
+    },
+    "path": "/v1.0/chats/19:chat@thread.v2/members",
+    "query": {}
+  },
+  {
+    "plugin": "microsoft-teams",
+    "tool": "get_user_presence",
+    "args": {
+      "user_id": "user-1"
+    },
+    "path": "/v1.0/users/user-1/presence",
+    "query": {}
+  },
+  {
+    "plugin": "gmail",
+    "tool": "search_threads",
+    "args": {
+      "query": "is:unread"
+    },
+    "path": "/gmail/v1/users/me/threads",
+    "query": {
+      "maxResults": "25",
+      "q": "is:unread"
+    }
+  },
+  {
+    "plugin": "gmail",
+    "tool": "get_thread_metadata",
+    "args": {
+      "thread_id": "thread-1"
+    },
+    "path": "/gmail/v1/users/me/threads/thread-1",
+    "query": {
+      "format": "metadata"
+    }
+  },
+  {
+    "plugin": "gmail",
+    "tool": "list_drafts",
+    "args": {},
+    "path": "/gmail/v1/users/me/drafts",
+    "query": {
+      "maxResults": "25"
+    }
+  },
+  {
+    "plugin": "gmail",
+    "tool": "get_draft_metadata",
+    "args": {
+      "draft_id": "draft-1"
+    },
+    "path": "/gmail/v1/users/me/drafts/draft-1",
+    "query": {
+      "format": "metadata"
+    }
+  },
+  {
+    "plugin": "gmail",
+    "tool": "list_labels",
+    "args": {},
+    "path": "/gmail/v1/users/me/labels",
+    "query": {}
+  },
+  {
+    "plugin": "google-calendar",
+    "tool": "get_event",
+    "args": {
+      "event_id": "event-1"
+    },
+    "path": "/calendar/v3/calendars/primary/events/event-1",
+    "query": {}
+  },
+  {
+    "plugin": "google-calendar",
+    "tool": "search_events",
+    "args": {
+      "calendar_id": "team@example.com",
+      "query": "planning",
+      "page_token": "next+/="
+    },
+    "path": "/calendar/v3/calendars/team@example.com/events",
+    "query": {
+      "maxResults": "25",
+      "pageToken": "next+/=",
+      "q": "planning",
+      "singleEvents": "true",
+      "orderBy": "startTime"
+    }
+  },
+  {
+    "plugin": "google-calendar",
+    "tool": "query_free_busy",
+    "args": {
+      "start_time": "2026-11-04T00:00:00Z",
+      "end_time": "2026-11-05T00:00:00Z",
+      "calendar_ids": [
+        "primary",
+        "team@example.com"
+      ]
+    },
+    "path": "/calendar/v3/freeBusy",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "timeMin": "2026-11-04T00:00:00Z",
+      "timeMax": "2026-11-05T00:00:00Z",
+      "calendarExpansionMax": 50,
+      "items": [
+        {
+          "id": "primary"
+        },
+        {
+          "id": "team@example.com"
+        }
+      ]
+    }
+  },
+  {
+    "plugin": "google-drive",
+    "tool": "search_files",
+    "args": {
+      "query": "name contains 'report'",
+      "page_token": "cursor+/="
+    },
+    "path": "/drive/v3/files",
+    "query": {
+      "q": "name contains 'report'",
+      "pageSize": "25",
+      "pageToken": "cursor+/=",
+      "fields": "nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink,description)"
+    }
+  },
+  {
+    "plugin": "google-drive",
+    "tool": "list_recent_files",
+    "args": {},
+    "path": "/drive/v3/files",
+    "query": {
+      "q": "trashed = false",
+      "pageSize": "25",
+      "orderBy": "modifiedTime desc",
+      "fields": "nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink,description)"
+    }
+  },
+  {
+    "plugin": "google-drive",
+    "tool": "get_file_permissions",
+    "args": {
+      "file_id": "file-1"
+    },
+    "path": "/drive/v3/files/file-1/permissions",
+    "query": {
+      "pageSize": "25",
+      "supportsAllDrives": "true",
+      "fields": "nextPageToken,permissions(id,type,role,emailAddress,displayName,domain,allowFileDiscovery)"
+    }
+  },
+  {
+    "plugin": "asana",
+    "tool": "get_me",
+    "args": {},
+    "path": "/api/1.0/users/me",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "asana",
+    "tool": "list_workspaces",
+    "args": {},
+    "path": "/api/1.0/workspaces",
+    "query": {
+      "limit": "25"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "asana",
+    "tool": "list_projects",
+    "args": {
+      "workspace_id": "workspace-1"
+    },
+    "path": "/api/1.0/workspaces/workspace-1/projects",
+    "query": {
+      "limit": "25"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "asana",
+    "tool": "get_project",
+    "args": {
+      "project_id": "project-1"
+    },
+    "path": "/api/1.0/projects/project-1",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "asana",
+    "tool": "list_project_tasks",
+    "args": {
+      "project_id": "project-1"
+    },
+    "path": "/api/1.0/projects/project-1/tasks",
+    "query": {
+      "limit": "25"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "asana",
+    "tool": "get_task",
+    "args": {
+      "task_id": "task-1"
+    },
+    "path": "/api/1.0/tasks/task-1",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "box",
+    "tool": "get_me",
+    "args": {},
+    "path": "/2.0/users/me",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "box",
+    "tool": "list_folder_items",
+    "args": {
+      "folder_id": "0"
+    },
+    "path": "/2.0/folders/0/items",
+    "query": {
+      "limit": "25",
+      "offset": "0"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "box",
+    "tool": "get_file",
+    "args": {
+      "file_id": "file-1"
+    },
+    "path": "/2.0/files/file-1",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "box",
+    "tool": "get_folder",
+    "args": {
+      "folder_id": "0"
+    },
+    "path": "/2.0/folders/0",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "box",
+    "tool": "search_files",
+    "args": {
+      "query": "roadmap"
+    },
+    "path": "/2.0/search",
+    "query": {
+      "query": "roadmap",
+      "limit": "25",
+      "offset": "0"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "box",
+    "tool": "list_file_comments",
+    "args": {
+      "file_id": "file-1"
+    },
+    "path": "/2.0/files/file-1/comments",
+    "query": {
+      "limit": "25"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "canva",
+    "tool": "list_designs",
+    "args": {},
+    "path": "/rest/v1/designs",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "canva",
+    "tool": "get_design",
+    "args": {
+      "design_id": "design-1"
+    },
+    "path": "/rest/v1/designs/design-1",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "canva",
+    "tool": "list_design_pages",
+    "args": {
+      "design_id": "design-1"
+    },
+    "path": "/rest/v1/designs/design-1/pages",
+    "query": {
+      "offset": "0",
+      "limit": "25"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "canva",
+    "tool": "list_brand_templates",
+    "args": {},
+    "path": "/rest/v1/brand-templates",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "canva",
+    "tool": "get_brand_template",
+    "args": {
+      "template_id": "template-1"
+    },
+    "path": "/rest/v1/brand-templates/template-1",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "canva",
+    "tool": "get_user_profile",
+    "args": {},
+    "path": "/rest/v1/users/me/profile",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "confluence",
+    "tool": "list_spaces",
+    "args": {},
+    "path": "/ex/confluence/cloud-1/wiki/api/v2/spaces",
+    "query": {
+      "limit": "25"
+    },
+    "method": "GET",
+    "configuration": {
+      "cloud_id": "cloud-1"
+    }
+  },
+  {
+    "plugin": "confluence",
+    "tool": "get_space",
+    "args": {
+      "space_id": "123"
+    },
+    "path": "/ex/confluence/cloud-1/wiki/api/v2/spaces/123",
+    "query": {},
+    "method": "GET",
+    "configuration": {
+      "cloud_id": "cloud-1"
+    }
+  },
+  {
+    "plugin": "confluence",
+    "tool": "list_pages",
+    "args": {},
+    "path": "/ex/confluence/cloud-1/wiki/api/v2/pages",
+    "query": {
+      "limit": "25"
+    },
+    "method": "GET",
+    "configuration": {
+      "cloud_id": "cloud-1"
+    }
+  },
+  {
+    "plugin": "confluence",
+    "tool": "get_page",
+    "args": {
+      "page_id": "123"
+    },
+    "path": "/ex/confluence/cloud-1/wiki/api/v2/pages/123",
+    "query": {
+      "body-format": "storage"
+    },
+    "method": "GET",
+    "configuration": {
+      "cloud_id": "cloud-1"
+    }
+  },
+  {
+    "plugin": "confluence",
+    "tool": "list_space_pages",
+    "args": {
+      "space_id": "123"
+    },
+    "path": "/ex/confluence/cloud-1/wiki/api/v2/spaces/123/pages",
+    "query": {
+      "limit": "25"
+    },
+    "method": "GET",
+    "configuration": {
+      "cloud_id": "cloud-1"
+    }
+  },
+  {
+    "plugin": "dropbox",
+    "tool": "get_current_account",
+    "args": {},
+    "path": "/2/users/get_current_account",
+    "query": {},
+    "method": "POST",
+    "body": null
+  },
+  {
+    "plugin": "dropbox",
+    "tool": "list_folder",
+    "args": {},
+    "path": "/2/files/list_folder",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "path": "",
+      "limit": 25
+    }
+  },
+  {
+    "plugin": "dropbox",
+    "tool": "continue_list_folder",
+    "args": {
+      "cursor": "cursor+/="
+    },
+    "path": "/2/files/list_folder/continue",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "cursor": "cursor+/="
+    }
+  },
+  {
+    "plugin": "dropbox",
+    "tool": "get_metadata",
+    "args": {
+      "path": "/Documents/notes.txt"
+    },
+    "path": "/2/files/get_metadata",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "path": "/Documents/notes.txt"
+    }
+  },
+  {
+    "plugin": "dropbox",
+    "tool": "search_files",
+    "args": {
+      "query": "roadmap"
+    },
+    "path": "/2/files/search_v2",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": "roadmap",
+      "options": {
+        "max_results": 25
+      }
+    }
+  },
+  {
+    "plugin": "dropbox",
+    "tool": "continue_search",
+    "args": {
+      "cursor": "cursor+/="
+    },
+    "path": "/2/files/search/continue_v2",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "cursor": "cursor+/="
+    }
+  },
+  {
+    "plugin": "github",
+    "tool": "get_me",
+    "args": {},
+    "path": "/user",
+    "query": {},
+    "method": "GET",
+    "headers": {
+      "accept": "application/vnd.github+json",
+      "x-github-api-version": "2026-03-10",
+      "user-agent": "GrenginConnector"
+    }
+  },
+  {
+    "plugin": "github",
+    "tool": "list_repositories",
+    "args": {},
+    "path": "/user/repos",
+    "query": {
+      "per_page": "25",
+      "page": "1",
+      "sort": "updated"
+    },
+    "method": "GET",
+    "headers": {
+      "accept": "application/vnd.github+json",
+      "x-github-api-version": "2026-03-10",
+      "user-agent": "GrenginConnector"
+    }
+  },
+  {
+    "plugin": "github",
+    "tool": "get_repository",
+    "args": {
+      "owner": "octocat",
+      "repo": "hello-world"
+    },
+    "path": "/repos/octocat/hello-world",
+    "query": {},
+    "method": "GET",
+    "headers": {
+      "accept": "application/vnd.github+json",
+      "x-github-api-version": "2026-03-10",
+      "user-agent": "GrenginConnector"
+    }
+  },
+  {
+    "plugin": "github",
+    "tool": "list_issues",
+    "args": {
+      "owner": "octocat",
+      "repo": "hello-world"
+    },
+    "path": "/repos/octocat/hello-world/issues",
+    "query": {
+      "per_page": "25",
+      "page": "1",
+      "state": "open"
+    },
+    "method": "GET",
+    "headers": {
+      "accept": "application/vnd.github+json",
+      "x-github-api-version": "2026-03-10",
+      "user-agent": "GrenginConnector"
+    }
+  },
+  {
+    "plugin": "github",
+    "tool": "get_issue",
+    "args": {
+      "owner": "octocat",
+      "repo": "hello-world",
+      "issue_number": 42
+    },
+    "path": "/repos/octocat/hello-world/issues/42",
+    "query": {},
+    "method": "GET",
+    "headers": {
+      "accept": "application/vnd.github+json",
+      "x-github-api-version": "2026-03-10",
+      "user-agent": "GrenginConnector"
+    }
+  },
+  {
+    "plugin": "github",
+    "tool": "list_pull_requests",
+    "args": {
+      "owner": "octocat",
+      "repo": "hello-world"
+    },
+    "path": "/repos/octocat/hello-world/pulls",
+    "query": {
+      "per_page": "25",
+      "page": "1"
+    },
+    "method": "GET",
+    "headers": {
+      "accept": "application/vnd.github+json",
+      "x-github-api-version": "2026-03-10",
+      "user-agent": "GrenginConnector"
+    }
+  },
+  {
+    "plugin": "github",
+    "tool": "list_branches",
+    "args": {
+      "owner": "octocat",
+      "repo": "hello-world"
+    },
+    "path": "/repos/octocat/hello-world/branches",
+    "query": {
+      "per_page": "25",
+      "page": "1"
+    },
+    "method": "GET",
+    "headers": {
+      "accept": "application/vnd.github+json",
+      "x-github-api-version": "2026-03-10",
+      "user-agent": "GrenginConnector"
+    }
+  },
+  {
+    "plugin": "github",
+    "tool": "list_commits",
+    "args": {
+      "owner": "octocat",
+      "repo": "hello-world"
+    },
+    "path": "/repos/octocat/hello-world/commits",
+    "query": {
+      "per_page": "25",
+      "page": "1"
+    },
+    "method": "GET",
+    "headers": {
+      "accept": "application/vnd.github+json",
+      "x-github-api-version": "2026-03-10",
+      "user-agent": "GrenginConnector"
+    }
+  },
+  {
+    "plugin": "github",
+    "tool": "search_code",
+    "args": {
+      "query": "repo:octocat/hello-world TODO"
+    },
+    "path": "/search/code",
+    "query": {
+      "q": "repo:octocat/hello-world TODO",
+      "per_page": "25",
+      "page": "1"
+    },
+    "method": "GET",
+    "headers": {
+      "accept": "application/vnd.github+json",
+      "x-github-api-version": "2026-03-10",
+      "user-agent": "GrenginConnector"
+    }
+  },
+  {
+    "plugin": "hubspot",
+    "tool": "list_contacts",
+    "args": {},
+    "path": "/crm/v3/objects/contacts",
+    "query": {
+      "limit": "25"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "hubspot",
+    "tool": "get_contact",
+    "args": {
+      "record_id": "123"
+    },
+    "path": "/crm/v3/objects/contacts/123",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "hubspot",
+    "tool": "list_companies",
+    "args": {},
+    "path": "/crm/v3/objects/companies",
+    "query": {
+      "limit": "25"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "hubspot",
+    "tool": "get_company",
+    "args": {
+      "record_id": "123"
+    },
+    "path": "/crm/v3/objects/companies/123",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "hubspot",
+    "tool": "list_deals",
+    "args": {},
+    "path": "/crm/v3/objects/deals",
+    "query": {
+      "limit": "25"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "hubspot",
+    "tool": "get_deal",
+    "args": {
+      "record_id": "123"
+    },
+    "path": "/crm/v3/objects/deals/123",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "hubspot",
+    "tool": "search_contacts",
+    "args": {
+      "query": "example"
+    },
+    "path": "/crm/v3/objects/contacts/search",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": "example",
+      "limit": 25,
+      "after": 0
+    }
+  },
+  {
+    "plugin": "intercom",
+    "tool": "get_me",
+    "args": {},
+    "path": "/me",
+    "query": {},
+    "method": "GET",
+    "headers": {
+      "intercom-version": "2.17",
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "intercom",
+    "tool": "list_contacts",
+    "args": {},
+    "path": "/contacts",
+    "query": {
+      "per_page": "25"
+    },
+    "method": "GET",
+    "headers": {
+      "intercom-version": "2.17",
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "intercom",
+    "tool": "get_contact",
+    "args": {
+      "contact_id": "contact-1"
+    },
+    "path": "/contacts/contact-1",
+    "query": {},
+    "method": "GET",
+    "headers": {
+      "intercom-version": "2.17",
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "intercom",
+    "tool": "list_conversations",
+    "args": {},
+    "path": "/conversations",
+    "query": {
+      "per_page": "25"
+    },
+    "method": "GET",
+    "headers": {
+      "intercom-version": "2.17",
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "intercom",
+    "tool": "get_conversation",
+    "args": {
+      "conversation_id": "123"
+    },
+    "path": "/conversations/123",
+    "query": {},
+    "method": "GET",
+    "headers": {
+      "intercom-version": "2.17",
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "intercom",
+    "tool": "list_admins",
+    "args": {},
+    "path": "/admins",
+    "query": {},
+    "method": "GET",
+    "headers": {
+      "intercom-version": "2.17",
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "jira",
+    "tool": "get_me",
+    "args": {},
+    "path": "/ex/jira/cloud-1/rest/api/3/myself",
+    "query": {},
+    "method": "GET",
+    "configuration": {
+      "cloud_id": "cloud-1"
+    }
+  },
+  {
+    "plugin": "jira",
+    "tool": "list_projects",
+    "args": {},
+    "path": "/ex/jira/cloud-1/rest/api/3/project/search",
+    "query": {
+      "maxResults": "25",
+      "startAt": "0"
+    },
+    "method": "GET",
+    "configuration": {
+      "cloud_id": "cloud-1"
+    }
+  },
+  {
+    "plugin": "jira",
+    "tool": "get_project",
+    "args": {
+      "project_id": "PROJ"
+    },
+    "path": "/ex/jira/cloud-1/rest/api/3/project/PROJ",
+    "query": {},
+    "method": "GET",
+    "configuration": {
+      "cloud_id": "cloud-1"
+    }
+  },
+  {
+    "plugin": "jira",
+    "tool": "search_issues",
+    "args": {
+      "jql": "project = PROJ ORDER BY updated DESC"
+    },
+    "path": "/ex/jira/cloud-1/rest/api/3/search/jql",
+    "query": {
+      "jql": "project = PROJ ORDER BY updated DESC",
+      "maxResults": "25"
+    },
+    "method": "GET",
+    "configuration": {
+      "cloud_id": "cloud-1"
+    }
+  },
+  {
+    "plugin": "jira",
+    "tool": "get_issue",
+    "args": {
+      "issue_id": "PROJ-1"
+    },
+    "path": "/ex/jira/cloud-1/rest/api/3/issue/PROJ-1",
+    "query": {},
+    "method": "GET",
+    "configuration": {
+      "cloud_id": "cloud-1"
+    }
+  },
+  {
+    "plugin": "jira",
+    "tool": "list_issue_comments",
+    "args": {
+      "issue_id": "PROJ-1"
+    },
+    "path": "/ex/jira/cloud-1/rest/api/3/issue/PROJ-1/comment",
+    "query": {
+      "maxResults": "25",
+      "startAt": "0"
+    },
+    "method": "GET",
+    "configuration": {
+      "cloud_id": "cloud-1"
+    }
+  },
+  {
+    "plugin": "linear",
+    "tool": "get_viewer",
+    "args": {},
+    "path": "/graphql",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": "query GrenginViewer { viewer { id name email } }",
+      "variables": {}
+    }
+  },
+  {
+    "plugin": "linear",
+    "tool": "list_teams",
+    "args": {},
+    "path": "/graphql",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": "query GrenginTeams($first: Int!, $after: String) { teams(first:$first,after:$after) { nodes { id name key } pageInfo { hasNextPage endCursor } } }",
+      "variables": {
+        "first": 25
+      }
+    }
+  },
+  {
+    "plugin": "linear",
+    "tool": "list_issues",
+    "args": {},
+    "path": "/graphql",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": "query GrenginIssues($first: Int!, $after: String) { issues(first:$first,after:$after) { nodes { id identifier title updatedAt url } pageInfo { hasNextPage endCursor } } }",
+      "variables": {
+        "first": 25
+      }
+    }
+  },
+  {
+    "plugin": "linear",
+    "tool": "get_issue",
+    "args": {
+      "issue_id": "ENG-1"
+    },
+    "path": "/graphql",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": "query GrenginIssue($id: String!) { issue(id:$id) { id identifier title description url updatedAt } }",
+      "variables": {
+        "id": "ENG-1"
+      }
+    }
+  },
+  {
+    "plugin": "linear",
+    "tool": "list_projects",
+    "args": {},
+    "path": "/graphql",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": "query GrenginProjects($first: Int!, $after: String) { projects(first:$first,after:$after) { nodes { id name description url } pageInfo { hasNextPage endCursor } } }",
+      "variables": {
+        "first": 25
+      }
+    }
+  },
+  {
+    "plugin": "linear",
+    "tool": "get_project",
+    "args": {
+      "project_id": "project-1"
+    },
+    "path": "/graphql",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": "query GrenginProject($id: String!) { project(id:$id) { id name description url } }",
+      "variables": {
+        "id": "project-1"
+      }
+    }
+  },
+  {
+    "plugin": "mailchimp-transactional",
+    "tool": "get_account_info",
+    "args": {},
+    "path": "/api/1.4/users/info",
+    "query": {},
+    "method": "POST",
+    "body": {}
+  },
+  {
+    "plugin": "mailchimp-transactional",
+    "tool": "list_senders",
+    "args": {},
+    "path": "/api/1.4/senders/list",
+    "query": {},
+    "method": "POST",
+    "body": {}
+  },
+  {
+    "plugin": "mailchimp-transactional",
+    "tool": "search_messages",
+    "args": {},
+    "path": "/api/1.4/messages/search",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": "",
+      "limit": 25
+    }
+  },
+  {
+    "plugin": "mailchimp-transactional",
+    "tool": "get_message_info",
+    "args": {
+      "message_id": "message-1"
+    },
+    "path": "/api/1.4/messages/info",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "id": "message-1"
+    }
+  },
+  {
+    "plugin": "mailchimp-transactional",
+    "tool": "list_subaccounts",
+    "args": {},
+    "path": "/api/1.4/subaccounts/list",
+    "query": {},
+    "method": "POST",
+    "body": {}
+  },
+  {
+    "plugin": "microsoft-work-iq",
+    "tool": "search_files",
+    "args": {
+      "query": "project roadmap"
+    },
+    "path": "/v1.0/search/query",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "requests": [
+        {
+          "entityTypes": [
+            "driveItem"
+          ],
+          "query": {
+            "queryString": "project roadmap"
+          },
+          "from": 0,
+          "size": 25
+        }
+      ]
+    }
+  },
+  {
+    "plugin": "microsoft-work-iq",
+    "tool": "search_mail",
+    "args": {
+      "query": "project roadmap"
+    },
+    "path": "/v1.0/search/query",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "requests": [
+        {
+          "entityTypes": [
+            "message"
+          ],
+          "query": {
+            "queryString": "project roadmap"
+          },
+          "from": 0,
+          "size": 25
+        }
+      ]
+    }
+  },
+  {
+    "plugin": "microsoft-work-iq",
+    "tool": "search_sites",
+    "args": {
+      "query": "project roadmap"
+    },
+    "path": "/v1.0/search/query",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "requests": [
+        {
+          "entityTypes": [
+            "site"
+          ],
+          "query": {
+            "queryString": "project roadmap"
+          },
+          "from": 0,
+          "size": 25
+        }
+      ]
+    }
+  },
+  {
+    "plugin": "microsoft-work-iq",
+    "tool": "search_calendar",
+    "args": {
+      "query": "project roadmap"
+    },
+    "path": "/v1.0/search/query",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "requests": [
+        {
+          "entityTypes": [
+            "event"
+          ],
+          "query": {
+            "queryString": "project roadmap"
+          },
+          "from": 0,
+          "size": 25
+        }
+      ]
+    }
+  },
+  {
+    "plugin": "microsoft-work-iq",
+    "tool": "get_me",
+    "args": {},
+    "path": "/v1.0/me",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "notion",
+    "tool": "get_me",
+    "args": {},
+    "path": "/v1/users/me",
+    "query": {},
+    "method": "GET",
+    "headers": {
+      "notion-version": "2025-09-03"
+    }
+  },
+  {
+    "plugin": "notion",
+    "tool": "search_pages",
+    "args": {},
+    "path": "/v1/search",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": "",
+      "page_size": 25
+    },
+    "headers": {
+      "notion-version": "2025-09-03"
+    }
+  },
+  {
+    "plugin": "notion",
+    "tool": "get_page",
+    "args": {
+      "page_id": "page-1"
+    },
+    "path": "/v1/pages/page-1",
+    "query": {},
+    "method": "GET",
+    "headers": {
+      "notion-version": "2025-09-03"
+    }
+  },
+  {
+    "plugin": "notion",
+    "tool": "list_block_children",
+    "args": {
+      "block_id": "block-1"
+    },
+    "path": "/v1/blocks/block-1/children",
+    "query": {
+      "page_size": "25"
+    },
+    "method": "GET",
+    "headers": {
+      "notion-version": "2025-09-03"
+    }
+  },
+  {
+    "plugin": "notion",
+    "tool": "get_database",
+    "args": {
+      "database_id": "database-1"
+    },
+    "path": "/v1/databases/database-1",
+    "query": {},
+    "method": "GET",
+    "headers": {
+      "notion-version": "2025-09-03"
+    }
+  },
+  {
+    "plugin": "notion",
+    "tool": "query_data_source",
+    "args": {
+      "data_source_id": "source-1"
+    },
+    "path": "/v1/data_sources/source-1/query",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "page_size": 25
+    },
+    "headers": {
+      "notion-version": "2025-09-03"
+    }
+  },
+  {
+    "plugin": "paypal",
+    "tool": "list_transactions",
+    "args": {
+      "start_date": "2026-10-01T00:00:00Z",
+      "end_date": "2026-10-02T00:00:00Z"
+    },
+    "path": "/v1/reporting/transactions",
+    "query": {
+      "start_date": "2026-10-01T00:00:00Z",
+      "end_date": "2026-10-02T00:00:00Z",
+      "page_size": "25",
+      "page": "1"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "paypal",
+    "tool": "get_balances",
+    "args": {},
+    "path": "/v1/reporting/balances",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "paypal",
+    "tool": "list_invoices",
+    "args": {},
+    "path": "/v2/invoicing/invoices",
+    "query": {
+      "page_size": "25",
+      "page": "1",
+      "total_required": "true"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "paypal",
+    "tool": "get_invoice",
+    "args": {
+      "invoice_id": "INV2-TEST"
+    },
+    "path": "/v2/invoicing/invoices/INV2-TEST",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "quickbooks",
+    "tool": "list_customers",
+    "args": {},
+    "path": "/v3/company/12345/query",
+    "query": {
+      "query": "SELECT * FROM Customer STARTPOSITION 1 MAXRESULTS 25"
+    },
+    "method": "GET",
+    "configuration": {
+      "realm_id": "12345"
+    },
+    "headers": {
+      "user-agent": "Grengin-Connector/0.2",
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "quickbooks",
+    "tool": "list_invoices",
+    "args": {},
+    "path": "/v3/company/12345/query",
+    "query": {
+      "query": "SELECT * FROM Invoice STARTPOSITION 1 MAXRESULTS 25"
+    },
+    "method": "GET",
+    "configuration": {
+      "realm_id": "12345"
+    },
+    "headers": {
+      "user-agent": "Grengin-Connector/0.2",
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "quickbooks",
+    "tool": "list_vendors",
+    "args": {},
+    "path": "/v3/company/12345/query",
+    "query": {
+      "query": "SELECT * FROM Vendor STARTPOSITION 1 MAXRESULTS 25"
+    },
+    "method": "GET",
+    "configuration": {
+      "realm_id": "12345"
+    },
+    "headers": {
+      "user-agent": "Grengin-Connector/0.2",
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "quickbooks",
+    "tool": "list_accounts",
+    "args": {},
+    "path": "/v3/company/12345/query",
+    "query": {
+      "query": "SELECT * FROM Account STARTPOSITION 1 MAXRESULTS 25"
+    },
+    "method": "GET",
+    "configuration": {
+      "realm_id": "12345"
+    },
+    "headers": {
+      "user-agent": "Grengin-Connector/0.2",
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "quickbooks",
+    "tool": "list_bills",
+    "args": {},
+    "path": "/v3/company/12345/query",
+    "query": {
+      "query": "SELECT * FROM Bill STARTPOSITION 1 MAXRESULTS 25"
+    },
+    "method": "GET",
+    "configuration": {
+      "realm_id": "12345"
+    },
+    "headers": {
+      "user-agent": "Grengin-Connector/0.2",
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "quickbooks",
+    "tool": "get_company",
+    "args": {},
+    "path": "/v3/company/12345/companyinfo/12345",
+    "query": {},
+    "method": "GET",
+    "configuration": {
+      "realm_id": "12345"
+    },
+    "headers": {
+      "user-agent": "Grengin-Connector/0.2",
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "salesforce",
+    "tool": "list_accounts",
+    "args": {},
+    "path": "/services/data/v65.0/query",
+    "query": {
+      "q": "SELECT Id,Name,Industry,Website FROM Account LIMIT 25"
+    },
+    "method": "GET",
+    "base_url_override": "https://fixture.my.salesforce.com/services/data/v65.0"
+  },
+  {
+    "plugin": "salesforce",
+    "tool": "list_contacts",
+    "args": {},
+    "path": "/services/data/v65.0/query",
+    "query": {
+      "q": "SELECT Id,Name,Email,AccountId FROM Contact LIMIT 25"
+    },
+    "method": "GET",
+    "base_url_override": "https://fixture.my.salesforce.com/services/data/v65.0"
+  },
+  {
+    "plugin": "salesforce",
+    "tool": "list_opportunities",
+    "args": {},
+    "path": "/services/data/v65.0/query",
+    "query": {
+      "q": "SELECT Id,Name,StageName,Amount,CloseDate FROM Opportunity LIMIT 25"
+    },
+    "method": "GET",
+    "base_url_override": "https://fixture.my.salesforce.com/services/data/v65.0"
+  },
+  {
+    "plugin": "salesforce",
+    "tool": "list_leads",
+    "args": {},
+    "path": "/services/data/v65.0/query",
+    "query": {
+      "q": "SELECT Id,Name,Company,Status FROM Lead LIMIT 25"
+    },
+    "method": "GET",
+    "base_url_override": "https://fixture.my.salesforce.com/services/data/v65.0"
+  },
+  {
+    "plugin": "salesforce",
+    "tool": "get_account",
+    "args": {
+      "account_id": "001000000000001"
+    },
+    "path": "/services/data/v65.0/sobjects/Account/001000000000001",
+    "query": {},
+    "method": "GET",
+    "base_url_override": "https://fixture.my.salesforce.com/services/data/v65.0"
+  },
+  {
+    "plugin": "salesforce",
+    "tool": "describe_object",
+    "args": {
+      "object_type": "Account"
+    },
+    "path": "/services/data/v65.0/sobjects/Account/describe",
+    "query": {},
+    "method": "GET",
+    "base_url_override": "https://fixture.my.salesforce.com/services/data/v65.0"
+  },
+  {
+    "plugin": "sentry",
+    "tool": "list_organizations",
+    "args": {},
+    "path": "/api/0/organizations/",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "sentry",
+    "tool": "get_organization",
+    "args": {
+      "organization": "example-org"
+    },
+    "path": "/api/0/organizations/example-org/",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "sentry",
+    "tool": "list_projects",
+    "args": {
+      "organization": "example-org"
+    },
+    "path": "/api/0/organizations/example-org/projects/",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "sentry",
+    "tool": "list_issues",
+    "args": {
+      "organization": "example-org"
+    },
+    "path": "/api/0/organizations/example-org/issues/",
+    "query": {
+      "query": "is:unresolved",
+      "limit": "25"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "sentry",
+    "tool": "get_issue",
+    "args": {
+      "issue_id": "123"
+    },
+    "path": "/api/0/issues/123/",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "sentry",
+    "tool": "list_issue_events",
+    "args": {
+      "issue_id": "123"
+    },
+    "path": "/api/0/issues/123/events/",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "shopify",
+    "tool": "get_shop",
+    "args": {},
+    "path": "/admin/api/2026-10/graphql.json",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": "query GrenginShop { shop { id name myshopifyDomain primaryDomain { url } } }",
+      "variables": {}
+    },
+    "base_url_override": "https://fixture-shop.myshopify.com/admin/api/2026-10"
+  },
+  {
+    "plugin": "shopify",
+    "tool": "list_products",
+    "args": {},
+    "path": "/admin/api/2026-10/graphql.json",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": "query GrenginProducts($first:Int!,$after:String,$query:String) { products(first:$first,after:$after,query:$query) { nodes { id title handle status updatedAt } pageInfo { hasNextPage endCursor } } }",
+      "variables": {
+        "first": 25
+      }
+    },
+    "base_url_override": "https://fixture-shop.myshopify.com/admin/api/2026-10"
+  },
+  {
+    "plugin": "shopify",
+    "tool": "get_product",
+    "args": {
+      "product_id": "gid://shopify/Product/123"
+    },
+    "path": "/admin/api/2026-10/graphql.json",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": "query GrenginProduct($id:ID!) { product(id:$id) { id title handle description status updatedAt } }",
+      "variables": {
+        "id": "gid://shopify/Product/123"
+      }
+    },
+    "base_url_override": "https://fixture-shop.myshopify.com/admin/api/2026-10"
+  },
+  {
+    "plugin": "shopify",
+    "tool": "list_orders",
+    "args": {},
+    "path": "/admin/api/2026-10/graphql.json",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": "query GrenginOrders($first:Int!,$after:String) { orders(first:$first,after:$after) { nodes { id name createdAt totalPriceSet { shopMoney { amount currencyCode } } } pageInfo { hasNextPage endCursor } } }",
+      "variables": {
+        "first": 25
+      }
+    },
+    "base_url_override": "https://fixture-shop.myshopify.com/admin/api/2026-10"
+  },
+  {
+    "plugin": "shopify",
+    "tool": "get_order",
+    "args": {
+      "order_id": "gid://shopify/Order/123"
+    },
+    "path": "/admin/api/2026-10/graphql.json",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": "query GrenginOrder($id:ID!) { order(id:$id) { id name createdAt displayFinancialStatus totalPriceSet { shopMoney { amount currencyCode } } } }",
+      "variables": {
+        "id": "gid://shopify/Order/123"
+      }
+    },
+    "base_url_override": "https://fixture-shop.myshopify.com/admin/api/2026-10"
+  },
+  {
+    "plugin": "shopify",
+    "tool": "list_collections",
+    "args": {},
+    "path": "/admin/api/2026-10/graphql.json",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": "query GrenginCollections($first:Int!,$after:String) { collections(first:$first,after:$after) { nodes { id title handle } pageInfo { hasNextPage endCursor } } }",
+      "variables": {
+        "first": 25
+      }
+    },
+    "base_url_override": "https://fixture-shop.myshopify.com/admin/api/2026-10"
+  },
+  {
+    "plugin": "slack",
+    "tool": "list_conversations",
+    "args": {},
+    "path": "/api/conversations.list",
+    "query": {
+      "limit": "25",
+      "types": "public_channel,private_channel,im,mpim"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "slack",
+    "tool": "get_conversation_history",
+    "args": {
+      "channel": "C123"
+    },
+    "path": "/api/conversations.history",
+    "query": {
+      "channel": "C123",
+      "limit": "15"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "slack",
+    "tool": "get_thread_replies",
+    "args": {
+      "channel": "C123",
+      "timestamp": "1700000000.000001"
+    },
+    "path": "/api/conversations.replies",
+    "query": {
+      "channel": "C123",
+      "ts": "1700000000.000001",
+      "limit": "15"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "slack",
+    "tool": "list_users",
+    "args": {},
+    "path": "/api/users.list",
+    "query": {
+      "limit": "25"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "slack",
+    "tool": "get_user",
+    "args": {
+      "user_id": "U123"
+    },
+    "path": "/api/users.info",
+    "query": {
+      "user": "U123"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "slack",
+    "tool": "get_team",
+    "args": {},
+    "path": "/api/team.info",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "slack",
+    "tool": "search_messages",
+    "args": {
+      "query": "roadmap"
+    },
+    "path": "/api/search.messages",
+    "query": {
+      "query": "roadmap",
+      "count": "25",
+      "page": "1"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "square",
+    "tool": "list_locations",
+    "args": {},
+    "path": "/v2/locations",
+    "query": {},
+    "method": "GET",
+    "headers": {
+      "square-version": "2026-09-16"
+    }
+  },
+  {
+    "plugin": "square",
+    "tool": "get_location",
+    "args": {
+      "location_id": "location-1"
+    },
+    "path": "/v2/locations/location-1",
+    "query": {},
+    "method": "GET",
+    "headers": {
+      "square-version": "2026-09-16"
+    }
+  },
+  {
+    "plugin": "square",
+    "tool": "list_customers",
+    "args": {},
+    "path": "/v2/customers",
+    "query": {
+      "limit": "25"
+    },
+    "method": "GET",
+    "headers": {
+      "square-version": "2026-09-16"
+    }
+  },
+  {
+    "plugin": "square",
+    "tool": "get_customer",
+    "args": {
+      "customer_id": "customer-1"
+    },
+    "path": "/v2/customers/customer-1",
+    "query": {},
+    "method": "GET",
+    "headers": {
+      "square-version": "2026-09-16"
+    }
+  },
+  {
+    "plugin": "square",
+    "tool": "list_payments",
+    "args": {},
+    "path": "/v2/payments",
+    "query": {
+      "limit": "25"
+    },
+    "method": "GET",
+    "headers": {
+      "square-version": "2026-09-16"
+    }
+  },
+  {
+    "plugin": "square",
+    "tool": "list_catalog_items",
+    "args": {},
+    "path": "/v2/catalog/list",
+    "query": {
+      "types": "ITEM"
+    },
+    "method": "GET",
+    "headers": {
+      "square-version": "2026-09-16"
+    }
+  },
+  {
+    "plugin": "stripe",
+    "tool": "list_customers",
+    "args": {},
+    "path": "/v1/customers",
+    "query": {
+      "limit": "25"
+    },
+    "method": "GET",
+    "headers": {
+      "stripe-version": "2026-10-28.endive"
+    }
+  },
+  {
+    "plugin": "stripe",
+    "tool": "list_invoices",
+    "args": {},
+    "path": "/v1/invoices",
+    "query": {
+      "limit": "25"
+    },
+    "method": "GET",
+    "headers": {
+      "stripe-version": "2026-10-28.endive"
+    }
+  },
+  {
+    "plugin": "stripe",
+    "tool": "list_payment_intents",
+    "args": {},
+    "path": "/v1/payment_intents",
+    "query": {
+      "limit": "25"
+    },
+    "method": "GET",
+    "headers": {
+      "stripe-version": "2026-10-28.endive"
+    }
+  },
+  {
+    "plugin": "stripe",
+    "tool": "list_products",
+    "args": {},
+    "path": "/v1/products",
+    "query": {
+      "limit": "25"
+    },
+    "method": "GET",
+    "headers": {
+      "stripe-version": "2026-10-28.endive"
+    }
+  },
+  {
+    "plugin": "stripe",
+    "tool": "list_prices",
+    "args": {},
+    "path": "/v1/prices",
+    "query": {
+      "limit": "25"
+    },
+    "method": "GET",
+    "headers": {
+      "stripe-version": "2026-10-28.endive"
+    }
+  },
+  {
+    "plugin": "stripe",
+    "tool": "get_customer",
+    "args": {
+      "customer_id": "cus_fixture"
+    },
+    "path": "/v1/customers/cus_fixture",
+    "query": {},
+    "method": "GET",
+    "headers": {
+      "stripe-version": "2026-10-28.endive"
+    }
+  },
+  {
+    "plugin": "stripe",
+    "tool": "get_balance",
+    "args": {},
+    "path": "/v1/balance",
+    "query": {},
+    "method": "GET",
+    "headers": {
+      "stripe-version": "2026-10-28.endive"
+    }
+  },
+  {
+    "plugin": "supabase",
+    "tool": "list_projects",
+    "args": {},
+    "path": "/v1/projects",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "supabase",
+    "tool": "get_project",
+    "args": {
+      "project_ref": "abcdefghijklmnopqrst"
+    },
+    "path": "/v1/projects/abcdefghijklmnopqrst",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "supabase",
+    "tool": "list_organizations",
+    "args": {},
+    "path": "/v1/organizations",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "supabase",
+    "tool": "get_organization",
+    "args": {
+      "organization_slug": "example-org"
+    },
+    "path": "/v1/organizations/example-org",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "supabase",
+    "tool": "list_functions",
+    "args": {
+      "project_ref": "abcdefghijklmnopqrst"
+    },
+    "path": "/v1/projects/abcdefghijklmnopqrst/functions",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "webflow",
+    "tool": "list_sites",
+    "args": {},
+    "path": "/v2/sites",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "webflow",
+    "tool": "get_site",
+    "args": {
+      "site_id": "site-1"
+    },
+    "path": "/v2/sites/site-1",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "webflow",
+    "tool": "list_collections",
+    "args": {
+      "site_id": "site-1"
+    },
+    "path": "/v2/sites/site-1/collections",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "webflow",
+    "tool": "list_collection_items",
+    "args": {
+      "collection_id": "collection-1"
+    },
+    "path": "/v2/collections/collection-1/items",
+    "query": {
+      "limit": "25",
+      "offset": "0"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "webflow",
+    "tool": "list_pages",
+    "args": {
+      "site_id": "site-1"
+    },
+    "path": "/v2/sites/site-1/pages",
+    "query": {
+      "limit": "25",
+      "offset": "0"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "wix",
+    "tool": "list_sites",
+    "args": {},
+    "path": "/site-list/v2/sites/query",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": {
+        "filter": {
+          "namespace": {
+            "$in": [
+              "WIX",
+              "HEADLESS"
+            ]
+          }
+        },
+        "cursorPaging": {
+          "limit": 25
+        }
+      }
+    },
+    "configuration": {
+      "account_id": "account-1"
+    },
+    "headers": {
+      "wix-account-id": "account-1"
+    }
+  },
+  {
+    "plugin": "wix",
+    "tool": "get_site",
+    "args": {
+      "site_id": "site-1"
+    },
+    "path": "/site-list/v2/sites/query",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": {
+        "filter": {
+          "namespace": {
+            "$in": [
+              "WIX",
+              "HEADLESS"
+            ]
+          },
+          "id": {
+            "$in": [
+              "site-1"
+            ]
+          }
+        }
+      }
+    },
+    "configuration": {
+      "account_id": "account-1"
+    },
+    "headers": {
+      "wix-account-id": "account-1"
+    }
+  },
+  {
+    "plugin": "wix",
+    "tool": "count_sites",
+    "args": {},
+    "path": "/site-list/v2/sites/count",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "filter": {
+        "namespace": {
+          "$in": [
+            "WIX",
+            "HEADLESS"
+          ]
+        }
+      }
+    },
+    "configuration": {
+      "account_id": "account-1"
+    },
+    "headers": {
+      "wix-account-id": "account-1"
+    }
+  },
+  {
+    "plugin": "wix",
+    "tool": "find_sites_by_name",
+    "args": {
+      "name": "Example"
+    },
+    "path": "/site-list/v2/sites/query",
+    "query": {},
+    "method": "POST",
+    "body": {
+      "query": {
+        "filter": {
+          "namespace": {
+            "$in": [
+              "WIX",
+              "HEADLESS"
+            ]
+          },
+          "name": "Example"
+        },
+        "cursorPaging": {
+          "limit": 25
+        }
+      }
+    },
+    "configuration": {
+      "account_id": "account-1"
+    },
+    "headers": {
+      "wix-account-id": "account-1"
+    }
+  },
+  {
+    "plugin": "wordpress",
+    "tool": "get_me",
+    "args": {},
+    "path": "/rest/v1.1/me",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "wordpress",
+    "tool": "list_sites",
+    "args": {},
+    "path": "/rest/v1.1/me/sites",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "wordpress",
+    "tool": "get_site",
+    "args": {
+      "site_id": "example.wordpress.com"
+    },
+    "path": "/rest/v1.1/sites/example.wordpress.com",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "wordpress",
+    "tool": "list_posts",
+    "args": {
+      "site_id": "example.wordpress.com"
+    },
+    "path": "/rest/v1.1/sites/example.wordpress.com/posts",
+    "query": {
+      "number": "25",
+      "page": "1"
+    },
+    "method": "GET"
+  },
+  {
+    "plugin": "wordpress",
+    "tool": "get_post",
+    "args": {
+      "site_id": "example.wordpress.com",
+      "post_id": 42
+    },
+    "path": "/rest/v1.1/sites/example.wordpress.com/posts/42",
+    "query": {},
+    "method": "GET"
+  },
+  {
+    "plugin": "xero",
+    "tool": "list_contacts",
+    "args": {},
+    "path": "/api.xro/2.0/Contacts",
+    "query": {
+      "page": "1"
+    },
+    "method": "GET",
+    "configuration": {
+      "tenant_id": "tenant-1"
+    },
+    "headers": {
+      "xero-tenant-id": "tenant-1",
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "xero",
+    "tool": "list_invoices",
+    "args": {},
+    "path": "/api.xro/2.0/Invoices",
+    "query": {
+      "page": "1"
+    },
+    "method": "GET",
+    "configuration": {
+      "tenant_id": "tenant-1"
+    },
+    "headers": {
+      "xero-tenant-id": "tenant-1",
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "xero",
+    "tool": "list_accounts",
+    "args": {},
+    "path": "/api.xro/2.0/Accounts",
+    "query": {
+      "page": "1"
+    },
+    "method": "GET",
+    "configuration": {
+      "tenant_id": "tenant-1"
+    },
+    "headers": {
+      "xero-tenant-id": "tenant-1",
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "xero",
+    "tool": "list_organizations",
+    "args": {},
+    "path": "/api.xro/2.0/Organisation",
+    "query": {},
+    "method": "GET",
+    "configuration": {
+      "tenant_id": "tenant-1"
+    },
+    "headers": {
+      "xero-tenant-id": "tenant-1",
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "xero",
+    "tool": "list_bank_transactions",
+    "args": {},
+    "path": "/api.xro/2.0/BankTransactions",
+    "query": {
+      "page": "1"
+    },
+    "method": "GET",
+    "configuration": {
+      "tenant_id": "tenant-1"
+    },
+    "headers": {
+      "xero-tenant-id": "tenant-1",
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "xero",
+    "tool": "get_contact",
+    "args": {
+      "contact_id": "contact-1"
+    },
+    "path": "/api.xro/2.0/Contacts/contact-1",
+    "query": {},
+    "method": "GET",
+    "configuration": {
+      "tenant_id": "tenant-1"
+    },
+    "headers": {
+      "xero-tenant-id": "tenant-1",
+      "accept": "application/json"
+    }
+  }
+]

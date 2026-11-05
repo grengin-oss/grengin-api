@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::{cell::Cell, collections::BTreeMap};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use schemars::JsonSchema;
@@ -433,10 +433,77 @@ pub fn evaluate_mapping(
         root: context.root(),
         item: None,
         definitions,
+        budget: None,
     };
     match evaluate(mapping, scope, false, 0)? {
         Evaluation::Value(value) => Ok(value),
         Evaluation::Omit => Ok(Value::Null),
+    }
+}
+
+pub fn evaluate_mapping_bounded(
+    mapping: &MappingExpression,
+    context: &MappingContext,
+    definitions: &BTreeMap<String, MappingExpression>,
+    max_steps: usize,
+    max_allocated_bytes: usize,
+) -> Result<Value, ProviderError> {
+    let budget = MappingBudget {
+        steps: Cell::new(max_steps),
+        bytes: Cell::new(max_allocated_bytes),
+    };
+    let scope = Scope {
+        root: context.root(),
+        item: None,
+        definitions,
+        budget: Some(&budget),
+    };
+    match evaluate(mapping, scope, false, 0)? {
+        Evaluation::Value(value) => Ok(value),
+        Evaluation::Omit => Ok(Value::Null),
+    }
+}
+
+struct MappingBudget {
+    steps: Cell<usize>,
+    bytes: Cell<usize>,
+}
+
+impl MappingBudget {
+    fn spend(&self, steps: usize, bytes: usize) -> Result<(), ProviderError> {
+        let steps = self.steps.get().checked_sub(steps);
+        let bytes = self.bytes.get().checked_sub(bytes);
+        match (steps, bytes) {
+            (Some(steps), Some(bytes)) => {
+                self.steps.set(steps);
+                self.bytes.set(bytes);
+                Ok(())
+            }
+            _ => Err(ProviderError::PayloadMapping(
+                "mapping resource budget exceeded".into(),
+            )),
+        }
+    }
+
+    fn value(&self, value: &Value) -> Result<(), ProviderError> {
+        self.spend(1, std::mem::size_of::<Value>())?;
+        match value {
+            Value::String(value) => self.spend(0, value.len().saturating_mul(6)),
+            Value::Array(values) => {
+                for value in values {
+                    self.value(value)?;
+                }
+                Ok(())
+            }
+            Value::Object(values) => {
+                for (key, value) in values {
+                    self.spend(0, key.len().saturating_add(64))?;
+                    self.value(value)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -452,9 +519,17 @@ struct Scope<'a> {
     root: &'a Value,
     item: Option<&'a Value>,
     definitions: &'a BTreeMap<String, MappingExpression>,
+    budget: Option<&'a MappingBudget>,
 }
 
 impl<'a> Scope<'a> {
+    fn allocate(&self, bytes: usize) -> Result<(), ProviderError> {
+        self.budget.map_or(Ok(()), |budget| budget.spend(0, bytes))
+    }
+
+    fn copy_value(&self, value: &Value) -> Result<(), ProviderError> {
+        self.budget.map_or(Ok(()), |budget| budget.value(value))
+    }
     fn resolve(&self, path: &str) -> Option<&'a Value> {
         resolve_in(self.root, self.item, path)
     }
@@ -473,6 +548,9 @@ fn evaluate(
     optional: bool,
     depth: usize,
 ) -> Result<Evaluation, ProviderError> {
+    if let Some(budget) = scope.budget {
+        budget.spend(1, 0)?;
+    }
     if depth > MAX_MAPPING_DEPTH {
         return Err(ProviderError::PayloadMapping(format!(
             "mapping exceeds maximum nesting depth of {MAX_MAPPING_DEPTH}"
@@ -480,9 +558,15 @@ fn evaluate(
     }
     let child_depth = depth + 1;
     match mapping {
-        MappingExpression::Literal(value) => Ok(Evaluation::Value(value.value.clone())),
+        MappingExpression::Literal(value) => {
+            scope.copy_value(&value.value)?;
+            Ok(Evaluation::Value(value.value.clone()))
+        }
         MappingExpression::Get(get) => match scope.resolve(&get.path) {
-            Some(value) => Ok(Evaluation::Value(value.clone())),
+            Some(value) => {
+                scope.copy_value(value)?;
+                Ok(Evaluation::Value(value.clone()))
+            }
             None if optional => Ok(Evaluation::Omit),
             None => Err(ProviderError::PayloadMapping(format!(
                 "canonical path does not exist: {}",
@@ -497,6 +581,7 @@ fn evaluate(
         }
         MappingExpression::JsonEncode(value) => {
             let value = required_value(evaluate(&value.value, scope, false, child_depth)?)?;
+            scope.copy_value(&value)?;
             Ok(Evaluation::Value(Value::String(
                 serde_json::to_string(&value)
                     .map_err(|error| ProviderError::PayloadMapping(error.to_string()))?,
@@ -507,6 +592,12 @@ fn evaluate(
             let text = value.as_str().ok_or_else(|| {
                 ProviderError::PayloadMapping("$base64 requires a string value".to_string())
             })?;
+            scope.allocate(
+                text.len()
+                    .saturating_add(2)
+                    .saturating_div(3)
+                    .saturating_mul(4),
+            )?;
             Ok(Evaluation::Value(Value::String(
                 STANDARD.encode(text.as_bytes()),
             )))
@@ -527,6 +618,7 @@ fn evaluate(
             let definition = scope.definitions.get(&map.using).ok_or_else(|| {
                 ProviderError::PayloadMapping(format!("unknown mapping definition: {}", map.using))
             })?;
+            scope.allocate(items.len().saturating_mul(std::mem::size_of::<Value>()))?;
             let mut output = Vec::with_capacity(items.len());
             for item in items {
                 if let Evaluation::Value(value) =
@@ -570,6 +662,7 @@ fn evaluate(
                         map.using
                     ))
                 })?;
+                scope.copy_value(&value)?;
                 output.extend(values.iter().cloned());
             }
             Ok(Evaluation::Value(Value::Array(output)))
@@ -630,6 +723,7 @@ fn evaluate(
                 let object = value.as_object().ok_or_else(|| {
                     ProviderError::PayloadMapping("$merge entries must be objects".to_string())
                 })?;
+                scope.copy_value(&value)?;
                 merged.extend(object.clone());
             }
             Ok(Evaluation::Value(Value::Object(merged)))
@@ -659,6 +753,7 @@ fn evaluate(
             let mut output = String::new();
             for item in &value.values {
                 let value = required_value(evaluate(item, scope, false, child_depth)?)?;
+                scope.copy_value(&value)?;
                 match value {
                     Value::String(value) => output.push_str(&value),
                     Value::Bool(value) => output.push_str(if value { "true" } else { "false" }),
@@ -691,7 +786,10 @@ fn evaluate(
         MappingExpression::ObjectValue(value) => evaluate_object(value, scope, child_depth),
         MappingExpression::Array(value) => evaluate_array(&value.value, scope, child_depth),
         MappingExpression::ArrayValue(value) => evaluate_array(value, scope, child_depth),
-        MappingExpression::Scalar(value) => Ok(Evaluation::Value(value.clone())),
+        MappingExpression::Scalar(value) => {
+            scope.copy_value(value)?;
+            Ok(Evaluation::Value(value.clone()))
+        }
     }
 }
 
@@ -703,6 +801,7 @@ fn evaluate_object(
     let mut output = Map::new();
     for (key, child) in object {
         if let Evaluation::Value(value) = evaluate(child, scope, false, depth)? {
+            scope.allocate(key.len().saturating_add(64))?;
             output.insert(key.clone(), value);
         }
     }
@@ -714,6 +813,7 @@ fn evaluate_array(
     scope: Scope<'_>,
     depth: usize,
 ) -> Result<Evaluation, ProviderError> {
+    scope.allocate(items.len().saturating_mul(std::mem::size_of::<Value>()))?;
     let mut output = Vec::with_capacity(items.len());
     for item in items {
         if let Evaluation::Value(value) = evaluate(item, scope, false, depth)? {
@@ -774,6 +874,59 @@ mod tests {
 
     fn expression(value: Value) -> MappingExpression {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn bounded_mapping_preserves_results_but_rejects_excessive_work_and_clones() {
+        let context =
+            MappingContext::new(json!({"request":{"items":[1,2,3],"text":"x".repeat(1024)}}));
+        let definitions = BTreeMap::from([("copy".into(), expression(json!({"$get":"item"})))]);
+        let mapping = expression(json!({"items":{"$map":"request.items","using":"copy"}}));
+        assert_eq!(
+            super::evaluate_mapping_bounded(&mapping, &context, &definitions, 100, 4096).unwrap(),
+            evaluate_mapping(&mapping, &context, &definitions).unwrap()
+        );
+        assert!(
+            super::evaluate_mapping_bounded(&mapping, &context, &definitions, 2, 4096).is_err()
+        );
+        assert!(
+            super::evaluate_mapping_bounded(
+                &expression(json!({"$get":"request.text"})),
+                &context,
+                &definitions,
+                100,
+                1024
+            )
+            .is_err()
+        );
+        assert!(
+            evaluate_mapping(
+                &expression(json!({"$get":"request.text"})),
+                &context,
+                &definitions
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn bounded_mapping_stops_nested_expansion_before_materializing_it() {
+        let context = MappingContext::new(json!({"request":{"items":vec![0;100]}}));
+        let definitions = BTreeMap::from([
+            (
+                "inner".into(),
+                expression(json!({"$map":"request.items","using":"copy"})),
+            ),
+            ("copy".into(), expression(json!({"$get":"item"}))),
+        ]);
+        let mapping = expression(json!({"$map":"request.items","using":"inner"}));
+        assert!(
+            super::evaluate_mapping_bounded(&mapping, &context, &definitions, 500, 4 * 1024 * 1024)
+                .is_err()
+        );
+        assert!(
+            super::evaluate_mapping_bounded(&mapping, &context, &definitions, 50000, 1024).is_err()
+        );
     }
 
     #[test]
