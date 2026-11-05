@@ -5,9 +5,11 @@ set -euo pipefail
 set +x
 root=$(cd "$(dirname "$0")/../.." && pwd)
 mode=${1:-mock}
-case "$mode" in suite|mock|catalog|catalog-all|validate|live) ;; *) printf 'Usage: bash tests/providers/gemini-tools.sh [suite|mock|catalog|catalog-all|validate|live]\n' >&2; exit 2 ;; esac
+case "$mode" in backend-suite|suite|mock|catalog|catalog-all|validate|live) ;; *) printf 'Usage: bash tests/providers/gemini-tools.sh [backend-suite|suite|mock|catalog|catalog-all|validate|live]\n' >&2; exit 2 ;; esac
 if [[ ${GRENGIN_GEMINI_BOUNDED:-0} != 1 ]]; then
-  exec systemd-run --user --quiet --wait --pipe -p MemoryMax=2G -p MemorySwapMax=0 \
+  memory=2G
+  if [[ "$mode" == backend-suite ]]; then memory=4G; fi
+  exec systemd-run --user --quiet --wait --pipe -p "MemoryMax=$memory" -p MemorySwapMax=0 \
     --setenv="PATH=$PATH" --setenv=GRENGIN_GEMINI_BOUNDED=1 \
     --setenv="CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$root/target}" \
     --setenv="GRENGIN_PROVIDER_CATALOG_DIR=${GRENGIN_PROVIDER_CATALOG_DIR:-}" \
@@ -18,6 +20,7 @@ fi
 cd "$root"
 export CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 case "$mode" in
+  backend-suite) cargo test --locked --workspace -j 1 -- --test-threads=1 ;;
   suite) cargo test --locked -p llm-plugin -j 1 -- --test-threads=1 ;;
   mock) cargo test --locked -p llm-plugin --test mock_server gemini_ -j 1 -- --test-threads=1 ;;
   catalog)
