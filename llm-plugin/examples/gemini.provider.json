@@ -2,7 +2,7 @@
   "$schema": "../schema/provider-plugin-v1.schema.json",
   "manifestVersion": "1.0",
   "id": "gemini",
-  "version": "1.1",
+  "version": "1.2",
   "name": "Google Gemini",
   "description": "Gemini native streaming chat, functions, and Google Search grounding.",
   "baseUrl": "https://generativelanguage.googleapis.com/v1beta/",
@@ -101,7 +101,7 @@
           {
             "name": { "$get": "item.name" },
             "description": { "$omitIfNull": { "$get": "item.description" } },
-            "parameters": { "$get": "item.parameters" }
+            "parametersJsonSchema": { "$get": "item.parameters" }
           }
         ]
       }

@@ -75,13 +75,22 @@ fn reference_gemini_image_manifest_is_valid() {
 
 #[test]
 fn builtin_chat_manifests_are_valid() {
-    for bytes in [
-        include_bytes!("../examples/openai.provider.json").as_slice(),
-        include_bytes!("../examples/mistral.provider.json").as_slice(),
-        include_bytes!("../examples/gemini.provider.json").as_slice(),
+    for (bytes, version) in [
+        (
+            include_bytes!("../examples/openai.provider.json").as_slice(),
+            "1.1",
+        ),
+        (
+            include_bytes!("../examples/mistral.provider.json").as_slice(),
+            "1.1",
+        ),
+        (
+            include_bytes!("../examples/gemini.provider.json").as_slice(),
+            "1.2",
+        ),
     ] {
         let manifest = ProviderManifestV1::from_json(bytes).unwrap();
-        assert_eq!(manifest.version, "1.1");
+        assert_eq!(manifest.version, version);
         assert!(manifest.operations.chat_stream.is_some());
         assert!(manifest.capabilities.chat.unwrap().tools);
     }

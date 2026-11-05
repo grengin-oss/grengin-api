@@ -87,6 +87,7 @@ pub fn embedded_plugin_config(engine_key: &str) -> Result<Option<PluginConfig>, 
     };
     if let Some(bytes) = chat_overlay {
         let overlay = ProviderManifestV1::from_json(bytes)?;
+        manifest.version = overlay.version;
         let chat_capabilities = overlay.capabilities.chat;
         manifest.capabilities.chat = chat_capabilities.clone();
         if let Some(default_capabilities) = manifest
@@ -313,25 +314,35 @@ mod tests {
 
     #[test]
     fn all_embedded_providers_compile_through_the_declarative_runtime() {
-        for engine_key in ["openai", "anthropic", "mistral", "gemini"] {
+        for (engine_key, version) in [
+            ("openai", "1.1"),
+            ("anthropic", "1.1"),
+            ("mistral", "1.1"),
+            ("gemini", "1.2"),
+        ] {
             let config = embedded_plugin_config(engine_key)
                 .expect("embedded manifest")
                 .expect("engine is embedded");
             let manifest = parse_manifest(&config).expect("embedded manifest parses");
-            assert_eq!(manifest.version, "1.1");
+            assert_eq!(manifest.version, version);
             let provider = compile_provider(config, engine_key, Some("test-key".to_string()))
                 .expect("compiled provider");
             assert_eq!(provider.descriptor().id.as_str(), engine_key);
-            assert_eq!(provider.descriptor().version, "1.1");
+            assert_eq!(provider.descriptor().version, version);
         }
     }
 
     #[test]
     fn resolves_active_versions_for_builtin_and_custom_engines() {
-        for engine_key in ["openai", "anthropic", "mistral", "gemini"] {
+        for (engine_key, version) in [
+            ("openai", "1.1"),
+            ("anthropic", "1.1"),
+            ("mistral", "1.1"),
+            ("gemini", "1.2"),
+        ] {
             assert_eq!(
                 provider_plugin_version(&test_engine(engine_key, None)).as_deref(),
-                Some("1.1")
+                Some(version)
             );
         }
 
@@ -346,6 +357,21 @@ mod tests {
                 .as_deref(),
             Some("2.1")
         );
+    }
+
+    #[test]
+    fn embedded_gemini_keeps_the_native_json_schema_tool_contract() {
+        let config = embedded_plugin_config("gemini")
+            .expect("embedded manifest")
+            .expect("engine is embedded");
+        let declaration = &config.manifest["mappings"]["gemini_function_tool"]["function_declarations"]
+            ["$array"][0];
+        assert_eq!(config.manifest["version"], "1.2");
+        assert_eq!(
+            declaration["parametersJsonSchema"],
+            serde_json::json!({"$get": "item.parameters"})
+        );
+        assert!(declaration.get("parameters").is_none());
     }
 
     #[test]
