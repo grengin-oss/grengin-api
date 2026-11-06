@@ -234,6 +234,9 @@ impl CompiledConnector {
         }) {
             return Err(ConnectorError::Manifest("invalid suggested prompts"));
         }
+        manifest
+            .validate_topic_groups()
+            .map_err(ConnectorError::Manifest)?;
         validate_mapping_definitions(&manifest.mappings)
             .map_err(|_| ConnectorError::Manifest("mappings"))?;
         let mut tools = BTreeMap::new();
@@ -298,11 +301,17 @@ impl CompiledConnector {
                     if !identifier(key, 64) || !tool.request.path_parameters.contains_key(key) {
                         return Err(ConnectorError::Manifest("path parameter missing"));
                     }
-                    if !prefix
-                        .chars()
-                        .chain(suffix.chars())
-                        .all(embedded_literal_char)
-                    {
+                    let valid_suffix = if let Some(action) = suffix.strip_prefix(':') {
+                        path.starts_with('/')
+                            && prefix.is_empty()
+                            && !action.is_empty()
+                            && action
+                                .bytes()
+                                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+                    } else {
+                        suffix.chars().all(embedded_literal_char)
+                    };
+                    if !prefix.chars().all(embedded_literal_char) || !valid_suffix {
                         return Err(ConnectorError::Manifest("request path segment"));
                     }
                     parameters.insert(key.to_string());

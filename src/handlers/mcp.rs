@@ -28,28 +28,30 @@ use crate::{
         ListPublicMcpServersQuery, ListServersQuery, ListToolsQuery, McpAuthorize,
         McpAuthorizeQuery, McpCredentialRequest, McpDisconnect, McpEffectiveAccessResponse,
         McpEffectiveServerAccess, McpEffectiveToolAccess, McpOauthCallback, McpOauthCallbackQuery,
-        McpServer, McpServerAccessList, McpServerAccessUpdate, McpServerCatalogEntry,
-        McpServerCatalogResponse, McpServerCreate, McpServerTestResult, McpServerUpdate,
-        McpSyncResult, McpTool, McpToolAccess, McpToolAccessUpdate, McpToolSummary, McpTools,
-        McpUserConnection, McpUserConnections, PaginatedMcpServers, PaginatedMcpToolExecutions,
+        McpServer, McpServerAccessList, McpServerAccessUpdate, McpServerCatalogResponse,
+        McpServerCreate, McpServerTestResult, McpServerUpdate, McpSyncResult, McpTool,
+        McpToolAccess, McpToolAccessUpdate, McpTools, McpUserConnection, McpUserConnections,
+        PaginatedMcpServers, PaginatedMcpToolExecutions,
     },
     error::AppError,
     models::{
         mcp_access_policies,
         mcp_access_policies::McpAccessTarget,
-        mcp_connections, mcp_executions, mcp_servers,
+        mcp_connections, mcp_servers,
         mcp_servers::{McpDefaultAccess, McpTransportType},
         mcp_tools,
     },
     services::authorization::{AuthorizationService, PermissionScopeMode},
+    services::connector_console_helpers::*,
     services::mcp_access::{
         build_access_context, load_server_rules, load_tool_rules, resolve_role_reference,
         resolve_server_access_with_rules, resolve_tool_access_with_rules,
     },
+    services::mcp_catalog_helpers::*,
     services::mcp_helpers::{
         build_access_rule_dtos, complete_oauth_authorization, encrypt_db_url_in_config,
-        resolve_mcp_oauth_token, start_oauth_authorization, to_execution_dto, to_server_dto,
-        to_tool_dto, upsert_connection,
+        resolve_mcp_oauth_token, start_oauth_authorization, to_server_dto, to_tool_dto,
+        upsert_connection,
     },
     services::mcp_service::{map_mcp_access_error, resolve_server_connected},
     services::mcp_tools::{filter_tools_for_user, sanitize_tool_name},
@@ -145,6 +147,7 @@ pub async fn list_mcp_servers(
     get,
     path = "/mcp-servers",
     tag = "mcp",
+    description = "Enabled installed servers the caller may use, with only permitted enabled tools and their own connection state. Applies the same server/tool access rules as chat; explicit tool grants are preserved. No workspace roster, client secret or account token is returned. Responses are private, no-store.",
     params(
         ("connected" = Option<bool>, Query, description = "Filter by connection status for the current user"),
         ("transport_type" = Option<McpTransportType>, Query, description = "Filter by transport type")
@@ -158,96 +161,7 @@ pub async fn list_public_mcp_servers(
     State(state): State<SharedState>,
     Query(query): Query<ListPublicMcpServersQuery>,
 ) -> Result<Json<McpServerCatalogResponse>, AppError> {
-    let mut finder = mcp_servers::Entity::find().filter(mcp_servers::Column::Enabled.eq(true));
-    if let Some(transport_type) = query.transport_type {
-        finder = finder.filter(mcp_servers::Column::TransportType.eq(transport_type));
-    }
-    let servers = finder.all(&state.database).await.map_err(|e| {
-        eprintln!("mcp server lookup error: {e}");
-        AppError::DbTimeout
-    })?;
-
-    if servers.is_empty() {
-        return Ok(Json(McpServerCatalogResponse {
-            servers: Vec::new(),
-        }));
-    }
-
-    let server_ids: Vec<Uuid> = servers.iter().map(|server| server.id).collect();
-    let tools = mcp_tools::Entity::find()
-        .filter(mcp_tools::Column::ServerId.is_in(server_ids.clone()))
-        .filter(mcp_tools::Column::Enabled.eq(true))
-        .all(&state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("mcp tools lookup error: {e}");
-            AppError::DbTimeout
-        })?;
-
-    let mut tools_by_server: HashMap<Uuid, Vec<McpToolSummary>> = HashMap::new();
-    for tool in tools {
-        tools_by_server
-            .entry(tool.server_id)
-            .or_default()
-            .push(McpToolSummary {
-                name: tool.name,
-                description: tool.description,
-            });
-    }
-
-    let connections = mcp_connections::Entity::find()
-        .filter(mcp_connections::Column::UserId.eq(claims.user_id))
-        .filter(mcp_connections::Column::ServerId.is_in(server_ids))
-        .all(&state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("mcp connections lookup error: {e}");
-            AppError::DbTimeout
-        })?;
-
-    let mut connections_by_server: HashMap<Uuid, mcp_connections::Model> = HashMap::new();
-    for connection in connections {
-        connections_by_server.insert(connection.server_id, connection);
-    }
-
-    let mut response = Vec::new();
-    let now = Utc::now();
-    let broker_statuses =
-        crate::services::connectors_helpers::cached_mcp_statuses(&state, claims.user_id).await?;
-    for server in servers {
-        let integration = crate::services::connector_console_helpers::integration_metadata(&server);
-        let connection_state = crate::services::connector_console_helpers::catalog_connection_state(
-            &server,
-            &integration,
-            connections_by_server.get(&server.id),
-            broker_statuses.get(&server.id).copied(),
-            now,
-        );
-        let connected =
-            connection_state == crate::dto::connector_console::ConnectorConnectionState::Connected;
-
-        if let Some(connected_filter) = query.connected {
-            if connected_filter != connected {
-                continue;
-            }
-        }
-
-        let mut tool_list = tools_by_server.remove(&server.id).unwrap_or_default();
-        tool_list.sort_by(|a, b| a.name.cmp(&b.name));
-        response.push(McpServerCatalogEntry {
-            integration,
-            connection_state,
-            id: server.id,
-            name: server.name,
-            description: server.description,
-            transport_type: server.transport_type,
-            icon: server.icon,
-            tools: tool_list,
-            connected,
-        });
-    }
-
-    Ok(Json(McpServerCatalogResponse { servers: response }))
+    Ok(Json(list_catalog(&state, claims.user_id, query).await?))
 }
 
 #[utoipa::path(
@@ -713,16 +627,22 @@ pub async fn sync_mcp_server_tools(
     get,
     path = "/admin/mcp-servers/{server_id}/executions",
     tag = "admin",
+    description = "Execution history for an installed server. Requires organization-wide mcp_servers:view. Includes tool name, caller email, timestamp, duration and result. Results may contain private vendor data: render safely and do not log to analytics. Ordered newest first with deterministic ID ordering for tied timestamps; offset is exact. Responses are private, no-store.",
     params(
         ("server_id" = Uuid, Path, description = "MCP server id"),
         ("limit" = Option<u64>, Query, description = "Page size (max 100, default 50)"),
-        ("offset" = Option<u64>, Query, description = "Offset for pagination"),
+        ("offset" = Option<u64>, Query, description = "Exact row offset (max 1000000)"),
         ("tool_name" = Option<String>, Query, description = "Filter by tool name"),
         ("is_error" = Option<bool>, Query, description = "Filter by error executions"),
         ("user_id" = Option<Uuid>, Query, description = "Filter by user id")
     ),
     responses(
-        (status = 200, body = PaginatedMcpToolExecutions)
+        (status = 200, body = PaginatedMcpToolExecutions),
+        (status = 400, description = "Offset exceeds 1000000"),
+        (status = 401, description = "Sign-in required"),
+        (status = 403, description = "Organization-wide MCP viewing permission required"),
+        (status = 404, description = "Unknown server"),
+        (status = 503, description = "Database unavailable")
     )
 )]
 pub async fn list_mcp_server_executions(
@@ -731,47 +651,11 @@ pub async fn list_mcp_server_executions(
     Path(server_id): Path<Uuid>,
     Query(query): Query<ListExecutionsQuery>,
 ) -> Result<Json<PaginatedMcpToolExecutions>, AuthError> {
-    let authz = AuthorizationService::new(&state.database);
-    authz
-        .ensure_permission(
-            claims.user_id,
-            PERMISSION_MCP_VIEW,
-            None,
-            PermissionScopeMode::RequireOrgWide,
-            Some(server_id),
-        )
-        .await?;
-    let mut finder =
-        mcp_executions::Entity::find().filter(mcp_executions::Column::ServerId.eq(server_id));
-    if let Some(tool) = query.tool_name {
-        finder = finder.filter(mcp_executions::Column::ToolName.eq(tool));
-    }
-    if let Some(is_error) = query.is_error {
-        finder = finder.filter(mcp_executions::Column::IsError.eq(is_error));
-    }
-    if let Some(user_id) = query.user_id {
-        finder = finder.filter(mcp_executions::Column::UserId.eq(user_id));
-    }
-    let limit = query.limit.unwrap_or(50).clamp(1, 100);
-    let offset = query.offset.unwrap_or(0);
-    let paginator = finder
-        .order_by_desc(mcp_executions::Column::ExecutedAt)
-        .paginate(&state.database, limit);
-    let total = paginator.num_items().await.map_err(|e| {
-        eprintln!("Db get error {}", e);
-        AuthError::DbTimeout
-    })?;
-    let data = paginator.fetch_page(offset / limit).await.map_err(|e| {
-        eprintln!("Db get error {}", e);
-        AuthError::DbTimeout
-    })?;
-    let executions = data.into_iter().map(to_execution_dto).collect();
-    Ok(Json(PaginatedMcpToolExecutions {
-        executions,
-        total: total as i64,
-        limit: limit as i64,
-        offset: offset as i64,
-    }))
+    Ok(Json(
+        ConnectorConsoleService::new(&state)
+            .executions(claims.user_id, server_id, query)
+            .await?,
+    ))
 }
 
 pub async fn get_mcp_server_access(

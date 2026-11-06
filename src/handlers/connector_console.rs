@@ -62,3 +62,21 @@ pub async fn update_tool(
             .await?,
     ))
 }
+
+#[utoipa::path(put, path = "/admin/mcp-servers/{server_id}/topic-groups/{group_id}", tag = "admin",
+    description = "Enable or disable every installed tool in one topic group of a catalog connector, such as Messages or Issues. Requires organization-wide mcp_servers:admin. Group membership comes from the installed plugin version, not the request. All tool changes and one audit event are committed atomically. Individual tool switches keep working, so a group can become mixed. Access rules, read-only permissions and credentials are unchanged.",
+    params(("server_id" = Uuid, Path, description = "Installed server UUID"), ("group_id" = String, Path, description = "Topic group id from overview.topic_groups")),
+    request_body = ConnectorToolUpdate,
+    responses((status = 200, body = ConnectorTopicGroupUpdateResult), (status = 401, description = "Sign-in required"), (status = 403, description = "Organization-wide MCP administration permission required"), (status = 404, description = "Server or topic group not found"), (status = 422, description = "Invalid JSON fields"), (status = 503, description = "Change or audit could not be saved")))]
+pub async fn update_topic_group(
+    claims: Claims,
+    State(state): State<SharedState>,
+    Path((server_id, group_id)): Path<(Uuid, String)>,
+    Json(request): Json<ConnectorToolUpdate>,
+) -> Result<Json<ConnectorTopicGroupUpdateResult>, AuthError> {
+    Ok(Json(
+        ConnectorConsoleService::new(&state)
+            .update_topic_group(claims.user_id, server_id, &group_id, request)
+            .await?,
+    ))
+}

@@ -29,6 +29,10 @@ pub fn mcp_routes() -> Router<SharedState> {
             axum::routing::put(crate::handlers::connector_console::update_tool),
         )
         .route(
+            "/admin/mcp-servers/{server_id}/topic-groups/{group_id}",
+            axum::routing::put(crate::handlers::connector_console::update_topic_group),
+        )
+        .route(
             "/admin/mcp-servers",
             get(list_mcp_servers).post(create_mcp_server),
         )

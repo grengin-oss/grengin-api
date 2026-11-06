@@ -21,6 +21,7 @@ const fixtures = JSON.parse(await readFile(join(root, 'connector-server-plugin/t
 fixtures.push(...JSON.parse(await readFile(join(root, 'connector-server-plugin/tests/fixtures/read-only-expansion-requests.json'), 'utf8')));
 fixtures.push(...JSON.parse(await readFile(join(root, 'connector-server-plugin/tests/fixtures/fifty-provider-requests.json'), 'utf8')));
 fixtures.push(...JSON.parse(await readFile(join(root, 'connector-server-plugin/tests/fixtures/business-provider-requests.json'), 'utf8')));
+fixtures.push(...JSON.parse(await readFile(join(catalog, '../../scripts/tests/fixtures/google-expansion-requests.json'), 'utf8')));
 const installedExamples = new Map();
 let activeArguments = {};
 const findings = new Map();
@@ -151,7 +152,15 @@ async function install(id, method='client_secret_post', flow='oauth2') {
   const example = fixtures.find(item => item.plugin === id && Object.keys(item.args).length === 0) ?? fixtures.find(item => item.plugin === id);
   assert(example, 'provider must have a reviewed read-tool fixture');
   manifest.tools = manifest.tools.filter(tool => tool.name === example.tool);
+  if (manifest.presentation?.topic_groups) {
+    manifest.presentation.topic_groups = manifest.presentation.topic_groups
+      .map(group => ({...group, tools: group.tools.filter(name => name === example.tool)}))
+      .filter(group => group.tools.length > 0);
+  }
   manifest.base_url = `${local}/vendor/${id}`;
+  for (const base of Object.keys(manifest.additional_base_urls ?? {})) {
+    manifest.additional_base_urls[base] = manifest.base_url;
+  }
   const setup = JSON.parse(await readFile(join(catalog,id,'versions',manifest.version,'setup.json'),'utf8'));
   assert.equal(manifest.auth, 'oauth2', `${id}: OAuth tests must not silently promote API-token plugins`);
   // Navikt requires openid; these two fixture-only scopes are not vendor setup instructions.

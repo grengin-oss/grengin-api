@@ -116,6 +116,7 @@ use utoipa::OpenApi;
         crate::handlers::connector_console::overview,
         crate::handlers::connector_console::people,
         crate::handlers::connector_console::update_tool,
+        crate::handlers::connector_console::update_topic_group,
         crate::handlers::connectors::list,
         crate::handlers::connectors::connect,
         crate::handlers::connectors::status,
@@ -426,6 +427,9 @@ use utoipa::OpenApi;
             ConnectorPeople,
             ConnectorPerson,
             ConnectorUsage,
+            ConnectorTopicGroup,
+            ConnectorTopicGroupState,
+            ConnectorTopicGroupUpdateResult,
             ConnectorToolUpdate,
             McpToolResultDetails,
             McpResultPreview,
@@ -555,6 +559,107 @@ pub struct ApiDoc;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connector_console_endpoints_and_permissions_are_documented() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI JSON");
+        for suffix in ["overview", "people", "executions"] {
+            let path = format!("/admin/mcp-servers/{{server_id}}/{suffix}");
+            let operation = &document["paths"][&path]["get"];
+            assert!(
+                operation["description"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty()),
+                "{path}"
+            );
+            for status in ["200", "401", "403", "404"] {
+                assert!(
+                    operation["responses"].get(status).is_some(),
+                    "{path}: {status}"
+                );
+            }
+        }
+        assert!(
+            document["paths"]["/admin/mcp-servers/{server_id}/tools/{tool_id}"]
+                .get("put")
+                .is_some()
+        );
+        let group_update =
+            &document["paths"]["/admin/mcp-servers/{server_id}/topic-groups/{group_id}"]["put"];
+        for status in ["200", "401", "403", "404", "422", "503"] {
+            assert!(
+                group_update["responses"].get(status).is_some(),
+                "topic group: {status}"
+            );
+        }
+        assert!(
+            document["paths"]["/discovery/connector-plugins"]
+                .get("get")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn connector_console_schemas_are_snake_case_without_credentials() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI JSON");
+        let schemas = &document["components"]["schemas"];
+        assert!(
+            schemas["ConnectorConsole"]["properties"]
+                .get("connected_user_count")
+                .is_some()
+        );
+        assert!(
+            schemas["ConnectorConsole"]["properties"]
+                .get("connectedUserCount")
+                .is_none()
+        );
+        assert!(
+            schemas["ConnectorIntegration"]["properties"]
+                .get("suggested_prompts")
+                .is_some()
+        );
+        assert!(
+            schemas["ConnectorToolUpdate"]["properties"]
+                .get("enabled")
+                .is_some()
+        );
+        assert!(
+            schemas["ConnectorConsole"]["properties"]
+                .get("topic_groups")
+                .is_some()
+        );
+        for field in ["id", "name", "state", "tool_ids"] {
+            assert!(
+                schemas["ConnectorTopicGroup"]["properties"]
+                    .get(field)
+                    .is_some(),
+                "{field}"
+            );
+        }
+        assert_eq!(
+            schemas["ConnectorTopicGroupState"]["enum"],
+            serde_json::json!(["enabled", "disabled", "mixed"])
+        );
+        for schema in [
+            "ConnectorConsole",
+            "ConnectorPerson",
+            "ConnectorIntegration",
+            "ConnectorTopicGroup",
+            "ConnectorTopicGroupUpdateResult",
+        ] {
+            for secret in [
+                "access_token",
+                "refresh_token",
+                "client_secret",
+                "authorization_url",
+            ] {
+                assert!(
+                    schemas[schema]["properties"].get(secret).is_none(),
+                    "{schema}: {secret}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn provider_plugin_schemas_use_snake_case() {

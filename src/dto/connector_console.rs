@@ -91,9 +91,34 @@ pub struct ConnectorConsole {
     pub default_access: McpDefaultAccess,
     pub access: McpServerAccessList,
     pub tools: Vec<McpTool>,
+    pub topic_groups: Vec<ConnectorTopicGroup>,
     pub usage: ConnectorUsage,
     pub reminders_supported: bool,
     pub write_confirmation_supported: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorTopicGroupState {
+    Enabled,
+    Disabled,
+    Mixed,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ConnectorTopicGroup {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub state: ConnectorTopicGroupState,
+    pub tool_ids: Vec<Uuid>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ConnectorTopicGroupUpdateResult {
+    pub group: ConnectorTopicGroup,
+    pub tools: Vec<McpTool>,
 }
 
 #[derive(Deserialize, ToSchema)]

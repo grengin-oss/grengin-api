@@ -39,6 +39,7 @@ pub mod http_client;
 pub mod image_gen_helpers;
 pub mod live_models_cache;
 pub mod mcp_access;
+pub mod mcp_catalog_helpers;
 pub mod mcp_client;
 pub mod mcp_helpers;
 pub mod mcp_oauth;

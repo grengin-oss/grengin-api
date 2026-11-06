@@ -325,6 +325,8 @@ impl DiscoveryCatalog {
                 sha256: version.sha256,
                 tool_groups: serde_json::to_value(compiled.manifest().tool_groups())
                     .map_err(|error| DiscoveryError::InvalidCatalog(error.to_string()))?,
+                topic_groups: serde_json::to_value(compiled.manifest().topic_groups())
+                    .map_err(|error| DiscoveryError::InvalidCatalog(error.to_string()))?,
                 plugin,
                 installation,
                 installation_sha256: version.setup_sha256,
@@ -1170,6 +1172,7 @@ mod tests {
             latest.tool_groups["read_write"],
             serde_json::json!(["create_mail_draft"])
         );
+        assert_eq!(latest.topic_groups, serde_json::json!([]));
         let exact = catalog
             .connector_plugin("test-connector", Some("1.0.0"))
             .await

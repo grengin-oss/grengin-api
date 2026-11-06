@@ -8,6 +8,10 @@ export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 export PYTHONDONTWRITEBYTECODE=1
 export GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR="$catalog/master-data/connector-plugins"
 cd "$root"
+node --check tests/connector-plugin/console-contract.mjs
+node --check tests/connector-plugin/query-budget.mjs
+node --check tests/connector-plugin/topic-groups.mjs
+node --check tests/connector-plugin/oauth-navikt.mjs
 cargo test --locked --workspace -j2 --config 'profile.test.package.grengin-api.codegen-units=256' -- --test-threads=1
 cargo test --locked -p connector-server-plugin --test providers --test business -j2 -- --ignored --test-threads=1
 cargo build --locked -p grengin-api -j2 --config 'profile.dev.package.grengin-api.codegen-units=256'

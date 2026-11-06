@@ -45,8 +45,25 @@ pub struct ConnectorToolGroups {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectorPresentation {
+    #[serde(default)]
     pub suggested_prompts: Vec<String>,
+    /// Topic groups that let administrators switch related tools together. When present,
+    /// every tool belongs to exactly one group. Access is still enforced per tool.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topic_groups: Vec<ConnectorTopicGroup>,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorTopicGroup {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub tools: Vec<String>,
+}
+
+const MAX_TOPIC_GROUPS: usize = 32;
 
 impl ConnectorManifest {
     pub fn tool_groups(&self) -> ConnectorToolGroups {
@@ -60,6 +77,69 @@ impl ConnectorManifest {
         }
         groups
     }
+
+    pub fn topic_groups(&self) -> &[ConnectorTopicGroup] {
+        self.presentation
+            .as_ref()
+            .map(|presentation| presentation.topic_groups.as_slice())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn validate_topic_groups(&self) -> Result<(), &'static str> {
+        let groups = self.topic_groups();
+        if groups.is_empty() {
+            return Ok(());
+        }
+        if groups.len() > MAX_TOPIC_GROUPS {
+            return Err("too many topic groups");
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        let mut owners = BTreeMap::new();
+        for group in groups {
+            if !topic_group_id(&group.id) || !ids.insert(group.id.as_str()) {
+                return Err("topic group id");
+            }
+            if !display_text(&group.name, 60)
+                || group
+                    .description
+                    .as_ref()
+                    .is_some_and(|text| !display_text(text, 240))
+            {
+                return Err("topic group text");
+            }
+            if group.tools.is_empty() {
+                return Err("topic group without tools");
+            }
+            for tool in &group.tools {
+                if owners.insert(tool.as_str(), group.id.as_str()).is_some() {
+                    return Err("tool in more than one topic group");
+                }
+            }
+        }
+        if owners.len() != self.tools.len()
+            || self
+                .tools
+                .iter()
+                .any(|tool| !owners.contains_key(tool.name.as_str()))
+        {
+            return Err("topic groups must cover every tool exactly once");
+        }
+        Ok(())
+    }
+}
+
+fn topic_group_id(value: &str) -> bool {
+    let mut chars = value.chars();
+    value.len() <= 64
+        && chars.next().is_some_and(|first| first.is_ascii_lowercase())
+        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+}
+
+fn display_text(value: &str, max_chars: usize) -> bool {
+    value.trim() == value
+        && !value.is_empty()
+        && value.chars().count() <= max_chars
+        && !value.chars().any(char::is_control)
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]

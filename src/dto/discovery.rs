@@ -85,6 +85,8 @@ pub struct ConnectorPluginDiscoveryResponse {
     pub sha256: String,
     #[schema(value_type = Object)]
     pub tool_groups: Value,
+    #[schema(value_type = Vec<Object>)]
+    pub topic_groups: Value,
     #[schema(value_type = Object)]
     pub plugin: Value,
     #[serde(skip_serializing_if = "Option::is_none")]

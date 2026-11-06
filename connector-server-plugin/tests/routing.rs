@@ -140,6 +140,53 @@ fn download(path: &str, redirects: Value) -> Value {
 }
 
 #[tokio::test]
+async fn fixed_google_action_suffixes_do_not_allow_argument_injection() {
+    let (origin, seen) = serve().await;
+    let plugin = compile(&origin, vec![tool("report", "/properties/{value}:runReport",
+        json!({"request":{"method":"POST","path_parameters":{"value":{"$get":"request.value"}}}}))], json!({})).unwrap();
+    call(&plugin, "report", json!({"value":"123456789"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        seen.lock().await[0].0,
+        "/api/properties/123456789:runReport"
+    );
+    for value in [
+        "123:mutate",
+        "../secret",
+        "123/other",
+        "123?x=1",
+        "123%3Amutate",
+    ] {
+        assert!(matches!(
+            call(&plugin, "report", json!({"value":value})).await,
+            Err(ConnectorError::Arguments)
+        ));
+    }
+    assert_eq!(seen.lock().await.len(), 1);
+    for path in [
+        "/properties/x:{value}",
+        "/properties/{value}:",
+        "/properties/{value}:run:Report",
+        "/properties/{value}:run(Report)",
+    ] {
+        assert!(
+            compile(
+                &origin,
+                vec![tool(
+                    "invalid",
+                    path,
+                    json!({"request":{"path_parameters":{"value":{"$get":"request.value"}}}})
+                )],
+                json!({})
+            )
+            .is_err(),
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn redirects_reach_allowlisted_downloads_without_forwarding_credentials() {
     let (origin, seen) = serve().await;
     let policy = json!({"allowed_hosts": ["127.0.0.1"], "max_hops": 2});

@@ -226,15 +226,20 @@
       "properties": {
         "suggested_prompts": {
           "type": "array",
+          "default": [],
           "items": {
             "type": "string"
           }
+        },
+        "topic_groups": {
+          "description": "Topic groups that let administrators switch related tools together. When present,\nevery tool belongs to exactly one group. Access is still enforced per tool.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConnectorTopicGroup"
+          }
         }
       },
-      "additionalProperties": false,
-      "required": [
-        "suggested_prompts"
-      ]
+      "additionalProperties": false
     },
     "ConnectorRequest": {
       "type": "object",
@@ -426,6 +431,35 @@
         "input_schema",
         "read_only",
         "request"
+      ]
+    },
+    "ConnectorTopicGroup": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "tools"
       ]
     },
     "CredentialDelivery": {

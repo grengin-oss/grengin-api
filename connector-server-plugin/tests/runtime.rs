@@ -117,6 +117,102 @@ fn optional_presentation_is_bounded_and_does_not_change_tool_behavior() {
     }
 }
 
+fn grouped_manifest(groups: Value) -> Value {
+    let mut value = manifest("https://example.com/v1");
+    let mut second = value["tools"][0].clone();
+    second["name"] = json!("search");
+    second["description"] = json!("Search records");
+    value["tools"].as_array_mut().unwrap().push(second);
+    value["presentation"] = json!({"topic_groups": groups});
+    value
+}
+
+#[test]
+fn topic_groups_cover_every_tool_once_without_requiring_prompts() {
+    let groups = json!([
+        {"id":"records","name":"Records","description":"Read single records.","tools":["lookup"]},
+        {"id":"search_2","name":"Search","tools":["search"]}
+    ]);
+    let plugin = CompiledConnector::compile(config(grouped_manifest(groups))).unwrap();
+    let topics = plugin.manifest().topic_groups();
+    assert_eq!(topics.len(), 2);
+    assert_eq!(topics[0].tools, ["lookup"]);
+    assert_eq!(topics[1].description, None);
+    assert!(
+        plugin
+            .manifest()
+            .presentation
+            .as_ref()
+            .unwrap()
+            .suggested_prompts
+            .is_empty()
+    );
+    let ungrouped = CompiledConnector::compile(config(manifest("https://example.com/v1"))).unwrap();
+    assert!(ungrouped.manifest().topic_groups().is_empty());
+}
+
+#[test]
+fn topic_groups_reject_gaps_overlaps_unknown_tools_and_unsafe_text() {
+    let group = |id: &str, name: &str, tools: Value| json!({"id":id,"name":name,"tools":tools});
+    let both = json!(["lookup", "search"]);
+    for invalid in [
+        json!([group("records", "Records", json!(["lookup"]))]),
+        json!([
+            group("records", "Records", both.clone()),
+            group("search", "Search", json!(["search"]))
+        ]),
+        json!([group(
+            "records",
+            "Records",
+            json!(["lookup", "search", "missing"])
+        )]),
+        json!([
+            group("records", "Records", json!(["lookup"])),
+            group("records", "Search", json!(["search"]))
+        ]),
+        json!([
+            group("records", "Records", both.clone()),
+            group("empty", "Empty", json!([]))
+        ]),
+        json!([group("Records", "Records", both.clone())]),
+        json!([group("1records", "Records", both.clone())]),
+        json!([group("records-all", "Records", both.clone())]),
+        json!([group(&"r".repeat(65), "Records", both.clone())]),
+        json!([group("records", "", both.clone())]),
+        json!([group("records", " Records", both.clone())]),
+        json!([group("records", "Rec\nords", both.clone())]),
+        json!([group("records", &"x".repeat(61), both.clone())]),
+        json!([{"id":"records","name":"Records","description":"x".repeat(241),"tools":both.clone()}]),
+        json!([{"id":"records","name":"Records","tools":both.clone(),"enabled":true}]),
+    ] {
+        assert!(
+            CompiledConnector::compile(config(grouped_manifest(invalid.clone()))).is_err(),
+            "{invalid}"
+        );
+    }
+    let one_group_per_tool = |count: usize| {
+        let mut value = manifest("https://example.com/v1");
+        let template = value["tools"][0].clone();
+        let mut tools = Vec::new();
+        let mut groups = Vec::new();
+        for index in 0..count {
+            let mut tool = template.clone();
+            tool["name"] = json!(format!("lookup_{index}"));
+            tools.push(tool);
+            groups.push(group(
+                &format!("g{index}"),
+                "Group",
+                json!([format!("lookup_{index}")]),
+            ));
+        }
+        value["tools"] = json!(tools);
+        value["presentation"] = json!({"topic_groups": groups});
+        CompiledConnector::compile(config(value))
+    };
+    assert!(one_group_per_tool(32).is_ok());
+    assert!(one_group_per_tool(33).is_err());
+}
+
 #[test]
 fn tenant_configuration_requires_explicit_valid_values_and_safe_destinations() {
     let mut value = manifest("https://login.salesforce.com/v65");
@@ -418,7 +514,9 @@ fn rejects_traversal_authorities_and_malformed_path_templates() {
         "/records/{id}{id}",
         "/records/{id",
         "/records/id}",
-        "/records/{id}:x",
+        "/records/x:{id}",
+        "/records/{id}:",
+        "/records/{id}:x:y",
         "/records/{id} x",
         "/records\\id",
         "/records?token=secret",
@@ -435,7 +533,11 @@ fn rejects_traversal_authorities_and_malformed_path_templates() {
 
 #[test]
 fn a_placeholder_may_sit_among_safe_literal_text_in_one_segment() {
-    for path in ["/records/{id}.json", "/Records('{id}')"] {
+    for path in [
+        "/records/{id}.json",
+        "/Records('{id}')",
+        "/records/{id}:runReport",
+    ] {
         let mut value = manifest("https://example.com/v1");
         value["tools"][0]["request"]["path"] = json!(path);
         assert!(CompiledConnector::compile(config(value)).is_ok(), "{path}");

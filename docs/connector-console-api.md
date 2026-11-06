@@ -1,8 +1,10 @@
 # Connector Detail UI Contract
 
-Prepared for backend 0.9.8, on `feat/connector-server-plugin`. Backend and catalog
-changes are local, uncommitted, unpublished additions to the previous pushed work.
-No frontend files, database migrations or shared services are changed here.
+Prepared for backend 0.9.8, on `feat/connector-server-plugin`. This follow-up adds
+exact execution pagination, a permission-filtered picker with batched access
+resolution, and atomic topic-group switches. Rebuild this branch before staging
+these changes. No frontend
+page, database migration or shared-service deployment is included.
 
 ## Screen Mapping
 
@@ -11,16 +13,20 @@ No frontend files, database migrations or shared services are changed here.
 | Installed connector identity | `GET /mcp-servers` now includes `integration.plugin_id`, `plugin_version` and `authentication`; never join by display name |
 | My account status | `/mcp-servers` includes typed `connection_state`: connected, not_connected, needs_reconnect or unavailable |
 | Administration detail page | `GET /admin/mcp-servers/{server_id}/overview` |
+| Native package catalog | `GET /discovery/connector-plugins`, detail `GET /discovery/connector-plugins/{id}?version=1` |
 | Connected by 6 of 9 people | `connected_user_count` / `active_user_count`; local stored state, active workspace accounts, not eligibility or a vendor health probe |
+| Connected-count widget | Use `overview.connected_user_count`; there is no separate count endpoint |
 | Turn off for everyone | Existing `PUT /admin/mcp-servers/{server_id}` with `{"enabled": false}`; retain account tokens, block future tool execution |
 | Connect my account | Select flow using `integration.authentication`, described below |
 | Try asking | `integration.suggested_prompts`; versioned optional manifest presentation, empty for providers without curated prompts; hide the section when empty |
 | What Grengin can do | `overview.tools`: UUID, description, `is_read_only`, `enabled`, access inheritance; only installed tools are supported |
 | Tool switch | `PUT /admin/mcp-servers/{server_id}/tools/{tool_id}` with `{"enabled": false}` or `true` |
-| Who can use it | Existing server access APIs and `overview.access`; use `all_users`, `admin_only`, or `explicit_only` plus department rules |
+| Tool groups | `overview.topic_groups`: `id`, `name`, optional `description`, `state` (`enabled`, `disabled`, `mixed`) and `tool_ids` into `overview.tools` |
+| Group switch | `PUT /admin/mcp-servers/{server_id}/topic-groups/{group_id}` with `{"enabled": false}` or `true` |
+| Who can use it | `GET/PUT /admin/mcp-servers/{server_id}/access` and `overview.access`; use `all_users`, `admin_only`, or `explicit_only` plus department rules |
 | People | `GET /admin/mcp-servers/{server_id}/people?limit=20&offset=0`; limit 1-100, exact offset, deterministic ordering |
 | This week | `overview.usage`, last rolling seven days: actual tool calls, successful calls, failed calls |
-| Open audit log | Existing `GET /admin/mcp-servers/{server_id}/executions` |
+| Open audit log | `GET /admin/mcp-servers/{server_id}/executions?limit=20&offset=0`, exact row offsets, optional `tool_name`, `is_error`, `user_id` filters |
 | Advanced | Existing server configuration, tool access and execution endpoints |
 
 The console and people endpoints require organization-wide `mcp_servers:view`;
@@ -35,6 +41,64 @@ may currently be excluded by a connector access policy. Do not label this count
 "eligible users". Disabling a server retains stored connection counts while its
 displayed per-user state becomes `unavailable`.
 
+Overview returns 401 for missing sign-in, 403 without organization-wide viewing
+permission, and 404 for an unknown server. Expired tokens with refresh
+credentials count as connected; revoked broker connections, empty credentials
+and inactive users do not. It never refreshes a token or calls a vendor.
+
+Execution history uses a stable `executed_at DESC, id DESC` order for timestamp
+ties. The existing limit is clamped to 1-100 (default 50); offsets over 1,000,000
+return 400. Unknown servers return 404, not an empty successful list. This is
+offset pagination, not a frozen snapshot: new executions can shift later pages.
+
+`GET /mcp-servers` now filters installed servers and tools using the existing chat
+access rules. Admin-only/explicit-only defaults hide denied servers; explicit
+server and tool grants remain honored. Only permitted enabled tools are exposed.
+It still returns no account tokens or workspace roster.
+
+The picker and tool list share one resolution pass: one user access context,
+batched server/tool rules, one lookup of referenced department paths, and one
+resolution per server. Explicit per-tool grants remain supported. Query-count
+regressions compare one versus thirteen department-scoped connectors.
+
+## Topic Groups
+
+The 55 existing connectors gain 1.2.0 packages, and five new Google apps have
+1.0.0 packages with groups. They group related tools by topic, such as Gmail's
+Messages, Threads, Attachments, Drafts and Labels, so a long tool list can be switched
+a group at a time. Groups come from the installed plugin version's manifest; a
+server installed from 1.1.0 or earlier, or a custom MCP server, returns an empty
+`topic_groups` list, so render the flat `tools` list instead. When groups are present,
+every installed tool belongs to exactly one group.
+
+`state` is derived from the installed tools: `enabled` when all are on, `disabled`
+when all are off, `mixed` otherwise. Individual tool switches keep working and can
+make a group mixed. The group switch requires organization-wide `mcp_servers:admin`.
+It resolves membership on the server from the installed manifest, never from the
+request, and updates every tool plus one `mcp.tool_group_enabled_changed` audit event
+in one transaction. It returns `{"group": ..., "tools": [...]}` with the new state and
+the updated tools. Unknown servers or group IDs return 404.
+
+Groups do not change access: a disabled group only turns its tools off, and enabling
+one does not override access rules or read-only permissions. The read-only versus
+read/write classification stays separate (`tool_groups` in discovery,
+`is_read_only` per tool). Discovery detail also returns the package's `topic_groups`
+with tool names, for showing groups before installation.
+
+The frontend mock's `getConnectedUsersCount()` helper must be removed/replaced,
+not implemented as a backend compatibility route. The admin list also does not
+return `connected_users_count`: do not infer zero or call overview once for every
+row. Render the measured count on the detail page from its existing overview.
+
+For the existing access UI, change just the default with
+`PUT /admin/mcp-servers/{server_id}/access/default`. Add a rule with
+`POST .../access/rules`; it returns **one McpAccessRule**, not a full access list.
+Delete it with `DELETE .../access/rules/{rule_id}` (204), then refetch `/access`.
+`/{server_id}/tools/access` manages bulk **tool** policies, not server policies.
+The legacy frontend org-wide `/connection` and `/connection/disconnect` URLs are
+not implemented here. Use per-user `/mcp/connections/{server_id}/...` instead;
+do not share one person's OAuth session with the organization.
+
 ## Authentication
 
 `integration` is safe to expose in the signed-in server listing:
@@ -42,7 +106,7 @@ displayed per-user state becomes `unavailable`.
 ```json
 {
   "plugin_id": "notion",
-  "plugin_version": "1.0.1",
+  "plugin_version": "1.2.0",
   "suggested_prompts": ["Find pages about the project roadmap."],
   "authentication": "api_token",
   "supported_authentication": ["oauth2", "api_token"],
@@ -90,22 +154,15 @@ every page is accessible; vendor calls can still return permission errors.
 
 Source: [Notion authorization](https://developers.notion.com/guides/authorization/overview).
 
-The catalog adds new **1.0.1** Gmail/Notion packages and a separate unpublished
-`docs/drafts/grengin-api/0.9.8/connector-console-index.json` candidate. The existing
-local fixture `index.json` remains pinned to 1.0.0 so the older running backend
-can still discover its packages. Existing 1.0.0 bytes and released distributions
-remain unchanged. Gmail suggestions cover read-only functions, not drafting.
-Prepare this candidate without replacing the active local fixture:
-
-```bash
-python3 scripts/connector_plugins_catalog.py \
-  --prepare-distribution /home/anurag/work/grengin-api \
-  --draft-name connector-console-index.json
-```
-
-Do not serve the new candidate to an old backend: its strict manifest parser
-rejects the new presentation field. Review source pins and rebuild the compatible
-backend before the catalog cutover. Neither local draft is a published index.
+The target early-access distribution is
+`https://meta.grengin.com/distributions/grengin-api/0.9.8/index.json`. Its previously
+published revision pins backend `fc13154` and 55 native plugins at 1.1.0. The user
+approved keeping 0.9.8 rather than creating 0.9.9: the replacement will pin the
+reviewed runtime 0.6.0 and 60 plugins (521 tools). Publication is a separate step;
+check the index source commits before assuming the replacement is live. Existing
+installed manifests require an explicit admin update, not just a backend restart.
+Use backend discovery, not global aliases. Older distributions and published
+package bytes remain unchanged.
 
 ## Tool Results
 
@@ -165,28 +222,19 @@ added. Do not send private tool payloads to browser console logs or analytics.
 
 ## Verification Commands
 
-All new Rust runs use one job, a 2 GiB cgroup limit and no swap:
+The backend-only HTTP suite starts disposable fixtures, not the user's demo
+backend or real vendor sessions. Use two compile jobs:
 
 ```bash
-bash tests/connector-plugin/console.sh check
-bash tests/connector-plugin/console.sh runtime
-bash tests/connector-plugin/console.sh catalog
-bash tests/connector-plugin/console.sh unit
-bash tests/connector-plugin/console.sh build
-bash tests/connector-plugin/console.sh http
+bash tests/connector-plugin/review.sh
 ```
 
 The HTTP suite uses a fresh disposable database and local vendor/model fixtures,
 not the user's development database or real connector accounts. No paid model or
 external write calls are needed. The existing live test services are left alone.
 
-### Current Resource Limit
-
-The original 2 GiB build/test cap caused OOM failures. The user subsequently
-authorized 4 GiB: fresh builds and all 853 workspace tests passed. The HTTP run
-caught and fixed camelCase database-column projections in native/broker People
-queries, then passed all 65 checks. Full Navikt/OAuth passed 619 checks. No compiler
-experiments or stale binaries are required. The wrapper defaults to 2 GiB;
-`GRENGIN_CONSOLE_MEMORY_MAX=4G` enables the approved full build/test budget.
-See `docs/connector-session-cache-audit-2026-11-05.md` for exact evidence and
-grengin-list's read-only tool audit for separate vendor/catalog limitations.
+`tests/connector-plugin/console-contract.mjs` is invoked by `http.sh`. It checks
+the actual frontend URLs, sign-in and permission failures, counts and privacy,
+policy changes reflected in the picker, cross-server tool isolation, exact
+execution offsets, timestamp ties, filter combinations and malformed queries.
+Swagger and pure pagination regression cases are also cargo tests.

@@ -1,11 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Duration, Utc};
-use connector_server_plugin::{ConnectorAuth, ConnectorManifest};
+use connector_server_plugin::{
+    ConnectorAuth, ConnectorManifest, ConnectorTopicGroup as ManifestTopicGroup,
+};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, DbErr, EntityTrait, FromQueryResult, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, QueryTrait, Set, TransactionTrait,
+    QueryFilter, QueryOrder, QuerySelect, QueryTrait, Set, TransactionTrait, sea_query::Expr,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -16,13 +20,16 @@ use crate::{
         error::AuthError,
         permissions::{PERMISSION_MCP_ADMIN, PERMISSION_MCP_VIEW},
     },
-    dto::{connector_console::*, mcp::McpServerAccessList},
+    dto::{
+        connector_console::*,
+        mcp::{ListExecutionsQuery, McpServerAccessList, PaginatedMcpToolExecutions},
+    },
     models::{connectors, mcp_connections, mcp_executions, mcp_servers, mcp_tools, users},
     services::{
         auth_audit::record_auth_event,
         authorization::{AuthorizationService, PermissionScopeMode},
         mcp_access::load_server_rules,
-        mcp_helpers::{build_access_rule_dtos, to_tool_dto},
+        mcp_helpers::{build_access_rule_dtos, to_execution_dto, to_tool_dto},
         mcp_service::map_mcp_access_error,
     },
     state::SharedState,
@@ -180,9 +187,69 @@ pub fn catalog_connection_state(
         .unwrap_or(ConnectorConnectionState::NotConnected)
 }
 
+fn installed_topic_groups(server: &mcp_servers::Model) -> Vec<ManifestTopicGroup> {
+    #[derive(Deserialize)]
+    struct Presentation {
+        #[serde(default)]
+        topic_groups: Vec<ManifestTopicGroup>,
+    }
+    server
+        .connection_config
+        .pointer("/connector_plugin/manifest/presentation")
+        .and_then(|value| Presentation::deserialize(value).ok())
+        .map(|presentation| presentation.topic_groups)
+        .unwrap_or_default()
+}
+
+fn topic_groups(
+    definitions: Vec<ManifestTopicGroup>,
+    tools: &[mcp_tools::Model],
+) -> Vec<ConnectorTopicGroup> {
+    let by_name: HashMap<&str, &mcp_tools::Model> = tools
+        .iter()
+        .map(|tool| (tool.original_name.as_str(), tool))
+        .collect();
+    definitions
+        .into_iter()
+        .filter_map(|group| {
+            let members: Vec<&mcp_tools::Model> = group
+                .tools
+                .iter()
+                .filter_map(|name| by_name.get(name.as_str()).copied())
+                .collect();
+            let enabled = members.iter().filter(|tool| tool.enabled).count();
+            let state = if members.is_empty() {
+                return None;
+            } else if enabled == members.len() {
+                ConnectorTopicGroupState::Enabled
+            } else if enabled == 0 {
+                ConnectorTopicGroupState::Disabled
+            } else {
+                ConnectorTopicGroupState::Mixed
+            };
+            Some(ConnectorTopicGroup {
+                id: group.id,
+                name: group.name,
+                description: group.description,
+                state,
+                tool_ids: members.iter().map(|tool| tool.id).collect(),
+            })
+        })
+        .collect()
+}
+
 fn database_error(error: DbErr) -> AuthError {
     eprintln!("connector console database error: {error}");
     AuthError::DbTimeout
+}
+
+fn execution_pagination(query: &ListExecutionsQuery) -> Result<(u64, u64), AuthError> {
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
+    let offset = query.offset.unwrap_or(0);
+    if offset > 1_000_000 {
+        return Err(AuthError::InvalidRequest { field: "offset" });
+    }
+    Ok((limit, offset))
 }
 
 pub struct ConnectorConsoleService<'a> {
@@ -352,6 +419,49 @@ impl<'a> ConnectorConsoleService<'a> {
         Ok((total, connected))
     }
 
+    pub async fn executions(
+        &self,
+        actor: Uuid,
+        id: Uuid,
+        query: ListExecutionsQuery,
+    ) -> Result<PaginatedMcpToolExecutions, AuthError> {
+        self.server(actor, id, PERMISSION_MCP_VIEW).await?;
+        let (limit, offset) = execution_pagination(&query)?;
+        let mut finder =
+            mcp_executions::Entity::find().filter(mcp_executions::Column::ServerId.eq(id));
+        if let Some(tool) = query.tool_name {
+            finder = finder.filter(mcp_executions::Column::ToolName.eq(tool));
+        }
+        if let Some(is_error) = query.is_error {
+            finder = finder.filter(mcp_executions::Column::IsError.eq(is_error));
+        }
+        if let Some(user_id) = query.user_id {
+            finder = finder.filter(mcp_executions::Column::UserId.eq(user_id));
+        }
+        let total = finder
+            .clone()
+            .count(&self.state.database)
+            .await
+            .map_err(database_error)?;
+        let executions = finder
+            .order_by_desc(mcp_executions::Column::ExecutedAt)
+            .order_by_desc(mcp_executions::Column::Id)
+            .limit(limit)
+            .offset(offset)
+            .all(&self.state.database)
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(to_execution_dto)
+            .collect();
+        Ok(PaginatedMcpToolExecutions {
+            executions,
+            total: total as i64,
+            limit: limit as i64,
+            offset: offset as i64,
+        })
+    }
+
     pub async fn overview(&self, actor: Uuid, id: Uuid) -> Result<ConnectorConsole, AuthError> {
         let server = self.server(actor, id, PERMISSION_MCP_VIEW).await?;
         let now = Utc::now();
@@ -407,6 +517,7 @@ impl<'a> ConnectorConsoleService<'a> {
                 .await
                 .map_err(map_mcp_access_error)?,
         };
+        let topic_groups = topic_groups(installed_topic_groups(&server), &tools);
         Ok(ConnectorConsole {
             server_id: id,
             name: server.name,
@@ -419,6 +530,7 @@ impl<'a> ConnectorConsoleService<'a> {
             connected_user_count,
             default_access: server.default_access,
             access,
+            topic_groups,
             tools: tools.iter().map(to_tool_dto).collect(),
             usage: ConnectorUsage {
                 period_start,
@@ -472,7 +584,7 @@ impl<'a> ConnectorConsoleService<'a> {
             .all(&self.state.database)
             .await
             .map_err(database_error)?;
-        let mut connections: std::collections::HashMap<_, _> = self
+        let mut connections: HashMap<_, _> = self
             .connection_rows(&server, &page.iter().map(|p| p.id).collect::<Vec<_>>())
             .await?
             .into_iter()
@@ -546,6 +658,72 @@ impl<'a> ConnectorConsoleService<'a> {
         tx.commit().await.map_err(database_error)?;
         Ok(to_tool_dto(&saved))
     }
+
+    pub async fn update_topic_group(
+        &self,
+        actor: Uuid,
+        server_id: Uuid,
+        group_id: &str,
+        request: ConnectorToolUpdate,
+    ) -> Result<ConnectorTopicGroupUpdateResult, AuthError> {
+        self.server(actor, server_id, PERMISSION_MCP_ADMIN).await?;
+        let tx = self.state.database.begin().await.map_err(database_error)?;
+        // Locking the server row keeps membership stable against a concurrent plugin upgrade.
+        let server = mcp_servers::Entity::find_by_id(server_id)
+            .lock_exclusive()
+            .one(&tx)
+            .await
+            .map_err(database_error)?
+            .ok_or(AuthError::ResourceNotFound)?;
+        let group = installed_topic_groups(&server)
+            .into_iter()
+            .find(|group| group.id == group_id)
+            .ok_or(AuthError::ResourceNotFound)?;
+        let members = mcp_tools::Entity::find()
+            .filter(mcp_tools::Column::ServerId.eq(server_id))
+            .filter(mcp_tools::Column::OriginalName.is_in(group.tools.iter().map(String::as_str)))
+            .order_by_asc(mcp_tools::Column::Name)
+            .lock_exclusive()
+            .all(&tx)
+            .await
+            .map_err(database_error)?;
+        if members.is_empty() {
+            return Err(AuthError::ResourceNotFound);
+        }
+        let now = Utc::now();
+        let tool_ids: Vec<Uuid> = members.iter().map(|tool| tool.id).collect();
+        mcp_tools::Entity::update_many()
+            .col_expr(mcp_tools::Column::Enabled, Expr::value(request.enabled))
+            .col_expr(mcp_tools::Column::UpdatedAt, Expr::value(now))
+            .filter(mcp_tools::Column::Id.is_in(tool_ids.iter().copied()))
+            .exec(&tx)
+            .await
+            .map_err(database_error)?;
+        record_auth_event(
+            &tx,
+            "mcp.tool_group_enabled_changed",
+            Some(actor),
+            serde_json::json!({"server_id":server_id,"group_id":group.id,"tool_ids":tool_ids,"enabled":request.enabled}),
+        )
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
+        tx.commit().await.map_err(database_error)?;
+        let tools: Vec<mcp_tools::Model> = members
+            .into_iter()
+            .map(|mut tool| {
+                tool.enabled = request.enabled;
+                tool.updated_at = now;
+                tool
+            })
+            .collect();
+        let group = topic_groups(vec![group], &tools)
+            .pop()
+            .ok_or(AuthError::ResourceNotFound)?;
+        Ok(ConnectorTopicGroupUpdateResult {
+            group,
+            tools: tools.iter().map(to_tool_dto).collect(),
+        })
+    }
 }
 
 pub fn result_preview(value: &Value) -> McpResultPreview {
@@ -607,6 +785,134 @@ impl std::io::Write for PreviewWriter {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn installed_tool(name: &str, enabled: bool) -> mcp_tools::Model {
+        mcp_tools::Model {
+            id: Uuid::new_v4(),
+            server_id: Uuid::nil(),
+            server_name: "Gmail".into(),
+            name: name.into(),
+            original_name: name.into(),
+            description: None,
+            input_schema: json!({}),
+            parameters: json!({}),
+            enabled,
+            is_read_only: true,
+            inherit_access_from_server: true,
+            last_synced_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn topic_group_state_follows_installed_tools_and_skips_missing_ones() {
+        let definitions = serde_json::from_value(json!([
+            {"id":"messages","name":"Messages","tools":["search_messages","get_message"]},
+            {"id":"threads","name":"Threads","description":"Conversation threads.","tools":["get_thread"]},
+            {"id":"labels","name":"Labels","tools":["list_labels"]},
+            {"id":"drafts","name":"Drafts","tools":["list_drafts"]}
+        ]))
+        .unwrap();
+        let tools = [
+            installed_tool("get_message", true),
+            installed_tool("search_messages", false),
+            installed_tool("get_thread", true),
+            installed_tool("list_labels", false),
+        ];
+        let groups = topic_groups(definitions, &tools);
+        let summary: Vec<_> = groups
+            .iter()
+            .map(|group| (group.id.as_str(), group.state, group.tool_ids.len()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("messages", ConnectorTopicGroupState::Mixed, 2),
+                ("threads", ConnectorTopicGroupState::Enabled, 1),
+                ("labels", ConnectorTopicGroupState::Disabled, 1),
+            ]
+        );
+        assert_eq!(groups[0].tool_ids, [tools[1].id, tools[0].id]);
+        assert_eq!(
+            groups[1].description.as_deref(),
+            Some("Conversation threads.")
+        );
+    }
+
+    fn test_server() -> mcp_servers::Model {
+        mcp_servers::Model {
+            id: Uuid::nil(),
+            name: "Gmail".into(),
+            description: None,
+            icon: None,
+            transport_type: mcp_servers::McpTransportType::Http,
+            connection_config: json!({}),
+            client_id: None,
+            client_secret: None,
+            url: None,
+            enabled: true,
+            status: None,
+            status_message: None,
+            tool_count: 0,
+            default_access: mcp_servers::McpDefaultAccess::AllUsers,
+            last_connected_at: None,
+            last_synced_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn installed_topic_groups_ignore_servers_without_valid_plugin_groups() {
+        let mut server = mcp_servers::Model {
+            connection_config: json!({"connector_plugin":{"manifest":{"presentation":{
+                "suggested_prompts":["Find invoices"],
+                "topic_groups":[{"id":"messages","name":"Messages","tools":["get_message"]}]
+            }}}}),
+            ..test_server()
+        };
+        assert_eq!(installed_topic_groups(&server)[0].id, "messages");
+        for config in [
+            json!({}),
+            json!({"connector_plugin":{"manifest":{"presentation":{"suggested_prompts":[]}}}}),
+            json!({"connector_plugin":{"manifest":{"presentation":{"topic_groups":"invalid"}}}}),
+        ] {
+            server.connection_config = config;
+            assert!(installed_topic_groups(&server).is_empty());
+        }
+    }
+
+    #[test]
+    fn execution_pagination_keeps_non_page_aligned_offsets() {
+        let query = serde_json::from_value(json!({"limit": 2, "offset": 1})).unwrap();
+        assert_eq!(execution_pagination(&query).unwrap(), (2, 1));
+    }
+
+    #[test]
+    fn execution_pagination_preserves_legacy_limit_clamping() {
+        for (input, expected) in [
+            (json!({}), 50),
+            (json!({"limit": 0}), 1),
+            (json!({"limit": u64::MAX}), 100),
+        ] {
+            let query = serde_json::from_value(input).unwrap();
+            assert_eq!(execution_pagination(&query).unwrap(), (expected, 0));
+        }
+    }
+
+    #[test]
+    fn execution_pagination_bounds_offsets_before_database_casts() {
+        for offset in [1_000_001, u64::MAX] {
+            let query = serde_json::from_value(json!({"offset": offset})).unwrap();
+            assert!(matches!(
+                execution_pagination(&query),
+                Err(AuthError::InvalidRequest { field: "offset" })
+            ));
+        }
+        let query = serde_json::from_value(json!({"offset": 1_000_000})).unwrap();
+        assert_eq!(execution_pagination(&query).unwrap(), (50, 1_000_000));
+    }
 
     #[test]
     fn expired_refreshable_sessions_are_not_prematurely_disconnected() {

@@ -6,6 +6,9 @@ import { open, readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createInterface } from 'node:readline';
 import { dirname, join } from 'node:path';
+import { runConsoleContract } from './console-contract.mjs';
+import { runQueryBudget } from './query-budget.mjs';
+import { runTopicAudit } from './topic-groups.mjs';
 
 const root = process.env.GRENGIN_BACKEND_ROOT;
 const scratch = process.env.GRENGIN_PLUGIN_TEST_ROOT;
@@ -250,6 +253,9 @@ try {
   check('admin call uses only the admin connection token',vendorCalls.at(-1),'Bearer fixture-alice');
   await chat(member);
   check('member call uses only the member connection token',vendorCalls.at(-1),'Bearer fixture-bob');
+  await runConsoleContract({call,check,sql,quote,server,request,admin,member});
+  await runTopicAudit({call,check,sql,quote,request,admin,member});
+  await runQueryBudget({call,check,sql,quote,server,member});
   const toolId=sql(`SELECT id FROM mcp_tools WHERE "serverId"=${quote(server.id)}`);
   await call('PUT',`/admin/mcp-servers/${server.id}/tools/${toolId}`,{enabled:false},403,member);
   await call('PUT',`/admin/mcp-servers/${server.id}/tools/${randomUUID()}`,{enabled:false},404);

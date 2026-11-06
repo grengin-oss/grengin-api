@@ -203,12 +203,19 @@ async fn every_provider_tool_obeys_its_http_contract_and_preserves_page_cursors(
             .unwrap(),
         );
         let root = PathBuf::from(std::env::var("GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR").unwrap());
-        let candidate_cases = root
+        let catalog_fixtures = root
             .parent()
             .unwrap()
             .parent()
             .unwrap()
-            .join("scripts/tests/fixtures/connector-content-requests.json");
+            .join("scripts/tests/fixtures");
+        let google_cases = catalog_fixtures.join("google-expansion-requests.json");
+        if google_cases.exists() {
+            cases.extend(
+                serde_json::from_slice::<Vec<Case>>(&std::fs::read(google_cases).unwrap()).unwrap(),
+            );
+        }
+        let candidate_cases = catalog_fixtures.join("connector-content-requests.json");
         if candidate_cases.exists() {
             let extra: Vec<Case> =
                 serde_json::from_slice(&std::fs::read(candidate_cases).unwrap()).unwrap();
@@ -480,6 +487,63 @@ fn tool_categories_follow_annotations_not_http_verbs() {
             .iter()
             .any(|t| t.name == "query_free_busy" && t.request.method.as_str() == "POST")
     );
+}
+
+#[tokio::test]
+#[ignore = "cross-repository catalog test; requires GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR"]
+async fn google_chat_search_enforces_the_vendor_length_boundary_before_network() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let fixture = Arc::new(Mutex::new(Fixture::default()));
+    let router = Router::new().fallback(respond).with_state(fixture.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let mut manifest = manifests().remove("google-chat").unwrap();
+    manifest["base_url"] = json!(format!("{origin}/v1"));
+    let plugin = CompiledConnector::compile(ConnectorPluginConfig {
+        manifest,
+        allow_insecure_http: true,
+        allow_private_network: true,
+        ..Default::default()
+    })
+    .unwrap();
+    for length in [1, 1000] {
+        plugin
+            .call(
+                "search_messages",
+                json!({"query":"x".repeat(length)}),
+                CallContext {
+                    user_id: "test",
+                    access_token: Some("fixture"),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture.lock().await.captured["body"]["filter"]
+                .as_str()
+                .unwrap()
+                .len(),
+            length
+        );
+    }
+    let before = fixture.lock().await.captured.clone();
+    for length in [0, 1001, 2000] {
+        assert!(matches!(
+            plugin
+                .call(
+                    "search_messages",
+                    json!({"query":"x".repeat(length)}),
+                    CallContext {
+                        user_id: "test",
+                        access_token: Some("fixture")
+                    }
+                )
+                .await,
+            Err(ConnectorError::Arguments)
+        ));
+    }
+    assert_eq!(fixture.lock().await.captured, before);
+    server.abort();
 }
 
 #[tokio::test]

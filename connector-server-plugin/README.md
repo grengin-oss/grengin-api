@@ -71,7 +71,7 @@ draft creation. It is a configuration example, not a claim of live Microsoft tes
 Use your own Entra application, minimal delegated scopes, and any required admin
 consent. This does not use Work IQ or bypass Microsoft licensing/API restrictions.
 
-All 55 provider packages (424 read-only tools in the local 1.1.0 candidates) live in the separate `grengin-list` repository,
+The reviewed catalog has 60 provider packages and 521 read-only tools in the separate `grengin-list` repository,
 under `master-data/connector-plugins/<id>/versions/<version>/plugin.json`. Each has a
 versioned `setup.json` declaring OAuth endpoints/scopes or API credential requirements,
 configuration requirements and vendor-specific constraints, without secrets. Their setup
@@ -85,19 +85,21 @@ Grengin API 0.9.8 introduces `GET /discovery/connector-plugins` and
 They use the optional `connectorPlugins` family of the exact backend distribution,
 sharing the existing AI/auth cache and version selectors. Detail verifies package
 SHA-256, identity, version, schema and default destination policy before returning
-the manifest and its read/write tool groups. A pinned setup digest also returns
+the manifest, its read/write tool groups and its topic groups. A pinned setup digest also returns
 `installation` and `installation_sha256`, verified against that version's setup.json.
 Requests support ETags and never
 install catalog entries into the database.
 
-The backend distribution is 0.9.8; the runtime crate is 0.5.0; provider packages
-use schema_version 1 (local 1.1.0 candidates retain the immutable 1.0.x packages). These versions are independent. Runtime upgrades
+The backend distribution is 0.9.8; the runtime crate is 0.6.0; provider packages
+use schema_version 1 (55 existing providers gain 1.2.0 packages; five new Google apps start at 1.0.0). These versions are independent. Runtime upgrades
 do not require rewriting old provider packages. Only missing pinned packages allow
 version fallback; invalid hashes and outages fail explicitly. Distributions without
 the new family retain working AI/auth discovery and return 404 for connectors.
 
-The local catalog draft is deliberately outside `master-data` with null source
-pins until commits are approved. It is not deployable or publishable as-is.
+The user-approved target remains the early-access 0.9.8 distribution. Its replacement
+must pin the reviewed backend and catalog source commits before publication. Older
+distributions and previously published versioned packages remain unchanged. Existing
+installed manifests do not update automatically when the distribution changes.
 
 ## Business Apps
 
@@ -129,6 +131,13 @@ bash tests/connector-plugin/oauth-navikt.sh protocols
 - `auth` is `oauth2`, `api_key` or `none`.
 - Optional `presentation.suggested_prompts` supplies up to eight plain-text
   suggestions (240 characters each), not executable templates or hidden prompts.
+- Optional `presentation.topic_groups` (runtime 0.6.0+) groups related tools so an
+  administrator can switch them together, for example Gmail's Messages, Threads and
+  Attachments. Each group has an `id` (`[a-z][a-z0-9_]*`, up to 64 characters), a
+  `name` (up to 60 characters), an optional `description` (up to 240) and its `tools`.
+  When groups are present, every tool belongs to exactly one group; at most 32 groups.
+  Groups are presentation only: access rules and read-only checks still apply per
+  tool. Runtimes before 0.6.0 reject manifests that declare groups.
 - `configuration_schema` validates non-secret tenant/account identifiers before installation.
   `base_url_override` belongs in the plugin wrapper; `base_url_policy` can require
   a tenant-specific host and constrain it to approved domain suffixes.
@@ -256,7 +265,9 @@ The signed-in `/mcp-servers` response includes safe plugin identity, selected
 authentication method and optional suggested prompts. Organization-wide MCP
 viewers can use `/admin/mcp-servers/{id}/overview` and `/people` for the connector
 detail screen. MCP admins can change an installed tool's `enabled` flag through
-`PUT /admin/mcp-servers/{id}/tools/{tool_id}` without replacing access rules.
+`PUT /admin/mcp-servers/{id}/tools/{tool_id}` without replacing access rules, or
+every tool in one topic group through `PUT /admin/mcp-servers/{id}/topic-groups/{group_id}`.
+The overview reports each group as `enabled`, `disabled` or `mixed`.
 Chat tool results carry bounded previews and execution metadata alongside their
 unchanged output. See [the UI contract](../docs/connector-console-api.md) for exact
 fields, permission boundaries and unsupported controls. There is no new migration.
