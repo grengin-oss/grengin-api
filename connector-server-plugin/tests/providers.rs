@@ -491,6 +491,107 @@ fn tool_categories_follow_annotations_not_http_verbs() {
 
 #[tokio::test]
 #[ignore = "cross-repository catalog test; requires GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR"]
+async fn google_calendar_opaque_ids_preserve_fragments_as_data_and_cannot_escape_the_path() {
+    let root = PathBuf::from(std::env::var("GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR").unwrap());
+    let candidate: Value = serde_json::from_slice(
+        &std::fs::read(root.join("google-calendar/versions/1.2.1/plugin.json")).unwrap(),
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let fixture = Arc::new(Mutex::new(Fixture::default()));
+    let router = Router::new().fallback(respond).with_state(fixture.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let config = |mut manifest: Value| {
+        manifest["base_url"] = json!(format!("{origin}/v3"));
+        ConnectorPluginConfig {
+            manifest,
+            allow_insecure_http: true,
+            allow_private_network: true,
+            ..Default::default()
+        }
+    };
+    let old_manifest = serde_json::from_slice(
+        &std::fs::read(root.join("google-calendar/versions/1.2.0/plugin.json")).unwrap(),
+    )
+    .unwrap();
+    let old = CompiledConnector::compile(config(old_manifest)).unwrap();
+    let id = "en.fixture#holiday@group.v.calendar.google.com";
+    assert!(matches!(
+        old.call(
+            "list_events",
+            json!({"calendar_id":id}),
+            CallContext {
+                user_id: "fixture-a",
+                access_token: Some("fixture-token-a")
+            }
+        )
+        .await,
+        Err(ConnectorError::Arguments)
+    ));
+    assert!(fixture.lock().await.captured.is_null());
+    let plugin = CompiledConnector::compile(config(candidate)).unwrap();
+    for (calendar, encoded) in [
+        ("primary", "primary"),
+        (id, "en.fixture%23holiday@group.v.calendar.google.com"),
+        ("calendar?other=1", "calendar%3Fother=1"),
+        ("calendar%23literal", "calendar%2523literal"),
+        ("calendar/part", "calendar%2Fpart"),
+    ] {
+        for tool in ["list_events", "get_event", "search_events"] {
+            for (user, token) in [
+                ("fixture-a", "fixture-token-a"),
+                ("fixture-b", "fixture-token-b"),
+            ] {
+                let args = match tool {
+                    "get_event" => json!({"calendar_id":calendar,"event_id":"event123"}),
+                    "search_events" => json!({"calendar_id":calendar,"query":"fixture"}),
+                    _ => json!({"calendar_id":calendar}),
+                };
+                plugin
+                    .call(
+                        tool,
+                        args,
+                        CallContext {
+                            user_id: user,
+                            access_token: Some(token),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let captured = fixture.lock().await.captured.clone();
+                let suffix = if tool == "get_event" { "/event123" } else { "" };
+                assert_eq!(
+                    captured["path"],
+                    format!("/v3/calendars/{encoded}/events{suffix}")
+                );
+                assert_eq!(captured["authorization"], format!("Bearer {token}"));
+                assert!(!captured["query"].as_str().unwrap().contains("other=1"));
+            }
+        }
+    }
+    let before = fixture.lock().await.captured.clone();
+    for calendar in ["", ".", "..", "a/../b", "line\nbreak"] {
+        assert!(matches!(
+            plugin
+                .call(
+                    "list_events",
+                    json!({"calendar_id":calendar}),
+                    CallContext {
+                        user_id: "fixture-a",
+                        access_token: Some("fixture-token-a")
+                    }
+                )
+                .await,
+            Err(ConnectorError::Arguments)
+        ));
+    }
+    assert_eq!(fixture.lock().await.captured, before);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore = "cross-repository catalog test; requires GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR"]
 async fn google_chat_search_enforces_the_vendor_length_boundary_before_network() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
