@@ -60,10 +60,10 @@ fn all_provider_manifests_validate_and_have_no_embedded_credentials() {
     let manifests = manifests();
     let root = PathBuf::from(std::env::var("GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR").unwrap());
     let catalog: Value = serde_json::from_slice(
-        &std::fs::read(root.parent().unwrap().join("connectors.json")).unwrap(),
+        &std::fs::read(root.parent().unwrap().join("connector-plugins.json")).unwrap(),
     )
     .unwrap();
-    let expected: BTreeSet<_> = catalog["catalog"]
+    let expected: BTreeSet<_> = catalog
         .as_array()
         .unwrap()
         .iter()
@@ -114,7 +114,7 @@ async fn every_provider_tool_obeys_its_http_contract_and_preserves_page_cursors(
         Json(json!({
             "path":uri.path(),"query":uri.query().unwrap_or(""),"method":method.as_str(),
             "headers":headers.iter().map(|(name,value)|(name.as_str(),value.to_str().unwrap())).collect::<BTreeMap<_,_>>(),
-            "ok":true,"errors":[],
+            "ok":true,"errors":[],"code":0,
             "authorization":headers.get("authorization").and_then(|v|v.to_str().ok()),
             "prefer":headers.get("prefer").and_then(|v|v.to_str().ok()),
             "body":if body.is_empty(){Value::Null}else{serde_json::from_slice::<Value>(&body).unwrap()},
@@ -125,8 +125,14 @@ async fn every_provider_tool_obeys_its_http_contract_and_preserves_page_cursors(
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let result = async {
         let manifests = manifests();
-        let cases: Vec<Case> =
+        let mut cases: Vec<Case> =
             serde_json::from_str(include_str!("fixtures/provider-requests.json")).unwrap();
+        cases.extend(
+            serde_json::from_str::<Vec<Case>>(include_str!(
+                "fixtures/business-provider-requests.json"
+            ))
+            .unwrap(),
+        );
         let mut covered = BTreeSet::new();
         for case in cases {
             let manifest = manifests[&case.plugin].clone();
@@ -356,6 +362,11 @@ fn reviewed_tool_inventory_matches_manifests_scopes_and_categories() {
                         | "dev.wix.com"
                         | "developer.wordpress.com"
                         | "github.com"
+                        | "www.zoho.com"
+                        | "desk.zoho.com"
+                        | "www.odoo.com"
+                        | "api.sap.com"
+                        | "help.sap.com"
                 )
             ));
         }

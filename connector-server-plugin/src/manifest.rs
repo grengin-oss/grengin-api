@@ -75,6 +75,8 @@ pub struct BaseUrlPolicy {
     pub allowed_host_suffixes: Vec<String>,
     #[serde(default)]
     pub required_override: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_custom_public_host: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]

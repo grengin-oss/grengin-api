@@ -99,6 +99,9 @@
     "BaseUrlPolicy": {
       "type": "object",
       "properties": {
+        "allow_custom_public_host": {
+          "type": "boolean"
+        },
         "allowed_host_suffixes": {
           "type": "array",
           "items": {

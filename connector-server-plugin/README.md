@@ -65,7 +65,7 @@ draft creation. It is a configuration example, not a claim of live Microsoft tes
 Use your own Entra application, minimal delegated scopes, and any required admin
 consent. This does not use Work IQ or bypass Microsoft licensing/API restrictions.
 
-All 34 provider packages (206 read-only tools) live in the separate `grengin-list` repository,
+All 39 provider packages (268 read-only tools) live in the separate `grengin-list` repository,
 under `master-data/connector-plugins/<id>/versions/1.0.0/plugin.json`. Each has a
 versioned `setup.json` declaring OAuth endpoints/scopes or API credential requirements,
 configuration requirements and vendor-specific constraints, without secrets. Their setup
@@ -84,7 +84,7 @@ the manifest and its read/write tool groups. A pinned setup digest also returns
 Requests support ETags and never
 install catalog entries into the database.
 
-The backend distribution is 0.9.8; the runtime crate is 0.2.0; provider packages
+The backend distribution is 0.9.8; the runtime crate is 0.4.0; provider packages
 are 1.0.0 with schema_version 1. These versions are independent. Runtime upgrades
 do not require rewriting old provider packages. Only missing pinned packages allow
 version fallback; invalid hashes and outages fail explicitly. Distributions without
@@ -187,3 +187,18 @@ Generate the JSON Schema with `cargo run -p connector-server-plugin --example sc
 read-only archive of the website's `feat/connector-open-access` service branch.
 It needs that checkout's installed Node dependencies but does not switch branches
 or modify/deploy the Worker. Override `GRENGIN_CONNECTOR_SERVICE_REF` when needed.
+
+## Business Preview Packages
+
+Zoho CRM, Books, Desk, Odoo 19 JSON-2 and SAP S/4HANA add 62 read-only tools.
+Zoho uses explicit regional OAuth profiles; Books/Desk organization selection is
+per-call. Odoo requires an administrator-selected public HTTPS host and database
+with per-user API keys. SAP uses manually supplied tenant bearer tokens, not an
+automatic OAuth adapter. Runtime 0.4.0 adds the explicit self-hosted destination
+policy without weakening TLS, private-IP, DNS or redirect validation.
+
+The tool inventory is still a preview pending missing-tool completion and real
+account testing. See the catalog business-connectors-final-audit.md before any
+publication. Run bash tests/connector-plugin/business-only.sh with the catalog
+checkout in GRENGIN_CONNECTOR_CATALOG_REPO. No automatic installation or R2
+publication is performed.

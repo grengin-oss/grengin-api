@@ -120,7 +120,10 @@ impl CompiledConnector {
         )?;
         let mut has_required_base_url = true;
         if let Some(policy) = &manifest.base_url_policy {
-            if policy.allowed_host_suffixes.is_empty()
+            // Self-hosted services require explicit opt-in and an administrator-supplied URL.
+            if (policy.allow_custom_public_host
+                && (!policy.required_override || !policy.allowed_host_suffixes.is_empty()))
+                || (!policy.allow_custom_public_host && policy.allowed_host_suffixes.is_empty())
                 || policy.allowed_host_suffixes.len() > 8
                 || policy.allowed_host_suffixes.iter().any(|suffix| {
                     !suffix.starts_with('.')
@@ -146,6 +149,7 @@ impl CompiledConnector {
                             .parse::<std::net::IpAddr>()
                             .is_ok_and(|ip| ip.is_loopback()));
                 if !local
+                    && !policy.allow_custom_public_host
                     && !policy
                         .allowed_host_suffixes
                         .iter()
