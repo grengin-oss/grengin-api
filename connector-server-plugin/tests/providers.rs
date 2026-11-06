@@ -4,19 +4,22 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
+    sync::Arc,
 };
 
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::OriginalUri,
+    extract::{OriginalUri, State},
     http::{HeaderMap, Method},
+    response::{IntoResponse, Response},
 };
 use connector_server_plugin::{
     CallContext, CompiledConnector, ConnectorError, ConnectorPluginConfig,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::Mutex;
 use url::Url;
 
 #[derive(Deserialize)]
@@ -36,6 +39,61 @@ struct Case {
     base_url_override: Option<String>,
     #[serde(default)]
     headers: BTreeMap<String, String>,
+    #[serde(default)]
+    response_pointer: Option<String>,
+    #[serde(default)]
+    mock_response: Option<Value>,
+    #[serde(default)]
+    mock_text: Option<String>,
+    #[serde(default)]
+    mock_mime: Option<String>,
+    #[serde(default)]
+    expected_content: Option<Value>,
+    #[serde(default)]
+    query_pairs: Option<Vec<(String, String)>>,
+    #[serde(default)]
+    forbidden_headers: Vec<String>,
+}
+
+#[derive(Default)]
+struct Fixture {
+    response: Option<Value>,
+    text: Option<String>,
+    mime: Option<String>,
+    captured: Value,
+}
+
+async fn respond(
+    State(state): State<Arc<Mutex<Fixture>>>,
+    OriginalUri(uri): OriginalUri,
+    method: Method,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let captured = json!({
+        "path":uri.path(),"query":uri.query().unwrap_or(""),"method":method.as_str(),
+        "headers":headers.iter().map(|(name,value)|(name.as_str(),value.to_str().unwrap())).collect::<BTreeMap<_,_>>(),
+        "ok":true,"errors":[],"code":0,
+        "authorization":headers.get("authorization").and_then(|v|v.to_str().ok()),
+        "prefer":headers.get("prefer").and_then(|v|v.to_str().ok()),
+        "body":if body.is_empty(){Value::Null}else{serde_json::from_slice::<Value>(&body).unwrap()},
+        "value":[{"id":"fixture"}],"items":[{"id":"fixture"}],
+        "nextPageToken":"opaque+/=","@odata.nextLink":"https://graph.microsoft.com/v1.0/next?$skiptoken=opaque"
+    });
+    let mut state = state.lock().await;
+    state.captured = captured.clone();
+    if let Some(text) = &state.text {
+        (
+            [(
+                axum::http::header::CONTENT_TYPE,
+                state.mime.as_deref().unwrap_or("text/plain"),
+            )],
+            text.clone(),
+        )
+            .into_response()
+    } else {
+        Json(state.response.clone().unwrap_or(captured)).into_response()
+    }
 }
 
 fn manifests() -> BTreeMap<String, Value> {
@@ -72,7 +130,13 @@ fn all_provider_manifests_validate_and_have_no_embedded_credentials() {
     assert_eq!(manifests.keys().cloned().collect::<BTreeSet<_>>(), expected);
     for (id, value) in manifests {
         let setup: Value = serde_json::from_slice(
-            &std::fs::read(root.join(&id).join("versions/1.0.0/setup.json")).unwrap(),
+            &std::fs::read(
+                root.join(&id)
+                    .join("versions")
+                    .join(value["version"].as_str().unwrap())
+                    .join("setup.json"),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(setup["plugin_id"], id);
@@ -84,7 +148,10 @@ fn all_provider_manifests_validate_and_have_no_embedded_credentials() {
             ..Default::default()
         })
         .unwrap();
-        assert_eq!(plugin.manifest().version, "1.0.0");
+        assert_eq!(
+            plugin.manifest().version,
+            value["version"].as_str().unwrap()
+        );
         assert!(
             plugin
                 .manifest()
@@ -110,18 +177,8 @@ fn all_provider_manifests_validate_and_have_no_embedded_credentials() {
 async fn every_provider_tool_obeys_its_http_contract_and_preserves_page_cursors() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
-    let router=Router::new().fallback(|OriginalUri(uri):OriginalUri,method:Method,headers:HeaderMap,body:Bytes| async move {
-        Json(json!({
-            "path":uri.path(),"query":uri.query().unwrap_or(""),"method":method.as_str(),
-            "headers":headers.iter().map(|(name,value)|(name.as_str(),value.to_str().unwrap())).collect::<BTreeMap<_,_>>(),
-            "ok":true,"errors":[],"code":0,
-            "authorization":headers.get("authorization").and_then(|v|v.to_str().ok()),
-            "prefer":headers.get("prefer").and_then(|v|v.to_str().ok()),
-            "body":if body.is_empty(){Value::Null}else{serde_json::from_slice::<Value>(&body).unwrap()},
-            "value":[{"id":"fixture"}],"items":[{"id":"fixture"}],
-            "nextPageToken":"opaque+/=","@odata.nextLink":"https://graph.microsoft.com/v1.0/next?$skiptoken=opaque"
-        }))
-    });
+    let fixture = Arc::new(Mutex::new(Fixture::default()));
+    let router = Router::new().fallback(respond).with_state(fixture.clone());
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let result = async {
         let manifests = manifests();
@@ -129,13 +186,57 @@ async fn every_provider_tool_obeys_its_http_contract_and_preserves_page_cursors(
             serde_json::from_str(include_str!("fixtures/provider-requests.json")).unwrap();
         cases.extend(
             serde_json::from_str::<Vec<Case>>(include_str!(
+                "fixtures/read-only-expansion-requests.json"
+            ))
+            .unwrap(),
+        );
+        cases.extend(
+            serde_json::from_str::<Vec<Case>>(include_str!(
+                "fixtures/fifty-provider-requests.json"
+            ))
+            .unwrap(),
+        );
+        cases.extend(
+            serde_json::from_str::<Vec<Case>>(include_str!(
                 "fixtures/business-provider-requests.json"
             ))
             .unwrap(),
         );
+        let root = PathBuf::from(std::env::var("GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR").unwrap());
+        let candidate_cases = root
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("scripts/tests/fixtures/connector-content-requests.json");
+        if candidate_cases.exists() {
+            let extra: Vec<Case> =
+                serde_json::from_slice(&std::fs::read(candidate_cases).unwrap()).unwrap();
+            for mut case in extra {
+                if let Some(original) = cases.iter().find(|original| original.plugin == case.plugin)
+                {
+                    case.configuration = original.configuration.clone();
+                    case.base_url_override = original.base_url_override.clone();
+                }
+                cases.push(case);
+            }
+        }
         let mut covered = BTreeSet::new();
         for case in cases {
-            let manifest = manifests[&case.plugin].clone();
+            let mut manifest = manifests[&case.plugin].clone();
+            // Fixed extra hosts (such as a separate content host) also point at the mock origin.
+            if let Some(urls) = manifest
+                .get_mut("additional_base_urls")
+                .and_then(Value::as_object_mut)
+            {
+                for url in urls.values_mut() {
+                    let path = Url::parse(url.as_str().unwrap())
+                        .unwrap()
+                        .path()
+                        .to_string();
+                    *url = json!(format!("{origin}{path}"));
+                }
+            }
             let base = Url::parse(
                 case.base_url_override
                     .as_deref()
@@ -144,6 +245,7 @@ async fn every_provider_tool_obeys_its_http_contract_and_preserves_page_cursors(
             .unwrap();
             let plugin = CompiledConnector::compile(ConnectorPluginConfig {
                 manifest,
+                auth_mode: None,
                 base_url_override: Some(format!("{origin}{}", base.path())),
                 configuration: case.configuration.clone(),
                 allow_insecure_http: true,
@@ -151,6 +253,36 @@ async fn every_provider_tool_obeys_its_http_contract_and_preserves_page_cursors(
             })
             .unwrap();
             for user in ["alice", "bob"] {
+                if let Some(mock) = &case.mock_response
+                    && let Some(mapping) = &plugin
+                        .manifest()
+                        .tools
+                        .iter()
+                        .find(|tool| tool.name == case.tool)
+                        .unwrap()
+                        .response
+                        .result
+                {
+                    let context = llm_plugin::MappingContext::new(json!({
+                        "request":case.args,"config":case.configuration,"session":{"response":mock}
+                    }));
+                    llm_plugin::evaluate_mapping_bounded(
+                        mapping,
+                        &context,
+                        &plugin.manifest().mappings,
+                        50000,
+                        64 * 1024 * 1024,
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("{} {} fixture mapping: {error}", case.plugin, case.tool)
+                    });
+                }
+                *fixture.lock().await = Fixture {
+                    response: case.mock_response.clone(),
+                    text: case.mock_text.clone(),
+                    mime: case.mock_mime.clone(),
+                    captured: Value::Null,
+                };
                 let token = format!("fixture-{user}");
                 let response = plugin
                     .call(
@@ -163,12 +295,62 @@ async fn every_provider_tool_obeys_its_http_contract_and_preserves_page_cursors(
                     )
                     .await
                     .unwrap_or_else(|error| panic!("{} {}: {error}", case.plugin, case.tool));
+                if case.plugin == "google-sheets" && case.tool == "get_values_by_filter" {
+                    assert_eq!(response["spreadsheetId"], case.args["spreadsheet_id"]);
+                    assert_eq!(
+                        response["valueRanges"][0]["dataFilters"][0]["a1Range"],
+                        case.args["range"]
+                    );
+                }
+                if let Some(expected) = &case.expected_content {
+                    assert_eq!(
+                        &response["content"], expected,
+                        "{} {} content",
+                        case.plugin, case.tool
+                    );
+                    assert_eq!(response["truncated"], false);
+                    assert_eq!(response["source_complete"], true);
+                }
+                let wire = fixture.lock().await.captured.clone();
+                let content_pointer = plugin
+                    .manifest()
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name == case.tool)
+                    .filter(|tool| {
+                        tool.response.overflow
+                            == connector_server_plugin::ResponseOverflow::Truncate
+                    })
+                    .map(|_| "/content");
+                let response = if case.expected_content.is_some() {
+                    &wire
+                } else {
+                    case.response_pointer.as_deref().or(content_pointer).map_or(
+                        &response,
+                        |pointer| {
+                            response
+                                .pointer(pointer)
+                                .expect("reviewed response mapping")
+                        },
+                    )
+                };
                 assert_eq!(response["path"], case.path, "{} {}", case.plugin, case.tool);
                 let query: BTreeMap<String, String> =
                     url::form_urlencoded::parse(response["query"].as_str().unwrap().as_bytes())
                         .into_owned()
                         .collect();
                 assert_eq!(query, case.query, "{} {}", case.plugin, case.tool);
+                if let Some(expected) = &case.query_pairs {
+                    let pairs: Vec<(String, String)> =
+                        url::form_urlencoded::parse(response["query"].as_str().unwrap().as_bytes())
+                            .into_owned()
+                            .collect();
+                    assert_eq!(
+                        &pairs, expected,
+                        "{} {} repeated query",
+                        case.plugin, case.tool
+                    );
+                }
                 assert_eq!(response["method"], case.method.as_deref().unwrap_or("GET"));
                 let mut expected_body = case.body.clone().unwrap_or(Value::Null);
                 match &plugin.manifest().credential_delivery {
@@ -200,6 +382,14 @@ async fn every_provider_tool_obeys_its_http_contract_and_preserves_page_cursors(
                         response["headers"][header], *value,
                         "{} {} header",
                         case.plugin, case.tool
+                    );
+                }
+                for header in &case.forbidden_headers {
+                    assert!(
+                        response["headers"][header].is_null(),
+                        "{} {} forbidden header",
+                        case.plugin,
+                        case.tool
                     );
                 }
                 if case.plugin == "outlook-mail" && case.tool == "get_message" {
@@ -292,6 +482,79 @@ fn tool_categories_follow_annotations_not_http_verbs() {
     );
 }
 
+#[tokio::test]
+#[ignore = "cross-repository catalog test; requires GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR"]
+async fn new_provider_identifier_and_page_bounds_fail_before_network() {
+    let manifests = manifests();
+    for (id, tool, args) in [
+        (
+            "google-contacts",
+            "get_contact",
+            json!({"contact_id":"people/../other"}),
+        ),
+        (
+            "google-contacts",
+            "search_contacts",
+            json!({"query":"Ada","page_size":31}),
+        ),
+        (
+            "microsoft-todo",
+            "get_task",
+            json!({"list_id":"../other","task_id":"123"}),
+        ),
+        (
+            "todoist",
+            "get_task",
+            json!({"task_id":"tmp-not-yet-synced"}),
+        ),
+        (
+            "miro",
+            "list_board_items",
+            json!({"board_id":"board123","limit":100}),
+        ),
+        (
+            "miro",
+            "list_boards",
+            json!({"query":"roadmap","offset":10000}),
+        ),
+        (
+            "calendly",
+            "list_event_types",
+            json!({"user_id":"https://attacker.invalid/user"}),
+        ),
+        (
+            "typeform",
+            "list_responses",
+            json!({"form_id":"../private"}),
+        ),
+    ] {
+        let plugin = CompiledConnector::compile(ConnectorPluginConfig {
+            manifest: manifests[id].clone(),
+            base_url_override: Some("http://127.0.0.1:1".into()),
+            allow_insecure_http: true,
+            allow_private_network: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            matches!(
+                plugin
+                    .call(
+                        tool,
+                        args,
+                        CallContext {
+                            user_id: "fixture",
+                            access_token: Some("fixture")
+                        }
+                    )
+                    .await,
+                Err(ConnectorError::Arguments)
+            ),
+            "{id} {tool}"
+        );
+    }
+}
+
 #[test]
 #[ignore = "cross-repository catalog test; requires GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR"]
 fn reviewed_tool_inventory_matches_manifests_scopes_and_categories() {
@@ -362,11 +625,21 @@ fn reviewed_tool_inventory_matches_manifests_scopes_and_categories() {
                         | "dev.wix.com"
                         | "developer.wordpress.com"
                         | "github.com"
+                        | "airtable.com"
                         | "www.zoho.com"
                         | "desk.zoho.com"
                         | "www.odoo.com"
                         | "api.sap.com"
                         | "help.sap.com"
+                        | "developer.clickup.com"
+                        | "developer.monday.com"
+                        | "developers.figma.com"
+                        | "developers.zoom.us"
+                        | "developer.zendesk.com"
+                        | "developer.todoist.com"
+                        | "developers.miro.com"
+                        | "developer.calendly.com"
+                        | "www.typeform.com"
                 )
             ));
         }
@@ -399,6 +672,262 @@ fn reviewed_tool_inventory_matches_manifests_scopes_and_categories() {
                     assert_eq!(tool.read_only, read_only);
                 }
             }
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "cross-repository catalog test; requires GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR"]
+async fn content_search_rejects_mutations_ungranted_types_and_unsafe_paths_before_network() {
+    let manifests = manifests();
+    for (id, tool, args, configuration) in [
+        (
+            "salesforce",
+            "soql_query",
+            json!({"query":"DELETE FROM Account"}),
+            json!({}),
+        ),
+        (
+            "salesforce",
+            "soql_query",
+            json!({"query":"SELECT Id FROM Account; DELETE FROM Account"}),
+            json!({}),
+        ),
+        (
+            "zoho-crm",
+            "coql_query",
+            json!({"select_query":"UPDATE Contacts SET Last_Name='x'"}),
+            json!({}),
+        ),
+        (
+            "github",
+            "get_file_contents",
+            json!({"owner":"acme","repo":"app","path":["..","secret"]}),
+            json!({}),
+        ),
+        (
+            "hubspot",
+            "search_objects",
+            json!({"object_type":"tickets","query":"private"}),
+            json!({}),
+        ),
+        (
+            "odoo",
+            "search_read",
+            json!({"model":"res.users","fields":["login"]}),
+            json!({"database":"demo"}),
+        ),
+        (
+            "odoo",
+            "read",
+            json!({"model":"res.partner","ids":[1],"fields":["name"],"method":"write"}),
+            json!({"database":"demo"}),
+        ),
+        (
+            "airtable",
+            "list_records",
+            json!({"base_id":"app123","table_id":"tbl123","sort_direction":"asc"}),
+            json!({}),
+        ),
+        (
+            "notion",
+            "query_data_source",
+            json!({"data_source_id":"source-1","sorts":[{"property":"Name","timestamp":"created_time","direction":"ascending"}]}),
+            json!({}),
+        ),
+        (
+            "wix",
+            "query_data_items",
+            json!({"site_id":"site\nheader","data_collection_id":"Products"}),
+            json!({"account_id":"account-1"}),
+        ),
+    ] {
+        let plugin = CompiledConnector::compile(ConnectorPluginConfig {
+            manifest: manifests[id].clone(),
+            configuration,
+            base_url_override: Some("http://127.0.0.1:1".into()),
+            allow_insecure_http: true,
+            allow_private_network: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            matches!(
+                plugin
+                    .call(
+                        tool,
+                        args,
+                        CallContext {
+                            user_id: "alice",
+                            access_token: Some("fixture")
+                        }
+                    )
+                    .await,
+                Err(ConnectorError::Arguments)
+            ),
+            "{id}/{tool}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "cross-repository catalog test; requires GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR"]
+async fn business_arguments_cannot_change_hosts_organizations_or_read_methods() {
+    let manifests = manifests();
+    for (id, tool, args) in [
+        ("zoho-crm", "get_lead", json!({"record_id":"../Contacts"})),
+        (
+            "zoho-crm",
+            "get_module_fields",
+            json!({"module":"../users"}),
+        ),
+        (
+            "zoho-crm",
+            "list_contacts",
+            json!({"page":1,"page_token":"opaque"}),
+        ),
+        ("zoho-crm", "list_contacts", json!({"per_page":201})),
+        ("zoho-books", "list_invoices", json!({})),
+        (
+            "zoho-books",
+            "get_invoice",
+            json!({"organization_id":"123","record_id":"1?organization_id=456"}),
+        ),
+        (
+            "zoho-desk",
+            "list_tickets",
+            json!({"organization_id":"123\r\nHost: attacker.example"}),
+        ),
+        (
+            "zoho-desk",
+            "list_tickets",
+            json!({"organization_id":"123","limit":101}),
+        ),
+        ("odoo", "get_contact", json!({"record_id":0})),
+        (
+            "odoo",
+            "get_contact",
+            json!({"record_id":1,"method":"unlink"}),
+        ),
+        ("odoo", "list_contacts", json!({"limit":101})),
+        ("sap-s4hana", "list_customers", json!({"top":101})),
+        (
+            "sap-s4hana",
+            "list_customers",
+            json!({"query":"$expand=everything"}),
+        ),
+    ] {
+        let plugin = CompiledConnector::compile(ConnectorPluginConfig {
+            manifest: manifests[id].clone(),
+            base_url_override: Some("http://127.0.0.1:1".into()),
+            configuration: if id == "odoo" {
+                json!({"database":"grengin_demo"})
+            } else {
+                Value::Null
+            },
+            allow_insecure_http: true,
+            allow_private_network: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            matches!(
+                plugin
+                    .call(
+                        tool,
+                        args,
+                        CallContext {
+                            user_id: "alice",
+                            access_token: Some("fixture")
+                        }
+                    )
+                    .await,
+                Err(ConnectorError::Arguments)
+            ),
+            "{id} {tool}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "cross-repository catalog test; requires GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR"]
+async fn business_empty_and_provider_error_responses_are_not_authentication_successes() {
+    use axum::http::StatusCode;
+    let manifests = manifests();
+    for (id, tool, status, response, success) in [
+        (
+            "zoho-crm",
+            "list_contacts",
+            StatusCode::NO_CONTENT,
+            Value::Null,
+            true,
+        ),
+        (
+            "zoho-books",
+            "list_organizations",
+            StatusCode::OK,
+            json!({"code":0,"organizations":[]}),
+            true,
+        ),
+        (
+            "zoho-books",
+            "list_organizations",
+            StatusCode::OK,
+            json!({"code":57,"message":"vendor diagnostic"}),
+            false,
+        ),
+        (
+            "zoho-books",
+            "list_organizations",
+            StatusCode::OK,
+            json!({"organizations":[]}),
+            false,
+        ),
+        (
+            "zoho-desk",
+            "list_organizations",
+            StatusCode::UNAUTHORIZED,
+            json!({"errorCode":"INVALID_OAUTH"}),
+            false,
+        ),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let body = response.clone();
+        let router = Router::new().fallback(move || {
+            let body = body.clone();
+            async move { (status, Json(body)) }
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let plugin = CompiledConnector::compile(ConnectorPluginConfig {
+            manifest: manifests[id].clone(),
+            base_url_override: Some(origin),
+            allow_insecure_http: true,
+            allow_private_network: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let result = plugin
+            .call(
+                tool,
+                json!({}),
+                CallContext {
+                    user_id: "alice",
+                    access_token: Some("fixture"),
+                },
+            )
+            .await;
+        server.abort();
+        let _ = server.await;
+        if success {
+            assert_eq!(result.unwrap(), response);
+        } else {
+            let error = result.unwrap_err();
+            assert!(matches!(
+                error,
+                ConnectorError::ProviderRejected | ConnectorError::Http { .. }
+            ));
+            assert!(!error.to_string().contains("vendor diagnostic"));
         }
     }
 }

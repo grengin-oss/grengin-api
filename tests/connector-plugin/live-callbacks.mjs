@@ -1,3 +1,7 @@
+export const microsoftConnectorIds=Object.freeze([
+  'outlook-mail','outlook-calendar','onedrive','sharepoint','microsoft-teams','microsoft-work-iq',
+]);
+
 export const callbackPaths=Object.freeze({
   jira:'/v1/connectors/callback/jira',
   github:'/v1/connectors/callback/github',
@@ -5,6 +9,7 @@ export const callbackPaths=Object.freeze({
   gmail:'/v1/connectors/callback/gmail',
   'google-calendar':'/v1/connectors/callback/google-calendar',
   'google-drive':'/v1/connectors/callback//google-drive',
+  ...Object.fromEntries(microsoftConnectorIds.map(id=>[id,`/v1/connectors/callback/${id}`])),
 });
 
 export function callbackFor(id){

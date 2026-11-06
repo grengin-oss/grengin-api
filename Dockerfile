@@ -11,12 +11,15 @@ ARG CARGO_BUILD_JOBS=2
 # TLS certificates for the download.
 RUN apk add --no-cache build-base pkgconfig perl clang lld musl-dev curl ca-certificates
 
-# The pinned Rust image already includes rustup; only install the target architecture.
-RUN case "$TARGETARCH" in \
-      amd64) rustup target add x86_64-unknown-linux-musl ;; \
-      arm64) rustup target add aarch64-unknown-linux-musl ;; \
-      *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
-    esac
+# Legacy builders leave TARGETARCH unset; BuildKit's explicit target takes precedence.
+RUN arch="${TARGETARCH:-$(uname -m)}" \
+ && case "$arch" in \
+      amd64|x86_64) RUST_TARGET="x86_64-unknown-linux-musl" ;; \
+      arm64|aarch64) RUST_TARGET="aarch64-unknown-linux-musl" ;; \
+      *) echo "Unsupported target architecture: $arch" >&2; exit 1 ;; \
+    esac \
+ && printf '%s\n' "$RUST_TARGET" > /tmp/grengin-rust-target \
+ && rustup target add "$RUST_TARGET"
 
 WORKDIR /usr/src/grengin-api
 
@@ -36,11 +39,7 @@ RUN mkdir -p src llm-plugin/src connector-server-plugin/src migration/src sqlx-m
  && echo "fn main(){}" > sqlx-mcp/src/main.rs
 RUN cargo fetch --locked
 ENV RUSTFLAGS="-C target-feature=+crt-static"
-RUN case "$TARGETARCH" in \
-      amd64) RUST_TARGET="x86_64-unknown-linux-musl" ;; \
-      arm64) RUST_TARGET="aarch64-unknown-linux-musl" ;; \
-      *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
-    esac \
+RUN RUST_TARGET="$(cat /tmp/grengin-rust-target)" \
  && cargo build --release --locked --target "$RUST_TARGET" -p grengin-api -p sqlx-mcp -j "$CARGO_BUILD_JOBS"
 
 # now copy real sources
@@ -54,11 +53,7 @@ RUN touch src/main.rs llm-plugin/src/lib.rs connector-server-plugin/src/lib.rs m
 ENV SWAGGER_UI_OVERWRITE_FOLDER=/swagger-overrides
 
 # build (fully static by default on musl)
-RUN case "$TARGETARCH" in \
-      amd64) RUST_TARGET="x86_64-unknown-linux-musl" ;; \
-      arm64) RUST_TARGET="aarch64-unknown-linux-musl" ;; \
-      *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
-    esac \
+RUN RUST_TARGET="$(cat /tmp/grengin-rust-target)" \
  && cargo build --release --locked --target "$RUST_TARGET" -p grengin-api -p sqlx-mcp -p migration -j "$CARGO_BUILD_JOBS" \
  && cp "/usr/src/grengin-api/target/$RUST_TARGET/release/grengin-api" /usr/local/bin/grengin-api \
  && cp "/usr/src/grengin-api/target/$RUST_TARGET/release/sqlx-mcp" /usr/local/bin/sqlx-mcp \

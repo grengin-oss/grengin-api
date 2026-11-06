@@ -53,6 +53,7 @@ fn manifest(base: &str) -> Value {
 fn config(value: Value) -> ConnectorPluginConfig {
     ConnectorPluginConfig {
         manifest: value,
+        auth_mode: None,
         base_url_override: None,
         configuration: json!({}),
         allow_insecure_http: true,
@@ -64,6 +65,55 @@ fn context() -> CallContext<'static> {
     CallContext {
         user_id: "alice",
         access_token: Some("alice-token"),
+    }
+}
+
+#[test]
+fn explicit_token_mode_cannot_remove_authentication_or_invent_oauth() {
+    use connector_server_plugin::ConnectorAuth;
+    for (primary, mode, allowed) in [
+        ("oauth2", ConnectorAuth::ApiKey, true),
+        ("oauth2", ConnectorAuth::None, false),
+        ("api_key", ConnectorAuth::Oauth2, false),
+        ("api_key", ConnectorAuth::None, false),
+        ("none", ConnectorAuth::ApiKey, false),
+        ("none", ConnectorAuth::Oauth2, false),
+    ] {
+        let mut value = manifest("https://example.com/v1");
+        value["auth"] = json!(primary);
+        let mut cfg = config(value);
+        cfg.auth_mode = Some(mode);
+        let result = CompiledConnector::compile(cfg);
+        assert_eq!(result.is_ok(), allowed, "{primary} {mode:?}");
+        if let Ok(plugin) = result {
+            assert_eq!(plugin.manifest().auth, mode);
+        }
+    }
+}
+
+#[test]
+fn optional_presentation_is_bounded_and_does_not_change_tool_behavior() {
+    let mut value = manifest("https://example.com/v1");
+    value["presentation"] = json!({"suggested_prompts":["Find the project roadmap."]});
+    let plugin = CompiledConnector::compile(config(value.clone())).unwrap();
+    assert_eq!(plugin.manifest().tools.len(), 1);
+    assert_eq!(
+        plugin
+            .manifest()
+            .presentation
+            .as_ref()
+            .unwrap()
+            .suggested_prompts[0],
+        "Find the project roadmap."
+    );
+    for invalid in [
+        json!([""]),
+        json!(["x".repeat(241)]),
+        json!(["x\ny"]),
+        json!(vec!["example"; 9]),
+    ] {
+        value["presentation"]["suggested_prompts"] = invalid;
+        assert!(CompiledConnector::compile(config(value.clone())).is_err());
     }
 }
 
@@ -100,6 +150,47 @@ fn tenant_configuration_requires_explicit_valid_values_and_safe_destinations() {
     value["configuration_schema"]["properties"]["tenant"] =
         json!({"$ref":"https://attacker.example/schema"});
     assert!(CompiledConnector::compile(config(value)).is_err());
+}
+
+#[test]
+fn self_hosted_public_hosts_need_explicit_policy_and_override() {
+    let mut value = manifest("https://configure.invalid/json/2");
+    value["base_url_policy"] = json!({
+        "allowed_host_suffixes": [], "required_override": true, "allow_custom_public_host": true
+    });
+    let mut setup = config(value.clone());
+    setup.allow_private_network = false;
+    setup.allow_insecure_http = false;
+    assert!(
+        CompiledConnector::compile(setup.clone())
+            .unwrap()
+            .validate_configuration()
+            .is_err()
+    );
+    setup.base_url_override = Some("https://customer.example/json/2".into());
+    assert!(
+        CompiledConnector::compile(setup.clone())
+            .unwrap()
+            .validate_configuration()
+            .is_ok()
+    );
+    for url in [
+        "http://customer.example/json/2",
+        "https://127.0.0.1/json/2",
+        "https://169.254.169.254/latest",
+        "https://user:secret@customer.example/json/2",
+    ] {
+        setup.base_url_override = Some(url.into());
+        assert!(CompiledConnector::compile(setup.clone()).is_err(), "{url}");
+    }
+    for policy in [
+        json!({"allowed_host_suffixes": [], "required_override": true}),
+        json!({"allowed_host_suffixes": [], "allow_custom_public_host": true}),
+        json!({"allowed_host_suffixes": [".example.com"], "required_override": true, "allow_custom_public_host": true}),
+    ] {
+        value["base_url_policy"] = policy;
+        assert!(CompiledConnector::compile(config(value.clone())).is_err());
+    }
 }
 
 #[test]
@@ -324,14 +415,39 @@ fn rejects_traversal_authorities_and_malformed_path_templates() {
         "https://evil.example/path",
         "/%2e%2e/escape",
         "/records/{unknown}",
-        "/records/{id}suffix",
+        "/records/{id}{id}",
+        "/records/{id",
+        "/records/id}",
+        "/records/{id}:x",
+        "/records/{id} x",
         "/records\\id",
         "/records?token=secret",
+        "/https://evil.example/path",
+        "/records::query",
+        "/:query",
+        "/records:",
     ] {
         let mut value = manifest("https://example.com/v1");
         value["tools"][0]["request"]["path"] = json!(path);
         assert!(CompiledConnector::compile(config(value)).is_err(), "{path}");
     }
+}
+
+#[test]
+fn a_placeholder_may_sit_among_safe_literal_text_in_one_segment() {
+    for path in ["/records/{id}.json", "/Records('{id}')"] {
+        let mut value = manifest("https://example.com/v1");
+        value["tools"][0]["request"]["path"] = json!(path);
+        assert!(CompiledConnector::compile(config(value)).is_ok(), "{path}");
+    }
+}
+
+#[test]
+fn static_resource_actions_cannot_change_the_url_authority() {
+    let mut value = manifest("https://example.com/v1");
+    value["tools"][0]["request"]["path"] = json!("/records:search");
+    value["tools"][0]["request"]["path_parameters"] = json!({});
+    assert!(CompiledConnector::compile(config(value)).is_ok());
 }
 
 #[test]

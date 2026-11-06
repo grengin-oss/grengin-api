@@ -174,6 +174,80 @@ actual read fails and does not count unconnected providers as passes.
 
 ## Reproduce And Restore
 
+### Microsoft Native Consent Preparation
+
+The same isolated 0.9.8 API now explicitly installs six Microsoft Graph plugins
+(42 read-only tools): Outlook Mail (5), Outlook Calendar (4), OneDrive (4),
+SharePoint (10), Teams (14), and Graph-backed Microsoft 365 Search (5). This is
+direct native OAuth, not a staging Worker broker deployment. Existing six vendor
+connections are retained.
+
+Credentials are read from CONNECTOR_MICROSOFT_CLIENT_ID/SECRET if configured,
+otherwise MICROSOFT_CLIENT_ID/SECRET, otherwise the approved AZURE_CLIENT_ID/SECRET.
+No credential values are written to the report. Each connector uses its exact
+registered http://localhost:5173/v1/connectors/callback/<connector-id> URI. The local
+Vite aliases route only to the existing signed-in MCP callback page, preserving
+the original redirect URI for token exchange. No frontend application commit is
+made for these development-only aliases.
+
+Preparation checks passed: 11 callback unit tests, all six real authorize APIs,
+all six callback handoffs/method/privacy-header checks, authenticated route and
+proxy checks, and all six enabled Connect buttons on the real page with real API
+responses. Live invalid-code probes return invalid_grant (Microsoft diagnostic
+9002313), with no tokens. This does not establish successful consent, scope grants,
+secret validity, refresh, Microsoft 365 entitlements or actual Graph tool calls.
+Real browser consent is still required before those can be reported as passing.
+
+```bash
+ms=(outlook-mail outlook-calendar onedrive sharepoint microsoft-teams microsoft-work-iq)
+bash tests/connector-plugin/live-native.sh install "${ms[@]}"
+bash tests/connector-plugin/live-native.sh check "${ms[@]}"
+bash tests/connector-plugin/live-native.sh ui "${ms[@]}"
+bash tests/connector-plugin/live-preflight.sh "${ms[@]}"
+# Complete the six real browser consent flows in Settings / Integrations first:
+bash tests/connector-plugin/live-native.sh probe "${ms[@]}"
+bash tests/connector-plugin/live-native.sh chat "${ms[@]}"
+```
+
+install is idempotent and does not overwrite existing server configuration or
+tokens. configure is the separate explicit operation to apply changed app settings.
+probe reports pending or expired credentials as unsuccessful, never as live passes.
+chat uses actual user tokens/vendor HTTP calls and only a local model fixture.
+
+### Microsoft Live Result And Staging Scope
+
+The operator deferred Microsoft consent/admin approval and asked to move forward
+with the existing verified native connectors for staging. Do not block staging on
+those Microsoft accounts or label them as successfully live-tested.
+
+- OneDrive: real OAuth consent completed and an encrypted user connection exists.
+  Both get_drive and list_root_files returned HTTP 400; get_drive also failed in
+  the actual chat tool loop. A direct fixed GET /v1.0/me/drive outside the plugin
+  returned the same HTTP 400 / BadRequest with a SharePoint Online licence-related
+  diagnostic. This is not a successful OneDrive tool test; account type/authority,
+  tenant provisioning and licensing need investigation before enabling it for staging.
+- Outlook Mail, Outlook Calendar, SharePoint, Teams and Microsoft 365 Search:
+  real consent/tool calls remain pending; some need tenant-admin approval.
+- Staging's live-verified set is Jira, GitHub, Slack, Gmail, Google Calendar and
+  Google Drive. Existing connections are preserved. Microsoft test installs remain
+  in the isolated local DB for later testing; none is automatically installed on staging.
+- Local frontend aliases are development-only. No staging frontend or service
+  deployment, source push or R2 publication occurred during Microsoft preparation.
+
+Run only the currently approved live set while Microsoft consent is deferred:
+
+```bash
+verified=(jira github slack gmail google-calendar google-drive)
+bash tests/connector-plugin/live-native.sh chat "${verified[@]}"
+bash tests/connector-plugin/live-native.sh probe "${verified[@]}"
+```
+
+The source branches were pushed before this follow-up: backend aff0cf5 and catalog
+46ea9f3, both feat/connector-server-plugin. Backend version 0.9.8 is prepared, not
+released: its distribution is still a draft with null source pins. Staging needs
+the matching reviewed/published compatibility catalog before relying on discovery.
+R2 publication requires its separate explicit approval; these tests do not publish it.
+
 ```bash
 bash tests/connector-plugin/live-native.sh status
 bash tests/connector-plugin/live-native.sh check

@@ -3,6 +3,13 @@
   "title": "ConnectorManifest",
   "type": "object",
   "properties": {
+    "additional_base_urls": {
+      "description": "Fixed extra origins a tool can target by name, such as a vendor's separate content host.\nCredentials are sent to them, so they are part of the reviewed manifest and never\nadministrator overrides.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
     "auth": {
       "$ref": "#/$defs/ConnectorAuth"
     },
@@ -42,6 +49,16 @@
     },
     "name": {
       "type": "string"
+    },
+    "presentation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConnectorPresentation"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "schema_version": {
       "type": "integer",
@@ -84,6 +101,29 @@
         "$array"
       ]
     },
+    "Base64DecodeExpression": {
+      "type": "object",
+      "properties": {
+        "$base64Decode": {
+          "$ref": "#/$defs/MappingExpression"
+        },
+        "charset": {
+          "description": "Charset label, `Content-Type` value or `[{name, value}]` header list. When present, text\nis decoded with that charset (UTF-8 if unknown) and malformed bytes become U+FFFD.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$base64Decode"
+      ]
+    },
     "Base64Expression": {
       "type": "object",
       "properties": {
@@ -94,6 +134,29 @@
       "additionalProperties": false,
       "required": [
         "$base64"
+      ]
+    },
+    "Base64UrlDecodeExpression": {
+      "type": "object",
+      "properties": {
+        "$base64UrlDecode": {
+          "$ref": "#/$defs/MappingExpression"
+        },
+        "charset": {
+          "description": "Charset label, `Content-Type` value or `[{name, value}]` header list. When present, text\nis decoded with that charset (UTF-8 if unknown) and malformed bytes become U+FFFD.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$base64UrlDecode"
       ]
     },
     "BaseUrlPolicy": {
@@ -158,9 +221,31 @@
         "api_key"
       ]
     },
+    "ConnectorPresentation": {
+      "type": "object",
+      "properties": {
+        "suggested_prompts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "suggested_prompts"
+      ]
+    },
     "ConnectorRequest": {
       "type": "object",
       "properties": {
+        "base": {
+          "description": "Name of an `additional_base_urls` entry to send this request to instead of `base_url`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "body": {
           "anyOf": [
             {
@@ -184,6 +269,12 @@
         },
         "path": {
           "type": "string"
+        },
+        "path_parameter_encoding": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/PathParameterEncoding"
+          }
         },
         "path_parameters": {
           "type": "object",
@@ -209,6 +300,10 @@
     "ConnectorResponse": {
       "type": "object",
       "properties": {
+        "accept_octet_stream": {
+          "description": "Text tools only: also accept `application/octet-stream` (or no content type), which many\ndownload endpoints send for every file. The bytes must still be UTF-8 without NULs.",
+          "type": "boolean"
+        },
         "error_array_pointer": {
           "type": [
             "string",
@@ -226,6 +321,30 @@
           ],
           "default": null
         },
+        "format": {
+          "$ref": "#/$defs/ResponseFormat",
+          "default": "json"
+        },
+        "max_result_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_source_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "overflow": {
+          "$ref": "#/$defs/ResponseOverflow",
+          "default": "error"
+        },
         "pagination": {
           "anyOf": [
             {
@@ -236,6 +355,17 @@
             }
           ],
           "default": null
+        },
+        "redirects": {
+          "description": "Follow a GET's redirect to a pre-signed download URL. Hops never carry credentials.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RedirectPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "result": {
           "anyOf": [
@@ -282,6 +412,8 @@
           "$ref": "#/$defs/ConnectorResponse",
           "default": {
             "error_if": null,
+            "format": "json",
+            "overflow": "error",
             "pagination": null,
             "result": null
           }
@@ -468,6 +600,15 @@
           "$ref": "#/$defs/Base64Expression"
         },
         {
+          "$ref": "#/$defs/Base64DecodeExpression"
+        },
+        {
+          "$ref": "#/$defs/Base64UrlDecodeExpression"
+        },
+        {
+          "$ref": "#/$defs/WalkExpression"
+        },
+        {
           "$ref": "#/$defs/MapExpression"
         },
         {
@@ -571,6 +712,63 @@
         "$omitIfNull"
       ]
     },
+    "PathParameterEncoding": {
+      "description": "How a whole-segment path parameter value is placed in the URL.",
+      "oneOf": [
+        {
+          "description": "The value must be a plain segment: no `/`, `%`, `?`, `#` or `\\\\`.",
+          "type": "string",
+          "const": "segment"
+        },
+        {
+          "description": "An opaque identifier that may contain reserved characters; they are percent-encoded once.",
+          "type": "string",
+          "const": "opaque"
+        },
+        {
+          "description": "Opaque, but double-encoded when the value starts with `/` or contains `//`, which is how\nZoom requires such meeting UUIDs to be sent.",
+          "type": "string",
+          "const": "opaque_double_if_slash"
+        }
+      ]
+    },
+    "RedirectPolicy": {
+      "type": "object",
+      "properties": {
+        "allowed_hosts": {
+          "description": "Exact hosts, or `.suffix` entries matching any subdomain.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_hops": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "allowed_hosts",
+        "max_hops"
+      ]
+    },
+    "ResponseFormat": {
+      "type": "string",
+      "enum": [
+        "json",
+        "text"
+      ]
+    },
+    "ResponseOverflow": {
+      "type": "string",
+      "enum": [
+        "error",
+        "truncate"
+      ]
+    },
     "StringConcatExpression": {
       "type": "object",
       "properties": {
@@ -614,6 +812,22 @@
       "required": [
         "$switch",
         "cases"
+      ]
+    },
+    "WalkExpression": {
+      "type": "object",
+      "properties": {
+        "$walk": {
+          "type": "string"
+        },
+        "using": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$walk",
+        "using"
       ]
     }
   }

@@ -40,6 +40,7 @@ utoipa-swagger-ui = { version = "9.0.2", features = ["axum", "vendored"] }
 utoipa = { version = "5.4.0", features = ["axum_extras", "chrono", "url", "uuid"] }
 url = "2.5"
 aes-gcm = "0.10.3"
+sha2 = "0.10.9"
 rmcp = { version = "3.8.0", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 reqwest-mcp = { package = "reqwest", version = "0.13.2", default-features = false, features = ["json", "stream", "rustls"] }
 sysinfo = "0.37.2"

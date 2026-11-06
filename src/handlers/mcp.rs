@@ -215,22 +215,16 @@ pub async fn list_public_mcp_servers(
     let broker_statuses =
         crate::services::connectors_helpers::cached_mcp_statuses(&state, claims.user_id).await?;
     for server in servers {
-        let legacy_connected = match server.transport_type {
-            mcp_servers::McpTransportType::Http
-            | mcp_servers::McpTransportType::Sse
-            | mcp_servers::McpTransportType::Websocket => connections_by_server
-                .get(&server.id)
-                .map(|connection| {
-                    let not_expired = connection.expires_at.map(|exp| exp > now).unwrap_or(true);
-                    connection.connected && not_expired
-                })
-                .unwrap_or(false),
-            mcp_servers::McpTransportType::Stdio => server.status.as_deref() == Some("connected"),
-        };
-        let connected = broker_statuses
-            .get(&server.id)
-            .copied()
-            .unwrap_or(legacy_connected);
+        let integration = crate::services::connector_console_helpers::integration_metadata(&server);
+        let connection_state = crate::services::connector_console_helpers::catalog_connection_state(
+            &server,
+            &integration,
+            connections_by_server.get(&server.id),
+            broker_statuses.get(&server.id).copied(),
+            now,
+        );
+        let connected =
+            connection_state == crate::dto::connector_console::ConnectorConnectionState::Connected;
 
         if let Some(connected_filter) = query.connected {
             if connected_filter != connected {
@@ -241,6 +235,8 @@ pub async fn list_public_mcp_servers(
         let mut tool_list = tools_by_server.remove(&server.id).unwrap_or_default();
         tool_list.sort_by(|a, b| a.name.cmp(&b.name));
         response.push(McpServerCatalogEntry {
+            integration,
+            connection_state,
             id: server.id,
             name: server.name,
             description: server.description,
@@ -756,7 +752,7 @@ pub async fn list_mcp_server_executions(
     if let Some(user_id) = query.user_id {
         finder = finder.filter(mcp_executions::Column::UserId.eq(user_id));
     }
-    let limit = query.limit.unwrap_or(50).min(100);
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
     let offset = query.offset.unwrap_or(0);
     let paginator = finder
         .order_by_desc(mcp_executions::Column::ExecutedAt)

@@ -741,7 +741,7 @@
     },
     "path": "/rest/v1/designs/design-1/pages",
     "query": {
-      "offset": "0",
+      "offset": "1",
       "limit": "25"
     },
     "method": "GET"

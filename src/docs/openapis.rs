@@ -47,6 +47,7 @@ use crate::dto::chat::{
 use crate::dto::chat_shares::*;
 use crate::dto::chat_stream::{ChatInput, ChatStream};
 use crate::dto::common::{PaginationQuery, SortRule};
+use crate::dto::connector_console::*;
 use crate::dto::discovery::{
     AiProviderDiscoveryResponse, AuthProviderDiscoveryResponse, ConnectorPluginDiscoveryResponse,
     DiscoveryCategory, DiscoveryListResponse, DiscoveryProviderSummary, DiscoveryVersion,
@@ -112,6 +113,9 @@ use utoipa::OpenApi;
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        crate::handlers::connector_console::overview,
+        crate::handlers::connector_console::people,
+        crate::handlers::connector_console::update_tool,
         crate::handlers::connectors::list,
         crate::handlers::connectors::connect,
         crate::handlers::connectors::status,
@@ -415,6 +419,16 @@ use utoipa::OpenApi;
             McpAccessDefault,
             McpServerAccess,
             McpServer,
+            ConnectorAuthenticationMethod,
+            ConnectorConnectionState,
+            ConnectorIntegration,
+            ConnectorConsole,
+            ConnectorPeople,
+            ConnectorPerson,
+            ConnectorUsage,
+            ConnectorToolUpdate,
+            McpToolResultDetails,
+            McpResultPreview,
             McpServerCreate,
             McpServerUpdate,
             PaginatedMcpServers,

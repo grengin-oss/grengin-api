@@ -2175,6 +2175,7 @@ pub async fn handle_chat_stream(
                            if let Some((resolved_id, entry)) = entry {
                                completed_tr.insert(resolved_id.clone());
                                let tool_result = ChatStreamToolResult {
+                                   mcp: None,
                                    tool_name: Some("web_search_call".to_string()),
                                    tool_id: Some(resolved_id),
                                    kind: Some(ChatToolKind::WebSearch),
@@ -2216,6 +2217,7 @@ pub async fn handle_chat_stream(
                            }
                            let is_web_search = result.is_web_search();
                            let tool_result = ChatStreamToolResult {
+                               mcp: None,
                                tool_name: result.tool_name.clone(),
                                tool_id: result.tool_id.clone(),
                                kind: Some(if is_web_search { ChatToolKind::WebSearch } else { ChatToolKind::Other }),
@@ -2479,8 +2481,10 @@ pub async fn handle_chat_stream(
                                    }
                                };
 
+                               let execution_id = Uuid::new_v4();
+                               let executed_at = Utc::now();
                                let execution = mcp_executions::ActiveModel {
-                                   id: Set(Uuid::new_v4()),
+                                   id: Set(execution_id),
                                    server_id: Set(tool_ref.server_id),
                                    server_name: Set(tool_ref.server_name.clone()),
                                    tool_name: Set(tool_ref.original_name.clone()),
@@ -2491,7 +2495,7 @@ pub async fn handle_chat_stream(
                                    result: Set(Some(result_value.clone())),
                                    is_error: Set(is_error),
                                    duration_ms: Set(Some(duration_ms)),
-                                   executed_at: Set(Utc::now()),
+                                   executed_at: Set(executed_at),
                                    created_at: Set(Utc::now()),
                                };
                                if let Err(e) = execution.insert(&app_state.database).await {
@@ -2502,6 +2506,15 @@ pub async fn handle_chat_stream(
                                    completed_tr.insert(id.clone());
                                }
                                let tool_result = ChatStreamToolResult {
+                                   mcp: Some(crate::dto::connector_console::McpToolResultDetails {
+                                       execution_id,
+                                       server_id: tool_ref.server_id,
+                                       server_name: tool_ref.server_name.clone(),
+                                       tool_name: tool_ref.original_name.clone(),
+                                       duration_ms,
+                                       executed_at,
+                                       preview: crate::services::connector_console_helpers::result_preview(&output_payload),
+                                   }),
                                    tool_name: Some(call.tool_name.clone()),
                                    tool_id: call.tool_id.clone(),
                                    kind: Some(ChatToolKind::Other),
@@ -2697,6 +2710,7 @@ pub async fn handle_chat_stream(
                for (tool_id, tool_name) in emitted_tc.iter() {
                    if !completed_tr.contains(tool_id) {
                        let failed = ChatStreamToolResult {
+                           mcp: None,
                            tool_name: Some(tool_name.clone()),
                            tool_id: Some(tool_id.clone()),
                            kind: Some(ChatToolKind::Other),

@@ -17,6 +17,18 @@ use crate::{
 pub fn mcp_routes() -> Router<SharedState> {
     Router::new()
         .route(
+            "/admin/mcp-servers/{server_id}/overview",
+            get(crate::handlers::connector_console::overview),
+        )
+        .route(
+            "/admin/mcp-servers/{server_id}/people",
+            get(crate::handlers::connector_console::people),
+        )
+        .route(
+            "/admin/mcp-servers/{server_id}/tools/{tool_id}",
+            axum::routing::put(crate::handlers::connector_console::update_tool),
+        )
+        .route(
             "/admin/mcp-servers",
             get(list_mcp_servers).post(create_mcp_server),
         )
@@ -60,4 +72,8 @@ pub fn mcp_routes() -> Router<SharedState> {
             post(disconnect_mcp_connection),
         )
         .route("/mcp/oauth/callback", get(mcp_oauth_callback))
+        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("private, no-store"),
+        ))
 }

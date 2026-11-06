@@ -272,6 +272,12 @@ pub async fn upsert_connection(
             AppError::DbTimeout
         })?;
     }
+    if !connected {
+        let client = state.mcp_clients.read().await.get(&server_id).cloned();
+        if let Some(client) = client {
+            client.invalidate_user_session(user_id).await;
+        }
+    }
     Ok(())
 }
 

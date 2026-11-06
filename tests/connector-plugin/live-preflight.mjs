@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
-import {callbackFor} from './live-callbacks.mjs';
+import {callbackFor,microsoftConnectorIds} from './live-callbacks.mjs';
 
 const root=process.env.GRENGIN_BACKEND_ROOT;
 const catalog=process.env.GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR ?? join(root,'../grengin-list/master-data/connector-plugins');
@@ -12,10 +12,14 @@ const providers=[
   {id:'gmail',prefix:'GOOGLE',url:'https://oauth2.googleapis.com/token'},
   {id:'google-calendar',prefix:'GOOGLE',url:'https://oauth2.googleapis.com/token'},
   {id:'google-drive',prefix:'GOOGLE',url:'https://oauth2.googleapis.com/token'},
+  ...microsoftConnectorIds.map(id=>({id,prefix:process.env.CONNECTOR_MICROSOFT_CLIENT_ID?'CONNECTOR_MICROSOFT':process.env.MICROSOFT_CLIENT_ID?'MICROSOFT':'AZURE',url:'https://login.microsoftonline.com/organizations/oauth2/v2.0/token'})),
 ];
+const selected=new Set(process.argv.slice(2));
+assert([...selected].every(id=>providers.some(provider=>provider.id===id)),'Unknown preflight connector');
 const accepted=new Set(['invalid_grant','bad_verification_code','bad_code','invalid_code']);
 let failures=0;
 for(const provider of providers){
+  if(selected.size&&!selected.has(provider.id))continue;
   const manifest=JSON.parse(await readFile(join(catalog,provider.id,'versions/1.0.0/plugin.json'),'utf8'));
   const setup=JSON.parse(await readFile(join(catalog,provider.id,'versions/1.0.0/setup.json'),'utf8'));
   assert.equal(setup.plugin_id,manifest.id);
@@ -38,6 +42,7 @@ for(const provider of providers){
     const pass=accepted.has(error);
     if(!pass)failures++;
     console.log(`${provider.id}: ${pass?'PASS':'CHECK'} HTTP ${response.status}; ${error}; no token returned`);
+    if(Array.isArray(body.error_codes))console.log(`${provider.id}: Microsoft diagnostic codes ${body.error_codes.filter(code=>Number.isSafeInteger(code)).slice(0,5).join(',')}`);
     if(!pass){
       const description=String(body.error_description??body.error?.message??body.message??'').toLowerCase();
       console.log(`${provider.id}: redacted rejection categories ${JSON.stringify({code:/authorization code|invalid code|malformed.*code/.test(description),redirect:/redirect|callback/.test(description),pkce:/pkce|verifier|challenge/.test(description),client:/client/.test(description)})}`);

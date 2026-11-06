@@ -4,11 +4,12 @@ import {readFile} from 'node:fs/promises';
 import {createServer} from 'node:http';
 import {join} from 'node:path';
 
-export async function runLiveChats({root,saved,request,pg,api,bearer}){
+export async function runLiveChats({root,saved,request,pg,api,bearer,selected=new Set()}){
   const key='native-live-chat-'+randomBytes(6).toString('hex');
   const model='local-connector-fixture';
   let active,installed=false,fixtureFailures=0,passed=0,failed=0;
-  const tests=[['jira','get_me'],['github','get_me'],['slack','get_team'],['gmail','list_labels'],['google-calendar','list_calendars'],['google-drive','list_files']];
+  const tests=[['jira','get_me'],['github','get_me'],['slack','get_team'],['gmail','list_labels'],['google-calendar','list_calendars'],['google-drive','list_files'],['outlook-mail','list_messages'],['outlook-calendar','list_calendars'],['onedrive','get_drive'],['sharepoint','get_root_site'],['microsoft-teams','list_joined_teams'],['microsoft-work-iq','get_me']].filter(([id])=>Object.hasOwn(saved.servers,id)&&(!selected.size||selected.has(id)));
+  assert(tests.length,'No selected chat tool tests');
   const fixture=createServer(async(req,res)=>{
     try{
       assert.equal(req.method,'POST');

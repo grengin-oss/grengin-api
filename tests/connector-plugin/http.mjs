@@ -106,8 +106,8 @@ async function connect(id,code) {
   const state=new URL(response.authorization_url).searchParams.get('state');
   await call('GET',`/mcp/oauth/callback?state=${encodeURIComponent(state)}&code=${code}`,undefined,200,id);
 }
-async function chat(id=admin) {
-  const result=await call('POST','/chat/stream',{provider:'plugin-chat-fixture',model_name:'fixture-model',selected_mcp_servers:[server.id],messages:[{role:'user',content:'Use plugin_echo',files:[]}]},200,id);
+async function chat(id=admin, selected=server.id) {
+  const result=await call('POST','/chat/stream',{provider:'plugin-chat-fixture',model_name:'fixture-model',selected_mcp_servers:[selected],messages:[{role:'user',content:'Use plugin_echo',files:[]}]},200,id);
   assert(!result.text.includes('ai_error'),result.text.slice(-1000));
   return result.text;
 }
@@ -174,6 +174,21 @@ try {
   await call('POST','/admin/mcp-servers',badFlow,400);
   check('invalid OAuth installs write no server rows',Number(sql('SELECT count(*) FROM mcp_servers')),initial);
   server=(await call('POST','/admin/mcp-servers',request,201)).json();
+  await call('GET',`/admin/mcp-servers/${server.id}/overview`,undefined,401,null);
+  await call('GET',`/admin/mcp-servers/${server.id}/overview`,undefined,403,member);
+  await call('GET',`/admin/mcp-servers/${server.id}/people`,undefined,403,member);
+  await call('GET',`/admin/mcp-servers/${randomUUID()}/overview`,undefined,404);
+  const consoleResponse=await call('GET',`/admin/mcp-servers/${server.id}/overview`);
+  const consoleDetail=consoleResponse.json();
+  check('execution listing accepts zero limit without division by zero',(await call('GET',`/admin/mcp-servers/${server.id}/executions?limit=0`)).json().limit,1);
+  check('connector console is private and no-store',consoleResponse.headers.get('cache-control'),'private, no-store');
+  check('connector console returns real initial counts and read-only tools',[consoleDetail.active_user_count,consoleDetail.connected_user_count,consoleDetail.tools.length,consoleDetail.tools[0].is_read_only],[2,0,1,true]);
+  check('connector console never returns client or account credentials',/client_secret|access_token|refresh_token|fixture-secret/.test(consoleResponse.text),false);
+  for(const pagination of ['limit=0','limit=101','offset=1000001']) await call('GET',`/admin/mcp-servers/${server.id}/people?${pagination}`,undefined,400);
+  const publicListing=await call('GET','/mcp-servers',undefined,200,member);
+  check('per-user server listing is never cached',publicListing.headers.get('cache-control'),'private, no-store');
+  const publicServer=publicListing.json().servers.find(value=>value.id===server.id);
+  check('ordinary users receive safe native identity and authentication metadata',publicServer.integration,{suggested_prompts:[],plugin_id:'fixture-connector',plugin_version:'1.0.0',authentication:'oauth2',supported_authentication:['oauth2','api_token'],per_user_credentials:true});
   check('installation persists exactly one explicit server',Number(sql('SELECT count(*) FROM mcp_servers')),initial+1);
   check('manifest tools are synchronized without an OAuth login or manual sync',sql(`SELECT count(*) FROM mcp_tools WHERE "serverId"=${quote(server.id)}`),'1');
   check('manifest is persisted in the existing server JSON field',JSON.parse(sql(`SELECT "connectionConfig" FROM mcp_servers WHERE id=${quote(server.id)}`)).connector_plugin.manifest.version,'1.0.0');
@@ -191,12 +206,64 @@ try {
   await chat();
   check('missing per-user authorization never reaches vendor API',vendorCalls.length,before);
   await connect(admin,'alice');await connect(member,'bob');
+  const people=(await call('GET',`/admin/mcp-servers/${server.id}/people?limit=1&offset=1`)).json();
+  check('connector people pagination has exact workspace and connection counts',[people.total,people.connected,people.people.length,people.limit,people.offset],[2,2,1,1,1]);
+  check('connected accounts have a displayable state',people.people[0].connection_state,'connected');
+  const nativeConfig=sql(`SELECT "connectionConfig" FROM mcp_servers WHERE id=${quote(server.id)}`);
+  const brokerId=randomUUID();
+  try {
+    sql(`UPDATE mcp_servers SET "connectionConfig"='{"grengin_connector_key":"slack"}'::jsonb WHERE id=${quote(server.id)};
+      INSERT INTO connectors(id,"userId","connectorKey","catalogVersion","serverId",status,scopes,"connectedAt","expiresAt","createdAt","updatedAt")
+      VALUES (${quote(brokerId)},${quote(admin)},'slack','1.0.0',${quote(server.id)},'connected','[]'::jsonb,now(),now()+interval '1 hour',now(),now())`);
+    const brokerPeople=(await call('GET',`/admin/mcp-servers/${server.id}/people`)).json();
+    const brokerPerson=brokerPeople.people.find(person=>person.user_id===admin);
+    check('broker people projection decodes camelCase database columns',[brokerPeople.connected,brokerPerson.connection_state,Boolean(brokerPerson.connected_at),Boolean(brokerPerson.expires_at)],[1,'connected',true,true]);
+    check('broker overview decodes the current account state',(await call('GET',`/admin/mcp-servers/${server.id}/overview`)).json().my_connection_state,'connected');
+    sql(`UPDATE connectors SET status='revoked' WHERE id=${quote(brokerId)}`);
+    const revokedPeople=(await call('GET',`/admin/mcp-servers/${server.id}/people`)).json();
+    check('revoked broker accounts do not appear connected',[revokedPeople.connected,revokedPeople.people.find(person=>person.user_id===admin).connection_state],[0,'not_connected']);
+  } finally {
+    sql(`DELETE FROM connectors WHERE id=${quote(brokerId)}; UPDATE mcp_servers SET "connectionConfig"=${quote(nativeConfig)}::jsonb WHERE id=${quote(server.id)}`);
+  }
+  const savedAccess=sql(`SELECT "accessToken" FROM mcp_connections WHERE "serverId"=${quote(server.id)} AND "userId"=${quote(member)}`);
+  sql(`UPDATE mcp_connections SET "accessToken"='' WHERE "serverId"=${quote(server.id)} AND "userId"=${quote(member)}`);
+  check('empty legacy credentials are not counted as connected',(await call('GET',`/admin/mcp-servers/${server.id}/overview`)).json().connected_user_count,1);
+  const brokenPublic=(await call('GET','/mcp-servers',undefined,200,member)).json().servers.find(value=>value.id===server.id);
+  check('ordinary users get a reconnect state for missing credentials',[brokenPublic.connected,brokenPublic.connection_state],[false,'needs_reconnect']);
+  sql(`UPDATE mcp_connections SET "accessToken"=${quote(savedAccess)} WHERE "serverId"=${quote(server.id)} AND "userId"=${quote(member)}`);
+  sql(`UPDATE mcp_connections SET "expiresAt"=now()-interval '1 minute' WHERE "serverId"=${quote(server.id)} AND "userId"=${quote(member)}`);
+  check('refreshable expired access tokens remain connected in console',(await call('GET',`/admin/mcp-servers/${server.id}/overview`)).json().connected_user_count,2);
+  sql(`UPDATE mcp_connections SET "expiresAt"=now()+interval '1 hour' WHERE "serverId"=${quote(server.id)} AND "userId"=${quote(member)}`);
+  sql(`UPDATE users SET status='deactivated' WHERE id=${quote(member)}`);
+  const activeOnly=(await call('GET',`/admin/mcp-servers/${server.id}/people`)).json();
+  check('deactivated accounts are excluded from people and both counts',[activeOnly.total,activeOnly.connected,activeOnly.people.length],[1,1,1]);
+  sql(`UPDATE users SET status='active' WHERE id=${quote(member)}`);
   check('stored OAuth access tokens are encrypted',sql('SELECT string_agg("accessToken",\',\') FROM mcp_connections').includes('fixture-alice'),false);
-  check('chat consumes the plugin result through the existing tool loop',(await chat()).includes('Plugin completed.'),true);
+  const streamed=await chat();
+  check('chat consumes the plugin result through the existing tool loop',streamed.includes('Plugin completed.'),true);
+  const resultEvent=streamed.split('\n').filter(line=>line.startsWith('data:')).map(line=>{try{return JSON.parse(line.slice(5));}catch{return null;}}).find(value=>value?.tool_result?.mcp)?.tool_result;
+  assert(resultEvent,'MCP tool-result details missing');
+  check('tool result includes readable preview and stable connector identity',[resultEvent.mcp.server_id,resultEvent.mcp.tool_name,resultEvent.mcp.preview.empty,resultEvent.mcp.preview.text.includes('plugin-result')],[server.id,'plugin_echo',false,true]);
+  check('tool-result metadata is saved with the reply',sql(`SELECT count(*) FROM messages WHERE "toolsResults"::text LIKE '%${resultEvent.mcp.execution_id}%'`)!=='0',true);
+  const usage=(await call('GET',`/admin/mcp-servers/${server.id}/overview`)).json().usage;
+  check('usage counts actual recorded executions',usage.tool_calls,usage.successful_tool_calls+usage.failed_tool_calls);
   check('admin call uses only the admin connection token',vendorCalls.at(-1),'Bearer fixture-alice');
   await chat(member);
   check('member call uses only the member connection token',vendorCalls.at(-1),'Bearer fixture-bob');
   const toolId=sql(`SELECT id FROM mcp_tools WHERE "serverId"=${quote(server.id)}`);
+  await call('PUT',`/admin/mcp-servers/${server.id}/tools/${toolId}`,{enabled:false},403,member);
+  await call('PUT',`/admin/mcp-servers/${server.id}/tools/${randomUUID()}`,{enabled:false},404);
+  await call('PUT',`/admin/mcp-servers/${server.id}/tools/${toolId}`,{enabled:false,client_secret:'not-allowed'},422);
+  const toggled=(await call('PUT',`/admin/mcp-servers/${server.id}/tools/${toolId}`,{enabled:false})).json();
+  check('tool switch changes only enablement, keeping read-only and access metadata',[toggled.enabled,toggled.is_read_only,toggled.inherit_access_from_server],[false,true,true]);
+  const disabledVendorCalls=vendorCalls.length;
+  await chat(member);
+  check('disabled tool is not executed',vendorCalls.length,disabledVendorCalls);
+  sql(`CREATE FUNCTION reject_tool_toggle_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event='mcp.tool_enabled_changed' THEN RAISE EXCEPTION 'fixture audit failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_tool_toggle_audit BEFORE INSERT ON auth_audit_events FOR EACH ROW EXECUTE FUNCTION reject_tool_toggle_audit()`);
+  await call('PUT',`/admin/mcp-servers/${server.id}/tools/${toolId}`,{enabled:true},503);
+  check('failed tool audit rolls back the toggle',sql(`SELECT enabled FROM mcp_tools WHERE id=${quote(toolId)}`),'f');
+  sql('DROP TRIGGER reject_tool_toggle_audit ON auth_audit_events; DROP FUNCTION reject_tool_toggle_audit()');
+  await call('PUT',`/admin/mcp-servers/${server.id}/tools/${toolId}`,{enabled:true});
   await changeDuringModelReply('revoking server access during generation prevents vendor execution',
     ()=>call('PUT',`/admin/mcp-servers/${server.id}`,{default_access:'admin_only'}),
     ()=>call('PUT',`/admin/mcp-servers/${server.id}`,{default_access:'all_users'}));
@@ -246,6 +313,21 @@ try {
   await call('POST','/admin/mcp-servers',mixed,400);
   await call('POST','/admin/mcp-servers',{...request,name:'Wrong base',url:vendor+'/elsewhere'},400);
   check('custom manifests cannot borrow centrally approved broker identities or a mismatched URL',true,true);
+  const tokenConfig=structuredClone(connection_config);
+  delete tokenConfig.oauth;
+  tokenConfig.connector_plugin.auth_mode='api_key';
+  const tokenServer=(await call('POST','/admin/mcp-servers',{...request,name:'Internal integration token fixture',client_id:null,client_secret:null,connection_config:tokenConfig},201)).json();
+  await call('POST',`/mcp/connections/${tokenServer.id}/authorize`,{},404,member);
+  await call('POST',`/mcp/connections/${tokenServer.id}/credentials`,{credential:'internal-token-alice'},200,admin);
+  await call('POST',`/mcp/connections/${tokenServer.id}/credentials`,{credential:'internal-token-bob'},200,member);
+  check('integration token is encrypted and never echoed',sql(`SELECT "accessToken" FROM mcp_connections WHERE "serverId"=${quote(tokenServer.id)} AND "userId"=${quote(member)}`).includes('internal-token-bob'),false);
+  await chat(admin,tokenServer.id);check('token mode tool call uses only the calling account token',vendorCalls.at(-1),'Bearer internal-token-alice');
+  await chat(member,tokenServer.id);check('token mode keeps each account isolated',vendorCalls.at(-1),'Bearer internal-token-bob');
+  const noAuth=structuredClone(tokenConfig);noAuth.connector_plugin.auth_mode='none';
+  await call('PUT',`/admin/mcp-servers/${tokenServer.id}`,{connection_config:noAuth},400);
+  await call('PUT',`/admin/mcp-servers/${tokenServer.id}`,{client_id:request.client_id,client_secret:request.client_secret,connection_config});
+  check('changing token mode to OAuth clears prior account credentials',sql(`SELECT count(*) FROM mcp_connections WHERE "serverId"=${quote(tokenServer.id)} AND (connected=true OR "accessToken" IS NOT NULL)`),'0');
+  await call('DELETE',`/admin/mcp-servers/${tokenServer.id}`,undefined,204);
   sql(`CREATE FUNCTION reject_plugin_delete_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event='mcp.plugin_deleted' THEN RAISE EXCEPTION 'fixture delete audit failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_plugin_delete_audit BEFORE INSERT ON auth_audit_events FOR EACH ROW EXECUTE FUNCTION reject_plugin_delete_audit()`);
   await call('DELETE',`/admin/mcp-servers/${server.id}`,undefined,503);
   check('delete audit failure retains the server and its tool metadata',sql(`SELECT count(*) FROM mcp_tools WHERE "serverId"=${quote(server.id)}`),'1');

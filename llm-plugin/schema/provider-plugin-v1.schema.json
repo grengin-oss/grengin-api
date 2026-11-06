@@ -89,6 +89,29 @@
         "$array"
       ]
     },
+    "Base64DecodeExpression": {
+      "type": "object",
+      "properties": {
+        "$base64Decode": {
+          "$ref": "#/$defs/MappingExpression"
+        },
+        "charset": {
+          "description": "Charset label, `Content-Type` value or `[{name, value}]` header list. When present, text\nis decoded with that charset (UTF-8 if unknown) and malformed bytes become U+FFFD.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$base64Decode"
+      ]
+    },
     "Base64Expression": {
       "type": "object",
       "properties": {
@@ -99,6 +122,29 @@
       "additionalProperties": false,
       "required": [
         "$base64"
+      ]
+    },
+    "Base64UrlDecodeExpression": {
+      "type": "object",
+      "properties": {
+        "$base64UrlDecode": {
+          "$ref": "#/$defs/MappingExpression"
+        },
+        "charset": {
+          "description": "Charset label, `Content-Type` value or `[{name, value}]` header list. When present, text\nis decoded with that charset (UTF-8 if unknown) and malformed bytes become U+FFFD.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$base64UrlDecode"
       ]
     },
     "BodyEncoding": {
@@ -843,6 +889,15 @@
           "$ref": "#/$defs/Base64Expression"
         },
         {
+          "$ref": "#/$defs/Base64DecodeExpression"
+        },
+        {
+          "$ref": "#/$defs/Base64UrlDecodeExpression"
+        },
+        {
+          "$ref": "#/$defs/WalkExpression"
+        },
+        {
           "$ref": "#/$defs/MapExpression"
         },
         {
@@ -1398,6 +1453,22 @@
         }
       },
       "additionalProperties": false
+    },
+    "WalkExpression": {
+      "type": "object",
+      "properties": {
+        "$walk": {
+          "type": "string"
+        },
+        "using": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$walk",
+        "using"
+      ]
     }
   }
 }

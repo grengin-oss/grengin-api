@@ -55,7 +55,7 @@ fn manifests() -> BTreeMap<String, Value> {
     let all: BTreeMap<String, Value> = std::fs::read_dir(root)
         .unwrap()
         .filter_map(|entry| {
-            let path = entry.unwrap().path().join("plugin.json");
+            let path = entry.unwrap().path().join("versions/1.0.0/plugin.json");
             path.is_file().then(|| {
                 let value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
                 (value["id"].as_str().unwrap().to_owned(), value)

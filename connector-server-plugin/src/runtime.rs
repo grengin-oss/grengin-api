@@ -16,14 +16,16 @@ use url::Url;
 
 use crate::{
     ConnectorAuth, ConnectorManifest, ConnectorPluginConfig, ConnectorTool, CredentialDelivery,
-    HttpMethod, security,
+    HttpMethod, PathParameterEncoding, RedirectPolicy, security,
 };
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 
 const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 const MAX_ARGUMENT_BYTES: usize = 128 * 1024;
 const MAX_RESULT_BYTES: usize = 1024 * 1024;
 const MAX_URL_BYTES: usize = 16 * 1024;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
+static CONTENT_CALLS: Semaphore = Semaphore::const_new(2);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectorError {
@@ -74,6 +76,9 @@ pub struct CompiledConnector {
     manifest: ConnectorManifest,
     configuration: Value,
     base_url: Url,
+    additional_base_urls: BTreeMap<String, Url>,
+    allow_insecure_http: bool,
+    allow_private_network: bool,
     configuration_validator: Option<jsonschema::Validator>,
     has_required_base_url: bool,
     tools: BTreeMap<String, CompiledTool>,
@@ -90,8 +95,13 @@ impl CompiledConnector {
         {
             return Err(ConnectorError::Manifest("manifest too large"));
         }
-        let manifest: ConnectorManifest = serde_json::from_value(config.manifest)
+        let mut manifest: ConnectorManifest = serde_json::from_value(config.manifest)
             .map_err(|_| ConnectorError::Manifest("schema"))?;
+        // An internal integration token may replace OAuth, but authentication cannot be disabled.
+        manifest.auth = manifest
+            .auth
+            .resolve_mode(config.auth_mode)
+            .ok_or(ConnectorError::Manifest("unsupported authentication mode"))?;
         if !config.configuration.is_null() && !config.configuration.is_object() {
             return Err(ConnectorError::Manifest("configuration must be an object"));
         }
@@ -118,6 +128,22 @@ impl CompiledConnector {
             config.allow_insecure_http,
             config.allow_private_network,
         )?;
+        if manifest.additional_base_urls.len() > 4 {
+            return Err(ConnectorError::Manifest("too many additional base URLs"));
+        }
+        let mut additional_base_urls = BTreeMap::new();
+        for (name, raw) in &manifest.additional_base_urls {
+            if !identifier(name, 32) || raw.len() > 4096 {
+                return Err(ConnectorError::Manifest("additional base URL"));
+            }
+            let url = Url::parse(raw).map_err(|_| ConnectorError::Destination)?;
+            security::validate_url(
+                &url,
+                config.allow_insecure_http,
+                config.allow_private_network,
+            )?;
+            additional_base_urls.insert(name.clone(), url);
+        }
         let mut has_required_base_url = true;
         if let Some(policy) = &manifest.base_url_policy {
             // Self-hosted services require explicit opt-in and an administrator-supplied URL.
@@ -198,10 +224,21 @@ impl CompiledConnector {
         if manifest.tools.is_empty() || manifest.tools.len() > 100 {
             return Err(ConnectorError::Manifest("must define 1 to 100 tools"));
         }
+        if manifest.presentation.as_ref().is_some_and(|ui| {
+            ui.suggested_prompts.len() > 8
+                || ui.suggested_prompts.iter().any(|prompt| {
+                    prompt.trim().is_empty()
+                        || prompt.chars().count() > 240
+                        || prompt.chars().any(char::is_control)
+                })
+        }) {
+            return Err(ConnectorError::Manifest("invalid suggested prompts"));
+        }
         validate_mapping_definitions(&manifest.mappings)
             .map_err(|_| ConnectorError::Manifest("mappings"))?;
         let mut tools = BTreeMap::new();
         for tool in &manifest.tools {
+            tool.response.validate_content_policy()?;
             if !identifier(&tool.name, 64)
                 || tool.description.trim().is_empty()
                 || tool.description.len() > 4096
@@ -246,6 +283,7 @@ impl CompiledConnector {
                 return Err(ConnectorError::Manifest("request path"));
             }
             let mut parameters = HashSet::new();
+            let mut whole_segment_parameters = HashSet::new();
             for segment in path.trim_start_matches('/').split('/') {
                 if segment == "." || segment == ".." {
                     return Err(ConnectorError::Manifest("path traversal"));
@@ -255,12 +293,62 @@ impl CompiledConnector {
                         return Err(ConnectorError::Manifest("path parameter missing"));
                     }
                     parameters.insert(key.to_string());
-                } else if segment.contains(['{', '}']) || segment.contains(':') {
+                    whole_segment_parameters.insert(key.to_string());
+                } else if let Some((prefix, key, suffix)) = embedded_placeholder(segment) {
+                    if !identifier(key, 64) || !tool.request.path_parameters.contains_key(key) {
+                        return Err(ConnectorError::Manifest("path parameter missing"));
+                    }
+                    if !prefix
+                        .chars()
+                        .chain(suffix.chars())
+                        .all(embedded_literal_char)
+                    {
+                        return Err(ConnectorError::Manifest("request path segment"));
+                    }
+                    parameters.insert(key.to_string());
+                } else if segment.contains(['{', '}'])
+                    || (segment.contains(':')
+                        && (!path.starts_with('/')
+                            || !segment.split_once(':').is_some_and(|(resource, action)| {
+                                [resource, action].iter().all(|part| {
+                                    !part.is_empty()
+                                        && part.bytes().all(|c| {
+                                            c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-')
+                                        })
+                                })
+                            })))
+                {
                     return Err(ConnectorError::Manifest("request path segment"));
                 }
             }
             if parameters.len() != tool.request.path_parameters.len() {
                 return Err(ConnectorError::Manifest("unused path parameters"));
+            }
+            if tool
+                .request
+                .path_parameter_encoding
+                .keys()
+                .any(|key| !whole_segment_parameters.contains(key))
+            {
+                return Err(ConnectorError::Manifest("path parameter encoding"));
+            }
+            if let Some(base) = &tool.request.base
+                && (!additional_base_urls.contains_key(base) || tool.response.pagination.is_some())
+            {
+                return Err(ConnectorError::Manifest("request base"));
+            }
+            if let Some(policy) = &tool.response.redirects
+                && (tool.request.method != HttpMethod::Get
+                    || tool.response.pagination.is_some()
+                    || !(1..=3).contains(&policy.max_hops)
+                    || policy.allowed_hosts.is_empty()
+                    || policy.allowed_hosts.len() > 8
+                    || !policy
+                        .allowed_hosts
+                        .iter()
+                        .all(|host| valid_redirect_host(host)))
+            {
+                return Err(ConnectorError::Manifest("redirect policy"));
             }
             for header in tool.request.headers.keys() {
                 llm_plugin::security::validate_header_name(header)
@@ -348,6 +436,9 @@ impl CompiledConnector {
                 config.configuration
             },
             base_url,
+            additional_base_urls,
+            allow_insecure_http: config.allow_insecure_http,
+            allow_private_network: config.allow_private_network,
             configuration_validator,
             has_required_base_url,
             tools,
@@ -415,6 +506,15 @@ impl CompiledConnector {
             return Err(ConnectorError::Arguments);
         }
         let _permit = self.calls.try_acquire().map_err(|_| ConnectorError::Busy)?;
+        let _content_permit = if tool.definition.response.is_content() {
+            Some(
+                CONTENT_CALLS
+                    .try_acquire()
+                    .map_err(|_| ConnectorError::Busy)?,
+            )
+        } else {
+            None
+        };
         tokio::time::timeout(
             Duration::from_secs(30),
             self.execute(&tool.definition, args, token),
@@ -443,14 +543,25 @@ impl CompiledConnector {
         tool: &ConnectorTool,
         context: &MappingContext,
     ) -> Result<Url, ConnectorError> {
-        let mut url = self.base_url.clone();
+        let base = match &tool.request.base {
+            Some(name) => self
+                .additional_base_urls
+                .get(name)
+                .ok_or(ConnectorError::Destination)?,
+            None => &self.base_url,
+        };
+        let mut url = base.clone();
         {
             let mut segments = url
                 .path_segments_mut()
                 .map_err(|_| ConnectorError::Destination)?;
             segments.pop_if_empty();
             for segment in tool.request.path.trim_start_matches('/').split('/') {
-                let part = if let Some(key) =
+                if segment.is_empty() {
+                    segments.push("");
+                    continue;
+                }
+                let parts = if let Some(key) =
                     segment.strip_prefix('{').and_then(|s| s.strip_suffix('}'))
                 {
                     let value = self.mapping(
@@ -460,30 +571,65 @@ impl CompiledConnector {
                             .ok_or(ConnectorError::Mapping)?,
                         context,
                     )?;
-                    scalar(&value)?
+                    let encoding = tool
+                        .request
+                        .path_parameter_encoding
+                        .get(key)
+                        .copied()
+                        .unwrap_or_default();
+                    if encoding != PathParameterEncoding::Segment {
+                        segments.push(&opaque_segment(&value, encoding)?);
+                        continue;
+                    }
+                    match value {
+                        Value::Array(values) if !values.is_empty() && values.len() <= 32 => {
+                            values.iter().map(scalar).collect::<Result<Vec<_>, _>>()?
+                        }
+                        Value::Array(_) => return Err(ConnectorError::Arguments),
+                        value => vec![scalar(&value)?],
+                    }
+                } else if let Some((prefix, key, suffix)) = embedded_placeholder(segment) {
+                    let value = self.mapping(
+                        tool.request
+                            .path_parameters
+                            .get(key)
+                            .ok_or(ConnectorError::Mapping)?,
+                        context,
+                    )?;
+                    vec![embedded_segment(prefix, &scalar(&value)?, suffix)?]
                 } else {
-                    segment.to_string()
+                    vec![segment.to_string()]
                 };
-                if part == "."
-                    || part == ".."
-                    || part.contains(['/', '\\', '%', '?', '#'])
-                    || part.chars().any(char::is_control)
-                {
-                    return Err(ConnectorError::Arguments);
+                for part in parts {
+                    if part.is_empty()
+                        || part == "."
+                        || part == ".."
+                        || part.contains(['/', '\\', '%', '?', '#'])
+                        || part.chars().any(char::is_control)
+                    {
+                        return Err(ConnectorError::Arguments);
+                    }
+                    segments.push(&part);
                 }
-                segments.push(&part);
             }
         }
         for (key, expression) in &tool.request.query {
             let value = self.mapping(expression, context)?;
             if !value.is_null() {
-                let value = scalar(&value)?;
-                if key.len().saturating_add(value.len()) > MAX_URL_BYTES {
-                    return Err(ConnectorError::Arguments);
-                }
-                url.query_pairs_mut().append_pair(key, &value);
-                if url.as_str().len() > MAX_URL_BYTES {
-                    return Err(ConnectorError::Arguments);
+                let values = match value {
+                    Value::Array(values) if values.len() <= 100 => values,
+                    Value::Array(_) => return Err(ConnectorError::Arguments),
+                    value => vec![value],
+                };
+                for value in values {
+                    let value = scalar(&value)?;
+                    if key.len().saturating_add(value.len()) > MAX_URL_BYTES {
+                        return Err(ConnectorError::Arguments);
+                    }
+                    url.query_pairs_mut().append_pair(key, &value);
+                    if url.as_str().len() > MAX_URL_BYTES {
+                        return Err(ConnectorError::Arguments);
+                    }
                 }
             }
         }
@@ -491,6 +637,54 @@ impl CompiledConnector {
             return Err(ConnectorError::Arguments);
         }
         Ok(url)
+    }
+
+    fn redirect_target(
+        &self,
+        current: &Url,
+        response: &reqwest::Response,
+        policy: &RedirectPolicy,
+    ) -> Result<Url, ConnectorError> {
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or(ConnectorError::Destination)?;
+        let mut next = current
+            .join(location)
+            .map_err(|_| ConnectorError::Destination)?;
+        next.set_fragment(None);
+        let host = next
+            .host_str()
+            .ok_or(ConnectorError::Destination)?
+            .to_ascii_lowercase();
+        let secure = next.scheme() == "https" && next.port().is_none();
+        let local_test = self.allow_insecure_http && next.scheme() == "http";
+        if next.as_str().len() > MAX_URL_BYTES
+            || !next.username().is_empty()
+            || next.password().is_some()
+            || !(secure || local_test)
+            || !policy
+                .allowed_hosts
+                .iter()
+                .any(|allowed| match allowed.strip_prefix('.') {
+                    Some(_) => host.ends_with(allowed.as_str()),
+                    None => host == *allowed,
+                })
+        {
+            return Err(ConnectorError::Destination);
+        }
+        // Names are checked by the client's resolver; literal addresses never reach it.
+        match next.host() {
+            Some(url::Host::Ipv4(ip)) => {
+                security::validate_ip(ip.into(), self.allow_private_network)?
+            }
+            Some(url::Host::Ipv6(ip)) => {
+                security::validate_ip(ip.into(), self.allow_private_network)?
+            }
+            _ => {}
+        }
+        Ok(next)
     }
 
     async fn execute(
@@ -570,13 +764,26 @@ impl CompiledConnector {
                 }
                 request = request.json(&body);
             }
-            let mut response = request.send().await.map_err(|error| {
-                if error.is_timeout() {
-                    ConnectorError::Timeout
-                } else {
-                    ConnectorError::Transport
+            let mut response = request.send().await.map_err(transport_error)?;
+            if let Some(policy) = &tool.response.redirects {
+                let mut current = url.clone();
+                let mut hops = 0;
+                while response.status().is_redirection() {
+                    hops += 1;
+                    if hops > policy.max_hops {
+                        return Err(ConnectorError::Destination);
+                    }
+                    let next = self.redirect_target(&current, &response, policy)?;
+                    // Pre-signed download URLs authorize themselves; never forward credentials.
+                    response = self
+                        .client
+                        .get(next.clone())
+                        .send()
+                        .await
+                        .map_err(transport_error)?;
+                    current = next;
                 }
-            })?;
+            }
             if !response.status().is_success() {
                 let retry_after_seconds = response
                     .headers()
@@ -589,31 +796,8 @@ impl CompiledConnector {
                     retry_after_seconds,
                 });
             }
-            if response
-                .content_length()
-                .is_some_and(|size| size > MAX_RESULT_BYTES as u64)
-            {
-                return Err(ConnectorError::ResponseTooLarge);
-            }
-            let mut bytes = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|_| ConnectorError::Transport)?
-            {
-                total_bytes = total_bytes.saturating_add(chunk.len());
-                if bytes.len().saturating_add(chunk.len()) > MAX_RESULT_BYTES
-                    || total_bytes > MAX_RESULT_BYTES * 4
-                {
-                    return Err(ConnectorError::ResponseTooLarge);
-                }
-                bytes.extend_from_slice(&chunk);
-            }
-            let body: Value = if bytes.is_empty() {
-                Value::Null
-            } else {
-                serde_json::from_slice(&bytes).map_err(|_| ConnectorError::Response)?
-            };
+            let read = tool.response.read(&mut response, &mut total_bytes).await?;
+            let body = read.value;
             let response_context = MappingContext::new(
                 json!({"request": context.root()["request"], "config": self.configuration, "session": {"response": body}}),
             );
@@ -669,17 +853,19 @@ impl CompiledConnector {
                 }
             } else {
                 let result = match &tool.response.result {
+                    Some(MappingExpression::Get(get)) if get.path == "session.response" => body,
+                    Some(mapping) if tool.response.is_content() => evaluate_mapping_bounded(
+                        mapping,
+                        &response_context,
+                        &self.manifest.mappings,
+                        50_000,
+                        64 * 1024 * 1024,
+                    )
+                    .map_err(|_| ConnectorError::Mapping)?,
                     Some(mapping) => self.mapping(mapping, &response_context)?,
                     None => body,
                 };
-                if serde_json::to_vec(&result)
-                    .map_err(|_| ConnectorError::Response)?
-                    .len()
-                    > MAX_RESULT_BYTES
-                {
-                    return Err(ConnectorError::ResponseTooLarge);
-                }
-                return Ok(result);
+                return tool.response.finish(result, read.bytes_read, read.complete);
             }
         }
         Err(ConnectorError::Pagination)
@@ -701,6 +887,85 @@ fn scalar(value: &Value) -> Result<String, ConnectorError> {
         Value::Number(_) | Value::Bool(_) => Ok(value.to_string()),
         _ => Err(ConnectorError::Mapping),
     }
+}
+
+fn transport_error(error: reqwest::Error) -> ConnectorError {
+    if error.is_timeout() {
+        ConnectorError::Timeout
+    } else {
+        ConnectorError::Transport
+    }
+}
+
+/// Splits `prefix{key}suffix` when a segment holds one placeholder among literal text.
+fn embedded_placeholder(segment: &str) -> Option<(&str, &str, &str)> {
+    let open = segment.find('{')?;
+    let close = segment.find('}')?;
+    if close < open || segment[open + 1..].contains('{') || segment[close + 1..].contains('}') {
+        return None;
+    }
+    Some((
+        &segment[..open],
+        &segment[open + 1..close],
+        &segment[close + 1..],
+    ))
+}
+
+fn embedded_literal_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '(' | ')' | '\'' | '=' | ',')
+}
+
+/// Places a value inside literal segment text such as `Entity('{id}')` or `search(q='{query}')`.
+fn embedded_segment(prefix: &str, value: &str, suffix: &str) -> Result<String, ConnectorError> {
+    if value.is_empty()
+        || value.len() > 1024
+        || value.contains(['/', '\\', '%', '?', '#'])
+        || value.chars().any(char::is_control)
+    {
+        return Err(ConnectorError::Arguments);
+    }
+    let value = if prefix.ends_with('\'') && suffix.starts_with('\'') {
+        // OData string literals escape a quote by doubling it, so a value cannot end the literal.
+        value.replace('\'', "''")
+    } else if value.contains(['\'', '(', ')', ',', '=', ':']) {
+        return Err(ConnectorError::Arguments);
+    } else {
+        value.to_string()
+    };
+    Ok(format!("{prefix}{value}{suffix}"))
+}
+
+/// `path_segments_mut().push` percent-encodes reserved characters (including `/` and `%`) once,
+/// so returning a pre-encoded value yields a double-encoded segment.
+fn opaque_segment(
+    value: &Value,
+    encoding: PathParameterEncoding,
+) -> Result<String, ConnectorError> {
+    let value = scalar(value)?;
+    if value.is_empty()
+        || value == "."
+        || value.len() > 1024
+        || value.contains("..")
+        || value.chars().any(char::is_control)
+    {
+        return Err(ConnectorError::Arguments);
+    }
+    if encoding == PathParameterEncoding::OpaqueDoubleIfSlash && value.contains('/') {
+        return Ok(utf8_percent_encode(&value, NON_ALPHANUMERIC).to_string());
+    }
+    Ok(value)
+}
+
+fn valid_redirect_host(host: &str) -> bool {
+    let name = host.strip_prefix('.').unwrap_or(host);
+    host.len() <= 253
+        && (!host.starts_with('.') || name.contains('.'))
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label
+                    .bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+        })
 }
 
 fn within_base_path(url: &Url, base: &Url) -> bool {

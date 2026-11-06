@@ -4,7 +4,9 @@
 use crate::models::mcp_servers::McpTransportType;
 use crate::services::http_client::HttpTimeouts;
 use chrono::{DateTime, Duration, Utc};
-use connector_server_plugin::{CallContext, CompiledConnector};
+use connector_server_plugin::{
+    CallContext, CompiledConnector, SessionCache, SessionCachePolicy, SessionLease,
+};
 use oauth2::{
     EndpointNotSet as OAuthEndpointNotSet, EndpointSet as OAuthEndpointSet, basic::BasicClient,
 };
@@ -26,14 +28,12 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::Arc;
 use thiserror::Error;
 use tokio::process::Command;
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::Mutex;
 use uuid::Uuid;
-
-const MAX_USER_HTTP_CLIENTS: usize = 256;
 
 #[derive(Debug, Error)]
 pub enum McpClientError {
@@ -57,6 +57,12 @@ pub struct McpOAuthConfig {
     pub issuer_url: String,
     pub auth_url: String,
     pub token_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token_include_grant_type: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_request_include_client_id: Option<bool>,
     pub client_id: String,
     pub client_secret: Option<String>,
     pub redirect_url: String,
@@ -75,6 +81,8 @@ pub struct McpOAuthConfig {
     pub refresh_token_response: Option<McpTokenResponsePaths>,
     #[serde(default)]
     pub token_request_format: McpTokenRequestFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token_request_format: Option<McpTokenRequestFormat>,
     #[serde(default)]
     pub scope_separator: McpScopeSeparator,
 }
@@ -87,12 +95,13 @@ pub enum McpScopeSeparator {
     Comma,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpTokenRequestFormat {
     #[default]
     Form,
     Json,
+    Query,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -104,6 +113,8 @@ pub struct McpTokenResponsePaths {
     pub token_type: Option<String>,
     pub scope: Option<String>,
     pub success: Option<String>,
+    #[serde(default)]
+    pub expiry_source: connector_server_plugin::OAuthExpirySource,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,17 +125,12 @@ pub enum McpTokenEndpointAuthMethod {
     None,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum McpOAuthFlow {
+    #[default]
     Oauth2,
     Oidc,
-}
-
-impl Default for McpOAuthFlow {
-    fn default() -> Self {
-        McpOAuthFlow::Oauth2
-    }
 }
 
 fn default_use_pkce() -> bool {
@@ -136,6 +142,9 @@ struct McpOAuthConfigInput {
     pub issuer_url: Option<String>,
     pub auth_url: String,
     pub token_url: String,
+    pub refresh_token_url: Option<String>,
+    pub refresh_token_include_grant_type: Option<bool>,
+    pub token_request_include_client_id: Option<bool>,
     pub redirect_url: String,
     pub scopes: Vec<String>,
     #[serde(default)]
@@ -152,6 +161,7 @@ struct McpOAuthConfigInput {
     pub refresh_token_response: Option<McpTokenResponsePaths>,
     #[serde(default)]
     pub token_request_format: McpTokenRequestFormat,
+    pub refresh_token_request_format: Option<McpTokenRequestFormat>,
     #[serde(default)]
     pub scope_separator: McpScopeSeparator,
 }
@@ -344,7 +354,7 @@ fn parse_oauth2_token_response(
     {
         return Err(invalid());
     }
-    let expires_at = payload
+    let mut expires_at = payload
         .expires_in
         .as_ref()
         .map(|expiry| {
@@ -356,6 +366,15 @@ fn parse_oauth2_token_response(
             Utc::now().checked_add_signed(duration).ok_or_else(invalid)
         })
         .transpose()?;
+    if let Some(paths) = paths
+        && let Some(timestamp) = paths
+            .expiry_source
+            .expiry_hint(&payload.access_token, Utc::now().timestamp())
+            .map_err(|_| invalid())?
+    {
+        let hint = DateTime::from_timestamp(timestamp, 0).ok_or_else(invalid)?;
+        expires_at = Some(expires_at.map_or(hint, |reported| reported.min(hint)));
+    }
 
     let scopes = match payload.scope {
         Some(ScopeField::Text(text)) => text
@@ -563,6 +582,7 @@ pub async fn refresh_token(
     refresh_token: &str,
     http_client: &ReqwestClient,
 ) -> Result<McpOAuthTokens, McpClientError> {
+    validate_token_auth(config)?;
     match config.flow {
         McpOAuthFlow::Oidc => {
             let client = build_oidc_client(config)?;
@@ -574,11 +594,19 @@ pub async fn refresh_token(
             Ok(tokens_from_response(&token_response))
         }
         McpOAuthFlow::Oauth2 => {
-            let form = vec![
-                ("grant_type".to_string(), "refresh_token".to_string()),
-                ("refresh_token".to_string(), refresh_token.to_string()),
-            ];
-            let response = oauth2_token_request(config, http_client, form)?
+            let mut form = vec![("refresh_token".to_string(), refresh_token.to_string())];
+            if config.refresh_token_include_grant_type.unwrap_or(true) {
+                form.push(("grant_type".to_string(), "refresh_token".to_string()));
+            }
+            let mut refresh_config = config.clone();
+            if let Some(url) = &config.refresh_token_url {
+                refresh_config.token_url = url.clone();
+            }
+            refresh_config.refresh_token_url = None;
+            if let Some(format) = config.refresh_token_request_format {
+                refresh_config.token_request_format = format;
+            }
+            let response = oauth2_token_request(&refresh_config, http_client, form)?
                 .send()
                 .await
                 .map_err(|_| McpClientError::OAuth("token refresh request failed".into()))?;
@@ -602,6 +630,53 @@ pub async fn refresh_token(
 }
 
 fn validate_token_auth(config: &McpOAuthConfig) -> Result<(), McpClientError> {
+    if matches!(config.flow, McpOAuthFlow::Oidc)
+        && (config.refresh_token_include_grant_type.is_some()
+            || config.token_request_include_client_id.is_some()
+            || config.refresh_token_request_format.is_some()
+            || config.token_request_format != McpTokenRequestFormat::Form)
+    {
+        return Err(McpClientError::OAuthConfig(
+            "custom token request requires oauth2 flow".into(),
+        ));
+    }
+    if let Some(endpoint) = &config.refresh_token_url {
+        let invalid = || {
+            McpClientError::OAuthConfig(
+                "refresh endpoint must share the token endpoint origin".into(),
+            )
+        };
+        let token = url::Url::parse(&config.token_url).map_err(|_| invalid())?;
+        let refresh = url::Url::parse(endpoint).map_err(|_| invalid())?;
+        if !matches!(refresh.scheme(), "https" | "http")
+            || refresh.origin() != token.origin()
+            || !refresh.username().is_empty()
+            || refresh.password().is_some()
+            || refresh.fragment().is_some()
+            || matches!(config.flow, McpOAuthFlow::Oidc)
+        {
+            return Err(invalid());
+        }
+    }
+    if config.token_request_format == McpTokenRequestFormat::Query
+        || config.refresh_token_request_format == Some(McpTokenRequestFormat::Query)
+    {
+        let endpoint = url::Url::parse(&config.token_url)
+            .map_err(|_| McpClientError::OAuthConfig("invalid token endpoint".into()))?;
+        let local = matches!(
+            endpoint.host_str(),
+            Some("localhost" | "127.0.0.1" | "[::1]")
+        );
+        if (endpoint.scheme() != "https" && !(endpoint.scheme() == "http" && local))
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || endpoint.fragment().is_some()
+        {
+            return Err(McpClientError::OAuthConfig(
+                "query token requests require TLS or loopback testing".into(),
+            ));
+        }
+    }
     for paths in config
         .token_response
         .iter()
@@ -670,19 +745,23 @@ fn oauth2_token_request(
                 encode(&config.client_id),
                 config.client_secret.as_deref().map(encode),
             );
+            if config.token_request_include_client_id.unwrap_or(false) {
+                form.push(("client_id".to_string(), config.client_id.clone()));
+            }
         }
         method => {
             form.push(("client_id".to_string(), config.client_id.clone()));
-            if method == McpTokenEndpointAuthMethod::ClientSecretPost {
-                if let Some(secret) = config.client_secret.as_ref() {
-                    form.push(("client_secret".to_string(), secret.clone()));
-                }
+            if method == McpTokenEndpointAuthMethod::ClientSecretPost
+                && let Some(secret) = config.client_secret.as_ref()
+            {
+                form.push(("client_secret".to_string(), secret.clone()));
             }
         }
     }
     Ok(match config.token_request_format {
         McpTokenRequestFormat::Form => request.form(&form),
         McpTokenRequestFormat::Json => request.json(&form.into_iter().collect::<HashMap<_, _>>()),
+        McpTokenRequestFormat::Query => request.query(&form),
     })
 }
 
@@ -695,7 +774,7 @@ pub fn oauth_config_from_connection(
         .get("oauth")
         .ok_or_else(|| McpClientError::OAuthConfig("missing oauth config".to_string()))?;
     let input: McpOAuthConfigInput = serde_json::from_value(oauth_value.clone())
-        .map_err(|e| McpClientError::OAuthConfig(format!("invalid oauth config: {e}")))?;
+        .map_err(|_| McpClientError::OAuthConfig("invalid oauth config".into()))?;
     let issuer_url = input
         .issuer_url
         .clone()
@@ -704,6 +783,9 @@ pub fn oauth_config_from_connection(
         issuer_url,
         auth_url: input.auth_url,
         token_url: input.token_url,
+        refresh_token_url: input.refresh_token_url,
+        refresh_token_include_grant_type: input.refresh_token_include_grant_type,
+        token_request_include_client_id: input.token_request_include_client_id,
         redirect_url: input.redirect_url,
         client_id: client_id.to_string(),
         client_secret,
@@ -715,6 +797,7 @@ pub fn oauth_config_from_connection(
         token_response: input.token_response,
         refresh_token_response: input.refresh_token_response,
         token_request_format: input.token_request_format,
+        refresh_token_request_format: input.refresh_token_request_format,
         scope_separator: input.scope_separator,
     };
     validate_token_auth(&config)?;
@@ -770,14 +853,24 @@ async fn connect_rmcp_http(
     Ok(service)
 }
 
-fn mcp_http_client(connection_config: &Value) -> Result<reqwest_mcp::Client, McpClientError> {
+fn transport_config(connection_config: &Value) -> Result<TransportConfigInput, McpClientError> {
     let config: TransportConfigInput = serde_json::from_value(
         connection_config
             .get("transport_config")
             .cloned()
             .unwrap_or_else(|| serde_json::json!({})),
     )
-    .map_err(|e| McpClientError::Config(format!("invalid transport_config: {e}")))?;
+    .map_err(|_| McpClientError::Config("invalid transport_config".into()))?;
+    config
+        .session_cache
+        .unwrap_or_default()
+        .validate()
+        .map_err(|_| McpClientError::Config("invalid MCP session cache policy".into()))?;
+    Ok(config)
+}
+
+fn mcp_http_client(connection_config: &Value) -> Result<reqwest_mcp::Client, McpClientError> {
+    let config = transport_config(connection_config)?;
     let mut headers = HeaderMap::new();
     for (name, value) in config.headers.unwrap_or_default() {
         let header = HeaderName::from_bytes(name.as_bytes())
@@ -807,13 +900,13 @@ pub struct McpServerClient {
     pub connection_config: Value,
     pub db_url: Option<String>,
     client: Mutex<Option<rmcp::service::RunningService<rmcp::service::RoleClient, ()>>>,
-    http_clients: Mutex<HashMap<Uuid, Arc<Mutex<Option<UserHttpClient>>>>>,
+    http_clients: Result<SessionCache<Uuid, UserHttpClient>, String>,
     connected: Mutex<bool>,
     plugin: Result<Option<CompiledConnector>, String>,
 }
 
 struct UserHttpClient {
-    token: String,
+    token_digest: [u8; 32],
     client: rmcp::service::RunningService<rmcp::service::RoleClient, ()>,
 }
 
@@ -827,6 +920,7 @@ struct StdioConnectionConfig {
 #[derive(Debug, Clone, Deserialize)]
 struct TransportConfigInput {
     headers: Option<HashMap<String, String>>,
+    session_cache: Option<SessionCachePolicy>,
 }
 
 impl McpServerClient {
@@ -853,6 +947,12 @@ impl McpServerClient {
             url.as_deref(),
         )
         .map_err(|error| error.to_string());
+        let http_clients = transport_config(&connection_config)
+            .and_then(|config| {
+                SessionCache::new(config.session_cache.unwrap_or_default())
+                    .map_err(|error| McpClientError::Config(error.to_string()))
+            })
+            .map_err(|error| error.to_string());
         Self {
             server_id,
             name,
@@ -861,7 +961,7 @@ impl McpServerClient {
             connection_config,
             db_url,
             client: Mutex::new(None),
-            http_clients: Mutex::new(HashMap::new()),
+            http_clients,
             connected: Mutex::new(false),
             plugin,
         }
@@ -907,49 +1007,41 @@ impl McpServerClient {
         Ok(())
     }
 
-    async fn http_client_slot(
-        &self,
-        user_id: Uuid,
-    ) -> Result<Arc<Mutex<Option<UserHttpClient>>>, McpClientError> {
-        let mut clients = self.http_clients.lock().await;
-        if let Some(entry) = clients.get(&user_id) {
-            return Ok(entry.clone());
-        }
-        if clients.len() >= MAX_USER_HTTP_CLIENTS {
-            let idle = clients
-                .iter()
-                .find_map(|(id, entry)| (Arc::strong_count(entry) == 1).then_some(*id));
-            let Some(idle) = idle else {
-                return Err(McpClientError::Rmcp(
-                    "mcp client capacity reached; retry later".into(),
-                ));
-            };
-            clients.remove(&idle);
-        }
-        let entry = Arc::new(Mutex::new(None));
-        clients.insert(user_id, entry.clone());
-        Ok(entry)
-    }
-
     async fn authenticated_http_client(
         &self,
         token: String,
         user_id: Uuid,
-    ) -> Result<OwnedMutexGuard<Option<UserHttpClient>>, McpClientError> {
-        let mut entry = self.http_client_slot(user_id).await?.lock_owned().await;
-        if entry.as_ref().is_none_or(|client| client.token != token) {
+    ) -> Result<SessionLease<UserHttpClient>, McpClientError> {
+        let mut entry = self
+            .http_clients
+            .as_ref()
+            .map_err(|error| McpClientError::Config(error.clone()))?
+            .lease(user_id)
+            .await
+            .map_err(|error| McpClientError::Rmcp(error.to_string()))?;
+        let token_digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        if entry
+            .as_ref()
+            .is_none_or(|client| client.token_digest != token_digest || client.client.is_closed())
+        {
             let service = connect_rmcp_http(
                 self.http_url_for_transport()?,
-                Some(token.clone()),
+                Some(token),
                 &self.connection_config,
             )
             .await?;
             *entry = Some(UserHttpClient {
-                token,
+                token_digest,
                 client: service,
             });
         }
         Ok(entry)
+    }
+
+    pub async fn invalidate_user_session(&self, user_id: Uuid) {
+        if let Ok(cache) = &self.http_clients {
+            cache.invalidate(&user_id).await;
+        }
     }
 
     pub async fn call_tool(
@@ -1146,7 +1238,7 @@ fn resolve_env_placeholders(value: &str) -> Result<String, McpClientError> {
             if let Some('{') = chars.peek().copied() {
                 chars.next();
                 let mut var = String::new();
-                while let Some(next) = chars.next() {
+                for next in chars.by_ref() {
                     if next == '}' {
                         break;
                     }
@@ -1206,17 +1298,38 @@ mod tests {
     use super::*;
     use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
     use base64::Engine;
+    use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
     };
 
+    #[test]
+    fn rejects_cross_origin_or_credential_bearing_refresh_endpoints() {
+        for url in [
+            "https://other.example/refresh",
+            "http://tokens.example/refresh",
+            "https://name:secret@tokens.example/refresh",
+            "https://tokens.example/refresh#fragment",
+        ] {
+            let mut config = oauth2_config("https://tokens.example/token".into());
+            config.refresh_token_url = Some(url.into());
+            assert!(validate_token_auth(&config).is_err());
+        }
+        let mut config = oauth2_config("https://tokens.example/token".into());
+        config.refresh_token_url = Some("https://tokens.example/refresh".into());
+        assert!(validate_token_auth(&config).is_ok());
+    }
+
     fn oauth2_config(token_url: String) -> McpOAuthConfig {
         McpOAuthConfig {
             issuer_url: "https://issuer.example.com".to_string(),
             auth_url: "https://issuer.example.com/authorize".to_string(),
             token_url,
+            refresh_token_url: None,
+            refresh_token_include_grant_type: None,
+            token_request_include_client_id: None,
             client_id: "client".to_string(),
             client_secret: None,
             redirect_url: "https://app.example.com/mcp/oauth/callback".to_string(),
@@ -1228,6 +1341,7 @@ mod tests {
             token_response: None,
             refresh_token_response: None,
             token_request_format: McpTokenRequestFormat::Form,
+            refresh_token_request_format: None,
             scope_separator: McpScopeSeparator::Space,
         }
     }
@@ -1308,6 +1422,157 @@ mod tests {
             "invalid_grant"
         );
         assert_eq!(summarize_oauth_error("upstream secret"), "oauth_error");
+    }
+
+    #[test]
+    fn basic_client_id_body_is_opt_in_and_never_includes_the_secret() {
+        let mut config = oauth2_config("https://tokens.example/token".into());
+        config.client_secret = Some("private-fixture".into());
+        config.token_endpoint_auth_method = Some(McpTokenEndpointAuthMethod::ClientSecretBasic);
+        for include in [false, true] {
+            config.token_request_include_client_id = Some(include);
+            let request = oauth2_token_request(
+                &config,
+                &ReqwestClient::new(),
+                vec![("grant_type".into(), "authorization_code".into())],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+            let form: HashMap<_, _> =
+                url::form_urlencoded::parse(request.body().unwrap().as_bytes().unwrap())
+                    .into_owned()
+                    .collect();
+            assert_eq!(form.get("client_id"), include.then_some(&config.client_id));
+            assert!(!form.contains_key("client_secret"));
+            assert!(request.headers().contains_key(AUTHORIZATION));
+        }
+        config.flow = McpOAuthFlow::Oidc;
+        assert!(validate_token_auth(&config).is_err());
+    }
+
+    #[test]
+    fn jwt_expiry_requires_explicit_selection_and_never_extends_reported_lifetime() {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let expiry = Utc::now().timestamp() + 3600;
+        let token = format!(
+            "e30.{}.fixture",
+            URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{expiry}}}"#))
+        );
+        let paths = serde_json::from_value(serde_json::json!({
+            "access_token":"/access_token", "expires_in":"/expires_in", "expiry_source":"jwt_exp"
+        }))
+        .unwrap();
+        let body = serde_json::json!({"access_token":token});
+        assert!(
+            parse_oauth2_token_response(&body.to_string(), None)
+                .unwrap()
+                .expires_at
+                .is_none()
+        );
+        assert_eq!(
+            parse_oauth2_token_response(&body.to_string(), Some(&paths))
+                .unwrap()
+                .expires_at
+                .unwrap()
+                .timestamp(),
+            expiry
+        );
+        let mut shorter = body;
+        shorter["expires_in"] = serde_json::json!(60);
+        assert!(
+            parse_oauth2_token_response(&shorter.to_string(), Some(&paths))
+                .unwrap()
+                .expires_at
+                .unwrap()
+                .timestamp()
+                < expiry
+        );
+        for invalid in ["opaque", "a.e30.c"] {
+            assert!(
+                parse_oauth2_token_response(
+                    &serde_json::json!({"access_token":invalid}).to_string(),
+                    Some(&paths)
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn separate_refresh_endpoint_uses_basic_auth_and_refresh_only_body() {
+        let router = Router::new().route("/refresh", post(|headers: HeaderMap, axum::extract::Form(body): axum::extract::Form<HashMap<String, String>>| async move {
+            assert!(headers.get("authorization").unwrap().to_str().unwrap().starts_with("Basic "));
+            assert_eq!(body.len(), 1);
+            assert_eq!(body["refresh_token"], "previous");
+            Json(serde_json::json!({"access_token":"renewed","expires_in":3600}))
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let mut config = oauth2_config(format!("{origin}/token"));
+        config.client_secret = Some("fixture".into());
+        config.token_endpoint_auth_method = Some(McpTokenEndpointAuthMethod::ClientSecretBasic);
+        config.refresh_token_url = Some(format!("{origin}/refresh"));
+        config.refresh_token_include_grant_type = Some(false);
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let result = refresh_token(&config, "previous", &ReqwestClient::new()).await;
+        server.abort();
+        let tokens = result.unwrap();
+        assert_eq!(tokens.access_token, "renewed");
+        assert!(tokens.refresh_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn query_code_exchange_and_form_refresh_are_distinct_and_errors_redact_secrets() {
+        use axum::{body::Bytes, extract::OriginalUri};
+        let router = Router::new().route(
+            "/token",
+            post(|OriginalUri(uri): OriginalUri, body: Bytes| async move {
+                let form: HashMap<String, String> =
+                    url::form_urlencoded::parse(if let Some(query) = uri.query() {
+                        query.as_bytes()
+                    } else {
+                        &body
+                    })
+                    .into_owned()
+                    .collect();
+                assert_eq!(form["client_secret"], "query-secret-canary");
+                if form["grant_type"] == "authorization_code" {
+                    assert!(uri.query().is_some());
+                    assert!(body.is_empty());
+                    assert_eq!(form["code"], "code-canary");
+                } else {
+                    assert!(uri.query().is_none());
+                    assert_eq!(form["refresh_token"], "refresh-canary");
+                }
+                Json(serde_json::json!({"access_token":"fixture","refresh_token":"refreshed"}))
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = oauth2_config(format!("http://{}/token", listener.local_addr().unwrap()));
+        config.client_secret = Some("query-secret-canary".into());
+        config.token_request_format = McpTokenRequestFormat::Query;
+        config.refresh_token_request_format = Some(McpTokenRequestFormat::Form);
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        assert!(
+            exchange_code(&config, "code-canary", "verifier", &ReqwestClient::new())
+                .await
+                .is_ok()
+        );
+        assert!(
+            refresh_token(&config, "refresh-canary", &ReqwestClient::new())
+                .await
+                .is_ok()
+        );
+        server.abort();
+        let _ = server.await;
+        let error = exchange_code(&config, "code-canary", "verifier", &ReqwestClient::new())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("query-secret-canary") && !error.contains("code-canary"));
+        config.token_url = "http://public.example/token".into();
+        assert!(validate_token_auth(&config).is_err());
     }
 
     #[tokio::test]
@@ -1715,36 +1980,103 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oauth_client_cache_is_bounded_and_never_evicts_an_in_use_entry() {
+    async fn closed_invalidated_and_rotated_sessions_reconnect_without_replaying_calls() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let initialized = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let router = Router::new().route("/mcp", post({
+            let initialized = initialized.clone();
+            let calls = calls.clone();
+            move |headers: HeaderMap, Json(message): Json<Value>| {
+                let initialized = initialized.clone();
+                let calls = calls.clone();
+                async move {
+                    if message.get("id").is_none() {
+                        return StatusCode::ACCEPTED.into_response();
+                    }
+                    let result = match message["method"].as_str().unwrap() {
+                        "initialize" => {
+                            initialized.fetch_add(1, Ordering::SeqCst);
+                            serde_json::json!({"protocolVersion":message["params"]["protocolVersion"],"capabilities":{"tools":{}},"serverInfo":{"name":"recovery","version":"1"}})
+                        }
+                        "tools/call" => {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            serde_json::json!({"content":[],"structuredContent":{"authorization":headers[AUTHORIZATION].to_str().unwrap()}})
+                        }
+                        _ => return StatusCode::BAD_REQUEST.into_response(),
+                    };
+                    Json(serde_json::json!({"jsonrpc":"2.0","id":message["id"],"result":result})).into_response()
+                }
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = McpServerClient::new(
+            Uuid::new_v4(),
+            "recovery".into(),
+            McpTransportType::Http,
+            Some(url),
+            serde_json::json!({}),
+            None,
+        );
+        let user = Uuid::new_v4();
+        for (index, token) in ["first", "first", "first", "rotated"].iter().enumerate() {
+            if index == 1 {
+                let lease = client
+                    .http_clients
+                    .as_ref()
+                    .unwrap()
+                    .lease(user)
+                    .await
+                    .unwrap();
+                lease.as_ref().unwrap().client.cancellation_token().cancel();
+            } else if index == 2 {
+                client.invalidate_user_session(user).await;
+            }
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                client.call_tool(
+                    "ping",
+                    serde_json::json!({}),
+                    Some((*token).into()),
+                    Some(user),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                result.structured_content.unwrap()["authorization"],
+                format!("Bearer {token}")
+            );
+            assert_eq!(initialized.load(Ordering::SeqCst), index + 1);
+            assert_eq!(calls.load(Ordering::SeqCst), index + 1);
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn oauth_client_cache_policy_is_configurable_and_rejects_invalid_limits() {
         let client = McpServerClient::new(
             Uuid::new_v4(),
             "capacity".into(),
             McpTransportType::Http,
             Some("https://example.invalid/mcp".into()),
-            serde_json::json!({}),
+            serde_json::json!({"transport_config":{"session_cache":{"max_entries":2}}}),
             None,
         );
-        let first_user = Uuid::new_v4();
-        let first = client.http_client_slot(first_user).await.unwrap();
-        assert!(Arc::ptr_eq(
-            &first,
-            &client.http_client_slot(first_user).await.unwrap()
-        ));
-        let mut active = vec![first];
-        for _ in 1..MAX_USER_HTTP_CLIENTS {
-            active.push(client.http_client_slot(Uuid::new_v4()).await.unwrap());
+        let cache = client.http_clients.as_ref().unwrap();
+        for _ in 0..512 {
+            drop(cache.lease(Uuid::new_v4()).await.unwrap());
         }
-        assert!(client.http_client_slot(Uuid::new_v4()).await.is_err());
-        active.pop();
-        let replacement = client.http_client_slot(Uuid::new_v4()).await.unwrap();
-        assert_eq!(
-            client.http_clients.lock().await.len(),
-            MAX_USER_HTTP_CLIENTS
+        assert_eq!(cache.cached_len().await, 2);
+        assert!(
+            transport_config(
+                &serde_json::json!({"transport_config":{"session_cache":{"max_in_flight":0}}})
+            )
+            .is_err()
         );
-        assert!(Arc::ptr_eq(
-            &active[0],
-            &client.http_client_slot(first_user).await.unwrap()
-        ));
-        drop(replacement);
+        assert!(transport_config(&serde_json::json!({"transport_config":{"session_cache":{"max_entries":"unlimited"}}})).is_err());
     }
 }

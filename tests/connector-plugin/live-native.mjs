@@ -5,8 +5,9 @@ import {once} from 'node:events';
 import {createServer} from 'node:http';
 import {mkdir,readFile,writeFile,open,chmod,rename} from 'node:fs/promises';
 import {resolve,join,sep} from 'node:path';
-import {callbackFor,callbackPaths} from './live-callbacks.mjs';
+import {callbackFor,callbackPaths,microsoftConnectorIds} from './live-callbacks.mjs';
 import {runLiveChats} from './live-chat.mjs';
+import {runLiveUi} from './live-ui.mjs';
 
 process.umask(0o077);
 const root=process.env.GRENGIN_BACKEND_ROOT;
@@ -20,6 +21,7 @@ const command=process.argv[2]??'status';
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const exec=(name,args,options={})=>execFileSync(name,args,{encoding:'utf8',stdio:['ignore','pipe','pipe'],...options});
 const quote=value=>`'${String(value).replaceAll("'","''")}'`;
+const credentialPrefix=key=>key==='jira'?'JIRA':key==='github'?(process.env.CONNECTOR_GITHUB_CLIENT_ID?'CONNECTOR_GITHUB':'GITHUB'):key==='slack'?'SLACK':microsoftConnectorIds.includes(key)?(process.env.CONNECTOR_MICROSOFT_CLIENT_ID?'CONNECTOR_MICROSOFT':process.env.MICROSOFT_CLIENT_ID?'MICROSOFT':'AZURE'):'GOOGLE';
 const processEnv=async pid=>Object.fromEntries((await readFile(`/proc/${pid}/environ`,'utf8')).split('\0').filter(Boolean).map(line=>{const at=line.indexOf('=');return[line.slice(0,at),line.slice(at+1)];}));
 const listenerPid=port=>Number(exec('ss',['-ltnpH',`sport = :${port}`]).match(/pid=(\d+)/)?.[1]??0);
 let saved;
@@ -73,26 +75,66 @@ async function frontend(startNative){
   for(let n=0;n<100;n++){try{const r=await fetch('http://localhost:5173/',{signal:AbortSignal.timeout(1000)});if(r.ok)return;}catch{}await sleep(100);}
   throw new Error('Frontend readiness timed out; private log is in native-plugin-live');
 }
+async function installConnectors(ids){
+  assert(ids.length&&ids.every(id=>Object.hasOwn(callbackPaths,id)),'Choose known live-test connectors');
+  assert.equal(new URL(saved.database).pathname,'/grengin_native_plugins_live','Only the isolated test DB may be configured');
+  const initial=(await request('GET','/admin/mcp-servers')).servers;
+  for(const id of ids){
+    const manifest=JSON.parse(await readFile(join(master,'connector-plugins',id,'versions/1.0.0/plugin.json'),'utf8'));
+    const setup=JSON.parse(await readFile(join(master,'connector-plugins',id,'versions/1.0.0/setup.json'),'utf8'));
+    const prefix=credentialPrefix(id);
+    const client=process.env[`${prefix}_CLIENT_ID`],secret=process.env[`${prefix}_CLIENT_SECRET`];
+    assert(client&&secret&&client!==secret,`Missing or invalid ${prefix} OAuth credentials`);
+    const name=`${manifest.name} (native plugin)`;
+    const current=initial.find(server=>server.id===saved.servers[id]||server.name===name);
+    if(current){
+      assert.equal(current.connection_config?.connector_plugin?.manifest?.id,id,'Existing test server has a different plugin identity');
+      saved.servers[id]=current.id;await save();
+      console.log(`${id}: existing native install reused without changing configuration or tokens`);continue;
+    }
+    const oauth={...setup.authentication.oauth,redirect_url:callbackFor(id)};
+    const server=await request('POST','/admin/mcp-servers',{name,description:`Local read-only ${manifest.name} plugin test`,icon:`https://meta.grengin.com/connectors/icons/${id}.svg`,transport_type:'http',url:manifest.base_url,enabled:true,default_access:'all_users',client_id:client,client_secret:secret,connection_config:{connector_plugin:{manifest,configuration:id==='jira'?{cloud_id:'00000000-0000-4000-8000-000000000000'}:{}},oauth}});
+    saved.servers[id]=server.id;await save();
+    console.log(`${id}: installed in isolated DB; ${manifest.tools.length} read-only tools; browser consent required`);
+  }
+}
 if(command==='frontend'||command==='restore-webapp'){
   assert(saved,'Start the isolated API first');await frontend(command==='frontend');
   console.log(command==='frontend'?'Local webapp now targets isolated native API 8083.':'Previous webapp process/environment restored; native database retained.');
-}else if(command==='status'||command==='check'||command==='probe'||command==='configure'||command==='chat'){
+}else if(command==='status'||command==='check'||command==='probe'||command==='configure'||command==='chat'||command==='install'||command==='ui'||command==='diagnose'){
   assert(saved,'Native plugin test setup has not been started');
   const health=await(await fetch(api+'/',{signal:AbortSignal.timeout(3000)})).json();
   console.log(`Isolated backend ${health.version}, ${health.status}; frontend http://localhost:5173/settings?tab=integrations`);
   const connections=(await request('GET','/mcp/connections')).connections;
+  const selected=new Set(process.argv.slice(3));
+  if(command!=='install')assert([...selected].every(key=>Object.hasOwn(saved.servers,key)),'Unknown connector selection');
   for(const [key,id]of Object.entries(saved.servers??{})){
     const connection=connections.find(row=>row.server_id===id);
     console.log(`${key}: ${connection?.connected?'connected':'awaiting browser consent'}`);
   }
-  if(command==='chat')await runLiveChats({root,saved,request,pg,api,bearer});
+  if(command==='install')await installConnectors([...selected]);
+  if(command==='chat')await runLiveChats({root,saved,request,pg,api,bearer,selected});
+  if(command==='ui')await runLiveUi({saved,bearer,request,selected});
+  if(command==='diagnose'){
+    const paths={'outlook-mail':'/me/messages?$top=1','outlook-calendar':'/me/calendars?$top=1',onedrive:'/me/drive',sharepoint:'/sites/root','microsoft-teams':'/me/joinedTeams','microsoft-work-iq':'/me'};
+    assert(selected.size&&[...selected].every(id=>Object.hasOwn(paths,id)),'Select Microsoft connectors for redacted Graph diagnostics');
+    for(const key of selected){
+      const id=saved.servers[key];
+      const row=JSON.parse(pg(`SELECT row_to_json(c) FROM mcp_connections c WHERE "serverId"=${quote(id)} AND "userId"=${quote(saved.owner.id)}`,saved.database)||'null');
+      if(!row?.accessToken){console.log(`${key}: awaiting browser consent`);continue;}
+      const response=await fetch('https://graph.microsoft.com/v1.0'+paths[key],{redirect:'manual',headers:{Authorization:`Bearer ${unseal(row.accessToken)}`,Accept:'application/json'},signal:AbortSignal.timeout(15000)});
+      const body=await jsonResponse(response);
+      const code=typeof body.error?.code==='string'&&/^[a-zA-Z0-9_.-]{1,80}$/.test(body.error.code)?body.error.code:'unclassified';
+      const message=String(body.error?.message??'');
+      const categories={sharepoint_license:/SPO license|sharepoint.*licen[sc]e|licen[sc]e.*sharepoint/i.test(message),mailbox:/mailbox/i.test(message),consent:/permission|consent|insufficient.*privilege/i.test(message),expired_token:/expired|lifetime validation/i.test(message),missing_resource:/not found|does not exist|not provisioned/i.test(message)};
+      console.log(`${key}: fixed Graph read HTTP ${response.status}${response.ok?'':`; code=${code}; diagnostic categories=${JSON.stringify(categories)}`}; response contents withheld`);
+    }
+  }
   if(command==='configure'){
-    const selected=new Set(process.argv.slice(3));
-    assert([...selected].every(key=>Object.hasOwn(saved.servers,key)),'Unknown connector selection');
     saved.blockedProviders??={};
     for(const [key,id]of Object.entries(saved.servers)){
       if(selected.size&&!selected.has(key))continue;
-      const prefix=key==='jira'?'JIRA':key==='github'?(process.env.CONNECTOR_GITHUB_CLIENT_ID?'CONNECTOR_GITHUB':'GITHUB'):key==='slack'?'SLACK':'GOOGLE';
+      const prefix=credentialPrefix(key);
       const client=process.env[`${prefix}_CLIENT_ID`],secret=process.env[`${prefix}_CLIENT_SECRET`];
       if(!client||!secret||client===secret){
         await request('PUT',`/admin/mcp-servers/${id}`,{enabled:false});saved.blockedProviders[key]=true;
@@ -117,6 +159,7 @@ if(command==='frontend'||command==='restore-webapp'){
     assert.equal((await(await fetch('http://localhost:5173/api/')).json()).version,'0.9.8');
     assert.equal((await(await fetch('http://127.0.0.1:8080/')).json()).version,'0.9.7');
     for(const [key,id]of Object.entries(saved.servers)){
+      if(selected.size&&!selected.has(key))continue;
       const server=(await request('GET','/admin/mcp-servers')).servers.find(row=>row.id===id);
       const expected=callbackFor(key);
       assert.equal(server.connection_config.oauth.redirect_url,expected);
@@ -129,12 +172,12 @@ if(command==='frontend'||command==='restore-webapp'){
       try{
         assert.equal(authorization.searchParams.get('redirect_uri'),expected);
         assert.equal(authorization.searchParams.get('response_type'),'code');
-        const prefix=key==='jira'?'JIRA':key==='github'?(process.env.CONNECTOR_GITHUB_CLIENT_ID?'CONNECTOR_GITHUB':'GITHUB'):key==='slack'?'SLACK':'GOOGLE';
+        const prefix=credentialPrefix(key);
         assert(!authorization.href.includes(process.env[`${prefix}_CLIENT_SECRET`]));
       }finally{pg(`DELETE FROM mcp_oauth_states WHERE state=${quote(authorization.searchParams.get('state'))} AND "userId"=${quote(saved.owner.id)}`,saved.database);}
       console.log(`PASS ${key}: real authorize API uses registered callback; ${tools.total} read-only tools; probe state removed`);
     }
-    for(const [id,path]of Object.entries(callbackPaths).filter(([id])=>id!=='slack')){
+    for(const [id,path]of Object.entries(callbackPaths).filter(([id])=>id!=='slack'&&(!selected.size||selected.has(id)))){
       const callback=await fetch(`http://localhost:5173${path}?code=fixture&state=fixture`,{redirect:'manual'});
       assert.equal(callback.status,302);assert.equal(callback.headers.get('location'),'/mcp/oauth/callback?code=fixture&state=fixture');
       assert.equal(callback.headers.get('cache-control'),'no-store');
@@ -148,13 +191,14 @@ if(command==='frontend'||command==='restore-webapp'){
   if(command==='probe'){
     let passed=0,failed=0,pending=0;
     const servers=(await request('GET','/admin/mcp-servers')).servers;
-    const targets={github:[['get_me',{}],['list_repositories',{}],['get_repository',{owner:'grengin-oss',repo:'grengin-api'}],['list_branches',{owner:'grengin-oss',repo:'grengin-api'}],['list_commits',{owner:'grengin-oss',repo:'grengin-api'}]],slack:[['get_team',{}],['list_conversations',{}],['list_users',{}]],gmail:[['list_messages',{}],['list_labels',{}]],'google-calendar':[['list_calendars',{}],['list_events',{}]],'google-drive':[['list_files',{}],['list_recent_files',{}]],jira:[['get_me',{}],['list_projects',{}]]};
+    const targets={github:[['get_me',{}],['list_repositories',{}],['get_repository',{owner:'grengin-oss',repo:'grengin-api'}],['list_branches',{owner:'grengin-oss',repo:'grengin-api'}],['list_commits',{owner:'grengin-oss',repo:'grengin-api'}]],slack:[['get_team',{}],['list_conversations',{}],['list_users',{}]],gmail:[['list_messages',{}],['list_labels',{}]],'google-calendar':[['list_calendars',{}],['list_events',{}]],'google-drive':[['list_files',{}],['list_recent_files',{}]],jira:[['get_me',{}],['list_projects',{}]],'outlook-mail':[['list_messages',{}],['list_sent_messages',{}]],'outlook-calendar':[['list_calendars',{}],['list_events',{start_time:new Date().toISOString(),end_time:new Date(Date.now()+7*86400000).toISOString()}]],onedrive:[['get_drive',{}],['list_root_files',{}]],sharepoint:[['get_root_site',{}],['search_sites',{query:'*'}]],'microsoft-teams':[['list_joined_teams',{}],['list_chats',{}]],'microsoft-work-iq':[['get_me',{}],['search_files',{query:'grengin',limit:1,offset:0}]]};
     for(const [key,id]of Object.entries(saved.servers)){
+      if(selected.size&&!selected.has(key))continue;
       const connection=connections.find(row=>row.server_id===id);
       if(!connection?.connected){pending++;continue;}
       const row=JSON.parse(pg(`SELECT row_to_json(c) FROM mcp_connections c WHERE "serverId"=${quote(id)} AND "userId"=${quote(saved.owner.id)}`,saved.database));
       assert(row.accessToken?.startsWith('enc:v1:'),'Only encrypted per-user tokens may be used');
-      if(row.expiresAt&&new Date(row.expiresAt)<=new Date()){console.log(`${key}: BLOCKED token expired; refresh/reconnect through backend first`);continue;}
+      if(row.expiresAt&&new Date(row.expiresAt)<=new Date()){failed++;console.log(`${key}: BLOCKED token expired; refresh/reconnect through backend first`);continue;}
       const access=unseal(row.accessToken);
       const server=servers.find(row=>row.id===id);
       if(key==='jira'){
@@ -180,7 +224,7 @@ if(command==='frontend'||command==='restore-webapp'){
       }
     }
     console.log(`Live reads: ${passed} passed; ${failed} failed; ${pending} connectors await consent. Actual Rust runtime and user tokens; no paid LLM calls; not a chat-model test.`);
-    if(failed)process.exitCode=1;
+    if(failed||pending)process.exitCode=1;
   }
 }else if(command==='serve'){
   assert(!listenerPid(8083),'Port 8083 is already in use');
@@ -235,20 +279,8 @@ if(command==='frontend'||command==='restore-webapp'){
     const o=saved.owner;
     pg(`BEGIN;INSERT INTO users(id,status,email,"emailVerified",name,"googleId","azureId",identities,"mfaEnabled","createdAt","updatedAt","lastLoginAt","isIndependent") VALUES(${quote(o.id)},'active',${quote(o.email)},true,${o.name?quote(o.name):'NULL'},${o.google_id?quote(o.google_id):'NULL'},${o.azure_id?quote(o.azure_id):'NULL'},${o.identities?quote(JSON.stringify(o.identities))+'::jsonb':'NULL'},false,now(),now(),now(),true);INSERT INTO user_role_assignments(id,"userId","roleId","assignedBy","createdAt","updatedAt") SELECT gen_random_uuid(),${quote(o.id)},id,${quote(o.id)},now(),now() FROM roles WHERE name='Super Admin';COMMIT;`,saved.database);
   }
-  const initial=(await request('GET','/admin/mcp-servers')).servers;
-  for(const id of ['jira','github','slack','gmail','google-calendar','google-drive']){
-    const manifest=JSON.parse(await readFile(join(master,'connector-plugins',id,'versions/1.0.0/plugin.json'),'utf8'));
-    const setup=JSON.parse(await readFile(join(master,'connector-plugins',id,'versions/1.0.0/setup.json'),'utf8'));
-    const prefix=id==='jira'?'JIRA':id==='github'?(process.env.CONNECTOR_GITHUB_CLIENT_ID?'CONNECTOR_GITHUB':'GITHUB'):id==='slack'?'SLACK':'GOOGLE';
-    assert(process.env[`${prefix}_CLIENT_ID`]&&process.env[`${prefix}_CLIENT_SECRET`],`Missing ${prefix} OAuth credentials`);
-    const name=`${manifest.name} (native plugin)`;
-    const current=initial.find(server=>server.name===name);
-    if(current){saved.servers[id]=current.id;continue;}
-    const oauth={...setup.authentication.oauth,redirect_url:callbackFor(id)};
-    const server=await request('POST','/admin/mcp-servers',{name,description:`Local read-only ${manifest.name} plugin test`,icon:`https://meta.grengin.com/connectors/icons/${id}.svg`,transport_type:'http',url:manifest.base_url,enabled:true,default_access:'all_users',client_id:process.env[`${prefix}_CLIENT_ID`],client_secret:process.env[`${prefix}_CLIENT_SECRET`],connection_config:{connector_plugin:{manifest,configuration:id==='jira'?{cloud_id:'00000000-0000-4000-8000-000000000000'}:{}},oauth}});
-    saved.servers[id]=server.id;await save();
-  }
+  await installConnectors(['jira','github','slack','gmail','google-calendar','google-drive']);
   console.log('READY: isolated native API 0.9.8 at http://127.0.0.1:8083; six explicitly installed plugins.');
   console.log('Jira cloud_id awaits accessible-resource selection after consent. No existing server or user tokens were copied.');
   backend.once('exit',()=>{if(!closing){console.error('Native backend exited');void stop();}});
-}else throw new Error('Usage: live-native.sh serve|frontend|restore-webapp|status|check|probe|configure|chat');
+}else throw new Error('Usage: live-native.sh serve|frontend|restore-webapp|status|check|probe|configure|chat|install|ui|diagnose [connector IDs]');

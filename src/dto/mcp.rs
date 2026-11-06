@@ -93,6 +93,8 @@ pub struct McpServerCatalogEntry {
     pub icon: Option<String>,
     pub tools: Vec<McpToolSummary>,
     pub connected: bool,
+    pub integration: crate::dto::connector_console::ConnectorIntegration,
+    pub connection_state: crate::dto::connector_console::ConnectorConnectionState,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

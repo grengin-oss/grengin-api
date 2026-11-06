@@ -18,6 +18,11 @@ const sql = query => execFileSync('psql', ['-XAt', '-v', 'ON_ERROR_STOP=1', proc
 const quote = value => `'${String(value).replaceAll("'", "''")}'`;
 const admin = randomUUID(), alice = randomUUID(), bob = randomUUID();
 const fixtures = JSON.parse(await readFile(join(root, 'connector-server-plugin/tests/fixtures/provider-requests.json'), 'utf8'));
+fixtures.push(...JSON.parse(await readFile(join(root, 'connector-server-plugin/tests/fixtures/read-only-expansion-requests.json'), 'utf8')));
+fixtures.push(...JSON.parse(await readFile(join(root, 'connector-server-plugin/tests/fixtures/fifty-provider-requests.json'), 'utf8')));
+fixtures.push(...JSON.parse(await readFile(join(root, 'connector-server-plugin/tests/fixtures/business-provider-requests.json'), 'utf8')));
+const installedExamples = new Map();
+let activeArguments = {};
 const findings = new Map();
 const exchanges = [], calls = [];
 const gateReleases = new Set();
@@ -48,21 +53,23 @@ const vendor = createServer(async (req, res) => {
   try {
     let raw = ''; for await (const chunk of req) { raw += chunk; assert(raw.length < 1024 * 1024); }
     const url = new URL(req.url, 'http://localhost');
-    if (url.pathname.startsWith('/oauth/') && url.pathname.endsWith('/token')) {
+    if (url.pathname.startsWith('/oauth/') && /\/(token|refresh)$/.test(url.pathname)) {
       if (fault === 'outage') { req.socket.destroy(); return; }
       if (fault === 'error_body') {
         res.writeHead(400, {'Content-Type':'application/json'});
         res.end(JSON.stringify({error:'invalid_grant',error_description:logCanary})); return;
       }
       const issuer = url.pathname.split('/')[2];
-      const form = req.headers['content-type']?.includes('application/json') ? new URLSearchParams(JSON.parse(raw)) : new URLSearchParams(raw);
+      const form = req.headers['content-type']?.includes('application/json') ? new URLSearchParams(JSON.parse(raw)) : new URLSearchParams(raw || url.searchParams);
+      const forwarded = new URLSearchParams(form);
+      if (url.pathname.endsWith('/refresh') && !forwarded.has('grant_type')) forwarded.set('grant_type','refresh_token');
       const response = await fetch(`${mock}/${issuer}/token`, {
-        method:'POST', redirect:'manual', body:form.toString(),
+        method:'POST', redirect:'manual', body:forwarded.toString(),
         headers:{'Content-Type':'application/x-www-form-urlencoded', ...(req.headers.authorization ? {Authorization:req.headers.authorization} : {})},
         signal:AbortSignal.timeout(10000),
       });
       const body = JSON.parse(await response.text());
-      exchanges.push({issuer, form, authorization:req.headers.authorization, status:response.status, body:structuredClone(body)});
+      exchanges.push({issuer, form, grantType:forwarded.get('grant_type'), authorization:req.headers.authorization, status:response.status, body:structuredClone(body)});
       if (gate && form.get('grant_type') === gate.grant && response.ok) {
         const current = gate; gate = undefined;
         current.ready(); await current.released;
@@ -78,7 +85,7 @@ const vendor = createServer(async (req, res) => {
       if (issuer === 'slack') body.ok = true;
       res.writeHead(response.status, {'Content-Type':'application/json'}); res.end(JSON.stringify(body));
     } else if (url.pathname.startsWith('/vendor/')) {
-      calls.push({path:url.pathname, token:req.headers['x-shopify-access-token'] ? `Bearer ${req.headers['x-shopify-access-token']}` : req.headers.authorization, body:raw});
+      calls.push({path:url.pathname, token:req.headers['x-shopify-access-token'] ?? req.headers.authorization, body:raw});
       res.writeHead(200, {'Content-Type':'application/json'});
       res.end(JSON.stringify({ok:true,errors:[],value:[],items:[],files:[],messages:[],result:'navikt-tool-ok'}));
     } else if (url.pathname.endsWith('/chat/completions')) {
@@ -86,7 +93,7 @@ const vendor = createServer(async (req, res) => {
       const tool = body.tools?.find(item => item.function.name.startsWith('mcp__'));
       const complete = body.messages.some(message => message.role === 'tool');
       const events = tool && !complete ? [
-        {choices:[{delta:{tool_calls:[{index:0,id:'navikt-call',type:'function',function:{name:tool.function.name,arguments:'{}'}}]}}]},
+        {choices:[{delta:{tool_calls:[{index:0,id:'navikt-call',type:'function',function:{name:tool.function.name,arguments:JSON.stringify(activeArguments)}}]}}]},
         {choices:[{delta:{},finish_reason:'tool_calls'}]},
       ] : [{choices:[{delta:{content:'Connector OAuth completed.'}}]}, {choices:[{delta:{},finish_reason:'stop'}],usage:{prompt_tokens:4,completion_tokens:4,total_tokens:8}}];
       res.writeHead(200, {'Content-Type':'text/event-stream'});
@@ -135,26 +142,34 @@ async function begin(server, user=alice, redirect='') {
 }
 const redeem = (pending, user=alice, status=200) => request('GET','/mcp/oauth/callback'+pending.query,undefined,status,user);
 async function chat(server, user=alice) {
+  activeArguments = installedExamples.get(server.id)?.args ?? {};
   return request('POST','/chat/stream',{provider:'navikt-chat-fixture',model_name:'fixture-model',selected_mcp_servers:[server.id],
     messages:[{role:'user',content:'Use the available connector tool',files:[]}]},200,user);
 }
 async function install(id, method='client_secret_post', flow='oauth2') {
-  const manifest = JSON.parse(await readFile(join(catalog,id,'versions/1.0.0/plugin.json'),'utf8'));
-  const example = fixtures.find(item => item.plugin === id && Object.keys(item.args).length === 0);
-  assert(example, 'provider must have a no-argument read tool in the reviewed fixture');
+  const manifest = JSON.parse(await readFile(join(catalog,id,'plugin.json'),'utf8'));
+  const example = fixtures.find(item => item.plugin === id && Object.keys(item.args).length === 0) ?? fixtures.find(item => item.plugin === id);
+  assert(example, 'provider must have a reviewed read-tool fixture');
   manifest.tools = manifest.tools.filter(tool => tool.name === example.tool);
   manifest.base_url = `${local}/vendor/${id}`;
-  const setup = JSON.parse(await readFile(join(catalog,id,'versions/1.0.0/setup.json'),'utf8'));
+  const setup = JSON.parse(await readFile(join(catalog,id,'versions',manifest.version,'setup.json'),'utf8'));
+  assert.equal(manifest.auth, 'oauth2', `${id}: OAuth tests must not silently promote API-token plugins`);
   // Navikt requires openid; these two fixture-only scopes are not vendor setup instructions.
   const scopes = [...new Set([...manifest.tools.flatMap(tool => tool.required_scopes ?? []), 'openid', 'offline_access'])];
   const oauth = {issuer_url:`${mock}/${id}`,auth_url:`${mock}/${id}/authorize`,token_url:`${local}/oauth/${id}/token`,
     redirect_url:'http://localhost:5173/mcp/oauth/callback',scopes,flow,token_endpoint_auth_method:method,
+    use_pkce: setup.authentication.oauth.use_pkce,
     ...(setup.authentication.oauth.token_request_format ? {token_request_format:setup.authentication.oauth.token_request_format} : {}),
+    ...(setup.authentication.oauth.refresh_token_request_format ? {refresh_token_request_format:setup.authentication.oauth.refresh_token_request_format} : {}),
+    ...(setup.authentication.oauth.token_request_include_client_id ? {token_request_include_client_id:true} : {}),
+    ...(setup.authentication.oauth.refresh_token_url ? {refresh_token_url:`${local}/oauth/${id}/refresh`,refresh_token_include_grant_type:setup.authentication.oauth.refresh_token_include_grant_type} : {}),
     ...(setup.authentication.oauth.token_response ? {token_response:setup.authentication.oauth.token_response} : {}),
     ...(setup.authentication.oauth.refresh_token_response ? {refresh_token_response:setup.authentication.oauth.refresh_token_response} : {})};
-  return (await request('POST','/admin/mcp-servers',{name:`Navikt ${id} ${flow}`,transport_type:'http',url:manifest.base_url,enabled:true,
+  const server = (await request('POST','/admin/mcp-servers',{name:`Navikt ${id} ${flow}`,transport_type:'http',url:manifest.base_url,enabled:true,
     default_access:'all_users',client_id:`fixture-${id}`,...(method !== 'none' ? {client_secret:'fixture-only-secret'} : {}),
     connection_config:{connector_plugin:{manifest,base_url_override:manifest.base_url,configuration:example.configuration ?? {},allow_insecure_http:true,allow_private_network:true},oauth}},201,admin)).json();
+  installedExamples.set(server.id,{...example,tokenPrefix:manifest.credential_delivery?.location==='header' ? (manifest.credential_delivery.prefix ?? '') : 'Bearer '});
+  return server;
 }
 function pause(grant) {
   let ready, resolveRelease;
@@ -196,17 +211,24 @@ try {
   await request('POST','/admin/ai-engines',{api_key:'fixture-only',is_enabled:true,whitelisted_models:['fixture-model'],default_model:'fixture-model',
     plugin_config:{manifest:provider,configuration:{},baseUrlOverride:local+'/',allowInsecureHttp:true,allowPrivateNetwork:true}},201,admin);
 
-  const ids = ['gmail', ...JSON.parse(await readFile(join(catalog,'../connector-plugins.json'),'utf8')).map(item=>item.key).filter(id=>id!=='gmail' && !['mailchimp-transactional','paypal','wix'].includes(id))];
+  const ids = ['gmail'];
+  for (const entry of JSON.parse(await readFile(join(catalog,'../connector-plugins.json'),'utf8'))) {
+    const manifest = JSON.parse(await readFile(join(catalog,entry.key,'plugin.json'),'utf8'));
+    if (entry.key !== 'gmail' && manifest.auth === 'oauth2') ids.push(entry.key);
+  }
   const methods = ['client_secret_post','none','client_secret_basic'];
   const installed = [];
   for (const [index,id] of ids.entries()) {
-    const method = methods[index % methods.length];
+    const manifest = JSON.parse(await readFile(join(catalog,id,'plugin.json'),'utf8'));
+    const setup = JSON.parse(await readFile(join(catalog,id,'versions',manifest.version,'setup.json'),'utf8'));
+    const method = setup.authentication.oauth.token_endpoint_auth_method ?? methods[index % methods.length];
     const server = await install(id,method); installed.push(server);
     await request('POST',`/mcp/connections/${server.id}/authorize`,{},401,null);
     const pending = await begin(server);
-    check(`${id}: authorization uses PKCE S256 and a fresh user-bound state`, pending.url.searchParams.get('code_challenge_method'), 'S256');
+    const pkce = setup.authentication.oauth.use_pkce !== false;
+    check(`${id}: authorization follows the catalog PKCE policy and uses a fresh user-bound state`, pending.url.searchParams.get('code_challenge_method'), pkce ? 'S256' : null);
     const verifier = sql(`SELECT "pkceVerifier" FROM mcp_oauth_states WHERE state=${quote(pending.state)}`);
-    check(`${id}: stored verifier matches the transmitted challenge`,createHash('sha256').update(verifier).digest('base64url'),pending.url.searchParams.get('code_challenge'));
+    check(`${id}: stored verifier matches the transmitted challenge`,pkce ? createHash('sha256').update(verifier).digest('base64url') : null,pending.url.searchParams.get('code_challenge'));
     await redeem(pending,bob,404); await redeem(pending,null,401);
     check(`${id}: another user or anonymous callback cannot consume the owner's state`,countStates(pending.state),1);
     await redeem(pending);
@@ -221,16 +243,17 @@ try {
     const before = exchanges.length; await redeem(pending,alice,404);
     check(`${id}: replay is rejected before a second exchange`,exchanges.length,before);
     await chat(server);
-    check(`${id}: chat tool call uses this user's Navikt access token`,calls.at(-1)?.token,`Bearer ${exchange.body.access_token}`);
+    const expectedToken = token => `${installedExamples.get(server.id).tokenPrefix}${token}`;
+    check(`${id}: chat tool call uses this user's Navikt access token`,calls.at(-1)?.token===expectedToken(exchange.body.access_token));
     sql(`UPDATE mcp_connections SET "expiresAt"=now()-interval '1 second' WHERE "serverId"=${quote(server.id)} AND "userId"=${quote(alice)}`);
     const refreshCount=exchanges.length;
     await chat(server);
-    check(`${id}: expired token refreshes with the correct response format`,exchanges.length===refreshCount+1 && exchanges.at(-1).form.get('grant_type')==='refresh_token' && calls.at(-1)?.token===`Bearer ${exchanges.at(-1).body.access_token}`);
+    check(`${id}: expired token refreshes with the correct response format`,exchanges.length===refreshCount+1 && exchanges.at(-1).grantType==='refresh_token' && calls.at(-1)?.token===expectedToken(exchanges.at(-1).body.access_token));
     const other = await begin(server,bob); await redeem(other,bob);
     const otherToken = exchanges.at(-1).body.access_token;
     assert.notEqual(otherToken,exchange.body.access_token,'mock must produce distinguishable credentials');
     await chat(server,bob);
-    check(`${id}: second user's tool call never borrows the first token`,calls.at(-1)?.token,`Bearer ${otherToken}`);
+    check(`${id}: second user's tool call never borrows the first token`,calls.at(-1)?.token===expectedToken(otherToken));
   }
 
   for (const id of ['mailchimp-transactional','paypal','wix']) {

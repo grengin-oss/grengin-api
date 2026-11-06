@@ -3,7 +3,10 @@
 
 use std::{cell::Cell, collections::BTreeMap};
 
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -31,6 +34,9 @@ pub enum MappingExpression {
     OmitIfNull(OmitIfNullExpression),
     JsonEncode(JsonEncodeExpression),
     Base64(Base64Expression),
+    Base64Decode(Base64DecodeExpression),
+    Base64UrlDecode(Base64UrlDecodeExpression),
+    Walk(WalkExpression),
     Map(MapExpression),
     FlatMap(FlatMapExpression),
     If(IfExpression),
@@ -78,6 +84,36 @@ pub struct JsonEncodeExpression {
 pub struct Base64Expression {
     #[serde(rename = "$base64")]
     pub value: Box<MappingExpression>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Base64DecodeExpression {
+    #[serde(rename = "$base64Decode")]
+    pub value: Box<MappingExpression>,
+    /// Charset label, `Content-Type` value or `[{name, value}]` header list. When present, text
+    /// is decoded with that charset (UTF-8 if unknown) and malformed bytes become U+FFFD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charset: Option<Box<MappingExpression>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Base64UrlDecodeExpression {
+    #[serde(rename = "$base64UrlDecode")]
+    pub value: Box<MappingExpression>,
+    /// Charset label, `Content-Type` value or `[{name, value}]` header list. When present, text
+    /// is decoded with that charset (UTF-8 if unknown) and malformed bytes become U+FFFD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charset: Option<Box<MappingExpression>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WalkExpression {
+    #[serde(rename = "$walk")]
+    pub path: String,
+    pub using: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -238,6 +274,28 @@ fn validate_expression<'a>(
         }
         MappingExpression::Base64(value) => {
             validate_expression(&value.value, definitions, definition_stack, child_depth)?
+        }
+        MappingExpression::Base64Decode(Base64DecodeExpression { value, charset })
+        | MappingExpression::Base64UrlDecode(Base64UrlDecodeExpression { value, charset }) => {
+            validate_expression(value, definitions, definition_stack, child_depth)?;
+            if let Some(charset) = charset {
+                validate_expression(charset, definitions, definition_stack, child_depth)?;
+            }
+        }
+        MappingExpression::Walk(walk) => {
+            validate_canonical_path(&walk.path)?;
+            validate_definition_name(&walk.using)?;
+            let definition = definitions.get(&walk.using).ok_or_else(|| {
+                ProviderError::InvalidManifest("walk references an unknown definition".into())
+            })?;
+            if definition_stack.contains(&walk.using.as_str()) {
+                return Err(ProviderError::InvalidManifest(
+                    "walk definition cycle".into(),
+                ));
+            }
+            definition_stack.push(&walk.using);
+            validate_expression(definition, definitions, definition_stack, child_depth)?;
+            definition_stack.pop();
         }
         MappingExpression::Map(map) => {
             validate_canonical_path(&map.path)?;
@@ -602,6 +660,81 @@ fn evaluate(
                 STANDARD.encode(text.as_bytes()),
             )))
         }
+        MappingExpression::Base64Decode(value) => decode_base64(
+            &value.value,
+            value.charset.as_deref(),
+            scope,
+            child_depth,
+            false,
+        ),
+        MappingExpression::Base64UrlDecode(value) => decode_base64(
+            &value.value,
+            value.charset.as_deref(),
+            scope,
+            child_depth,
+            true,
+        ),
+        MappingExpression::Walk(walk) => {
+            let Some(root) = scope.resolve(&walk.path) else {
+                if optional {
+                    return Ok(Evaluation::Omit);
+                }
+                return Err(ProviderError::PayloadMapping(
+                    "walk path does not exist".into(),
+                ));
+            };
+            let definition = scope.definitions.get(&walk.using).ok_or_else(|| {
+                ProviderError::PayloadMapping("walk references an unknown definition".into())
+            })?;
+            let mut stack = vec![(root, 0usize)];
+            let mut output = Vec::new();
+            let mut visited = 0usize;
+            while let Some((node, nesting)) = stack.pop() {
+                visited += 1;
+                if visited > 32768 || nesting > 64 {
+                    return Err(ProviderError::PayloadMapping(
+                        "walk resource budget exceeded".into(),
+                    ));
+                }
+                if let Some(budget) = scope.budget {
+                    budget.spend(1, 0)?;
+                }
+                let mut children = Vec::new();
+                match node {
+                    Value::Object(object) => {
+                        if let Evaluation::Value(value) =
+                            evaluate(definition, scope.with_item(node), true, child_depth)?
+                            && !value.is_null()
+                        {
+                            scope.allocate(std::mem::size_of::<Value>())?;
+                            output.push(value);
+                        }
+                        if stack.len().saturating_add(object.len()) > 32768 {
+                            return Err(ProviderError::PayloadMapping(
+                                "walk resource budget exceeded".into(),
+                            ));
+                        }
+                        children.extend(object.values().rev());
+                    }
+                    Value::Array(array) => {
+                        if stack.len().saturating_add(array.len()) > 32768 {
+                            return Err(ProviderError::PayloadMapping(
+                                "walk resource budget exceeded".into(),
+                            ));
+                        }
+                        children.extend(array.iter().rev());
+                    }
+                    _ => {}
+                }
+                scope.allocate(
+                    children
+                        .len()
+                        .saturating_mul(std::mem::size_of::<(&Value, usize)>()),
+                )?;
+                stack.extend(children.into_iter().map(|node| (node, nesting + 1)));
+            }
+            Ok(Evaluation::Value(Value::Array(output)))
+        }
         MappingExpression::Map(map) => {
             let Some(selected) = scope.resolve(&map.path) else {
                 if optional {
@@ -793,6 +926,82 @@ fn evaluate(
     }
 }
 
+fn decode_base64(
+    value: &MappingExpression,
+    charset: Option<&MappingExpression>,
+    scope: Scope<'_>,
+    depth: usize,
+    url_safe: bool,
+) -> Result<Evaluation, ProviderError> {
+    let value = required_value(evaluate(value, scope, false, depth)?)?;
+    let text = value
+        .as_str()
+        .ok_or_else(|| ProviderError::PayloadMapping("base64 decoding requires a string".into()))?;
+    let charset = match charset {
+        Some(expression) => Some(match evaluate(expression, scope, true, depth)? {
+            Evaluation::Value(value) => charset_label(&value),
+            Evaluation::Omit => None,
+        }),
+        None => None,
+    };
+    // Bound allocation before filtering MIME line breaks or decoding provider-controlled input.
+    // Single-byte charsets can expand to three UTF-8 bytes per input byte.
+    scope.allocate(
+        text.len()
+            .saturating_mul(if charset.is_some() { 3 } else { 2 }),
+    )?;
+    let compact: String = text.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    let (padded, unpadded) = if url_safe {
+        (&URL_SAFE, &URL_SAFE_NO_PAD)
+    } else {
+        (&STANDARD, &STANDARD_NO_PAD)
+    };
+    let bytes = padded
+        .decode(&compact)
+        .or_else(|_| unpadded.decode(&compact))
+        .map_err(|_| ProviderError::PayloadMapping("invalid base64 content".into()))?;
+    let decoded = match charset {
+        // A declared charset means the caller expects text, so one malformed part must not fail
+        // the whole result: decode leniently and replace invalid bytes with U+FFFD.
+        Some(label) => label
+            .as_deref()
+            .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+            .unwrap_or(encoding_rs::UTF_8)
+            .decode(&bytes)
+            .0
+            .into_owned(),
+        None => String::from_utf8(bytes)
+            .map_err(|_| ProviderError::PayloadMapping("decoded content is not UTF-8".into()))?,
+    };
+    Ok(Evaluation::Value(Value::String(decoded)))
+}
+
+/// Reads a charset from a label (`iso-8859-1`), a `Content-Type` value
+/// (`text/plain; charset="iso-8859-1"`) or a `[{name, value}]` header list.
+fn charset_label(value: &Value) -> Option<String> {
+    let text = match value {
+        Value::String(text) => text.as_str(),
+        Value::Array(headers) => headers.iter().find_map(|header| {
+            header
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| name.eq_ignore_ascii_case("content-type"))
+                .and(header.get("value").and_then(Value::as_str))
+        })?,
+        _ => return None,
+    };
+    let label = if !text.contains(['/', ';', '=']) {
+        text
+    } else {
+        text.split(';').skip(1).find_map(|parameter| {
+            let (name, value) = parameter.split_once('=')?;
+            name.trim().eq_ignore_ascii_case("charset").then_some(value)
+        })?
+    };
+    let label = label.trim().trim_matches(['"', '\'']).trim();
+    (!label.is_empty() && label.len() <= 64).then(|| label.to_string())
+}
+
 fn evaluate_object(
     object: &BTreeMap<String, MappingExpression>,
     scope: Scope<'_>,
@@ -874,6 +1083,145 @@ mod tests {
 
     fn expression(value: Value) -> MappingExpression {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn base64_decoders_preserve_text_alphabets_padding_and_mime_line_breaks() {
+        use base64::{
+            Engine,
+            engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
+        };
+        for text in ["", "Hello, café 水", "text with newline\n", "???>>>"] {
+            for (operator, encoded) in [
+                ("$base64Decode", STANDARD.encode(text)),
+                ("$base64Decode", format!("{}\r\n", STANDARD.encode(text))),
+                ("$base64UrlDecode", URL_SAFE.encode(text)),
+                ("$base64UrlDecode", URL_SAFE_NO_PAD.encode(text)),
+            ] {
+                let mapping = expression(json!({operator:{"$get":"request.text"}}));
+                validate_mapping(&mapping, &BTreeMap::new()).unwrap();
+                let context = MappingContext::new(json!({"request":{"text":encoded}}));
+                assert_eq!(
+                    evaluate_mapping(&mapping, &context, &BTreeMap::new()).unwrap(),
+                    text
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn base64_decode_rejects_binary_invalid_input_and_budget_exhaustion_without_leaks() {
+        for operator in ["$base64Decode", "$base64UrlDecode"] {
+            for value in [
+                json!("private-canary%%%"),
+                json!("/w=="),
+                json!("-w=="),
+                json!(17),
+                Value::Null,
+            ] {
+                let mapping = expression(json!({operator:{"$get":"request.value"}}));
+                let context = MappingContext::new(json!({"request":{"value":value}}));
+                let error = evaluate_mapping(&mapping, &context, &BTreeMap::new())
+                    .unwrap_err()
+                    .to_string();
+                assert!(!error.contains("private-canary"));
+            }
+            let mapping = expression(json!({operator:{"$get":"request.value"}}));
+            let context = MappingContext::new(json!({"request":{"value":"YQ==".repeat(100)}}));
+            assert!(
+                super::evaluate_mapping_bounded(&mapping, &context, &BTreeMap::new(), 100, 256)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn declared_charsets_decode_legacy_text_without_failing_the_call() {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let latin1 = URL_SAFE_NO_PAD.encode(b"caf\xe9 na\xefve");
+        let utf8 = URL_SAFE_NO_PAD.encode("caf\u{e9}".as_bytes());
+        let invalid = URL_SAFE_NO_PAD.encode(b"ok \xff\xfe end");
+        let mapping = expression(json!({
+            "$base64UrlDecode": {"$get": "request.data"},
+            "charset": {"$get": "request.charset"}
+        }));
+        validate_mapping(&mapping, &BTreeMap::new()).unwrap();
+        for (charset, data, expected) in [
+            (json!("iso-8859-1"), &latin1, "caf\u{e9} na\u{ef}ve"),
+            (
+                json!("text/plain; charset=\"ISO-8859-1\""),
+                &latin1,
+                "caf\u{e9} na\u{ef}ve",
+            ),
+            (
+                json!("text/plain; charset = \"windows-1252\""),
+                &latin1,
+                "caf\u{e9} na\u{ef}ve",
+            ),
+            (
+                json!("text/html; format=flowed; CHARSET\t=\tiso-8859-1"),
+                &latin1,
+                "caf\u{e9} na\u{ef}ve",
+            ),
+            (
+                json!([{"name": "Content-Type", "value": "text/plain; charset=windows-1252"}]),
+                &latin1,
+                "caf\u{e9} na\u{ef}ve",
+            ),
+            (
+                json!([{"name": "Subject", "value": "no charset"}]),
+                &utf8,
+                "caf\u{e9}",
+            ),
+            (
+                json!("text/plain; x-charset=windows-1252"),
+                &invalid,
+                "ok \u{fffd}\u{fffd} end",
+            ),
+            (
+                json!("unknown-charset"),
+                &invalid,
+                "ok \u{fffd}\u{fffd} end",
+            ),
+            (Value::Null, &invalid, "ok \u{fffd}\u{fffd} end"),
+        ] {
+            let context =
+                MappingContext::new(json!({"request": {"data": data, "charset": charset}}));
+            assert_eq!(
+                evaluate_mapping(&mapping, &context, &BTreeMap::new()).unwrap(),
+                expected
+            );
+        }
+        let strict = expression(json!({"$base64UrlDecode": {"$get": "request.data"}}));
+        let context = MappingContext::new(json!({"request": {"data": latin1}}));
+        assert!(evaluate_mapping(&strict, &context, &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn bounded_walk_extracts_nested_content_without_cloning_the_source_tree() {
+        let definitions = BTreeMap::from([(
+            "text".into(),
+            expression(json!({
+                "$coalesce":[{"$get":"item.textRun.content"},null]
+            })),
+        )]);
+        let mapping = expression(json!({"$walk":"request.document","using":"text"}));
+        validate_mapping(&mapping, &definitions).unwrap();
+        let context = MappingContext::new(json!({"request":{"document":[
+            {"paragraph":{"elements":[{"textRun":{"content":"One"}}]}},
+            {"table":{"rows":[{"cell":{"textRun":{"content":"Two"}}}]}}
+        ]}}));
+        assert_eq!(
+            super::evaluate_mapping_bounded(&mapping, &context, &definitions, 1000, 16384).unwrap(),
+            json!(["One", "Two"])
+        );
+        let wide = MappingContext::new(json!({"request":{"document":vec![Value::Null;32769]}}));
+        assert!(evaluate_mapping(&mapping, &wide, &definitions).is_err());
+        assert!(
+            super::evaluate_mapping_bounded(&mapping, &context, &definitions, 2, 16384).is_err()
+        );
+        let cycle = BTreeMap::from([("text".into(), mapping.clone())]);
+        assert!(validate_mapping(&mapping, &cycle).is_err());
     }
 
     #[test]
