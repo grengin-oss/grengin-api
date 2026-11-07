@@ -342,6 +342,8 @@ pub struct McpAuthorize {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub broker_connection_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<crate::models::connectors::ConnectorStatus>,
 }
 
 #[derive(Deserialize, ToSchema)]

@@ -13,13 +13,16 @@ with the backend/service changes. Deploy a compatible webapp alongside them.
 2. Open its `authorization_url`. It is present only for pending consent. For a
    popup, copy this context into its same-origin sessionStorage before navigating
    to the vendor. Do not depend on an unvalidated `postMessage` or opener.
-   For registration-free connections this URL is the Grengin service's destination
+   For new broker connections this URL is the Grengin service's destination
    approval page, not the vendor: it shows the connector, its permissions and this
    instance's domain, and the user must choose Continue before the vendor opens.
    The approval is bound to that browser, so open the URL in the same browser
    profile that will finish the flow (a popup or new tab is fine). The URL still
-   carries `state`. Starting MCP authorization for a native server that is already
-   connected or awaiting confirmation returns 409 rather than a URL.
+   carries `state`. Starting MCP authorization for an already-connected native
+   server returns HTTP 200, `success: true`, `status: "connected"`, and
+   `authorization_url: null`. Do not open another consent window; refresh the
+   connection listing. An awaiting-confirmation row likewise returns its status
+   without a URL; complete only from the previously verified browser receipt.
 3. The vendor still redirects only to the shared service callback. grengin-api
    signs the instance return URL derived from REDIRECT_URL, so the operator does
    not register every instance URL with Slack. Public instances require HTTPS;
@@ -53,7 +56,9 @@ Polling and listing endpoints intentionally never return it. A lost code
 requires disconnect/restart, not a recovery endpoint that reveals the code.
 
 Old backend starts without a signed instance `redirect_uri` retain the manual
-code page for compatibility. Existing pending attempts must be disconnected and
+code page for registered-flow compatibility. New registration-free starts require
+the instance callback. Existing pending and awaiting-confirmation attempts from
+before browser binding must be disconnected and
 restarted after upgrading; their return destination cannot be changed in flight.
 No vendor token, backend bearer token, private key or OAuth authorization code
 is delivered to the instance callback.

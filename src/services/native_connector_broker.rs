@@ -60,70 +60,22 @@ pub fn identity(config: &Value) -> Result<Option<NativeBrokerIdentity>, AppError
     }))
 }
 
-// Mirrors JavaScript's JSON.stringify, which the broker uses for the same digest. Numbers it would
-// print differently (exponents, unsafe integers) are refused rather than hashed inconsistently.
-fn js_number(number: &serde_json::Number) -> Option<String> {
-    const SAFE: f64 = 9_007_199_254_740_991.0;
-    if let Some(value) = number.as_i64() {
-        return ((value as f64).abs() <= SAFE).then(|| value.to_string());
-    }
-    if let Some(value) = number.as_u64() {
-        return ((value as f64) <= SAFE).then(|| value.to_string());
-    }
-    let value = number.as_f64()?;
-    if value == 0.0 {
-        return Some("0".into());
-    }
-    if !value.is_finite() || !(1e-6..1e21).contains(&value.abs()) {
-        return None;
-    }
-    Some(if value.fract() == 0.0 {
-        format!("{value:.0}")
-    } else {
-        format!("{value}")
-    })
-}
-
 pub fn canonical_digest(value: &Value) -> Result<String, AppError> {
-    fn write(value: &Value, output: &mut Vec<u8>) -> Result<(), serde_json::Error> {
+    fn safe_integers(value: &Value) -> bool {
         match value {
-            Value::Object(object) => {
-                output.push(b'{');
-                let mut keys = object.keys().collect::<Vec<_>>();
-                keys.sort();
-                for (index, key) in keys.into_iter().enumerate() {
-                    if index != 0 {
-                        output.push(b',');
-                    }
-                    serde_json::to_writer(&mut *output, key)?;
-                    output.push(b':');
-                    write(&object[key], output)?;
-                }
-                output.push(b'}');
-            }
-            Value::Array(values) => {
-                output.push(b'[');
-                for (index, value) in values.iter().enumerate() {
-                    if index != 0 {
-                        output.push(b',');
-                    }
-                    write(value, output)?;
-                }
-                output.push(b']');
-            }
-            Value::Number(number) => output.extend_from_slice(
-                js_number(number)
-                    .ok_or_else(|| {
-                        serde::de::Error::custom("number not representable in JSON.stringify")
-                    })?
-                    .as_bytes(),
-            ),
-            _ => serde_json::to_writer(output, value)?,
+            Value::Object(object) => object.values().all(safe_integers),
+            Value::Array(values) => values.iter().all(safe_integers),
+            Value::Number(number) if number.is_i64() || number.is_u64() => number
+                .as_f64()
+                .is_some_and(|number| number.abs() <= 9_007_199_254_740_991.0),
+            _ => true,
         }
-        Ok(())
     }
-    let mut bytes = Vec::new();
-    write(value, &mut bytes).map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
+    if !safe_integers(value) {
+        return Err(AppError::ServiceTemporarilyUnavailable);
+    }
+    let bytes = serde_json_canonicalizer::to_vec(value)
+        .map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
     Ok(openssl::sha::sha256(&bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -184,23 +136,35 @@ mod tests {
             digest(r#"{"a":-0.0}"#).unwrap(),
             digest(r#"{"a":0}"#).unwrap()
         );
-        for (number, javascript) in [
-            (0.5, "0.5"),
-            (0.000001, "0.000001"),
-            (1e20, "100000000000000000000"),
+        for (raw, canonical) in [
+            (r#"{"a":0.5}"#, r#"{"a":0.5}"#),
+            (r#"{"a":1e-7}"#, r#"{"a":1e-7}"#),
+            (r#"{"a":1e21}"#, r#"{"a":1e+21}"#),
+            (
+                r#"{"a":1000000000000000100.0}"#,
+                r#"{"a":1000000000000000100}"#,
+            ),
         ] {
-            assert_eq!(
-                js_number(&serde_json::Number::from_f64(number).unwrap()).unwrap(),
-                javascript
-            );
+            let expected = openssl::sha::sha256(canonical.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            assert_eq!(digest(raw).unwrap(), expected, "{raw}");
         }
-        for raw in [
-            r#"{"a":1e21}"#,
-            r#"{"a":1e-7}"#,
-            r#"{"a":9007199254740993}"#,
-        ] {
-            assert!(digest(raw).is_err(), "{raw}");
-        }
+        assert!(digest(r#"{"a":9007199254740993}"#).is_err());
+    }
+
+    #[test]
+    fn unicode_keys_follow_jcs_utf16_order() {
+        let value = json!({"\u{fffd}":1,"\u{1f600}":2});
+        let expected = "{\"\u{1f600}\":2,\"\u{fffd}\":1}";
+        assert_eq!(
+            canonical_digest(&value).unwrap(),
+            openssl::sha::sha256(expected.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
     }
 
     #[test]

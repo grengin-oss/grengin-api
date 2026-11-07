@@ -49,8 +49,8 @@ use crate::{
     },
     services::mcp_catalog_helpers::*,
     services::mcp_helpers::{
-        build_access_rule_dtos, complete_oauth_authorization, encrypt_db_url_in_config,
-        resolve_mcp_oauth_token, start_oauth_authorization, to_server_dto, to_tool_dto,
+        authorize_user_mcp_connection, build_access_rule_dtos, complete_oauth_authorization,
+        encrypt_db_url_in_config, resolve_mcp_oauth_token, to_server_dto, to_tool_dto,
         upsert_connection,
     },
     services::mcp_service::{map_mcp_access_error, resolve_server_connected},
@@ -1167,6 +1167,7 @@ pub async fn list_mcp_connections(
     post,
     path = "/mcp/connections/{server_id}/authorize",
     tag = "mcp",
+    description = "Start OAuth for an accessible server. An existing broker connection returns its status without requiring a new authorization URL; an already-connected account returns HTTP 200 with status connected.",
     params(
         ("server_id" = Uuid, Path, description = "MCP server id"),
         ("redirect_uri" = Option<String>, Query, description = "Where the callback redirects afterwards; must be a relative path or on the REDIRECT_URL origin, otherwise it is ignored")
@@ -1180,20 +1181,15 @@ pub async fn authorize_mcp_connection(
     State(state): State<SharedState>,
     Path(server_id): Path<Uuid>,
     Query(query): Query<McpAuthorizeQuery>,
-) -> Result<Json<McpAuthorize>, AppError> {
-    let prompt = start_oauth_authorization(
+) -> Result<Json<McpAuthorize>, crate::services::connector_broker::ConnectorError> {
+    let response = authorize_user_mcp_connection(
         &state,
         server_id,
         claims.user_id,
         query.redirect_uri.as_deref(),
     )
     .await?;
-    Ok(Json(McpAuthorize {
-        success: true,
-        authorization_url: Some(prompt.authorization_url),
-        message: Some("Authorize via provided URL".into()),
-        broker_connection_id: prompt.broker_connection_id,
-    }))
+    Ok(Json(response))
 }
 
 #[utoipa::path(post,path="/mcp/connections/{server_id}/credentials",tag="mcp",

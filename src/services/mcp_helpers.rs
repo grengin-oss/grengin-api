@@ -682,6 +682,87 @@ pub async fn build_mcp_oauth_prompt(
     start_oauth_authorization(state, server_id, user_id, None).await
 }
 
+async fn start_native_broker_connection(
+    state: &SharedState,
+    server: &mcp_servers::Model,
+    user_id: Uuid,
+) -> Result<
+    Option<crate::dto::connectors::ConnectorConnection>,
+    crate::services::connector_broker::ConnectorError,
+> {
+    let Some(native) =
+        crate::services::native_connector_broker::identity(&server.connection_config)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        crate::services::connectors_helpers::start_connection(
+            state,
+            user_id,
+            native.plugin_id,
+            crate::dto::connectors::ConnectConnectorRequest {
+                version: native.plugin_version,
+                server_id: Some(server.id),
+            },
+        )
+        .await?,
+    ))
+}
+
+fn broker_authorize_response(
+    id: Uuid,
+    status: crate::models::connectors::ConnectorStatus,
+    authorization_url: Option<String>,
+) -> crate::dto::mcp::McpAuthorize {
+    use crate::models::connectors::ConnectorStatus;
+    let connected = status == ConnectorStatus::Connected;
+    crate::dto::mcp::McpAuthorize {
+        success: matches!(
+            status,
+            ConnectorStatus::Connected
+                | ConnectorStatus::Pending
+                | ConnectorStatus::AwaitingConfirmation
+        ),
+        message: Some(
+            if connected {
+                "Already connected"
+            } else if authorization_url.is_some() {
+                "Authorize via provided URL"
+            } else {
+                "Connection status available"
+            }
+            .into(),
+        ),
+        authorization_url,
+        broker_connection_id: Some(id),
+        status: Some(status),
+    }
+}
+
+pub async fn authorize_user_mcp_connection(
+    state: &SharedState,
+    server_id: Uuid,
+    user_id: Uuid,
+    redirect_uri: Option<&str>,
+) -> Result<crate::dto::mcp::McpAuthorize, crate::services::connector_broker::ConnectorError> {
+    let server = require_server_access(state, user_id, server_id).await?;
+    if let Some(connection) = start_native_broker_connection(state, &server, user_id).await? {
+        return Ok(broker_authorize_response(
+            connection.id,
+            connection.status,
+            connection.authorization_url,
+        ));
+    }
+    let prompt = start_server_oauth_authorization(state, server, user_id, redirect_uri).await?;
+    Ok(crate::dto::mcp::McpAuthorize {
+        success: true,
+        authorization_url: Some(prompt.authorization_url),
+        message: Some("Authorize via provided URL".into()),
+        broker_connection_id: prompt.broker_connection_id,
+        status: None,
+    })
+}
+
 pub async fn start_oauth_authorization(
     state: &SharedState,
     server_id: Uuid,
@@ -689,19 +770,17 @@ pub async fn start_oauth_authorization(
     redirect_uri: Option<&str>,
 ) -> Result<McpOauthPrompt, AppError> {
     let server = require_server_access(state, user_id, server_id).await?;
-    if let Some(native) =
-        crate::services::native_connector_broker::identity(&server.connection_config)?
-    {
-        let connection = crate::services::connectors_helpers::start_connection(
-            state,
-            user_id,
-            native.plugin_id,
-            crate::dto::connectors::ConnectConnectorRequest {
-                version: native.plugin_version,
-                server_id: Some(server_id),
-            },
-        )
-        .await?;
+    start_server_oauth_authorization(state, server, user_id, redirect_uri).await
+}
+
+async fn start_server_oauth_authorization(
+    state: &SharedState,
+    server: mcp_servers::Model,
+    user_id: Uuid,
+    redirect_uri: Option<&str>,
+) -> Result<McpOauthPrompt, AppError> {
+    let server_id = server.id;
+    if let Some(connection) = start_native_broker_connection(state, &server, user_id).await? {
         return Ok(McpOauthPrompt {
             // Connected or awaiting-confirmation connections have no authorization step left to start.
             authorization_url: connection.authorization_url.ok_or(AppError::DbConflict)?,
@@ -1027,6 +1106,43 @@ async fn delete_oauth_state(state: &SharedState, oauth_state_id: Uuid) -> Result
 mod tests {
     use super::{OAuthCallbackOutcome, retain_refresh_token};
     use crate::services::mcp_client::{McpClientError, McpOAuthTokens};
+
+    #[test]
+    fn connected_broker_authorization_returns_status_without_requiring_another_url() {
+        use crate::models::connectors::ConnectorStatus;
+        let reply = super::broker_authorize_response(
+            uuid::Uuid::new_v4(),
+            ConnectorStatus::Connected,
+            None,
+        );
+        assert!(reply.success);
+        assert!(reply.authorization_url.is_none());
+        assert!(reply.broker_connection_id.is_some());
+        assert_eq!(serde_json::to_value(reply).unwrap()["status"], "connected");
+    }
+
+    #[test]
+    fn pending_and_terminal_broker_statuses_are_not_reported_as_already_connected() {
+        use crate::models::connectors::ConnectorStatus;
+        let pending = super::broker_authorize_response(
+            uuid::Uuid::new_v4(),
+            ConnectorStatus::Pending,
+            Some("https://service.example/consent".into()),
+        );
+        assert!(pending.success);
+        assert!(pending.authorization_url.is_some());
+        let awaiting = super::broker_authorize_response(
+            uuid::Uuid::new_v4(),
+            ConnectorStatus::AwaitingConfirmation,
+            None,
+        );
+        assert!(awaiting.success);
+        assert_eq!(awaiting.status, Some(ConnectorStatus::AwaitingConfirmation));
+        let revoked =
+            super::broker_authorize_response(uuid::Uuid::new_v4(), ConnectorStatus::Revoked, None);
+        assert!(!revoked.success);
+        assert!(revoked.authorization_url.is_none());
+    }
 
     #[tokio::test]
     #[ignore = "requires DB_URL pointing at the isolated grengin_security_test database"]
