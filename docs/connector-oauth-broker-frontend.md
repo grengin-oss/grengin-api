@@ -13,6 +13,13 @@ with the backend/service changes. Deploy a compatible webapp alongside them.
 2. Open its `authorization_url`. It is present only for pending consent. For a
    popup, copy this context into its same-origin sessionStorage before navigating
    to the vendor. Do not depend on an unvalidated `postMessage` or opener.
+   For registration-free connections this URL is the Grengin service's destination
+   approval page, not the vendor: it shows the connector, its permissions and this
+   instance's domain, and the user must choose Continue before the vendor opens.
+   The approval is bound to that browser, so open the URL in the same browser
+   profile that will finish the flow (a popup or new tab is fine). The URL still
+   carries `state`. Starting MCP authorization for a native server that is already
+   connected or awaiting confirmation returns 409 rather than a URL.
 3. The vendor still redirects only to the shared service callback. grengin-api
    signs the instance return URL derived from REDIRECT_URL, so the operator does
    not register every instance URL with Slack. Public instances require HTTPS;

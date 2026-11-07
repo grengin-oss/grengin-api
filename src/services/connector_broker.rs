@@ -209,6 +209,7 @@ fn service_url(raw: &str) -> Option<Url> {
 }
 
 pub fn proof_message(
+    audience: Option<&str>,
     connection: &str,
     user: &str,
     timestamp: i64,
@@ -218,10 +219,14 @@ pub fn proof_message(
 ) -> Result<String, AppError> {
     let digest =
         hash(MessageDigest::sha256(), body).map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
-    Ok(format!(
-        "grengin-connectors-v2\n{connection}\n{user}\n{timestamp}\n{nonce}\nPOST\n{path}\n{}",
+    let signed = format!(
+        "{connection}\n{user}\n{timestamp}\n{nonce}\nPOST\n{path}\n{}",
         hex(&digest)
-    ))
+    );
+    Ok(match audience {
+        Some(origin) => format!("grengin-connectors-v3\n{origin}\n{signed}"),
+        None => format!("grengin-connectors-v2\n{signed}"),
+    })
 }
 
 impl ConnectorBroker {
@@ -298,25 +303,60 @@ impl ConnectorBroker {
         let public_key = key
             .raw_public_key()
             .map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
-        let timestamp = chrono::Utc::now().timestamp();
-        let nonce = random_secret()?;
-        let message = proof_message(&connection, &user, timestamp, &nonce, url.path(), &body)?;
-        let signature = Signer::new_without_digest(&key)
-            .and_then(|mut signer| signer.sign_oneshot_to_vec(message.as_bytes()))
-            .map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
-        let response = self
-            .client
-            .post(url)
-            .header("X-Grengin-Connection", connection)
-            .header("X-Grengin-Public-Key", hex(&public_key))
-            .header("X-Grengin-Timestamp", timestamp.to_string())
-            .header("X-Grengin-Nonce", nonce)
-            .header("X-Grengin-Signature", hex(&signature))
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await
-            .map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
+        let audience = self.base.origin().ascii_serialization();
+        // v3 binds the proof to this service. Brokers deployed before v3 reject it before any write,
+        // so one v2 retry is side-effect free and keeps instances working during the rollout.
+        let mut proof_audience = Some(audience.as_str());
+        loop {
+            let timestamp = chrono::Utc::now().timestamp();
+            let nonce = random_secret()?;
+            let message = proof_message(
+                proof_audience,
+                &connection,
+                &user,
+                timestamp,
+                &nonce,
+                url.path(),
+                &body,
+            )?;
+            let signature = Signer::new_without_digest(&key)
+                .and_then(|mut signer| signer.sign_oneshot_to_vec(message.as_bytes()))
+                .map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
+            let response = self
+                .client
+                .post(url.clone())
+                .header("X-Grengin-Connection", &connection)
+                .header("X-Grengin-Public-Key", hex(&public_key))
+                .header("X-Grengin-Timestamp", timestamp.to_string())
+                .header("X-Grengin-Nonce", nonce)
+                .header("X-Grengin-Signature", hex(&signature))
+                .header("Content-Type", "application/json")
+                .body(body.clone())
+                .send()
+                .await
+                .map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
+            let (status, retry_after, bytes) = Self::read_reply(response).await?;
+            if proof_audience.is_some()
+                && status == reqwest::StatusCode::UNAUTHORIZED
+                && error_type(&bytes).as_deref() == Some("invalid_connector_proof")
+            {
+                proof_audience = None;
+                continue;
+            }
+            if !status.is_success() {
+                return Err(ConnectorError::Broker(BrokerIssue::classify(
+                    error_type(&bytes).as_deref(),
+                    retry_after.as_deref(),
+                )));
+            }
+            return serde_json::from_slice(&bytes)
+                .map_err(|_| AppError::ServiceTemporarilyUnavailable.into());
+        }
+    }
+
+    async fn read_reply(
+        response: reqwest::Response,
+    ) -> Result<(reqwest::StatusCode, Option<String>, Vec<u8>), ConnectorError> {
         let status = response.status();
         let retry_after = response
             .headers()
@@ -343,15 +383,16 @@ impl ConnectorBroker {
             }
             bytes.extend_from_slice(&chunk);
         }
-        if !status.is_success() {
-            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
-            return Err(ConnectorError::Broker(BrokerIssue::classify(
-                body.pointer("/error/type").and_then(|value| value.as_str()),
-                retry_after.as_deref(),
-            )));
-        }
-        serde_json::from_slice(&bytes).map_err(|_| AppError::ServiceTemporarilyUnavailable.into())
+        Ok((status, retry_after, bytes))
     }
+}
+
+fn error_type(bytes: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()?
+        .pointer("/error/type")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -418,64 +459,73 @@ mod tests {
     }
 
     #[test]
-    fn proof_is_bound_to_operation_identity_and_exact_body() {
-        let proof = proof_message(
+    fn proof_is_bound_to_operation_identity_exact_body_and_service() {
+        let staging = Some("https://service-staging.grengin.com");
+        let proof = |audience, connection, user, path, body: &[u8]| {
+            proof_message(audience, connection, user, 123, "nonce", path, body).unwrap()
+        };
+        let base = proof(
+            staging,
             "connection_1",
             "user_1",
-            123,
-            "nonce",
             "/v1/connectors/start",
             b"{}",
-        )
-        .unwrap();
-        assert_ne!(
-            proof,
-            proof_message(
+        );
+        for changed in [
+            proof(
+                staging,
                 "connection_1",
                 "user_2",
-                123,
-                "nonce",
                 "/v1/connectors/start",
-                b"{}"
-            )
-            .unwrap()
-        );
-        assert_ne!(
-            proof,
-            proof_message(
+                b"{}",
+            ),
+            proof(
+                staging,
                 "connection_2",
                 "user_1",
-                123,
-                "nonce",
                 "/v1/connectors/start",
-                b"{}"
-            )
-            .unwrap()
-        );
-        assert_ne!(
-            proof,
-            proof_message(
+                b"{}",
+            ),
+            proof(
+                staging,
                 "connection_1",
                 "user_1",
-                123,
-                "nonce",
                 "/v1/connectors/start",
-                b"{ }"
-            )
-            .unwrap()
-        );
-        assert_ne!(
-            proof,
-            proof_message(
+                b"{ }",
+            ),
+            proof(
+                staging,
                 "connection_1",
                 "user_1",
-                123,
-                "nonce",
                 "/v1/connectors/token",
-                b"{}"
-            )
-            .unwrap()
+                b"{}",
+            ),
+            proof(
+                Some("https://service.grengin.com"),
+                "connection_1",
+                "user_1",
+                "/v1/connectors/start",
+                b"{}",
+            ),
+        ] {
+            assert_ne!(base, changed);
+        }
+        assert!(base.starts_with(
+            "grengin-connectors-v3\nhttps://service-staging.grengin.com\nconnection_1\n"
+        ));
+        let legacy = proof(
+            None,
+            "connection_1",
+            "user_1",
+            "/v1/connectors/start",
+            b"{}",
         );
+        assert!(legacy.starts_with("grengin-connectors-v2\nconnection_1\nuser_1\n123\n"));
+        assert_eq!(
+            error_type(br#"{"error":{"type":"invalid_connector_proof"}}"#).as_deref(),
+            Some("invalid_connector_proof")
+        );
+        assert_eq!(error_type(b"not json"), None);
         assert_eq!(decode_key(&"a".repeat(64)).unwrap(), [0xaa; 32]);
         assert!(decode_key(&"z".repeat(64)).is_none());
     }
