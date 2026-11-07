@@ -237,6 +237,14 @@ pub async fn save_server(
         model = fresh;
     }
     let preview = model.clone().try_into_model().map_err(database_error)?;
+    let broker = crate::services::native_connector_broker::identity(&preview.connection_config)
+        .map_err(|_| AuthError::InvalidRequest {
+            field: "connection_config.oauth_broker",
+        })?;
+    if broker.is_some() {
+        model.client_id = Set(None);
+        model.client_secret = Set(None);
+    }
     let plugin = compile_plugin(
         &preview.connection_config,
         preview.transport_type,
@@ -251,6 +259,7 @@ pub async fn save_server(
     if plugin
         .as_ref()
         .is_some_and(|plugin| plugin.manifest().auth == ConnectorAuth::Oauth2)
+        && broker.is_none()
     {
         let client_id = preview
             .client_id
@@ -295,6 +304,10 @@ pub async fn save_server(
             .await
             .map_err(database_error)?
             .is_some()
+        && (broker.is_none()
+            || previous.as_ref().is_none_or(|old| {
+                old.connection_config != preview.connection_config || old.url != preview.url
+            }))
     {
         return Err(AuthError::InvalidRequest {
             field: "connection_config.connector_plugin",

@@ -34,7 +34,7 @@ pub fn compile_plugin(
     // Custom manifests cannot borrow a catalog connector's centrally approved OAuth identity.
     if config.as_object().is_none_or(|map| {
         map.keys()
-            .any(|key| !matches!(key.as_str(), "connector_plugin" | "oauth"))
+            .any(|key| !matches!(key.as_str(), "connector_plugin" | "oauth" | "oauth_broker"))
     }) {
         return Err(ConnectorError::Manifest("mixed connector configuration"));
     }
@@ -83,9 +83,16 @@ pub fn compile_plugin(
             "server URL must match plugin base_url",
         ));
     }
+    let broker = match config.get("oauth_broker") {
+        Some(Value::Object(value)) if value.is_empty() && config.get("oauth").is_none() => true,
+        Some(_) => return Err(ConnectorError::Manifest("invalid broker configuration")),
+        None => false,
+    };
     let oauth = config.get("oauth");
-    if (plugin.manifest().auth == ConnectorAuth::Oauth2 && !oauth.is_some_and(Value::is_object))
-        || (plugin.manifest().auth != ConnectorAuth::Oauth2 && oauth.is_some())
+    if (plugin.manifest().auth == ConnectorAuth::Oauth2
+        && !oauth.is_some_and(Value::is_object)
+        && !broker)
+        || (plugin.manifest().auth != ConnectorAuth::Oauth2 && (oauth.is_some() || broker))
     {
         return Err(ConnectorError::Manifest(
             "OAuth configuration must match plugin auth",

@@ -1192,6 +1192,7 @@ pub async fn authorize_mcp_connection(
         success: true,
         authorization_url: Some(prompt.authorization_url),
         message: Some("Authorize via provided URL".into()),
+        broker_connection_id: prompt.broker_connection_id,
     }))
 }
 

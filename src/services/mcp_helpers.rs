@@ -553,6 +553,7 @@ pub fn build_oauth_config(
 pub struct McpOauthPrompt {
     pub authorization_url: String,
     pub server_name: String,
+    pub broker_connection_id: Option<Uuid>,
 }
 
 #[derive(Serialize)]
@@ -688,6 +689,26 @@ pub async fn start_oauth_authorization(
     redirect_uri: Option<&str>,
 ) -> Result<McpOauthPrompt, AppError> {
     let server = require_server_access(state, user_id, server_id).await?;
+    if let Some(native) =
+        crate::services::native_connector_broker::identity(&server.connection_config)?
+    {
+        let connection = crate::services::connectors_helpers::start_connection(
+            state,
+            user_id,
+            native.plugin_id,
+            crate::dto::connectors::ConnectConnectorRequest {
+                version: native.plugin_version,
+                server_id: Some(server_id),
+            },
+        )
+        .await?;
+        return Ok(McpOauthPrompt {
+            // Connected or awaiting-confirmation connections have no authorization step left to start.
+            authorization_url: connection.authorization_url.ok_or(AppError::DbConflict)?,
+            server_name: server.name,
+            broker_connection_id: Some(connection.id),
+        });
+    }
     if server.connection_config.get("connector_plugin").is_some() {
         let plugin = crate::services::mcp_plugin_helpers::compile_plugin(
             &server.connection_config,
@@ -709,6 +730,7 @@ pub async fn start_oauth_authorization(
         return Ok(McpOauthPrompt {
             authorization_url,
             server_name: server.name,
+            broker_connection_id: None,
         });
     }
 
@@ -753,6 +775,7 @@ pub async fn start_oauth_authorization(
     Ok(McpOauthPrompt {
         authorization_url: authorization.authorization_url,
         server_name: server.name,
+        broker_connection_id: None,
     })
 }
 

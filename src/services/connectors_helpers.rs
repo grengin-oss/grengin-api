@@ -19,6 +19,9 @@ use crate::{
         connector_broker::{BrokerIssue, ConnectorBroker, ConnectorError, random_secret},
         mcp_access::{build_access_context, load_server_rules, resolve_server_access_with_rules},
         mcp_oauth::{OAuthRefreshLocks, StoredToken, seal_token},
+        native_connector_broker::{
+            NativeBrokerIdentity, identity as native_identity, same_binding,
+        },
     },
     state::SharedState,
 };
@@ -105,7 +108,17 @@ async fn owned(state: &SharedState, user: Uuid, id: Uuid) -> Result<connectors::
         .ok_or(AppError::ResourceNotFound)
 }
 
-fn grant(state: &SharedState, row: &connectors::Model) -> Result<String, AppError> {
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredGrant {
+    grant: String,
+    native: NativeBrokerIdentity,
+}
+
+fn opened_grant(
+    state: &SharedState,
+    row: &connectors::Model,
+) -> Result<(String, Option<NativeBrokerIdentity>), AppError> {
     let stored = row
         .encrypted_grant
         .as_deref()
@@ -113,9 +126,37 @@ fn grant(state: &SharedState, row: &connectors::Model) -> Result<String, AppErro
     match StoredToken::open(&state.settings.auth.app_key, stored)
         .map_err(|_| AppError::ServiceTemporarilyUnavailable)?
     {
-        StoredToken::Sealed(secret) => Ok(secret),
+        StoredToken::Sealed(secret) => {
+            if secret.starts_with('{') {
+                let stored: StoredGrant = serde_json::from_str(&secret)
+                    .map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
+                Ok((stored.grant, Some(stored.native)))
+            } else {
+                Ok((secret, None))
+            }
+        }
         StoredToken::LegacyPlaintext(_) => Err(AppError::ServiceTemporarilyUnavailable),
     }
+}
+
+fn grant(state: &SharedState, row: &connectors::Model) -> Result<String, AppError> {
+    opened_grant(state, row).map(|(grant, _)| grant)
+}
+
+fn sealed_grant(
+    state: &SharedState,
+    native: Option<&NativeBrokerIdentity>,
+) -> Result<String, AppError> {
+    let secret = random_secret()?;
+    let stored = match native {
+        Some(native) => serde_json::to_string(&StoredGrant {
+            grant: secret,
+            native: native.clone(),
+        })
+        .map_err(|_| AppError::ServiceTemporarilyUnavailable)?,
+        None => secret,
+    };
+    seal_token(&state.settings.auth.app_key, &stored)
 }
 
 async fn allowed_server(
@@ -123,19 +164,27 @@ async fn allowed_server(
     user: Uuid,
     id: Uuid,
     expected_url: Option<&str>,
-) -> Result<(), AppError> {
+) -> Result<Option<NativeBrokerIdentity>, AppError> {
     let server = mcp_servers::Entity::find_by_id(id)
         .one(&state.database)
         .await
         .map_err(database_error)?
         .ok_or(AppError::ResourceNotFound)?;
-    if !server.enabled
-        || server.transport_type != McpTransportType::Http
-        || server.connection_config.get("connector_plugin").is_some()
-    {
+    if !server.enabled || server.transport_type != McpTransportType::Http {
         return Err(AppError::ResourceNotFound);
     }
-    if !server
+    let native = native_identity(&server.connection_config)?;
+    if server.connection_config.get("connector_plugin").is_some() {
+        if native.is_none() {
+            return Err(AppError::ResourceNotFound);
+        }
+        crate::services::mcp_plugin_config::compile_plugin(
+            &server.connection_config,
+            server.transport_type,
+            server.url.as_deref(),
+        )
+        .map_err(|_| AppError::ResourceNotFound)?;
+    } else if !server
         .connection_config
         .get("oauth")
         .is_some_and(serde_json::Value::is_object)
@@ -157,6 +206,16 @@ async fn allowed_server(
         == McpPermission::Denied
     {
         return Err(AppError::ResourceNotFound);
+    }
+    Ok(native)
+}
+
+async fn allowed_connection(state: &SharedState, row: &connectors::Model) -> Result<(), AppError> {
+    if let Some(server) = row.server_id {
+        let current = allowed_server(state, row.user_id, server, row.mcp_url.as_deref()).await?;
+        if !same_binding(current.as_ref(), opened_grant(state, row)?.1.as_ref()) {
+            return Err(AppError::ResourceNotFound);
+        }
     }
     Ok(())
 }
@@ -188,6 +247,7 @@ async fn save_status(
     }
     if let Some(server) = row.server_id {
         allowed_server(state, user, server, reply.mcp_url.as_deref()).await?;
+        allowed_connection(state, &row).await?;
     }
     if let Some(previous) = row.mcp_url.as_ref()
         && reply.mcp_url.as_ref() != Some(previous)
@@ -263,8 +323,15 @@ pub async fn start_connection(
         .admit(user, std::time::Instant::now())
         .map_err(|retry| ConnectorError::Broker(BrokerIssue::RateLimited(retry)))?;
     let _lock = LOCKS.lock(user, lock_id(&key)).await;
-    if let Some(server) = request.server_id {
-        allowed_server(state, user, server, None).await?;
+    let native = match request.server_id {
+        Some(server) => allowed_server(state, user, server, None).await?,
+        None => None,
+    };
+    if native
+        .as_ref()
+        .is_some_and(|native| native.plugin_id != key || native.plugin_version != request.version)
+    {
+        return Err(AppError::ResourceNotFound.into());
     }
     let broker = ConnectorBroker::from_env()?;
     let creation_lock = CREATION_LOCKS.lock(user, Uuid::nil()).await;
@@ -275,7 +342,10 @@ pub async fn start_connection(
         .await
         .map_err(database_error)?;
     let mut row = if let Some(existing) = existing {
-        if existing.catalog_version != request.version || existing.server_id != request.server_id {
+        if existing.catalog_version != request.version
+            || existing.server_id != request.server_id
+            || !same_binding(opened_grant(state, &existing)?.1.as_ref(), native.as_ref())
+        {
             return Err(AppError::DbConflict.into());
         }
         existing
@@ -297,10 +367,7 @@ pub async fn start_connection(
             catalog_version: Set(request.version.clone()),
             server_id: Set(request.server_id),
             status: Set(ConnectorStatus::Pending),
-            encrypted_grant: Set(Some(seal_token(
-                &state.settings.auth.app_key,
-                &random_secret()?,
-            )?)),
+            encrypted_grant: Set(Some(sealed_grant(state, native.as_ref())?)),
             authorization_url: Set(None),
             mcp_url: Set(None),
             scopes: Set(json!([])),
@@ -329,8 +396,13 @@ pub async fn start_connection(
     ) {
         return Err(AppError::DbConflict.into());
     }
-    let body = json!({"connection_id":row.id,"user_id":user,"connector_key":key,"version":request.version,
+    let mut body = json!({"connection_id":row.id,"user_id":user,"connector_key":key,"version":request.version,
         "connection_grant":grant(state,&row)?,"redirect_uri":redirect_uri});
+    if let Some(native) = opened_grant(state, &row)?.1 {
+        body["catalog_kind"] = json!("native");
+        body["distribution_version"] = json!(native.distribution_version);
+        body["manifest_sha256"] = json!(native.manifest_sha256);
+    }
     let reply: BrokerStatus = broker.post("/v1/connectors/start", &body).await?;
     row = save_status(state, user, row, reply).await?;
     Ok(public(row))
@@ -371,6 +443,7 @@ pub async fn connection_status(
     if row.encrypted_grant.is_none() || row.status == ConnectorStatus::Revoked {
         return Ok(public(row));
     }
+    allowed_connection(state, &row).await?;
     let reply = ConnectorBroker::from_env()?
         .post(
             &format!("/v1/connectors/{id}/status"),
@@ -575,7 +648,7 @@ pub async fn resolve_mcp_connection_token(
     };
     let _lock = LOCKS.lock(user, lock_id(&row.connector_key)).await;
     let mut row = owned(state, user, row.id).await?;
-    allowed_server(state, user, server, row.mcp_url.as_deref()).await?;
+    allowed_connection(state, &row).await?;
     if matches!(
         row.status,
         ConnectorStatus::Pending | ConnectorStatus::AwaitingConfirmation

@@ -340,6 +340,8 @@ pub struct McpAuthorize {
     pub success: bool,
     pub authorization_url: Option<String>,
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub broker_connection_id: Option<Uuid>,
 }
 
 #[derive(Deserialize, ToSchema)]
