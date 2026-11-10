@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use url::Url;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Case {
     plugin: String,
     tool: String,
@@ -226,6 +226,36 @@ async fn every_provider_tool_obeys_its_http_contract_and_preserves_page_cursors(
                     case.base_url_override = original.base_url_override.clone();
                 }
                 cases.push(case);
+            }
+        }
+        // A suite re-exposes its members' tools; each member contract must also hold under the suite's tool name.
+        let listing: Value = serde_json::from_slice(
+            &std::fs::read(root.parent().unwrap().join("connector-plugins.json")).unwrap(),
+        )
+        .unwrap();
+        for suite in listing.as_array().unwrap() {
+            let Some(id) = suite.get("members").and(suite["key"].as_str()) else {
+                continue;
+            };
+            let version = manifests[id]["version"].as_str().unwrap();
+            let composition: Value = serde_json::from_slice(
+                &std::fs::read(root.join(id).join("versions").join(version).join("composition.json"))
+                    .unwrap(),
+            )
+            .unwrap();
+            for member in composition["members"].as_array().unwrap() {
+                let renames = member["tools"].as_object().unwrap();
+                let derived: Vec<Case> = cases
+                    .iter()
+                    .filter(|case| case.plugin == member["id"].as_str().unwrap())
+                    .map(|case| {
+                        let mut case = case.clone();
+                        case.tool = renames[&case.tool].as_str().unwrap().to_owned();
+                        case.plugin = id.to_owned();
+                        case
+                    })
+                    .collect();
+                cases.extend(derived);
             }
         }
         let mut covered = BTreeSet::new();

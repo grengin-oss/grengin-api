@@ -29,6 +29,9 @@ pub struct DiscoveryProviderSummary {
     pub icon_dark: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// Suites only: the single-app connector plugins this connector combines behind one sign-in.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
     pub selected_version: String,
     pub latest_version: String,
     pub available_versions: Vec<DiscoveryVersion>,

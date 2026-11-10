@@ -113,6 +113,8 @@ struct CatalogProvider {
     icon_dark: Option<String>,
     #[serde(default)]
     category: Option<String>,
+    #[serde(default)]
+    members: Vec<String>,
     default_version: String,
     versions: Vec<CatalogArtifactVersion>,
 }
@@ -450,6 +452,7 @@ impl DiscoveryCatalog {
                 status: provider.status,
                 icon: provider.icon,
                 icon_dark: provider.icon_dark,
+                members: provider.members,
                 selected_version: selected.version.clone(),
                 latest_version: available_versions
                     .first()
@@ -816,6 +819,35 @@ fn validate_catalog_index(kind: &CatalogKind, index: &CatalogIndex) -> Result<()
         if !versions.contains(&provider.default_version) {
             return Err(DiscoveryError::InvalidCatalog(
                 "provider default version is not present in its package list".to_string(),
+            ));
+        }
+    }
+    validate_suite_members(kind, index)
+}
+
+// A suite is one connector plugin combining single-app plugins behind one sign-in; members stay listed on their own.
+fn validate_suite_members(kind: &CatalogKind, index: &CatalogIndex) -> Result<(), DiscoveryError> {
+    let suites: HashSet<&str> = index
+        .providers
+        .iter()
+        .filter(|provider| !provider.members.is_empty())
+        .map(|provider| provider.id.as_str())
+        .collect();
+    if suites.is_empty() {
+        return Ok(());
+    }
+    let known: HashSet<&str> = index.providers.iter().map(|provider| provider.id.as_str()).collect();
+    for provider in index.providers.iter().filter(|provider| !provider.members.is_empty()) {
+        let unique: HashSet<&str> = provider.members.iter().map(String::as_str).collect();
+        if !matches!(kind, CatalogKind::Connector)
+            || provider.members.len() < 2
+            || unique.len() != provider.members.len()
+            || unique
+                .iter()
+                .any(|member| !known.contains(member) || suites.contains(member))
+        {
+            return Err(DiscoveryError::InvalidCatalog(
+                "distribution contains an invalid connector suite".to_string(),
             ));
         }
     }
@@ -1317,6 +1349,78 @@ mod tests {
         ));
     }
 
+    fn suite_distribution(suite_members: Value) -> Vec<u8> {
+        let mut index: Value = serde_json::from_slice(&connector_distribution(
+            "1.0.0",
+            &[("1.0.0", &connector_manifest("1.0.0"))],
+        ))
+        .unwrap();
+        let single = index["connectorPlugins"]["providers"][0].clone();
+        let providers = index["connectorPlugins"]["providers"].as_array_mut().unwrap();
+        for id in ["test-docs", "test-sheets"] {
+            let mut member = single.clone();
+            member["id"] = serde_json::json!(id);
+            providers.push(member);
+        }
+        let mut suite = single;
+        suite["id"] = serde_json::json!("test-office");
+        suite["name"] = serde_json::json!("Test office apps");
+        suite["members"] = suite_members;
+        providers.push(suite);
+        serde_json::to_vec(&index).unwrap()
+    }
+
+    #[tokio::test]
+    async fn connector_suites_list_their_members_and_single_apps_stay_listed() {
+        let catalog = connector_catalog(
+            suite_distribution(serde_json::json!(["test-docs", "test-sheets"])),
+            vec![],
+        )
+        .await;
+        let listed = catalog.list_connector_plugins(None).await.unwrap();
+        let suite = listed.providers.iter().find(|p| p.id == "test-office").unwrap();
+        assert_eq!(suite.members, ["test-docs", "test-sheets"]);
+        assert!(listed.providers.iter().any(|p| p.id == "test-docs" && p.members.is_empty()));
+        let body = serde_json::to_value(&listed).unwrap();
+        let single = body["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "test-docs")
+            .unwrap();
+        assert!(single.get("members").is_none());
+    }
+
+    #[tokio::test]
+    async fn connector_suites_must_reference_distinct_single_app_plugins() {
+        for members in [
+            serde_json::json!(["test-docs"]),
+            serde_json::json!(["test-docs", "test-docs"]),
+            serde_json::json!(["test-docs", "missing"]),
+            serde_json::json!(["test-docs", "test-office"]),
+        ] {
+            let catalog = connector_catalog(suite_distribution(members.clone()), vec![]).await;
+            assert!(
+                matches!(
+                    catalog.list_connector_plugins(None).await,
+                    Err(DiscoveryError::InvalidCatalog(_))
+                ),
+                "{members}"
+            );
+        }
+        let mut index: Value = serde_json::from_slice(&suite_distribution(serde_json::json!([
+            "test-docs",
+            "test-sheets"
+        ])))
+        .unwrap();
+        index["aiProviders"]["providers"][0]["members"] = serde_json::json!(["a", "b"]);
+        let catalog = connector_catalog(serde_json::to_vec(&index).unwrap(), vec![]).await;
+        assert!(matches!(
+            catalog.list_ai(None).await,
+            Err(DiscoveryError::InvalidCatalog(_))
+        ));
+    }
+
     #[test]
     fn connector_packages_must_match_index_identity_schema_and_runtime_policy() {
         let manifest: Value = serde_json::from_slice(&connector_manifest("1.0.0")).unwrap();
@@ -1348,6 +1452,7 @@ mod tests {
             icon: None,
             icon_dark: None,
             category: None,
+            members: Vec::new(),
             default_version: default_version.to_string(),
             versions,
         }
