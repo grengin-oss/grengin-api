@@ -521,6 +521,10 @@ const server = createServer((request, response) => {
       }
 
       case 'POST /v1/models/mock-model:streamGenerateContent': {
+        const declarations = (body.tools ?? []).flatMap((tool) => tool.function_declarations ?? tool.functionDeclarations ?? []);
+        if (declarations.some((tool) => tool.parameters && ('$schema' in tool.parameters || 'additionalProperties' in tool.parameters))) {
+          return json(response, 400, { error: { status: 'INVALID_ARGUMENT', message: 'JSON Schema keywords require parametersJsonSchema, not parameters' } });
+        }
         const parts = (body.contents ?? []).flatMap((content) => content.parts ?? []);
         const toolResult = parts.find((part) => part.functionResponse);
         if (toolResult) {
@@ -560,7 +564,7 @@ const server = createServer((request, response) => {
             data({
               candidates: [{
                 content: {
-                  parts: [{ functionCall: { name: declaration.name, args: { city: 'Paris' } } }],
+                  parts: [{ functionCall: { name: declaration.name, args: (declaration.parametersJsonSchema ?? declaration.parameters)?.properties?.city ? { city: 'Paris' } : {} } }],
                 },
                 finishReason: 'STOP',
               }],

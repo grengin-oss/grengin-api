@@ -557,6 +557,89 @@ async fn gemini_manifest_synthesizes_an_id_and_completes_an_mcp_tool_round_trip(
     .await;
 }
 
+async fn gemini_json_schema_round_trip(manifest: &[u8]) {
+    let server = mock_server!();
+    let provider = server.provider(manifest, |_| {});
+    for schema in [
+        json!({"type":"object","properties":{},"additionalProperties":false}),
+        json!({"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"city":{"type":"string"},"limit":{"anyOf":[{"type":"integer"},{"type":"null"}]}},"required":["city"],"additionalProperties":false}),
+        json!({"type":"object","$defs":{"City":{"type":"string"}},"properties":{"city":{"$ref":"#/$defs/City"},"filters":{"type":"object","properties":{"labels":{"type":"array","items":{"type":"string"}}},"additionalProperties":false}},"required":["city"],"additionalProperties":false}),
+    ] {
+        let mut tool = weather_tool();
+        tool.parameters = schema.clone();
+        let mut session = provider
+            .chat()
+            .unwrap()
+            .start(request("mock-model", "weather in Paris", vec![tool]))
+            .await
+            .unwrap();
+        let first = drain(&mut session.stream().await.unwrap()).await;
+        let id = first
+            .iter()
+            .find_map(|event| match event {
+                ProviderEvent::ToolCallStart { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .expect("tool call");
+        let sent = server.requests().await;
+        let declaration = &sent.last().unwrap()["body"]["tools"][0]["function_declarations"][0];
+        assert_eq!(declaration["parametersJsonSchema"], schema);
+        assert!(declaration.get("parameters").is_none());
+        let mut continued = session
+            .continue_with_tools(vec![ToolResult {
+                call_id: id,
+                name: MCP_TOOL.into(),
+                output: json!({"content":[{"type":"text","text":"11 degrees"}]}),
+                is_error: false,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(
+            text_of(&drain(&mut continued).await),
+            "The tool said: 11 degrees"
+        );
+    }
+}
+
+#[tokio::test]
+async fn gemini_json_schema_tools_preserve_mcp_keywords_and_complete() {
+    gemini_json_schema_round_trip(GEMINI).await;
+}
+
+#[tokio::test]
+#[ignore = "requires GRENGIN_PROVIDER_CATALOG_DIR"]
+async fn gemini_catalog_json_schema_tools_complete() {
+    let catalog = std::env::var("GRENGIN_PROVIDER_CATALOG_DIR").unwrap();
+    let manifest = fs::read(std::path::Path::new(&catalog).join("gemini/plugin.json")).unwrap();
+    gemini_json_schema_round_trip(&manifest).await;
+}
+
+#[tokio::test]
+async fn gemini_legacy_schema_field_reproduces_the_provider_rejection() {
+    let server = mock_server!();
+    let provider = server.provider(GEMINI, |manifest| {
+        let declaration =
+            &mut manifest["mappings"]["gemini_function_tool"]["function_declarations"]["$array"][0];
+        declaration["parameters"] = declaration
+            .as_object_mut()
+            .unwrap()
+            .remove("parametersJsonSchema")
+            .unwrap();
+    });
+    let mut tool = weather_tool();
+    tool.parameters["additionalProperties"] = json!(false);
+    let mut session = provider
+        .chat()
+        .unwrap()
+        .start(request("mock-model", "weather", vec![tool]))
+        .await
+        .unwrap();
+    assert!(matches!(
+        session.stream().await,
+        Err(ProviderError::HttpStatus { status: 400, .. })
+    ));
+}
+
 #[tokio::test]
 async fn mistral_conversations_manifest_completes_an_mcp_tool_round_trip() {
     let server = mock_server!();
