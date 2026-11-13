@@ -20,6 +20,7 @@ pub struct AIEngineCreate {
     pub default_model: Option<String>,
     pub default_image_gen_model: Option<String>,
     pub plugin_config: Option<PluginConfig>,
+    pub base_url_override: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -32,6 +33,7 @@ pub struct AIEngineUpdate {
     pub default_model: Option<String>,
     pub default_image_gen_model: Option<String>,
     pub plugin_config: Option<PluginConfig>,
+    pub base_url_override: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -52,6 +54,8 @@ pub struct AIEngineDetail {
     pub default_image_gen_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugin_config: Option<PluginConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url_override: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -193,6 +197,29 @@ mod tests {
         assert_eq!(create.display_name.as_deref(), Some("Example"));
         assert_eq!(update.display_name.as_deref(), Some("Example 2"));
         assert_eq!(update.is_enabled, Some(true));
+    }
+
+    #[test]
+    fn catalog_engines_accept_their_own_endpoint() {
+        let create: AIEngineCreate = serde_json::from_value(json!({
+            "engine_key": "azure-openai",
+            "api_key": "secret",
+            "base_url_override": "https://contoso.services.ai.azure.com/openai/v1/"
+        }))
+        .expect("catalog create with endpoint");
+        let update: AIEngineUpdate = serde_json::from_value(json!({
+            "base_url_override": "https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1/"
+        }))
+        .expect("catalog update with endpoint");
+
+        assert_eq!(
+            create.base_url_override.as_deref(),
+            Some("https://contoso.services.ai.azure.com/openai/v1/")
+        );
+        assert_eq!(
+            update.base_url_override.as_deref(),
+            Some("https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1/")
+        );
     }
 
     #[test]

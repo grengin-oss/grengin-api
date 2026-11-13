@@ -36,6 +36,49 @@ use crate::{
 
 pub const RESERVED_ENGINE_KEYS: &[&str] = &["openai", "anthropic", "mistral", "gemini"];
 
+const BASE_URL_OVERRIDE_FIELD: AuthError = AuthError::InvalidRequest {
+    field: "base_url_override",
+};
+
+// Catalog engines such as Azure OpenAI (per-resource host) and Bedrock (per-region host) need
+// the customer's own endpoint; it gets the same destination rules as a custom plugin URL.
+pub fn catalog_base_url_override(raw: &str) -> Result<Option<String>, AuthError> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let url = url::Url::parse(raw).map_err(|_| BASE_URL_OVERRIDE_FIELD)?;
+    if url.query().is_some() {
+        return Err(BASE_URL_OVERRIDE_FIELD);
+    }
+    llm_plugin::security::validate_provider_url(&url, false, false)
+        .map_err(|_| BASE_URL_OVERRIDE_FIELD)?;
+    Ok(Some(url.to_string()))
+}
+
+// A custom engine keeps its endpoint inside plugin_config, so the column only belongs to catalog engines.
+pub fn apply_base_url_override(
+    active: &mut ai_engines::ActiveModel,
+    engine: &ai_engines::Model,
+    requested: Option<&str>,
+    plugin_config_replaced: bool,
+) -> Result<(), AuthError> {
+    match requested {
+        Some(_) if plugin_config_replaced || engine.plugin_config.is_some() => {
+            Err(BASE_URL_OVERRIDE_FIELD)
+        }
+        Some(raw) => {
+            active.base_url_override = Set(catalog_base_url_override(raw)?);
+            Ok(())
+        }
+        None if plugin_config_replaced => {
+            active.base_url_override = Set(None);
+            Ok(())
+        }
+        None => Ok(()),
+    }
+}
+
 pub async fn find_engine(
     state: &SharedState,
     engine_key: &str,
@@ -88,6 +131,7 @@ fn engine_detail(state: &SharedState, engine: ai_engines::Model) -> AIEngineDeta
         default_model: Some(engine.default_model),
         default_image_gen_model: engine.default_image_gen_model,
         plugin_config,
+        base_url_override: engine.base_url_override,
         created_at: engine.created_at,
         updated_at: engine.updated_at,
     }
@@ -200,12 +244,20 @@ pub async fn create_engine(
                 PluginConfig {
                     manifest: package.plugin,
                     configuration: serde_json::json!({}),
-                    base_url_override: None,
+                    base_url_override: request
+                        .base_url_override
+                        .as_deref()
+                        .map(catalog_base_url_override)
+                        .transpose()?
+                        .flatten(),
                     allow_insecure_http: false,
                     allow_private_network: false,
                 },
                 true,
             )
+        }
+        (None, Some(_)) if request.base_url_override.is_some() => {
+            return Err(BASE_URL_OVERRIDE_FIELD);
         }
         (None, Some(config)) => (config, false),
         _ => {
@@ -277,6 +329,9 @@ pub async fn create_engine(
         .map(|value| encrypt_key(&state.settings.auth.app_key, value.as_bytes()))
         .transpose()
         .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
+    let base_url_override = catalog_install
+        .then(|| config.base_url_override.clone())
+        .flatten();
     let plugin_config = if catalog_install {
         None
     } else {
@@ -325,6 +380,7 @@ pub async fn create_engine(
         default_model: Set(default_model),
         default_image_gen_model: Set(request.default_image_gen_model),
         plugin_config: Set(plugin_config),
+        base_url_override: Set(base_url_override),
         api_key_validated_at: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
@@ -348,4 +404,104 @@ pub async fn create_engine(
         state.provider_registry.register(Arc::new(provider)).await;
     }
     Ok(engine_detail(state, engine))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn engine(plugin_config: Option<serde_json::Value>) -> ai_engines::Model {
+        let now = Utc::now();
+        ai_engines::Model {
+            id: Uuid::new_v4(),
+            display_name: "Azure OpenAI".to_string(),
+            is_enabled: true,
+            engine_key: "azure-openai".to_string(),
+            api_key_status: ApiKeyStatus::NotValidated,
+            api_key: None,
+            whitelist_models: Vec::new(),
+            default_model: "<empty>".to_string(),
+            default_image_gen_model: None,
+            plugin_config,
+            base_url_override: None,
+            api_key_validated_at: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn customer_azure_resource_and_bedrock_region_are_accepted() {
+        assert_eq!(
+            catalog_base_url_override(" https://contoso.services.ai.azure.com/openai/v1/ ")
+                .unwrap()
+                .as_deref(),
+            Some("https://contoso.services.ai.azure.com/openai/v1/")
+        );
+        assert_eq!(
+            catalog_base_url_override("https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1/")
+                .unwrap()
+                .as_deref(),
+            Some("https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1/")
+        );
+        assert_eq!(catalog_base_url_override("  ").unwrap(), None);
+    }
+
+    #[test]
+    fn unsafe_override_destinations_are_rejected() {
+        for raw in [
+            "http://contoso.services.ai.azure.com/openai/v1/",
+            "https://127.0.0.1/v1/",
+            "https://169.254.169.254/latest/",
+            "https://metadata.google.internal/v1/",
+            "https://user:pass@contoso.services.ai.azure.com/",
+            "https://contoso.services.ai.azure.com/openai/v1/?api-key=x",
+            "not a url",
+        ] {
+            assert!(catalog_base_url_override(raw).is_err(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn override_is_stored_only_for_catalog_engines() {
+        let catalog = engine(None);
+        let mut active = catalog.clone().into_active_model();
+        apply_base_url_override(
+            &mut active,
+            &catalog,
+            Some("https://contoso.services.ai.azure.com/openai/v1/"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            active.base_url_override,
+            Set(Some(
+                "https://contoso.services.ai.azure.com/openai/v1/".to_string()
+            ))
+        );
+
+        let mut active = catalog.clone().into_active_model();
+        apply_base_url_override(&mut active, &catalog, Some(""), false).unwrap();
+        assert_eq!(active.base_url_override, Set(None));
+
+        let custom = engine(Some(serde_json::json!({})));
+        let mut active = custom.clone().into_active_model();
+        assert!(
+            apply_base_url_override(&mut active, &custom, Some("https://example.com/"), false)
+                .is_err()
+        );
+        assert!(
+            apply_base_url_override(&mut active, &catalog, Some("https://example.com/"), true)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn replacing_the_plugin_config_drops_a_catalog_override() {
+        let mut catalog = engine(None);
+        catalog.base_url_override = Some("https://contoso.services.ai.azure.com/".to_string());
+        let mut active = catalog.clone().into_active_model();
+        apply_base_url_override(&mut active, &catalog, None, true).unwrap();
+        assert_eq!(active.base_url_override, Set(None));
+    }
 }

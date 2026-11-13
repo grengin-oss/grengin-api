@@ -121,7 +121,7 @@ pub async fn validate_ai_engine_plugin(
     post,
     path = "/admin/ai-engines",
     tag = "admin",
-    description = "Install one discovery engine using engine_key, or one custom engine using plugin_config (exactly one). A first API key enables the engine unless is_enabled is explicit. Omitted whitelisted_models selects at most three recent generators; explicit lists, including [], are preserved. Catalog manifests are not stored in the database.",
+    description = "Install one discovery engine using engine_key, or one custom engine using plugin_config (exactly one). A first API key enables the engine unless is_enabled is explicit. Omitted whitelisted_models selects at most three recent generators; explicit lists, including [], are preserved. Catalog manifests are not stored in the database. A catalog install may set base_url_override (https, public host) to its own endpoint, such as an Azure OpenAI resource or a Bedrock region; PUT /admin/ai-engines/{engine_key} changes or clears it (empty string).",
     request_body = AIEngineCreate,
     responses(
         (status = 201, body = AIEngineDetail),
