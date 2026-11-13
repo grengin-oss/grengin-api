@@ -36,7 +36,7 @@ use crate::{
     error::AppError,
     models::{
         mcp_access_policies,
-        mcp_access_policies::McpAccessTarget,
+        mcp_access_policies::{McpAccessTarget, McpAccessType},
         mcp_connections, mcp_servers,
         mcp_servers::{McpDefaultAccess, McpTransportType},
         mcp_tools,
@@ -44,8 +44,8 @@ use crate::{
     services::authorization::{AuthorizationService, PermissionScopeMode},
     services::connector_console_helpers::*,
     services::mcp_access::{
-        build_access_context, load_server_rules, load_tool_rules, resolve_role_reference,
-        resolve_server_access_with_rules, resolve_tool_access_with_rules,
+        build_access_context, ensure_rule_types_allowed, load_server_rules, load_tool_rules,
+        resolve_role_reference, resolve_server_access_with_rules, resolve_tool_access_with_rules,
     },
     services::mcp_catalog_helpers::*,
     services::mcp_helpers::{
@@ -864,9 +864,16 @@ pub async fn update_mcp_server_tools_access(
             Some(server_id),
         )
         .await?;
+    let access_types: Vec<McpAccessType> = req
+        .tools
+        .iter()
+        .flat_map(|item| item.rules.iter().flatten().map(|rule| rule.access_type))
+        .collect();
+    ensure_rule_types_allowed(&state.database, claims.user_id, &access_types).await?;
     let mut updated = Vec::new();
     for item in req.tools {
         if let Some(tool) = mcp_tools::Entity::find_by_id(item.tool_id)
+            .filter(mcp_tools::Column::ServerId.eq(server_id))
             .one(&state.database)
             .await
             .map_err(|_| AuthError::DbUnavailable)?
@@ -1023,6 +1030,13 @@ pub async fn update_mcp_tool_access(
             Some(tool_id),
         )
         .await?;
+    let access_types: Vec<McpAccessType> = req
+        .rules
+        .iter()
+        .flatten()
+        .map(|rule| rule.access_type)
+        .collect();
+    ensure_rule_types_allowed(&state.database, claims.user_id, &access_types).await?;
     if let Some(tool) = mcp_tools::Entity::find_by_id(tool_id)
         .one(&state.database)
         .await

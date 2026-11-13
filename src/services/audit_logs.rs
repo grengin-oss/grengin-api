@@ -6,12 +6,17 @@ use std::{env, time::Duration};
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, DbErr, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder,
+    PaginatorTrait, QueryFilter, QueryOrder, TransactionTrait,
 };
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::{dto::audit_logs::AuditLogEntry, models::audit_logs};
+use crate::{
+    auth::{error::AuthError, permissions::ROLE_SUPER_ADMIN},
+    dto::audit_logs::{AuditLogEntry, AuditLogsRedactedPayload},
+    models::audit_logs,
+    services::{auth_audit::record_required_auth_event, authorization::AuthorizationService},
+};
 
 const DEFAULT_RETENTION_DAYS: i64 = 365;
 const DEFAULT_PAGE: u64 = 1;
@@ -102,11 +107,30 @@ pub async fn list_audit_logs(
     })
 }
 
-pub async fn redact_user_logs(db: &DatabaseConnection, user_id: Uuid) -> Result<u64, DbErr> {
+pub fn redaction_target_allowed(actor_id: Uuid, user_id: Uuid) -> bool {
+    actor_id != user_id
+}
+
+// Redaction is destructive, so it needs Super Admin rather than the read-only audit permission, can
+// never erase the caller's own trail, and is itself recorded in the separate auth audit table.
+pub async fn redact_user_logs(
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    user_id: Uuid,
+) -> Result<u64, AuthError> {
+    if !redaction_target_allowed(actor_id, user_id)
+        || !AuthorizationService::new(db)
+            .user_has_role_name(actor_id, ROLE_SUPER_ADMIN)
+            .await?
+    {
+        return Err(AuthError::PermissionDenied);
+    }
+    let txn = db.begin().await.map_err(redaction_error)?;
     let rows = audit_logs::Entity::find()
         .filter(audit_logs::Column::UserId.eq(user_id))
-        .all(db)
-        .await?;
+        .all(&txn)
+        .await
+        .map_err(redaction_error)?;
     let mut updated = 0u64;
     for row in rows {
         let mut active: audit_logs::ActiveModel = row.into();
@@ -115,10 +139,26 @@ pub async fn redact_user_logs(db: &DatabaseConnection, user_id: Uuid) -> Result<
         active.details = Set(Some(serde_json::json!({
             "gdpr_redacted": true
         })));
-        active.update(db).await?;
+        active.update(&txn).await.map_err(redaction_error)?;
         updated += 1;
     }
+    record_required_auth_event(
+        &txn,
+        "audit.user_logs_redacted",
+        Some(actor_id),
+        AuditLogsRedactedPayload {
+            target_user_id: user_id,
+            redacted_count: updated,
+        },
+    )
+    .await?;
+    txn.commit().await.map_err(redaction_error)?;
     Ok(updated)
+}
+
+fn redaction_error(error: DbErr) -> AuthError {
+    eprintln!("audit logs redact error: {error}");
+    AuthError::DbTimeout
 }
 
 pub async fn prune_expired_logs(

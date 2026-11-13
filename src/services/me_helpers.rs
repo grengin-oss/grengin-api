@@ -17,9 +17,29 @@ use sea_orm::{
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+// The departments a caller may see for one purpose. Each endpoint passes the permission domain it
+// authorized, so a departments:view role never widens a narrower users:view or analytics:view grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdministeredScope {
+    Departments,
+    Users,
+    Analytics,
+}
+
+impl AdministeredScope {
+    fn domain(self) -> &'static str {
+        match self {
+            Self::Departments => "departments",
+            Self::Users => "users",
+            Self::Analytics => "analytics",
+        }
+    }
+}
+
 pub async fn load_administered_department_ids(
     claims: Claims,
     app_state: &SharedState,
+    scope: AdministeredScope,
 ) -> Result<Vec<Uuid>, AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     if authz
@@ -43,7 +63,7 @@ pub async fn load_administered_department_ids(
             role_permissions::Relation::Permissions.def(),
         )
         .filter(user_role_assignments::Column::UserId.eq(claims.user_id))
-        .filter(permissions::Column::Domain.eq("departments"))
+        .filter(permissions::Column::Domain.eq(scope.domain()))
         .filter(
             Condition::any()
                 .add(permissions::Column::Action.eq("manage"))

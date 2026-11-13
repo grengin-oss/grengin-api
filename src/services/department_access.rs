@@ -128,6 +128,19 @@ pub async fn ensure_member_move_allowed(
     finish(db, actor_id, Some(target_department_id), result).await
 }
 
+// Moving a member changes the policies that bind them, so it needs the same authority as editing them.
+pub async fn ensure_members_manageable(
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    user_ids: &[Uuid],
+) -> Result<(), AuthError> {
+    for &user_id in user_ids {
+        crate::services::role_assignment::ensure_user_management_allowed(db, actor_id, user_id)
+            .await?;
+    }
+    Ok(())
+}
+
 pub async fn ensure_member_release_to_parent_allowed(
     db: &DatabaseConnection,
     actor_id: Uuid,
@@ -144,8 +157,13 @@ pub async fn ensure_member_release_to_parent_allowed(
             AuthError::DbTimeout
         })?
         .flatten();
+    // Releasing members of a top-level department leaves them unassigned, outside every department
+    // policy and budget, which only an org-wide user manager may do.
     let Some(parent_id) = parent_id else {
-        return Ok(());
+        return crate::services::role_assignment::ensure_user_unassignment_allowed(
+            db, actor_id, None,
+        )
+        .await;
     };
     let grants = PermissionGrants::load(db, actor_id).await?;
     let parent_path = load_department_path(db, Some(parent_id)).await?;

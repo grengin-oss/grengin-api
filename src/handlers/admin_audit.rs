@@ -202,23 +202,7 @@ pub async fn redact_audit_logs_for_user(
     Path(user_id): Path<Uuid>,
     State(app_state): State<SharedState>,
 ) -> Result<(StatusCode, Json<AuditLogRedactResponse>), AuthError> {
-    let authz = AuthorizationService::new(&app_state.database);
-    authz
-        .ensure_permission(
-            claims.user_id,
-            PERMISSION_AUDIT_LOGS_VIEW,
-            None,
-            PermissionScopeMode::RequireOrgWide,
-            None,
-        )
-        .await?;
-
-    let redacted_count = redact_user_logs(&app_state.database, user_id)
-        .await
-        .map_err(|err| {
-            eprintln!("audit logs redact error: {err}");
-            AuthError::DbTimeout
-        })?;
+    let redacted_count = redact_user_logs(&app_state.database, claims.user_id, user_id).await?;
     Ok((
         StatusCode::OK,
         Json(AuditLogRedactResponse {

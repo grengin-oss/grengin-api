@@ -7,7 +7,9 @@ use crate::{
     services::{
         analytics, analytics_cache,
         authorization::{AuthorizationService, PermissionScopeMode},
-        me_helpers::{load_administered_department_ids, load_administered_department_paths},
+        me_helpers::{
+            AdministeredScope, load_administered_department_ids, load_administered_department_paths,
+        },
     },
     state::SharedState,
 };
@@ -44,7 +46,9 @@ pub async fn department_analytics_for_caller(
     let administered_paths = if org_wide {
         Vec::new()
     } else {
-        let department_ids = load_administered_department_ids(claims, app_state).await?;
+        let department_ids =
+            load_administered_department_ids(claims, app_state, AdministeredScope::Analytics)
+                .await?;
         load_administered_department_paths(app_state, &department_ids).await?
     };
 
