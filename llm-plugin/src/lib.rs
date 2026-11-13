@@ -15,8 +15,8 @@ pub use domain::*;
 pub use error::ProviderError;
 pub use manifest::*;
 pub use mapping::{
-    MappingContext, MappingExpression, evaluate_mapping, resolve_path, validate_mapping,
-    validate_mapping_definitions,
+    MappingContext, MappingExpression, evaluate_mapping, evaluate_mapping_bounded, resolve_path,
+    validate_mapping, validate_mapping_definitions,
 };
 pub use registry::ProviderRegistry;
 pub use runtime::{DeclarativeProvider, ProviderRuntimeConfig};

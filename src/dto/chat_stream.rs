@@ -151,6 +151,8 @@ pub struct ChatStreamToolCall {
 #[derive(Serialize, ToSchema, IntoParams)]
 pub struct ChatStreamToolResult {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<crate::dto::connector_console::McpToolResultDetails>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_id: Option<String>,

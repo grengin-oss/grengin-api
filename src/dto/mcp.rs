@@ -93,6 +93,8 @@ pub struct McpServerCatalogEntry {
     pub icon: Option<String>,
     pub tools: Vec<McpToolSummary>,
     pub connected: bool,
+    pub integration: crate::dto::connector_console::ConnectorIntegration,
+    pub connection_state: crate::dto::connector_console::ConnectorConnectionState,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -338,6 +340,17 @@ pub struct McpAuthorize {
     pub success: bool,
     pub authorization_url: Option<String>,
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub broker_connection_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<crate::models::connectors::ConnectorStatus>,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct McpCredentialRequest {
+    pub credential: String,
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

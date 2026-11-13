@@ -1,0 +1,1044 @@
+[
+  {
+    "plugin": "zoho-crm",
+    "tool": "get_current_user",
+    "args": {},
+    "path": "/crm/v8/users",
+    "query": {
+      "type": "CurrentUser"
+    }
+  },
+  {
+    "plugin": "zoho-crm",
+    "tool": "list_modules",
+    "args": {},
+    "path": "/crm/v8/settings/modules",
+    "query": {}
+  },
+  {
+    "plugin": "zoho-crm",
+    "tool": "get_module_fields",
+    "args": {
+      "module": "Contacts"
+    },
+    "path": "/crm/v8/settings/fields",
+    "query": {
+      "module": "Contacts"
+    }
+  },
+  {
+    "plugin": "zoho-crm",
+    "tool": "list_leads",
+    "args": {},
+    "path": "/crm/v8/Leads",
+    "query": {
+      "fields": "Last_Name,First_Name,Company,Email",
+      "per_page": "25"
+    }
+  },
+  {
+    "plugin": "zoho-crm",
+    "tool": "get_lead",
+    "args": {
+      "record_id": "123456789"
+    },
+    "path": "/crm/v8/Leads/123456789",
+    "query": {}
+  },
+  {
+    "plugin": "zoho-crm",
+    "tool": "list_contacts",
+    "args": {},
+    "path": "/crm/v8/Contacts",
+    "query": {
+      "fields": "Last_Name,First_Name,Email",
+      "per_page": "25"
+    }
+  },
+  {
+    "plugin": "zoho-crm",
+    "tool": "get_contact",
+    "args": {
+      "record_id": "123456789"
+    },
+    "path": "/crm/v8/Contacts/123456789",
+    "query": {}
+  },
+  {
+    "plugin": "zoho-crm",
+    "tool": "list_accounts",
+    "args": {},
+    "path": "/crm/v8/Accounts",
+    "query": {
+      "fields": "Account_Name,Website,Phone",
+      "per_page": "25"
+    }
+  },
+  {
+    "plugin": "zoho-crm",
+    "tool": "get_account",
+    "args": {
+      "record_id": "123456789"
+    },
+    "path": "/crm/v8/Accounts/123456789",
+    "query": {}
+  },
+  {
+    "plugin": "zoho-crm",
+    "tool": "list_deals",
+    "args": {},
+    "path": "/crm/v8/Deals",
+    "query": {
+      "fields": "Deal_Name,Stage,Amount",
+      "per_page": "25"
+    }
+  },
+  {
+    "plugin": "zoho-crm",
+    "tool": "get_deal",
+    "args": {
+      "record_id": "123456789"
+    },
+    "path": "/crm/v8/Deals/123456789",
+    "query": {}
+  },
+  {
+    "plugin": "zoho-crm",
+    "tool": "list_products",
+    "args": {},
+    "path": "/crm/v8/Products",
+    "query": {
+      "fields": "Product_Name,Product_Code",
+      "per_page": "25"
+    }
+  },
+  {
+    "plugin": "zoho-crm",
+    "tool": "get_product",
+    "args": {
+      "record_id": "123456789"
+    },
+    "path": "/crm/v8/Products/123456789",
+    "query": {}
+  },
+  {
+    "plugin": "zoho-crm",
+    "tool": "search_records",
+    "args": {
+      "module": "Accounts",
+      "word": "Acme & Sons"
+    },
+    "path": "/crm/v8/Accounts/search",
+    "query": {
+      "word": "Acme & Sons",
+      "page": "1",
+      "per_page": "25"
+    }
+  },
+  {
+    "plugin": "zoho-crm",
+    "tool": "list_contacts",
+    "args": {
+      "page_token": "opaque+/=&page=99",
+      "per_page": 50
+    },
+    "path": "/crm/v8/Contacts",
+    "query": {
+      "fields": "Last_Name,First_Name,Email",
+      "per_page": "50",
+      "page_token": "opaque+/=&page=99"
+    }
+  },
+  {
+    "plugin": "zoho-books",
+    "tool": "list_organizations",
+    "args": {},
+    "path": "/books/v3/organizations",
+    "query": {}
+  },
+  {
+    "plugin": "zoho-books",
+    "tool": "get_organization",
+    "args": {
+      "organization_id": "123456789"
+    },
+    "path": "/books/v3/organizations/123456789",
+    "query": {}
+  },
+  {
+    "plugin": "zoho-books",
+    "tool": "list_contacts",
+    "args": {
+      "organization_id": "123456789"
+    },
+    "path": "/books/v3/contacts",
+    "query": {
+      "organization_id": "123456789",
+      "page": "1",
+      "per_page": "25"
+    }
+  },
+  {
+    "plugin": "zoho-books",
+    "tool": "get_contact",
+    "args": {
+      "organization_id": "123456789",
+      "record_id": "987654321"
+    },
+    "path": "/books/v3/contacts/987654321",
+    "query": {
+      "organization_id": "123456789"
+    }
+  },
+  {
+    "plugin": "zoho-books",
+    "tool": "list_invoices",
+    "args": {
+      "organization_id": "123456789"
+    },
+    "path": "/books/v3/invoices",
+    "query": {
+      "organization_id": "123456789",
+      "page": "1",
+      "per_page": "25"
+    }
+  },
+  {
+    "plugin": "zoho-books",
+    "tool": "get_invoice",
+    "args": {
+      "organization_id": "123456789",
+      "record_id": "987654321"
+    },
+    "path": "/books/v3/invoices/987654321",
+    "query": {
+      "organization_id": "123456789"
+    }
+  },
+  {
+    "plugin": "zoho-books",
+    "tool": "list_customer_payments",
+    "args": {
+      "organization_id": "123456789"
+    },
+    "path": "/books/v3/customerpayments",
+    "query": {
+      "organization_id": "123456789",
+      "page": "1",
+      "per_page": "25"
+    }
+  },
+  {
+    "plugin": "zoho-books",
+    "tool": "get_customer_payment",
+    "args": {
+      "organization_id": "123456789",
+      "record_id": "987654321"
+    },
+    "path": "/books/v3/customerpayments/987654321",
+    "query": {
+      "organization_id": "123456789"
+    }
+  },
+  {
+    "plugin": "zoho-books",
+    "tool": "list_items",
+    "args": {
+      "organization_id": "123456789"
+    },
+    "path": "/books/v3/items",
+    "query": {
+      "organization_id": "123456789",
+      "page": "1",
+      "per_page": "25"
+    }
+  },
+  {
+    "plugin": "zoho-books",
+    "tool": "get_item",
+    "args": {
+      "organization_id": "123456789",
+      "record_id": "987654321"
+    },
+    "path": "/books/v3/items/987654321",
+    "query": {
+      "organization_id": "123456789"
+    }
+  },
+  {
+    "plugin": "zoho-books",
+    "tool": "list_sales_orders",
+    "args": {
+      "organization_id": "123456789"
+    },
+    "path": "/books/v3/salesorders",
+    "query": {
+      "organization_id": "123456789",
+      "page": "1",
+      "per_page": "25"
+    }
+  },
+  {
+    "plugin": "zoho-books",
+    "tool": "get_sales_order",
+    "args": {
+      "organization_id": "123456789",
+      "record_id": "987654321"
+    },
+    "path": "/books/v3/salesorders/987654321",
+    "query": {
+      "organization_id": "123456789"
+    }
+  },
+  {
+    "plugin": "zoho-books",
+    "tool": "list_invoice_payments",
+    "args": {
+      "organization_id": "123456789",
+      "invoice_id": "987654321"
+    },
+    "path": "/books/v3/invoices/987654321/payments",
+    "query": {
+      "organization_id": "123456789"
+    }
+  },
+  {
+    "plugin": "zoho-desk",
+    "tool": "list_organizations",
+    "args": {},
+    "path": "/api/v1/organizations",
+    "query": {}
+  },
+  {
+    "plugin": "zoho-desk",
+    "tool": "list_tickets",
+    "args": {
+      "organization_id": "123456789"
+    },
+    "path": "/api/v1/tickets",
+    "query": {
+      "from": "0",
+      "limit": "25"
+    },
+    "headers": {
+      "orgid": "123456789"
+    }
+  },
+  {
+    "plugin": "zoho-desk",
+    "tool": "get_ticket",
+    "args": {
+      "organization_id": "123456789",
+      "record_id": "987654321"
+    },
+    "path": "/api/v1/tickets/987654321",
+    "query": {},
+    "headers": {
+      "orgid": "123456789"
+    }
+  },
+  {
+    "plugin": "zoho-desk",
+    "tool": "list_contacts",
+    "args": {
+      "organization_id": "123456789"
+    },
+    "path": "/api/v1/contacts",
+    "query": {
+      "from": "0",
+      "limit": "25"
+    },
+    "headers": {
+      "orgid": "123456789"
+    }
+  },
+  {
+    "plugin": "zoho-desk",
+    "tool": "get_contact",
+    "args": {
+      "organization_id": "123456789",
+      "record_id": "987654321"
+    },
+    "path": "/api/v1/contacts/987654321",
+    "query": {},
+    "headers": {
+      "orgid": "123456789"
+    }
+  },
+  {
+    "plugin": "zoho-desk",
+    "tool": "list_accounts",
+    "args": {
+      "organization_id": "123456789"
+    },
+    "path": "/api/v1/accounts",
+    "query": {
+      "from": "0",
+      "limit": "25"
+    },
+    "headers": {
+      "orgid": "123456789"
+    }
+  },
+  {
+    "plugin": "zoho-desk",
+    "tool": "get_account",
+    "args": {
+      "organization_id": "123456789",
+      "record_id": "987654321"
+    },
+    "path": "/api/v1/accounts/987654321",
+    "query": {},
+    "headers": {
+      "orgid": "123456789"
+    }
+  },
+  {
+    "plugin": "zoho-desk",
+    "tool": "list_ticket_threads",
+    "args": {
+      "organization_id": "123456789",
+      "ticket_id": "987654321"
+    },
+    "path": "/api/v1/tickets/987654321/threads",
+    "query": {
+      "from": "0",
+      "limit": "25"
+    },
+    "headers": {
+      "orgid": "123456789"
+    }
+  },
+  {
+    "plugin": "zoho-desk",
+    "tool": "list_ticket_comments",
+    "args": {
+      "organization_id": "123456789",
+      "ticket_id": "987654321"
+    },
+    "path": "/api/v1/tickets/987654321/comments",
+    "query": {
+      "from": "0",
+      "limit": "25"
+    },
+    "headers": {
+      "orgid": "123456789"
+    }
+  },
+  {
+    "plugin": "zoho-desk",
+    "tool": "get_ticket_thread",
+    "args": {
+      "organization_id": "123456789",
+      "ticket_id": "987654321",
+      "thread_id": "555"
+    },
+    "path": "/api/v1/tickets/987654321/threads/555",
+    "query": {},
+    "headers": {
+      "orgid": "123456789"
+    }
+  },
+  {
+    "plugin": "zoho-desk",
+    "tool": "list_departments",
+    "args": {
+      "organization_id": "123456789"
+    },
+    "path": "/api/v1/departments",
+    "query": {
+      "from": "0",
+      "limit": "25"
+    },
+    "headers": {
+      "orgid": "123456789"
+    }
+  },
+  {
+    "plugin": "odoo",
+    "tool": "list_contacts",
+    "args": {},
+    "path": "/json/2/res.partner/search_read",
+    "query": {},
+    "method": "POST",
+    "configuration": {
+      "database": "grengin_demo"
+    },
+    "base_url_override": "https://odoo.customer.example/json/2",
+    "headers": {
+      "x-odoo-database": "grengin_demo"
+    },
+    "body": {
+      "domain": [
+        [
+          "is_company",
+          "=",
+          false
+        ]
+      ],
+      "fields": [
+        "id",
+        "name",
+        "email",
+        "phone",
+        "is_company"
+      ],
+      "limit": 25,
+      "offset": 0
+    }
+  },
+  {
+    "plugin": "odoo",
+    "tool": "list_companies",
+    "args": {},
+    "path": "/json/2/res.partner/search_read",
+    "query": {},
+    "method": "POST",
+    "configuration": {
+      "database": "grengin_demo"
+    },
+    "base_url_override": "https://odoo.customer.example/json/2",
+    "headers": {
+      "x-odoo-database": "grengin_demo"
+    },
+    "body": {
+      "domain": [
+        [
+          "is_company",
+          "=",
+          true
+        ]
+      ],
+      "fields": [
+        "id",
+        "name",
+        "email",
+        "phone",
+        "is_company"
+      ],
+      "limit": 25,
+      "offset": 0
+    }
+  },
+  {
+    "plugin": "odoo",
+    "tool": "list_leads",
+    "args": {},
+    "path": "/json/2/crm.lead/search_read",
+    "query": {},
+    "method": "POST",
+    "configuration": {
+      "database": "grengin_demo"
+    },
+    "base_url_override": "https://odoo.customer.example/json/2",
+    "headers": {
+      "x-odoo-database": "grengin_demo"
+    },
+    "body": {
+      "domain": [],
+      "fields": [
+        "id",
+        "name",
+        "contact_name",
+        "email_from",
+        "stage_id"
+      ],
+      "limit": 25,
+      "offset": 0
+    }
+  },
+  {
+    "plugin": "odoo",
+    "tool": "list_sales_orders",
+    "args": {},
+    "path": "/json/2/sale.order/search_read",
+    "query": {},
+    "method": "POST",
+    "configuration": {
+      "database": "grengin_demo"
+    },
+    "base_url_override": "https://odoo.customer.example/json/2",
+    "headers": {
+      "x-odoo-database": "grengin_demo"
+    },
+    "body": {
+      "domain": [],
+      "fields": [
+        "id",
+        "name",
+        "partner_id",
+        "state",
+        "amount_total",
+        "currency_id"
+      ],
+      "limit": 25,
+      "offset": 0
+    }
+  },
+  {
+    "plugin": "odoo",
+    "tool": "list_invoices",
+    "args": {},
+    "path": "/json/2/account.move/search_read",
+    "query": {},
+    "method": "POST",
+    "configuration": {
+      "database": "grengin_demo"
+    },
+    "base_url_override": "https://odoo.customer.example/json/2",
+    "headers": {
+      "x-odoo-database": "grengin_demo"
+    },
+    "body": {
+      "domain": [
+        [
+          "move_type",
+          "in",
+          [
+            "out_invoice",
+            "out_refund"
+          ]
+        ]
+      ],
+      "fields": [
+        "id",
+        "name",
+        "partner_id",
+        "state",
+        "amount_total",
+        "currency_id",
+        "move_type"
+      ],
+      "limit": 25,
+      "offset": 0
+    }
+  },
+  {
+    "plugin": "odoo",
+    "tool": "list_products",
+    "args": {},
+    "path": "/json/2/product.product/search_read",
+    "query": {},
+    "method": "POST",
+    "configuration": {
+      "database": "grengin_demo"
+    },
+    "base_url_override": "https://odoo.customer.example/json/2",
+    "headers": {
+      "x-odoo-database": "grengin_demo"
+    },
+    "body": {
+      "domain": [],
+      "fields": [
+        "id",
+        "name",
+        "default_code",
+        "list_price",
+        "active"
+      ],
+      "limit": 25,
+      "offset": 0
+    }
+  },
+  {
+    "plugin": "odoo",
+    "tool": "list_projects",
+    "args": {},
+    "path": "/json/2/project.project/search_read",
+    "query": {},
+    "method": "POST",
+    "configuration": {
+      "database": "grengin_demo"
+    },
+    "base_url_override": "https://odoo.customer.example/json/2",
+    "headers": {
+      "x-odoo-database": "grengin_demo"
+    },
+    "body": {
+      "domain": [],
+      "fields": [
+        "id",
+        "name",
+        "partner_id",
+        "active"
+      ],
+      "limit": 25,
+      "offset": 0
+    }
+  },
+  {
+    "plugin": "odoo",
+    "tool": "list_tasks",
+    "args": {},
+    "path": "/json/2/project.task/search_read",
+    "query": {},
+    "method": "POST",
+    "configuration": {
+      "database": "grengin_demo"
+    },
+    "base_url_override": "https://odoo.customer.example/json/2",
+    "headers": {
+      "x-odoo-database": "grengin_demo"
+    },
+    "body": {
+      "domain": [],
+      "fields": [
+        "id",
+        "name",
+        "project_id",
+        "stage_id",
+        "active"
+      ],
+      "limit": 25,
+      "offset": 0
+    }
+  },
+  {
+    "plugin": "odoo",
+    "tool": "find_contacts",
+    "args": {
+      "query": "Acme & Sons"
+    },
+    "path": "/json/2/res.partner/search_read",
+    "query": {},
+    "method": "POST",
+    "configuration": {
+      "database": "grengin_demo"
+    },
+    "base_url_override": "https://odoo.customer.example/json/2",
+    "headers": {
+      "x-odoo-database": "grengin_demo"
+    },
+    "body": {
+      "domain": [
+        [
+          "name",
+          "ilike",
+          "Acme & Sons"
+        ]
+      ],
+      "fields": [
+        "id",
+        "name",
+        "email",
+        "phone",
+        "is_company"
+      ],
+      "limit": 25,
+      "offset": 0
+    }
+  },
+  {
+    "plugin": "odoo",
+    "tool": "get_contact",
+    "args": {
+      "record_id": 42
+    },
+    "path": "/json/2/res.partner/read",
+    "query": {},
+    "method": "POST",
+    "configuration": {
+      "database": "grengin_demo"
+    },
+    "base_url_override": "https://odoo.customer.example/json/2",
+    "headers": {
+      "x-odoo-database": "grengin_demo"
+    },
+    "body": {
+      "ids": [
+        42
+      ],
+      "fields": [
+        "id",
+        "name",
+        "email",
+        "phone",
+        "is_company"
+      ]
+    }
+  },
+  {
+    "plugin": "odoo",
+    "tool": "get_lead",
+    "args": {
+      "record_id": 42
+    },
+    "path": "/json/2/crm.lead/read",
+    "query": {},
+    "method": "POST",
+    "configuration": {
+      "database": "grengin_demo"
+    },
+    "base_url_override": "https://odoo.customer.example/json/2",
+    "headers": {
+      "x-odoo-database": "grengin_demo"
+    },
+    "body": {
+      "ids": [
+        42
+      ],
+      "fields": [
+        "id",
+        "name",
+        "contact_name",
+        "email_from",
+        "stage_id"
+      ]
+    }
+  },
+  {
+    "plugin": "odoo",
+    "tool": "get_sales_order",
+    "args": {
+      "record_id": 42
+    },
+    "path": "/json/2/sale.order/read",
+    "query": {},
+    "method": "POST",
+    "configuration": {
+      "database": "grengin_demo"
+    },
+    "base_url_override": "https://odoo.customer.example/json/2",
+    "headers": {
+      "x-odoo-database": "grengin_demo"
+    },
+    "body": {
+      "ids": [
+        42
+      ],
+      "fields": [
+        "id",
+        "name",
+        "partner_id",
+        "state",
+        "amount_total",
+        "currency_id"
+      ]
+    }
+  },
+  {
+    "plugin": "odoo",
+    "tool": "get_invoice",
+    "args": {
+      "record_id": 42
+    },
+    "path": "/json/2/account.move/read",
+    "query": {},
+    "method": "POST",
+    "configuration": {
+      "database": "grengin_demo"
+    },
+    "base_url_override": "https://odoo.customer.example/json/2",
+    "headers": {
+      "x-odoo-database": "grengin_demo"
+    },
+    "body": {
+      "ids": [
+        42
+      ],
+      "fields": [
+        "id",
+        "name",
+        "partner_id",
+        "state",
+        "amount_total",
+        "currency_id",
+        "move_type"
+      ]
+    }
+  },
+  {
+    "plugin": "odoo",
+    "tool": "get_product",
+    "args": {
+      "record_id": 42
+    },
+    "path": "/json/2/product.product/read",
+    "query": {},
+    "method": "POST",
+    "configuration": {
+      "database": "grengin_demo"
+    },
+    "base_url_override": "https://odoo.customer.example/json/2",
+    "headers": {
+      "x-odoo-database": "grengin_demo"
+    },
+    "body": {
+      "ids": [
+        42
+      ],
+      "fields": [
+        "id",
+        "name",
+        "default_code",
+        "list_price",
+        "active"
+      ]
+    }
+  },
+  {
+    "plugin": "odoo",
+    "tool": "get_task",
+    "args": {
+      "record_id": 42
+    },
+    "path": "/json/2/project.task/read",
+    "query": {},
+    "method": "POST",
+    "configuration": {
+      "database": "grengin_demo"
+    },
+    "base_url_override": "https://odoo.customer.example/json/2",
+    "headers": {
+      "x-odoo-database": "grengin_demo"
+    },
+    "body": {
+      "ids": [
+        42
+      ],
+      "fields": [
+        "id",
+        "name",
+        "project_id",
+        "stage_id",
+        "active"
+      ]
+    }
+  },
+  {
+    "plugin": "odoo",
+    "tool": "get_connection_context",
+    "args": {},
+    "path": "/json/2/res.users/context_get",
+    "query": {},
+    "method": "POST",
+    "configuration": {
+      "database": "grengin_demo"
+    },
+    "base_url_override": "https://odoo.customer.example/json/2",
+    "headers": {
+      "x-odoo-database": "grengin_demo"
+    },
+    "body": {}
+  },
+  {
+    "plugin": "sap-s4hana",
+    "tool": "list_business_partners",
+    "args": {},
+    "path": "/sap/opu/odata/sap/API_BUSINESS_PARTNER/A_BusinessPartner",
+    "query": {
+      "$top": "25",
+      "$skip": "0",
+      "$format": "json"
+    },
+    "base_url_override": "https://customer-api.s4hana.ondemand.com/sap/opu",
+    "headers": {
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "sap-s4hana",
+    "tool": "list_customers",
+    "args": {},
+    "path": "/sap/opu/odata/sap/API_BUSINESS_PARTNER/A_Customer",
+    "query": {
+      "$top": "25",
+      "$skip": "0",
+      "$format": "json"
+    },
+    "base_url_override": "https://customer-api.s4hana.ondemand.com/sap/opu",
+    "headers": {
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "sap-s4hana",
+    "tool": "list_suppliers",
+    "args": {},
+    "path": "/sap/opu/odata/sap/API_BUSINESS_PARTNER/A_Supplier",
+    "query": {
+      "$top": "25",
+      "$skip": "0",
+      "$format": "json"
+    },
+    "base_url_override": "https://customer-api.s4hana.ondemand.com/sap/opu",
+    "headers": {
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "sap-s4hana",
+    "tool": "list_products",
+    "args": {},
+    "path": "/sap/opu/odata4/sap/api_product/srvd_a2x/sap/product/0002/Product",
+    "query": {
+      "$top": "25",
+      "$skip": "0",
+      "$format": "json"
+    },
+    "base_url_override": "https://customer-api.s4hana.ondemand.com/sap/opu",
+    "headers": {
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "sap-s4hana",
+    "tool": "list_sales_orders",
+    "args": {},
+    "path": "/sap/opu/odata/sap/API_SALES_ORDER_SRV/A_SalesOrder",
+    "query": {
+      "$top": "25",
+      "$skip": "0",
+      "$format": "json"
+    },
+    "base_url_override": "https://customer-api.s4hana.ondemand.com/sap/opu",
+    "headers": {
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "sap-s4hana",
+    "tool": "list_purchase_orders",
+    "args": {},
+    "path": "/sap/opu/odata4/sap/api_purchaseorder_2/srvd_a2x/sap/purchaseorder/0001/PurchaseOrder",
+    "query": {
+      "$top": "25",
+      "$skip": "0",
+      "$format": "json"
+    },
+    "base_url_override": "https://customer-api.s4hana.ondemand.com/sap/opu",
+    "headers": {
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "sap-s4hana",
+    "tool": "list_billing_documents",
+    "args": {},
+    "path": "/sap/opu/odata/sap/API_BILLING_DOCUMENT_SRV/A_BillingDocument",
+    "query": {
+      "$top": "25",
+      "$skip": "0",
+      "$format": "json"
+    },
+    "base_url_override": "https://customer-api.s4hana.ondemand.com/sap/opu",
+    "headers": {
+      "accept": "application/json"
+    }
+  },
+  {
+    "plugin": "sap-s4hana",
+    "tool": "list_supplier_invoices",
+    "args": {},
+    "path": "/sap/opu/odata/sap/API_SUPPLIERINVOICE_PROCESS_SRV/A_SupplierInvoice",
+    "query": {
+      "$top": "25",
+      "$skip": "0",
+      "$format": "json"
+    },
+    "base_url_override": "https://customer-api.s4hana.ondemand.com/sap/opu",
+    "headers": {
+      "accept": "application/json"
+    }
+  }
+]

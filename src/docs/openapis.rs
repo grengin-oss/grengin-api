@@ -47,17 +47,18 @@ use crate::dto::chat::{
 use crate::dto::chat_shares::*;
 use crate::dto::chat_stream::{ChatInput, ChatStream};
 use crate::dto::common::{PaginationQuery, SortRule};
+use crate::dto::connector_console::*;
 use crate::dto::discovery::{
-    AiProviderDiscoveryResponse, AuthProviderDiscoveryResponse, DiscoveryCategory,
-    DiscoveryListResponse, DiscoveryProviderSummary, DiscoveryVersion,
+    AiProviderDiscoveryResponse, AuthProviderDiscoveryResponse, ConnectorPluginDiscoveryResponse,
+    DiscoveryCategory, DiscoveryListResponse, DiscoveryProviderSummary, DiscoveryVersion,
 };
 use crate::dto::files::{Attachment, File, FileResponse, FileUploadRequest};
 use crate::dto::mcp::{
     BulkToolAccessUpdate, BulkToolAccessUpdateResponse, McpAccessRule, McpAccessRuleInput,
-    McpAuthorize, McpDisconnect, McpEffectiveAccessResponse, McpEffectiveServerAccess,
-    McpEffectiveToolAccess, McpOauthCallback, McpResolvedVia, McpServer, McpServerAccessList,
-    McpServerAccessUpdate, McpServerCatalogEntry, McpServerCatalogResponse, McpServerCreate,
-    McpServerTestResult, McpServerUpdate, McpSyncResult, McpTool, McpToolAccess,
+    McpAuthorize, McpCredentialRequest, McpDisconnect, McpEffectiveAccessResponse,
+    McpEffectiveServerAccess, McpEffectiveToolAccess, McpOauthCallback, McpResolvedVia, McpServer,
+    McpServerAccessList, McpServerAccessUpdate, McpServerCatalogEntry, McpServerCatalogResponse,
+    McpServerCreate, McpServerTestResult, McpServerUpdate, McpSyncResult, McpTool, McpToolAccess,
     McpToolAccessUpdate, McpToolExecution, McpToolSummary, McpTools, McpUserConnection,
     McpUserConnections, PaginatedMcpServers, PaginatedMcpToolExecutions,
 };
@@ -112,6 +113,15 @@ use utoipa::OpenApi;
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        crate::handlers::connector_console::overview,
+        crate::handlers::connector_console::people,
+        crate::handlers::connector_console::update_tool,
+        crate::handlers::connector_console::update_topic_group,
+        crate::handlers::connectors::list,
+        crate::handlers::connectors::connect,
+        crate::handlers::connectors::status,
+        crate::handlers::connectors::disconnect,
+        crate::handlers::connectors::complete,
         chat_shares::create_share,
         chat_shares::list_shares,
         chat_shares::update_share,
@@ -134,6 +144,8 @@ use utoipa::OpenApi;
         discovery::list_auth_provider_templates,
         discovery::get_auth_provider_template,
         discovery::list_ai_provider_plugins,
+        discovery::list_connector_plugins,
+        discovery::get_connector_plugin,
         discovery::get_ai_provider_plugin,
         chat::get_chat_by_id,
         chat::get_chats,
@@ -249,6 +261,7 @@ use utoipa::OpenApi;
         mcp::list_mcp_tools,
         mcp::list_mcp_connections,
         mcp::authorize_mcp_connection,
+        mcp::save_mcp_credential,
         mcp::disconnect_mcp_connection,
         mcp::mcp_oauth_callback,
         mcp::get_mcp_effective_access,
@@ -407,6 +420,19 @@ use utoipa::OpenApi;
             McpAccessDefault,
             McpServerAccess,
             McpServer,
+            ConnectorAuthenticationMethod,
+            ConnectorConnectionState,
+            ConnectorIntegration,
+            ConnectorConsole,
+            ConnectorPeople,
+            ConnectorPerson,
+            ConnectorUsage,
+            ConnectorTopicGroup,
+            ConnectorTopicGroupState,
+            ConnectorTopicGroupUpdateResult,
+            ConnectorToolUpdate,
+            McpToolResultDetails,
+            McpResultPreview,
             McpServerCreate,
             McpServerUpdate,
             PaginatedMcpServers,
@@ -430,6 +456,7 @@ use utoipa::OpenApi;
             McpUserConnection,
             McpUserConnections,
             McpAuthorize,
+            McpCredentialRequest,
             McpDisconnect,
             McpOauthCallback,
             EffectivePermissionsResponse,
@@ -508,6 +535,7 @@ use utoipa::OpenApi;
             DiscoveryListResponse,
             AuthProviderDiscoveryResponse,
             AiProviderDiscoveryResponse,
+            ConnectorPluginDiscoveryResponse,
         )
     ),
     tags(
@@ -531,6 +559,107 @@ pub struct ApiDoc;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connector_console_endpoints_and_permissions_are_documented() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI JSON");
+        for suffix in ["overview", "people", "executions"] {
+            let path = format!("/admin/mcp-servers/{{server_id}}/{suffix}");
+            let operation = &document["paths"][&path]["get"];
+            assert!(
+                operation["description"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty()),
+                "{path}"
+            );
+            for status in ["200", "401", "403", "404"] {
+                assert!(
+                    operation["responses"].get(status).is_some(),
+                    "{path}: {status}"
+                );
+            }
+        }
+        assert!(
+            document["paths"]["/admin/mcp-servers/{server_id}/tools/{tool_id}"]
+                .get("put")
+                .is_some()
+        );
+        let group_update =
+            &document["paths"]["/admin/mcp-servers/{server_id}/topic-groups/{group_id}"]["put"];
+        for status in ["200", "401", "403", "404", "422", "503"] {
+            assert!(
+                group_update["responses"].get(status).is_some(),
+                "topic group: {status}"
+            );
+        }
+        assert!(
+            document["paths"]["/discovery/connector-plugins"]
+                .get("get")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn connector_console_schemas_are_snake_case_without_credentials() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI JSON");
+        let schemas = &document["components"]["schemas"];
+        assert!(
+            schemas["ConnectorConsole"]["properties"]
+                .get("connected_user_count")
+                .is_some()
+        );
+        assert!(
+            schemas["ConnectorConsole"]["properties"]
+                .get("connectedUserCount")
+                .is_none()
+        );
+        assert!(
+            schemas["ConnectorIntegration"]["properties"]
+                .get("suggested_prompts")
+                .is_some()
+        );
+        assert!(
+            schemas["ConnectorToolUpdate"]["properties"]
+                .get("enabled")
+                .is_some()
+        );
+        assert!(
+            schemas["ConnectorConsole"]["properties"]
+                .get("topic_groups")
+                .is_some()
+        );
+        for field in ["id", "name", "state", "tool_ids"] {
+            assert!(
+                schemas["ConnectorTopicGroup"]["properties"]
+                    .get(field)
+                    .is_some(),
+                "{field}"
+            );
+        }
+        assert_eq!(
+            schemas["ConnectorTopicGroupState"]["enum"],
+            serde_json::json!(["enabled", "disabled", "mixed"])
+        );
+        for schema in [
+            "ConnectorConsole",
+            "ConnectorPerson",
+            "ConnectorIntegration",
+            "ConnectorTopicGroup",
+            "ConnectorTopicGroupUpdateResult",
+        ] {
+            for secret in [
+                "access_token",
+                "refresh_token",
+                "client_secret",
+                "authorization_url",
+            ] {
+                assert!(
+                    schemas[schema]["properties"].get(secret).is_none(),
+                    "{schema}: {secret}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn provider_plugin_schemas_use_snake_case() {

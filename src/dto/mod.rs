@@ -19,6 +19,8 @@ pub mod chat;
 pub mod chat_shares;
 pub mod chat_stream;
 pub mod common;
+pub mod connector_console;
+pub mod connectors;
 pub mod deployment;
 pub mod discovery;
 pub mod embeddings;

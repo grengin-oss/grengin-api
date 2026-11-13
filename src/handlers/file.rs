@@ -198,7 +198,7 @@ pub async fn get_files(
     Query(query): Query<PaginationQuery>,
     State(app_state): State<SharedState>,
 ) -> Result<Json<FilePaginatedResponse>, AppError> {
-    let limit = query.limit.unwrap_or(30);
+    let limit = query.limit.unwrap_or(30).clamp(1, 100);
     let offset = query.offset.unwrap_or(0);
     let page = offset.checked_div(limit).unwrap_or(0);
     let mut response = FilePaginatedResponse {
@@ -210,7 +210,8 @@ pub async fn get_files(
     let mut select = files::Entity::find()
         .offset(offset)
         .limit(limit)
-        .filter(files::Column::UserId.eq(claims.user_id));
+        .filter(files::Column::UserId.eq(claims.user_id))
+        .filter(files::Column::Status.eq(FileUploadStatus::Uploaded));
     if let Some(search) = query.search {
         select = select.filter(
             files::Column::Name

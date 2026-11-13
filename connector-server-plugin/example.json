@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "id": "microsoft-graph",
+  "version": "1.0.0",
+  "name": "Microsoft Graph",
+  "base_url": "https://graph.microsoft.com/v1.0",
+  "auth": "oauth2",
+  "tools": [
+    {
+      "name": "list_mail",
+      "description": "List the signed-in user's recent messages. Requires delegated Mail.Read permission.",
+      "input_schema": {
+        "$comment": "Inputs are validated before any network request. This is real JSON, not JSONC.",
+        "type": "object",
+        "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 25}},
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "required_scopes": ["Mail.Read"],
+      "request": {
+        "method": "GET",
+        "path": "/me/messages",
+        "query": {
+          "$top": {"$coalesce": [{"$get": "request.limit"}, 10]},
+          "$select": "id,subject,from,receivedDateTime,bodyPreview",
+          "$orderby": "receivedDateTime desc"
+        },
+        "headers": {"Accept": "application/json"}
+      },
+      "response": {"result": {"$get": "session.response.value"}}
+    },
+    {
+      "name": "get_mail",
+      "description": "Read one message in the signed-in user's mailbox. Requires Mail.Read.",
+      "input_schema": {
+        "type": "object",
+        "properties": {"message_id": {"type": "string", "minLength": 1, "maxLength": 1024}},
+        "required": ["message_id"],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "required_scopes": ["Mail.Read"],
+      "request": {
+        "method": "GET",
+        "path": "/me/messages/{message_id}",
+        "path_parameters": {"message_id": {"$get": "request.message_id"}}
+      }
+    },
+    {
+      "name": "list_drive_files",
+      "description": "List files in the signed-in user's drive, following at most three pages. Requires Files.Read. Exceeding the page limit returns an error rather than silently truncating.",
+      "input_schema": {"type": "object", "additionalProperties": false},
+      "read_only": true,
+      "required_scopes": ["Files.Read"],
+      "request": {"method": "GET", "path": "/me/drive/root/children", "query": {"$top": 25}},
+      "response": {
+        "pagination": {"items_pointer": "/value", "next_pointer": "/@odata.nextLink", "max_pages": 3}
+      }
+    },
+    {
+      "name": "create_mail_draft",
+      "description": "Create, but do not send, a mail draft in the signed-in user's mailbox. Requires Mail.ReadWrite and write access to this connector.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "subject": {"type": "string", "maxLength": 250},
+          "text": {"type": "string", "maxLength": 10000}
+        },
+        "required": ["subject", "text"],
+        "additionalProperties": false
+      },
+      "read_only": false,
+      "destructive": false,
+      "required_scopes": ["Mail.ReadWrite"],
+      "request": {
+        "method": "POST",
+        "path": "/me/messages",
+        "body": {
+          "subject": {"$get": "request.subject"},
+          "body": {"contentType": "Text", "content": {"$get": "request.text"}}
+        }
+      },
+      "response": {"result": {"id": {"$get": "session.response.id"}, "subject": {"$get": "session.response.subject"}}}
+    }
+  ]
+}

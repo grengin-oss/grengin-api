@@ -8,7 +8,7 @@ use crate::{
             PERMISSION_DEPARTMENTS_MANAGE, PERMISSION_ROLES_ASSIGN, ROLE_DEPARTMENT_ADMIN,
         },
     },
-    dto::admin_department::{DepartmentModelKey, RoleAssignmentPayload},
+    dto::admin_department::{DepartmentModelKey, DepartmentRow, RoleAssignmentPayload},
     models::{
         department_allowed_models,
         departments::{self, BudgetPeriod},
@@ -17,11 +17,15 @@ use crate::{
     services::{
         auth_audit::record_required_auth_event,
         authorization::{AuthorizationService, PermissionScopeMode, is_path_within_scope},
-        budget_allocation::{period_bounds, sum_child_allocations, sum_department_cost_in_range},
+        budget_allocation::{
+            period_bounds, sum_child_allocations, sum_department_cost_in_range,
+            sum_parent_cost_after_allocation,
+        },
+        department_access::{ensure_member_release_to_parent_allowed, ensure_members_manageable},
         permission_grants::{DepartmentScope, PermissionGrants, load_department_path},
         role_assignment::{
-            ensure_role_assignment_allowed, ensure_role_assignment_allowed_at,
-            load_role_permission_keys,
+            check_user_unassignment, ensure_role_assignment_allowed,
+            ensure_role_assignment_allowed_at, load_role_permission_keys,
         },
     },
     utils::ltree::ltree_label_from_uuid,
@@ -32,8 +36,8 @@ use rust_decimal::Decimal;
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::Set,
-    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, QueryFilter,
-    QuerySelect, Statement, TransactionTrait,
+    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, DatabaseTransaction,
+    EntityTrait, QueryFilter, QuerySelect, Statement, TransactionTrait,
     sea_query::Expr,
     sqlx::postgres::types::{PgLTree, PgLTreeLabel},
 };
@@ -241,6 +245,123 @@ pub async fn reparent_department<C: ConnectionTrait>(
     Ok(())
 }
 
+// The users FK sets department_id to NULL on delete, which would strand members outside every
+// department policy. Only an org-wide user manager may do that; anyone else moves them to the parent.
+async fn reassign_members_before_delete(
+    db: &DatabaseConnection,
+    txn: &DatabaseTransaction,
+    department_id: Uuid,
+    actor_id: Uuid,
+) -> Result<(), AuthError> {
+    let members: Vec<Uuid> = users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::DepartmentId.eq(department_id))
+        .into_tuple()
+        .all(txn)
+        .await
+        .map_err(|e| {
+            eprintln!("department members lookup error: {e}");
+            AuthError::DbTimeout
+        })?;
+    if members.is_empty() {
+        return Ok(());
+    }
+    ensure_members_manageable(db, actor_id, &members).await?;
+    let actor = PermissionGrants::load(db, actor_id).await?;
+    if check_user_unassignment(&actor).is_ok() {
+        return Ok(());
+    }
+    ensure_member_release_to_parent_allowed(db, actor_id, department_id).await?;
+    let parent_id = departments::Entity::find_by_id(department_id)
+        .select_only()
+        .column(departments::Column::ParentId)
+        .into_tuple::<Option<Uuid>>()
+        .one(txn)
+        .await
+        .map_err(|e| {
+            eprintln!("department parent lookup error: {e}");
+            AuthError::DbTimeout
+        })?
+        .flatten()
+        .ok_or(AuthError::PermissionDenied)?;
+    users::Entity::update_many()
+        .filter(users::Column::DepartmentId.eq(department_id))
+        .col_expr(users::Column::DepartmentId, Expr::value(parent_id))
+        .col_expr(users::Column::UpdatedAt, Expr::value(Utc::now()))
+        .exec(txn)
+        .await
+        .map_err(|e| {
+            eprintln!("department members reassign error: {e}");
+            AuthError::DbTimeout
+        })?;
+    Ok(())
+}
+
+// A funded department may only take what its parent still has free for children.
+pub async fn ensure_allocation_fits_parent(
+    db: &DatabaseConnection,
+    parent_id: Uuid,
+    department_id: Uuid,
+    budget_allocated: Decimal,
+) -> Result<(), AuthError> {
+    let parent = departments_base_select()
+        .filter(departments::Column::Id.eq(parent_id))
+        .into_model::<DepartmentRow>()
+        .one(db)
+        .await
+        .map_err(|e| {
+            eprintln!("find parent error: {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::DbNotFound)?;
+    let other_children_alloc = sum_child_allocations(db, parent.id, Some(department_id))
+        .await
+        .map_err(|e| {
+            eprintln!("sum other children error: {e}");
+            AuthError::DbTimeout
+        })?;
+    let (p_start, p_end) = period_bounds(&parent.budget_period, Utc::now());
+    let parent_used = sum_parent_cost_after_allocation(
+        db,
+        parent.id,
+        department_id,
+        budget_allocated,
+        p_start,
+        p_end,
+    )
+    .await
+    .map_err(|e| {
+        eprintln!("sum parent used error: {e}");
+        AuthError::DbTimeout
+    })?;
+    let parent_available_for_children =
+        (parent.budget_allocated - other_children_alloc - parent_used).max(Decimal::ZERO);
+    if budget_allocated > parent_available_for_children {
+        return Err(AuthError::BudgetExceedsParentAvailable);
+    }
+    Ok(())
+}
+
+// Shrinking a department below what its children already hold would hand that money back to the
+// parent while the children keep spending it.
+pub async fn ensure_allocation_covers_children(
+    db: &DatabaseConnection,
+    department_id: Uuid,
+    budget_allocated: Decimal,
+) -> Result<(), AuthError> {
+    let children_alloc = sum_child_allocations(db, department_id, None)
+        .await
+        .map_err(|e| {
+            eprintln!("sum children error: {e}");
+            AuthError::DbTimeout
+        })?;
+    if budget_allocated < children_alloc {
+        return Err(AuthError::BudgetExceedsParentAvailable);
+    }
+    Ok(())
+}
+
 pub async fn delete_department_with_scoped_assignments(
     db: &DatabaseConnection,
     department_id: Uuid,
@@ -260,6 +381,7 @@ pub async fn delete_department_with_scoped_assignments(
             Some(department_id),
         )
         .await?;
+    reassign_members_before_delete(db, &txn, department_id, actor_id).await?;
     let assignments = user_role_assignments::Entity::find()
         .filter(user_role_assignments::Column::ScopeDepartmentId.eq(department_id))
         .all(&txn)

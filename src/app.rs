@@ -15,6 +15,7 @@ use crate::{
     services::{
         analytics_cache::spawn_analytics_cache_refresh,
         audit_logs::spawn_audit_log_retention_worker, auth_session::SessionGuard,
+        connectors_helpers::spawn_deleted_connector_cleanup,
         deployment_health::load_deployment_health, file_storage::prepare_storage_root,
         startup_migrations::run_startup_migrations,
     },
@@ -66,6 +67,7 @@ pub async fn init_app() -> Result<(), Error> {
     }
 
     let app_state = AppState::from_settings(settings).await?;
+    spawn_deleted_connector_cleanup(app_state.clone());
     spawn_analytics_cache_refresh(app_state.database.clone());
     spawn_audit_log_retention_worker(app_state.database.clone());
     let configured_origins = std::env::var("CORS_ALLOWED_ORIGINS")
@@ -96,6 +98,7 @@ pub async fn init_app() -> Result<(), Error> {
         .merge(message_routes())
         .merge(admin_routes())
         .merge(mcp_routes())
+        .merge(crate::routes::connectors::connectors_routes())
         .merge(me_routes())
         .merge(me_skills_routes())
         .merge(branding_routes())

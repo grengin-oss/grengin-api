@@ -63,6 +63,22 @@ See the [LLM provider plugin authoring guide](llm-plugin/README.md) for the v1
 format, examples, validation, testing, installation, versioning, and security
 rules.
 
+## Connector Plugins
+
+Administrators can install JSON-defined HTTP tools through the existing MCP
+server APIs. Installed manifests are persisted and compiled into memory; each
+call uses the signed-in user's encrypted OAuth/API-key connection and existing MCP access rules.
+The local 0.9.8 catalog preparation covers all 34 connector IDs with 206 read-only
+tools; live vendor credentials and entitlements still require validation.
+Provider packages are versioned separately in `grengin-list`, not embedded in
+this repository. `GET /discovery/connector-plugins` lists only packages pinned
+for the backend release; `GET /discovery/connector-plugins/{id}?version=1`
+returns a digest-checked manifest for explicit installation. Nothing is
+automatically saved merely by fetching the catalog.
+No separate connector process or Redis service is required. See the
+[connector plugin guide](connector-server-plugin/README.md) for the format,
+Microsoft Graph example, limitations and repeatable local tests.
+
 ## Configurable Authentication
 
 OIDC providers are configured at runtime through the SSO administration API.
@@ -268,6 +284,7 @@ grengin-api/
 |   |-- dto/               # API request and response types
 |   `-- docs/              # OpenAPI definitions
 |-- llm-plugin/            # Declarative provider runtime and manifests
+|-- connector-server-plugin/ # Declarative HTTP connector tools
 |-- migration/             # Versioned database migrations
 |-- sqlx-mcp/              # Read-only PostgreSQL MCP server
 |-- swagger-overrides/     # Branded Swagger UI assets

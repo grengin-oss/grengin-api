@@ -23,4 +23,7 @@ CLAUDE.md
 !/tests/ai-engines/
 !/tests/ai-engines/*.sh
 !/tests/ai-engines/*.mjs
+!/tests/connectors/
+!/tests/connectors/*.sh
+!/tests/connectors/*.mjs
 /llm-plugin/HANDOFF.md

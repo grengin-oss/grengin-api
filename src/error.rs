@@ -30,6 +30,7 @@ pub enum ErrorCode {
     // 2000-2999: validation
     ValidationMissingField = 2001,
     ValidationEmptyField = 2002,
+    ValidationInvalidField = 2003,
 
     // 3000-3999: SSO
     SsoSigninBlockedConditionalAccess = 3001,
@@ -107,6 +108,9 @@ pub enum AppError {
         field: &'static str,
     },
     ValidationEmptyField {
+        field: &'static str,
+    },
+    ValidationInvalidField {
         field: &'static str,
     },
 
@@ -457,6 +461,30 @@ impl AppError {
                     StatusCode::BAD_REQUEST,
                     ErrorDetail {
                         code: ErrorCode::ValidationEmptyField,
+                        description: Self::render(description_tpl, &params),
+                        solution: Self::render(solution_tpl, &params),
+                        description_key,
+                        solution_key,
+                        params,
+                        external_code: None,
+                    },
+                )
+            }
+
+            AppError::ValidationInvalidField { field } => {
+                let mut params = Self::base_params();
+                params.insert("field".to_string(), (*field).to_string());
+
+                let description_key = "error.validation.invalid_field.description".to_string();
+                let solution_key = "error.validation.invalid_field.solution".to_string();
+
+                let description_tpl = "The value provided for `{field}` is invalid.";
+                let solution_tpl = "Check the allowed values for `{field}` and try again.";
+
+                (
+                    StatusCode::BAD_REQUEST,
+                    ErrorDetail {
+                        code: ErrorCode::ValidationInvalidField,
                         description: Self::render(description_tpl, &params),
                         solution: Self::render(solution_tpl, &params),
                         description_key,

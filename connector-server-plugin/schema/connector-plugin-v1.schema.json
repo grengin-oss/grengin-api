@@ -1,0 +1,868 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ConnectorManifest",
+  "type": "object",
+  "properties": {
+    "additional_base_urls": {
+      "description": "Fixed extra origins a tool can target by name, such as a vendor's separate content host.\nCredentials are sent to them, so they are part of the reviewed manifest and never\nadministrator overrides.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "auth": {
+      "$ref": "#/$defs/ConnectorAuth"
+    },
+    "base_url": {
+      "type": "string"
+    },
+    "base_url_policy": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BaseUrlPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "configuration_schema": true,
+    "credential_delivery": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CredentialDelivery"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "id": {
+      "type": "string"
+    },
+    "mappings": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/MappingExpression"
+      },
+      "default": {}
+    },
+    "name": {
+      "type": "string"
+    },
+    "presentation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConnectorPresentation"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "tools": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ConnectorTool"
+      }
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "version",
+    "name",
+    "base_url",
+    "auth"
+  ],
+  "$defs": {
+    "ArrayExpression": {
+      "type": "object",
+      "properties": {
+        "$array": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$array"
+      ]
+    },
+    "Base64DecodeExpression": {
+      "type": "object",
+      "properties": {
+        "$base64Decode": {
+          "$ref": "#/$defs/MappingExpression"
+        },
+        "charset": {
+          "description": "Charset label, `Content-Type` value or `[{name, value}]` header list. When present, text\nis decoded with that charset (UTF-8 if unknown) and malformed bytes become U+FFFD.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$base64Decode"
+      ]
+    },
+    "Base64Expression": {
+      "type": "object",
+      "properties": {
+        "$base64": {
+          "$ref": "#/$defs/MappingExpression"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$base64"
+      ]
+    },
+    "Base64UrlDecodeExpression": {
+      "type": "object",
+      "properties": {
+        "$base64UrlDecode": {
+          "$ref": "#/$defs/MappingExpression"
+        },
+        "charset": {
+          "description": "Charset label, `Content-Type` value or `[{name, value}]` header list. When present, text\nis decoded with that charset (UTF-8 if unknown) and malformed bytes become U+FFFD.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$base64UrlDecode"
+      ]
+    },
+    "BaseUrlPolicy": {
+      "type": "object",
+      "properties": {
+        "allow_custom_public_host": {
+          "type": "boolean"
+        },
+        "allowed_host_suffixes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "required_override": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "allowed_host_suffixes"
+      ]
+    },
+    "CoalesceExpression": {
+      "description": "Yields the first entry that resolves to a non-null value.\n\nNeeded wherever a provider requires a field the canonical request treats as optional, such as\nAnthropic's mandatory `max_tokens`, which otherwise fails the whole payload when unset.",
+      "type": "object",
+      "properties": {
+        "$coalesce": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$coalesce"
+      ]
+    },
+    "ConcatExpression": {
+      "description": "Flattens several arrays into one, the array counterpart of `$merge`.\n\nNeeded whenever a provider takes a single list that the runtime assembles from more than one\nsource, such as `tools` holding both mapped client tools and a literal provider-native tool.\nEntries that evaluate to nothing are skipped, so an absent optional list contributes nothing.",
+      "type": "object",
+      "properties": {
+        "$concat": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$concat"
+      ]
+    },
+    "ConnectorAuth": {
+      "type": "string",
+      "enum": [
+        "none",
+        "oauth2",
+        "api_key"
+      ]
+    },
+    "ConnectorPresentation": {
+      "type": "object",
+      "properties": {
+        "suggested_prompts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "topic_groups": {
+          "description": "Topic groups that let administrators switch related tools together. When present,\nevery tool belongs to exactly one group. Access is still enforced per tool.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConnectorTopicGroup"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConnectorRequest": {
+      "type": "object",
+      "properties": {
+        "base": {
+          "description": "Name of an `additional_base_urls` entry to send this request to instead of `base_url`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          },
+          "default": {}
+        },
+        "method": {
+          "$ref": "#/$defs/HttpMethod"
+        },
+        "path": {
+          "type": "string"
+        },
+        "path_parameter_encoding": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/PathParameterEncoding"
+          }
+        },
+        "path_parameters": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          },
+          "default": {}
+        },
+        "query": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "path"
+      ]
+    },
+    "ConnectorResponse": {
+      "type": "object",
+      "properties": {
+        "accept_octet_stream": {
+          "description": "Text tools only: also accept `application/octet-stream` (or no content type), which many\ndownload endpoints send for every file. The bytes must still be UTF-8 without NULs.",
+          "type": "boolean"
+        },
+        "error_array_pointer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error_if": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "format": {
+          "$ref": "#/$defs/ResponseFormat",
+          "default": "json"
+        },
+        "max_result_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_source_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "overflow": {
+          "$ref": "#/$defs/ResponseOverflow",
+          "default": "error"
+        },
+        "pagination": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NextLinkPagination"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "redirects": {
+          "description": "Follow a GET's redirect to a pre-signed download URL. Hops never carry credentials.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RedirectPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConnectorTool": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "destructive": {
+          "type": "boolean",
+          "default": false
+        },
+        "input_schema": true,
+        "name": {
+          "type": "string"
+        },
+        "read_only": {
+          "type": "boolean"
+        },
+        "request": {
+          "$ref": "#/$defs/ConnectorRequest"
+        },
+        "required_scopes": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "response": {
+          "$ref": "#/$defs/ConnectorResponse",
+          "default": {
+            "error_if": null,
+            "format": "json",
+            "overflow": "error",
+            "pagination": null,
+            "result": null
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description",
+        "input_schema",
+        "read_only",
+        "request"
+      ]
+    },
+    "ConnectorTopicGroup": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "tools"
+      ]
+    },
+    "CredentialDelivery": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "location": {
+              "type": "string",
+              "const": "header"
+            },
+            "name": {
+              "type": "string"
+            },
+            "prefix": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "location",
+            "name"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string"
+            },
+            "location": {
+              "type": "string",
+              "const": "json_body"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "location",
+            "field"
+          ]
+        }
+      ]
+    },
+    "FlatMapExpression": {
+      "type": "object",
+      "properties": {
+        "$flatMap": {
+          "type": "string"
+        },
+        "using": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$flatMap",
+        "using"
+      ]
+    },
+    "GetExpression": {
+      "type": "object",
+      "properties": {
+        "$get": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$get"
+      ]
+    },
+    "HttpMethod": {
+      "type": "string",
+      "enum": [
+        "GET",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE"
+      ]
+    },
+    "IfExpression": {
+      "type": "object",
+      "properties": {
+        "$if": {
+          "$ref": "#/$defs/MappingExpression"
+        },
+        "else": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "then": {
+          "$ref": "#/$defs/MappingExpression"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$if",
+        "then"
+      ]
+    },
+    "JsonEncodeExpression": {
+      "type": "object",
+      "properties": {
+        "$jsonEncode": {
+          "$ref": "#/$defs/MappingExpression"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$jsonEncode"
+      ]
+    },
+    "LiteralExpression": {
+      "type": "object",
+      "properties": {
+        "$literal": true
+      },
+      "additionalProperties": false,
+      "required": [
+        "$literal"
+      ]
+    },
+    "MapExpression": {
+      "type": "object",
+      "properties": {
+        "$map": {
+          "type": "string"
+        },
+        "using": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$map",
+        "using"
+      ]
+    },
+    "MappingExpression": {
+      "description": "A declarative payload expression.\n\nVariant order is load-bearing for `untagged` deserialization and must not be rearranged:\n\n* `ArrayValue` comes first because serde also derives struct-from-sequence for the operator\n  variants below, so a bare JSON array like `[a, b]` would otherwise be read as\n  `IfExpression { condition: a, then: b }`.\n* The `$`-prefixed operator structs come before `ObjectValue` so `{\"$get\": …}` is read as an\n  operator instead of a one-key object literal.\n* `Scalar` comes last because [`Value`] accepts anything.",
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        },
+        {
+          "$ref": "#/$defs/LiteralExpression"
+        },
+        {
+          "$ref": "#/$defs/GetExpression"
+        },
+        {
+          "$ref": "#/$defs/OmitIfNullExpression"
+        },
+        {
+          "$ref": "#/$defs/JsonEncodeExpression"
+        },
+        {
+          "$ref": "#/$defs/Base64Expression"
+        },
+        {
+          "$ref": "#/$defs/Base64DecodeExpression"
+        },
+        {
+          "$ref": "#/$defs/Base64UrlDecodeExpression"
+        },
+        {
+          "$ref": "#/$defs/WalkExpression"
+        },
+        {
+          "$ref": "#/$defs/MapExpression"
+        },
+        {
+          "$ref": "#/$defs/FlatMapExpression"
+        },
+        {
+          "$ref": "#/$defs/IfExpression"
+        },
+        {
+          "$ref": "#/$defs/SwitchExpression"
+        },
+        {
+          "$ref": "#/$defs/MergeExpression"
+        },
+        {
+          "$ref": "#/$defs/ConcatExpression"
+        },
+        {
+          "$ref": "#/$defs/StringConcatExpression"
+        },
+        {
+          "$ref": "#/$defs/CoalesceExpression"
+        },
+        {
+          "$ref": "#/$defs/ObjectExpression"
+        },
+        {
+          "$ref": "#/$defs/ArrayExpression"
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        },
+        true
+      ]
+    },
+    "MergeExpression": {
+      "type": "object",
+      "properties": {
+        "$merge": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$merge"
+      ]
+    },
+    "NextLinkPagination": {
+      "type": "object",
+      "properties": {
+        "items_pointer": {
+          "type": "string"
+        },
+        "max_pages": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "next_pointer": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "items_pointer",
+        "next_pointer",
+        "max_pages"
+      ]
+    },
+    "ObjectExpression": {
+      "type": "object",
+      "properties": {
+        "$object": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$object"
+      ]
+    },
+    "OmitIfNullExpression": {
+      "type": "object",
+      "properties": {
+        "$omitIfNull": {
+          "$ref": "#/$defs/MappingExpression"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$omitIfNull"
+      ]
+    },
+    "PathParameterEncoding": {
+      "description": "How a whole-segment path parameter value is placed in the URL.",
+      "oneOf": [
+        {
+          "description": "The value must be a plain segment: no `/`, `%`, `?`, `#` or `\\\\`.",
+          "type": "string",
+          "const": "segment"
+        },
+        {
+          "description": "An opaque identifier that may contain reserved characters; they are percent-encoded once.",
+          "type": "string",
+          "const": "opaque"
+        },
+        {
+          "description": "Opaque, but double-encoded when the value starts with `/` or contains `//`, which is how\nZoom requires such meeting UUIDs to be sent.",
+          "type": "string",
+          "const": "opaque_double_if_slash"
+        }
+      ]
+    },
+    "RedirectPolicy": {
+      "type": "object",
+      "properties": {
+        "allowed_hosts": {
+          "description": "Exact hosts, or `.suffix` entries matching any subdomain.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_hops": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "allowed_hosts",
+        "max_hops"
+      ]
+    },
+    "ResponseFormat": {
+      "type": "string",
+      "enum": [
+        "json",
+        "text"
+      ]
+    },
+    "ResponseOverflow": {
+      "type": "string",
+      "enum": [
+        "error",
+        "truncate"
+      ]
+    },
+    "StringConcatExpression": {
+      "type": "object",
+      "properties": {
+        "$stringConcat": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$stringConcat"
+      ]
+    },
+    "SwitchExpression": {
+      "type": "object",
+      "properties": {
+        "$switch": {
+          "$ref": "#/$defs/MappingExpression"
+        },
+        "cases": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MappingExpression"
+          }
+        },
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MappingExpression"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$switch",
+        "cases"
+      ]
+    },
+    "WalkExpression": {
+      "type": "object",
+      "properties": {
+        "$walk": {
+          "type": "string"
+        },
+        "using": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$walk",
+        "using"
+      ]
+    }
+  }
+}

@@ -37,6 +37,106 @@ pub struct ResolvedAccess {
     pub priority: i32,
 }
 
+#[derive(Debug, sea_orm::FromQueryResult)]
+struct DepartmentPath {
+    id: Uuid,
+    path: String,
+    depth: i32,
+}
+
+pub struct McpAccessResolver<'a> {
+    context: &'a McpAccessContext,
+    departments: HashMap<Uuid, DepartmentPath>,
+}
+
+impl<'a> McpAccessResolver<'a> {
+    pub async fn load(
+        db: &DatabaseConnection,
+        context: &'a McpAccessContext,
+        rules: &[mcp_access_policies::Model],
+    ) -> Result<Self, AppError> {
+        let ids: HashSet<Uuid> = rules
+            .iter()
+            .filter(|rule| rule.access_type == McpAccessType::Department)
+            .filter_map(|rule| rule.department_id)
+            .collect();
+        let departments = if context.department_id.is_some()
+            && context.department_path.is_some()
+            && context.department_depth.is_some()
+            && !ids.is_empty()
+        {
+            departments::Entity::find()
+                .select_only()
+                .column(departments::Column::Id)
+                // SeaORM cannot deserialize PostgreSQL ltree directly into String.
+                .column_as(Expr::cust("path::text"), "path")
+                .column(departments::Column::Depth)
+                .filter(departments::Column::Id.is_in(ids))
+                .into_model::<DepartmentPath>()
+                .all(db)
+                .await
+                .map_err(|e| {
+                    eprintln!("mcp department paths lookup error: {e}");
+                    AppError::DbTimeout
+                })?
+                .into_iter()
+                .map(|department| (department.id, department))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        Ok(Self {
+            context,
+            departments,
+        })
+    }
+
+    pub fn server(
+        &self,
+        server: &mcp_servers::Model,
+        rules: &[mcp_access_policies::Model],
+    ) -> ResolvedAccess {
+        if let Some(resolved) = resolve_access_from_rules(self.context, rules, &self.departments) {
+            return resolved;
+        }
+        let permission = match server.default_access {
+            mcp_servers::McpDefaultAccess::AllUsers => McpPermission::Full,
+            mcp_servers::McpDefaultAccess::AdminOnly if self.context.is_admin => {
+                McpPermission::Full
+            }
+            mcp_servers::McpDefaultAccess::AdminOnly
+            | mcp_servers::McpDefaultAccess::ExplicitOnly => McpPermission::Denied,
+        };
+        ResolvedAccess {
+            permission,
+            resolved_via: McpResolvedVia::ServerDefault,
+            priority: 0,
+        }
+    }
+
+    pub fn tool(
+        &self,
+        tool: &mcp_tools::Model,
+        server_access: &ResolvedAccess,
+        rules: &[mcp_access_policies::Model],
+    ) -> ResolvedAccess {
+        if tool.inherit_access_from_server {
+            return ResolvedAccess {
+                permission: server_access.permission,
+                resolved_via: McpResolvedVia::InheritedFromServer,
+                priority: server_access.priority,
+            };
+        }
+        resolve_access_from_rules(self.context, rules, &self.departments).unwrap_or(
+            ResolvedAccess {
+                permission: McpPermission::Denied,
+                resolved_via: McpResolvedVia::ToolDefault,
+                priority: 0,
+            },
+        )
+    }
+}
+
 pub async fn build_access_context(
     db: &sea_orm::DatabaseConnection,
     user_id: Uuid,
@@ -60,6 +160,7 @@ pub async fn build_access_context(
         }
         let row = departments::Entity::find_by_id(dept_id)
             .select_only()
+            // SeaORM cannot deserialize PostgreSQL ltree directly into String.
             .column_as(Expr::cust("path::text"), "path")
             .column_as(departments::Column::Depth, "depth")
             .into_model::<DeptPathRowDb>()
@@ -134,6 +235,80 @@ pub async fn build_access_context(
     })
 }
 
+fn permission_rank(permission: McpPermission) -> u8 {
+    match permission {
+        McpPermission::Denied => 0,
+        McpPermission::ReadOnly => 1,
+        McpPermission::Full => 2,
+    }
+}
+
+pub fn delegation_within_ceiling(holder: McpPermission, requested: McpPermission) -> bool {
+    permission_rank(requested) <= permission_rank(holder)
+}
+
+// Delegation passes on access the delegator already holds; only org-wide MCP admins may unlock a
+// restricted server or lift a deny for someone else.
+pub async fn ensure_delegation_allowed(
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    server: &mcp_servers::Model,
+    requested: McpPermission,
+) -> Result<(), AuthError> {
+    let ctx = build_access_context(db, actor_id)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
+    if ctx.is_admin {
+        return Ok(());
+    }
+    let rules = load_server_rules(db, &[server.id])
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
+    let held = resolve_server_access_with_rules(db, &ctx, server, &rules)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
+    if delegation_within_ceiling(held.permission, requested) {
+        Ok(())
+    } else {
+        Err(AuthError::PermissionDenied)
+    }
+}
+
+// Role-wide rules reach every department, so they stay with org-wide MCP admins like the server rules.
+pub async fn ensure_rule_types_allowed(
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    access_types: &[McpAccessType],
+) -> Result<(), AuthError> {
+    if !access_types.contains(&McpAccessType::Role) {
+        return Ok(());
+    }
+    AuthorizationService::new(db)
+        .ensure_permission(
+            actor_id,
+            PERMISSION_MCP_ADMIN,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await
+}
+
+pub async fn ensure_rule_removal_allowed(
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    rule: &mcp_access_policies::Model,
+) -> Result<(), AuthError> {
+    let ctx = build_access_context(db, actor_id)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
+    if ctx.is_admin || rule.created_by == Some(actor_id) {
+        Ok(())
+    } else {
+        Err(AuthError::PermissionDenied)
+    }
+}
+
 pub async fn load_server_rules(
     db: &sea_orm::DatabaseConnection,
     server_ids: &[Uuid],
@@ -170,22 +345,22 @@ pub async fn load_tool_rules(
         })
 }
 
-async fn resolve_access_from_rules(
-    db: &sea_orm::DatabaseConnection,
+fn resolve_access_from_rules(
     ctx: &McpAccessContext,
     rules: &[mcp_access_policies::Model],
-) -> Result<Option<ResolvedAccess>, AppError> {
+    dept_lookup: &HashMap<Uuid, DepartmentPath>,
+) -> Option<ResolvedAccess> {
     if let Some(rule) = rules
         .iter()
         .filter(|rule| rule.access_type == McpAccessType::User)
         .filter(|rule| rule.user_id == Some(ctx.user_id))
         .max_by_key(|rule| rule.created_at)
     {
-        return Ok(Some(ResolvedAccess {
+        return Some(ResolvedAccess {
             permission: rule.permission,
             resolved_via: McpResolvedVia::UserRule,
             priority: 300,
-        }));
+        });
     }
 
     if let (Some(user_dept_id), Some(user_path), Some(user_depth)) = (
@@ -199,44 +374,12 @@ async fn resolve_access_from_rules(
             .filter(|rule| rule.department_id.is_some())
             .collect();
         if !dept_rules.is_empty() {
-            #[derive(Debug, sea_orm::FromQueryResult)]
-            struct DeptPathRowDb {
-                id: Uuid,
-                #[sea_orm(from_alias = "path")]
-                path: String,
-                #[sea_orm(from_alias = "depth")]
-                depth: i32,
-            }
-
-            let dept_ids: Vec<Uuid> = dept_rules
-                .iter()
-                .filter_map(|rule| rule.department_id)
-                .collect();
-            let dept_paths = departments::Entity::find()
-                .select_only()
-                .column(departments::Column::Id)
-                .column_as(Expr::cust("path::text"), "path")
-                .column_as(departments::Column::Depth, "depth")
-                .filter(departments::Column::Id.is_in(dept_ids))
-                .into_model::<DeptPathRowDb>()
-                .all(db)
-                .await
-                .map_err(|e| {
-                    eprintln!("department paths lookup error: {e}");
-                    AppError::DbTimeout
-                })?;
-
-            let mut dept_lookup: HashMap<Uuid, (String, i32)> = HashMap::new();
-            for row in dept_paths {
-                dept_lookup.insert(row.id, (row.path, row.depth));
-            }
-
             let mut best_rule: Option<(&mcp_access_policies::Model, i32)> = None;
             for rule in dept_rules {
                 let Some(dept_id) = rule.department_id else {
                     continue;
                 };
-                let Some((path, depth)) = dept_lookup.get(&dept_id) else {
+                let Some(DepartmentPath { path, depth, .. }) = dept_lookup.get(&dept_id) else {
                     continue;
                 };
                 let is_direct = dept_id == user_dept_id;
@@ -256,11 +399,11 @@ async fn resolve_access_from_rules(
                 } else {
                     McpResolvedVia::DepartmentInherited
                 };
-                return Ok(Some(ResolvedAccess {
+                return Some(ResolvedAccess {
                     permission: rule.permission,
                     resolved_via,
                     priority: 200 - depth_diff,
-                }));
+                });
             }
         }
     }
@@ -298,15 +441,15 @@ async fn resolve_access_from_rules(
             } else {
                 McpPermission::ReadOnly
             };
-            return Ok(Some(ResolvedAccess {
+            return Some(ResolvedAccess {
                 permission,
                 resolved_via: McpResolvedVia::RoleRule,
                 priority: 100,
-            }));
+            });
         }
     }
 
-    Ok(None)
+    None
 }
 
 pub async fn resolve_server_access_with_rules(
@@ -315,27 +458,9 @@ pub async fn resolve_server_access_with_rules(
     server: &mcp_servers::Model,
     rules: &[mcp_access_policies::Model],
 ) -> Result<ResolvedAccess, AppError> {
-    if let Some(resolved) = resolve_access_from_rules(db, ctx, rules).await? {
-        return Ok(resolved);
-    }
-
-    let permission = match server.default_access {
-        mcp_servers::McpDefaultAccess::AllUsers => McpPermission::Full,
-        mcp_servers::McpDefaultAccess::AdminOnly => {
-            if ctx.is_admin {
-                McpPermission::Full
-            } else {
-                McpPermission::Denied
-            }
-        }
-        mcp_servers::McpDefaultAccess::ExplicitOnly => McpPermission::Denied,
-    };
-
-    Ok(ResolvedAccess {
-        permission,
-        resolved_via: McpResolvedVia::ServerDefault,
-        priority: 0,
-    })
+    Ok(McpAccessResolver::load(db, ctx, rules)
+        .await?
+        .server(server, rules))
 }
 
 pub async fn resolve_tool_access_with_rules(
@@ -345,23 +470,14 @@ pub async fn resolve_tool_access_with_rules(
     server_access: &ResolvedAccess,
     rules: &[mcp_access_policies::Model],
 ) -> Result<ResolvedAccess, AppError> {
-    if tool.inherit_access_from_server {
-        return Ok(ResolvedAccess {
-            permission: server_access.permission,
-            resolved_via: McpResolvedVia::InheritedFromServer,
-            priority: server_access.priority,
-        });
-    }
-
-    if let Some(resolved) = resolve_access_from_rules(db, ctx, rules).await? {
-        return Ok(resolved);
-    }
-
-    Ok(ResolvedAccess {
-        permission: McpPermission::Denied,
-        resolved_via: McpResolvedVia::ToolDefault,
-        priority: 0,
-    })
+    let load_rules = if tool.inherit_access_from_server {
+        &[][..]
+    } else {
+        rules
+    };
+    Ok(McpAccessResolver::load(db, ctx, load_rules)
+        .await?
+        .tool(tool, server_access, rules))
 }
 
 pub async fn resolve_role_reference(
@@ -400,4 +516,155 @@ pub async fn resolve_role_reference(
     }
 
     Err(AuthError::ResourceNotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    fn context() -> McpAccessContext {
+        McpAccessContext {
+            user_id: Uuid::from_u128(1),
+            department_id: Some(Uuid::from_u128(2)),
+            department_path: Some("root.child".into()),
+            department_depth: Some(1),
+            role_ids: HashSet::from([Uuid::from_u128(3)]),
+            role_names: HashSet::from(["User".into()]),
+            is_admin: false,
+        }
+    }
+
+    fn rule(access_type: McpAccessType, permission: McpPermission) -> mcp_access_policies::Model {
+        mcp_access_policies::Model {
+            id: Uuid::new_v4(),
+            target_type: McpAccessTarget::Server,
+            server_id: Some(Uuid::from_u128(4)),
+            tool_id: None,
+            access_type,
+            permission,
+            role_id: Some(Uuid::from_u128(3)),
+            role_name: None,
+            department_id: Some(Uuid::from_u128(2)),
+            user_id: Some(Uuid::from_u128(1)),
+            inherit_departments: true,
+            inherit_from_server: None,
+            created_at: Utc::now(),
+            created_by: None,
+        }
+    }
+
+    fn paths() -> HashMap<Uuid, DepartmentPath> {
+        [(2, "root.child", 1), (5, "root", 0), (6, "roots", 0)]
+            .into_iter()
+            .map(|(id, path, depth)| {
+                (
+                    Uuid::from_u128(id),
+                    DepartmentPath {
+                        id: Uuid::from_u128(id),
+                        path: path.into(),
+                        depth,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn delegation_never_grants_more_than_the_delegator_holds() {
+        use McpPermission::{Denied, Full, ReadOnly};
+        assert!(delegation_within_ceiling(Full, Full));
+        assert!(delegation_within_ceiling(Full, ReadOnly));
+        assert!(delegation_within_ceiling(ReadOnly, ReadOnly));
+        assert!(delegation_within_ceiling(Denied, Denied));
+        assert!(delegation_within_ceiling(ReadOnly, Denied));
+        assert!(!delegation_within_ceiling(ReadOnly, Full));
+        assert!(!delegation_within_ceiling(Denied, ReadOnly));
+        assert!(!delegation_within_ceiling(Denied, Full));
+    }
+
+    #[test]
+    fn batched_rules_preserve_latest_user_override_before_department_and_role() {
+        let context = context();
+        let old = rule(McpAccessType::User, McpPermission::Denied);
+        let mut current = old.clone();
+        current.permission = McpPermission::ReadOnly;
+        current.created_at += Duration::seconds(1);
+        let rules = [
+            rule(McpAccessType::Department, McpPermission::Denied),
+            old,
+            rule(McpAccessType::Role, McpPermission::Denied),
+            current,
+        ];
+        let result = resolve_access_from_rules(&context, &rules, &paths()).unwrap();
+        assert_eq!(result.permission, McpPermission::ReadOnly);
+        assert!(matches!(result.resolved_via, McpResolvedVia::UserRule));
+    }
+
+    #[test]
+    fn batched_departments_preserve_specificity_inheritance_and_path_boundaries() {
+        let context = context();
+        let mut inherited = rule(McpAccessType::Department, McpPermission::ReadOnly);
+        inherited.department_id = Some(Uuid::from_u128(5));
+        let direct = rule(McpAccessType::Department, McpPermission::Denied);
+        let lookup = paths();
+        let result = resolve_access_from_rules(&context, &[inherited.clone()], &lookup).unwrap();
+        assert_eq!(result.permission, McpPermission::ReadOnly);
+        assert!(matches!(
+            result.resolved_via,
+            McpResolvedVia::DepartmentInherited
+        ));
+        assert_eq!(
+            resolve_access_from_rules(&context, &[inherited.clone(), direct], &lookup)
+                .unwrap()
+                .permission,
+            McpPermission::Denied
+        );
+        inherited.inherit_departments = false;
+        assert!(resolve_access_from_rules(&context, &[inherited.clone()], &lookup).is_none());
+        inherited.inherit_departments = true;
+        inherited.department_id = Some(Uuid::from_u128(6));
+        assert!(resolve_access_from_rules(&context, &[inherited.clone()], &lookup).is_none());
+        inherited.department_id = Some(Uuid::new_v4());
+        assert!(resolve_access_from_rules(&context, &[inherited], &lookup).is_none());
+    }
+
+    #[test]
+    fn batched_role_rules_keep_deny_precedence_and_ignore_unmatched_roles() {
+        let context = context();
+        let read = rule(McpAccessType::Role, McpPermission::ReadOnly);
+        let full = rule(McpAccessType::Role, McpPermission::Full);
+        let mut denied = rule(McpAccessType::Role, McpPermission::Denied);
+        assert_eq!(
+            resolve_access_from_rules(
+                &context,
+                &[read.clone(), full.clone(), denied.clone()],
+                &paths()
+            )
+            .unwrap()
+            .permission,
+            McpPermission::Denied
+        );
+        denied.role_id = Some(Uuid::new_v4());
+        assert_eq!(
+            resolve_access_from_rules(&context, &[read, full, denied], &paths())
+                .unwrap()
+                .permission,
+            McpPermission::Full
+        );
+    }
+
+    #[test]
+    fn no_department_does_not_match_cached_department_paths() {
+        let mut context = context();
+        context.department_id = None;
+        assert!(
+            resolve_access_from_rules(
+                &context,
+                &[rule(McpAccessType::Department, McpPermission::Full)],
+                &paths()
+            )
+            .is_none()
+        );
+    }
 }

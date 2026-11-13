@@ -6,6 +6,7 @@
 pub fn extract_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len() / 2);
     let mut rest = html;
+    let mut tags_closed = true;
 
     loop {
         // Find next tag or entity marker
@@ -27,7 +28,9 @@ pub fn extract_text(html: &str) -> String {
             }
         } else if rest.starts_with('<') {
             rest = &rest[1..]; // consume <
-            let Some(gt) = rest.find('>') else {
+            let Some(gt) = rest.find('>').filter(|_| tags_closed) else {
+                // No later '>' exists, so every remaining '<' is literal; remembering that avoids rescanning to the end.
+                tags_closed = false;
                 out.push('<');
                 continue;
             };
@@ -75,8 +78,7 @@ pub fn extract_text(html: &str) -> String {
                 } else {
                     "</style"
                 };
-                let lower = rest.to_ascii_lowercase();
-                if let Some(p) = lower.find(close) {
+                if let Some(p) = find_ascii_case_insensitive(rest, close) {
                     rest = &rest[p + close.len()..];
                     if let Some(gt2) = rest.find('>') {
                         rest = &rest[gt2 + 1..];
@@ -88,7 +90,7 @@ pub fn extract_text(html: &str) -> String {
         } else if rest.starts_with('&') {
             rest = &rest[1..]; // consume &
             // Entity name is at most ~10 ASCII chars before ;
-            if let Some(semi) = rest.find(';').filter(|&p| p <= 12) {
+            if let Some(semi) = rest.bytes().take(13).position(|b| b == b';') {
                 let entity = &rest[..semi];
                 let replacement = match entity {
                     "amp" => Some("&"),
@@ -114,6 +116,13 @@ pub fn extract_text(html: &str) -> String {
     }
 
     out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 #[cfg(test)]
@@ -154,6 +163,26 @@ mod tests {
     #[test]
     fn collapses_whitespace() {
         assert_eq!(extract_text("<p>  spaced   out  </p>"), "spaced out");
+    }
+
+    #[test]
+    fn unclosed_angle_brackets_stay_literal() {
+        assert_eq!(extract_text("a <p>b</p> < c < d"), "a b < c < d");
+        assert_eq!(extract_text("x <<< &amp y"), "x <<< &amp y");
+    }
+
+    #[test]
+    fn script_close_tag_matches_any_case() {
+        assert_eq!(extract_text("<SCRIPT>x()</ScRiPt><p>shown</p>"), "shown");
+    }
+
+    #[test]
+    fn hostile_inputs_finish_quickly() {
+        let started = std::time::Instant::now();
+        extract_text(&"<".repeat(200_000));
+        extract_text(&"&".repeat(200_000));
+        extract_text(&"<script></script>".repeat(20_000));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]

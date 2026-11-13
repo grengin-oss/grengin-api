@@ -96,7 +96,7 @@ impl SqlxDatabaseHandler {
             .await
         {
             Ok(results) => {
-                let content = Content::json(results).map_err(|e| {
+                let content = ContentBlock::json(results).map_err(|e| {
                     McpError::internal_error(format!("Result serialization failed: {e}"), None)
                 })?;
                 Ok(CallToolResult::success(vec![content]))
@@ -123,7 +123,7 @@ impl SqlxDatabaseHandler {
             .await
         {
             Ok(results) => {
-                let content = Content::json(results).map_err(|e| {
+                let content = ContentBlock::json(results).map_err(|e| {
                     McpError::internal_error(format!("Result serialization failed: {e}"), None)
                 })?;
                 Ok(CallToolResult::success(vec![content]))
@@ -150,7 +150,7 @@ impl SqlxDatabaseHandler {
             .await
         {
             Ok(results) => {
-                let content = Content::json(results).map_err(|e| {
+                let content = ContentBlock::json(results).map_err(|e| {
                     McpError::internal_error(format!("Result serialization failed: {e}"), None)
                 })?;
                 Ok(CallToolResult::success(vec![content]))
@@ -177,7 +177,7 @@ impl SqlxDatabaseHandler {
             .await
         {
             Ok(results) => {
-                let content = Content::json(results).map_err(|e| {
+                let content = ContentBlock::json(results).map_err(|e| {
                     McpError::internal_error(format!("Result serialization failed: {e}"), None)
                 })?;
                 Ok(CallToolResult::success(vec![content]))
@@ -200,7 +200,7 @@ impl SqlxDatabaseHandler {
     ) -> Result<CallToolResult, McpError> {
         match self.db_manager.list_ltree_columns(params.schema).await {
             Ok(results) => {
-                let content = Content::json(results).map_err(|e| {
+                let content = ContentBlock::json(results).map_err(|e| {
                     McpError::internal_error(format!("Result serialization failed: {e}"), None)
                 })?;
                 Ok(CallToolResult::success(vec![content]))
@@ -221,7 +221,7 @@ impl SqlxDatabaseHandler {
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let status = self.db_manager.get_pool_state().await;
-        let content = Content::json(status).map_err(|e| {
+        let content = ContentBlock::json(status).map_err(|e| {
             McpError::internal_error(format!("Status serialization failed: {e}"), None)
         })?;
         Ok(CallToolResult::success(vec![content]))
@@ -230,25 +230,22 @@ impl SqlxDatabaseHandler {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for SqlxDatabaseHandler {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let mut server_info = Implementation::from_build_env();
         server_info.name = "sqlx-mcp".to_string();
         server_info.title = Some("SQLx MCP Server".to_string());
         server_info.version = env!("CARGO_PKG_VERSION").to_string();
 
-        ServerInfo {
-            instructions: Some("SQLx PostgreSQL MCP server with read-only tools for query + schema discovery. Use list_tables/describe_table/list_foreign_keys/list_ltree_columns before complex SQL. Use PostgreSQL syntax (not SQLite/MySQL metadata commands).".to_string()),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info,
-            ..Default::default()
-        }
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions("SQLx PostgreSQL MCP server with read-only tools for query + schema discovery. Use list_tables/describe_table/list_foreign_keys/list_ltree_columns before complex SQL. Use PostgreSQL syntax (not SQLite/MySQL metadata commands).")
+            .with_server_info(server_info)
     }
 
     async fn initialize(
         &self,
-        _request: InitializeRequestParams,
+        request: InitializeRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
-        Ok(self.get_info())
+        self.negotiate_initialize(&request)
     }
 }

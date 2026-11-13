@@ -272,6 +272,12 @@ pub async fn upsert_connection(
             AppError::DbTimeout
         })?;
     }
+    if !connected {
+        let client = state.mcp_clients.read().await.get(&server_id).cloned();
+        if let Some(client) = client {
+            client.invalidate_user_session(user_id).await;
+        }
+    }
     Ok(())
 }
 
@@ -279,7 +285,15 @@ pub async fn resolve_mcp_oauth_token(
     state: &SharedState,
     user_id: Uuid,
     server_id: Uuid,
+    client_url: Option<&str>,
 ) -> Result<Option<String>, AppError> {
+    if let Some(token) = crate::services::connectors_helpers::resolve_mcp_connection_token(
+        state, user_id, server_id, client_url,
+    )
+    .await?
+    {
+        return Ok(token);
+    }
     // One provider refresh per connection in this single-instance deployment. Waiting callers
     // re-read the saved tokens instead of redeeming the same rotating refresh token twice.
     let _refresh_lock = state.mcp_refresh_locks.lock(user_id, server_id).await;
@@ -440,7 +454,7 @@ async fn store_refreshed_oauth_tokens<C: ConnectionTrait>(
     Ok(updated.rows_affected == 1)
 }
 
-async fn store_oauth_tokens_with<C: ConnectionTrait>(
+pub(crate) async fn store_oauth_tokens_with<C: ConnectionTrait>(
     db: &C,
     app_key: &[u8; 32],
     user_id: Uuid,
@@ -539,6 +553,7 @@ pub fn build_oauth_config(
 pub struct McpOauthPrompt {
     pub authorization_url: String,
     pub server_name: String,
+    pub broker_connection_id: Option<Uuid>,
 }
 
 #[derive(Serialize)]
@@ -667,23 +682,135 @@ pub async fn build_mcp_oauth_prompt(
     start_oauth_authorization(state, server_id, user_id, None).await
 }
 
+async fn start_native_broker_connection(
+    state: &SharedState,
+    server: &mcp_servers::Model,
+    user_id: Uuid,
+) -> Result<
+    Option<crate::dto::connectors::ConnectorConnection>,
+    crate::services::connector_broker::ConnectorError,
+> {
+    let Some(native) =
+        crate::services::native_connector_broker::identity(&server.connection_config)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        crate::services::connectors_helpers::start_connection(
+            state,
+            user_id,
+            native.plugin_id,
+            crate::dto::connectors::ConnectConnectorRequest {
+                version: native.plugin_version,
+                server_id: Some(server.id),
+            },
+        )
+        .await?,
+    ))
+}
+
+fn broker_authorize_response(
+    id: Uuid,
+    status: crate::models::connectors::ConnectorStatus,
+    authorization_url: Option<String>,
+) -> crate::dto::mcp::McpAuthorize {
+    use crate::models::connectors::ConnectorStatus;
+    let connected = status == ConnectorStatus::Connected;
+    crate::dto::mcp::McpAuthorize {
+        success: matches!(
+            status,
+            ConnectorStatus::Connected
+                | ConnectorStatus::Pending
+                | ConnectorStatus::AwaitingConfirmation
+        ),
+        message: Some(
+            if connected {
+                "Already connected"
+            } else if authorization_url.is_some() {
+                "Authorize via provided URL"
+            } else {
+                "Connection status available"
+            }
+            .into(),
+        ),
+        authorization_url,
+        broker_connection_id: Some(id),
+        status: Some(status),
+    }
+}
+
+pub async fn authorize_user_mcp_connection(
+    state: &SharedState,
+    server_id: Uuid,
+    user_id: Uuid,
+    redirect_uri: Option<&str>,
+) -> Result<crate::dto::mcp::McpAuthorize, crate::services::connector_broker::ConnectorError> {
+    let server = require_server_access(state, user_id, server_id).await?;
+    if let Some(connection) = start_native_broker_connection(state, &server, user_id).await? {
+        return Ok(broker_authorize_response(
+            connection.id,
+            connection.status,
+            connection.authorization_url,
+        ));
+    }
+    let prompt = start_server_oauth_authorization(state, server, user_id, redirect_uri).await?;
+    Ok(crate::dto::mcp::McpAuthorize {
+        success: true,
+        authorization_url: Some(prompt.authorization_url),
+        message: Some("Authorize via provided URL".into()),
+        broker_connection_id: prompt.broker_connection_id,
+        status: None,
+    })
+}
+
 pub async fn start_oauth_authorization(
     state: &SharedState,
     server_id: Uuid,
     user_id: Uuid,
     redirect_uri: Option<&str>,
 ) -> Result<McpOauthPrompt, AppError> {
-    let server = mcp_servers::Entity::find_by_id(server_id)
-        .one(&state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("mcp server lookup error: {e}");
-            AppError::DbTimeout
-        })?
-        .ok_or(AppError::McpServerNotFound)?;
+    let server = require_server_access(state, user_id, server_id).await?;
+    start_server_oauth_authorization(state, server, user_id, redirect_uri).await
+}
 
-    if !server.enabled {
-        return Err(AppError::McpServerNotFound);
+async fn start_server_oauth_authorization(
+    state: &SharedState,
+    server: mcp_servers::Model,
+    user_id: Uuid,
+    redirect_uri: Option<&str>,
+) -> Result<McpOauthPrompt, AppError> {
+    let server_id = server.id;
+    if let Some(connection) = start_native_broker_connection(state, &server, user_id).await? {
+        return Ok(McpOauthPrompt {
+            // Connected or awaiting-confirmation connections have no authorization step left to start.
+            authorization_url: connection.authorization_url.ok_or(AppError::DbConflict)?,
+            server_name: server.name,
+            broker_connection_id: Some(connection.id),
+        });
+    }
+    if server.connection_config.get("connector_plugin").is_some() {
+        let plugin = crate::services::mcp_plugin_helpers::compile_plugin(
+            &server.connection_config,
+            server.transport_type,
+            server.url.as_deref(),
+        )
+        .map_err(|_| AppError::ResourceNotFound)?;
+        if plugin.is_some_and(|plugin| {
+            plugin.manifest().auth != connector_server_plugin::ConnectorAuth::Oauth2
+        }) {
+            return Err(AppError::ResourceNotFound);
+        }
+    }
+
+    if let Some(authorization_url) =
+        crate::services::connectors_helpers::pending_authorization(state, user_id, server_id)
+            .await?
+    {
+        return Ok(McpOauthPrompt {
+            authorization_url,
+            server_name: server.name,
+            broker_connection_id: None,
+        });
     }
 
     if !matches!(
@@ -727,6 +854,7 @@ pub async fn start_oauth_authorization(
     Ok(McpOauthPrompt {
         authorization_url: authorization.authorization_url,
         server_name: server.name,
+        broker_connection_id: None,
     })
 }
 
@@ -743,6 +871,23 @@ pub async fn complete_oauth_authorization(
             eprintln!("mcp oauth state lookup error: {e}");
             AppError::DbTimeout
         })?
+        .ok_or(AppError::ResourceNotFound)?;
+
+    if oauth_state.user_id != caller_user_id {
+        return Err(AppError::ResourceNotFound);
+    }
+    let _lock = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        state
+            .mcp_refresh_locks
+            .lock(caller_user_id, oauth_state.server_id),
+    )
+    .await
+    .map_err(|_| AppError::ServiceTemporarilyUnavailable)?;
+    let oauth_state = mcp_oauth_states::Entity::find_by_id(oauth_state.id)
+        .one(&state.database)
+        .await
+        .map_err(|_| AppError::DbTimeout)?
         .ok_or(AppError::ResourceNotFound)?;
 
     match check_oauth_state(&oauth_state, caller_user_id, Utc::now()) {
@@ -765,8 +910,11 @@ pub async fn complete_oauth_authorization(
         .as_deref()
         .and_then(|uri| allowed_redirect_uri(uri, &state.settings.auth.redirect_url));
 
-    if let Some(error) = callback.error {
-        eprintln!("mcp oauth error: {error} {:?}", callback.error_description);
+    if callback.error.is_some() {
+        eprintln!(
+            "mcp oauth consent rejected for server {}",
+            oauth_state.server_id
+        );
         finish_oauth_state(state, oauth_state.id, OAuthCallbackOutcome::ProviderError).await;
         return Ok(build_oauth_callback_response(
             redirect_uri.as_deref(),
@@ -779,14 +927,7 @@ pub async fn complete_oauth_authorization(
         .code
         .ok_or(AppError::ValidationMissingField { field: "code" })?;
 
-    let server = mcp_servers::Entity::find_by_id(oauth_state.server_id)
-        .one(&state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("mcp server lookup error: {e}");
-            AppError::DbTimeout
-        })?
-        .ok_or(AppError::McpServerNotFound)?;
+    let server = require_server_access(state, caller_user_id, oauth_state.server_id).await?;
 
     let oauth_config = build_oauth_config(state, &server)?;
     let exchange = exchange_code(
@@ -804,6 +945,11 @@ pub async fn complete_oauth_authorization(
         eprintln!("mcp oauth token exchange error: {e}");
         AppError::ServiceTemporarilyUnavailable
     })?;
+
+    let fresh = require_server_access(state, caller_user_id, server.id).await?;
+    if oauth_binding_changed(&server, &fresh) {
+        return Err(AppError::ResourceNotFound);
+    }
 
     redeem_oauth_state(state, oauth_state.id, oauth_state.user_id, &server, tokens).await?;
 
@@ -853,6 +999,15 @@ async fn redeem_oauth_state(
         eprintln!("mcp oauth redeem begin error: {e}");
         AppError::DbTimeout
     })?;
+    let fresh = mcp_servers::Entity::find_by_id(server.id)
+        .lock_exclusive()
+        .one(&txn)
+        .await
+        .map_err(|_| AppError::DbTimeout)?
+        .ok_or(AppError::ResourceNotFound)?;
+    if !fresh.enabled || oauth_binding_changed(server, &fresh) {
+        return Err(AppError::ResourceNotFound);
+    }
     let removed = mcp_oauth_states::Entity::delete_by_id(oauth_state_id)
         .exec(&txn)
         .await
@@ -876,6 +1031,50 @@ async fn redeem_oauth_state(
         eprintln!("mcp oauth redeem commit error: {e}");
         AppError::DbTimeout
     })
+}
+
+fn oauth_binding_changed(old: &mcp_servers::Model, current: &mcp_servers::Model) -> bool {
+    old.connection_config != current.connection_config
+        || old.url != current.url
+        || old.transport_type != current.transport_type
+        || old.client_id != current.client_id
+        || old.client_secret != current.client_secret
+}
+
+pub(crate) async fn require_server_access(
+    state: &SharedState,
+    user: Uuid,
+    server: Uuid,
+) -> Result<mcp_servers::Model, AppError> {
+    use crate::services::mcp_access::{
+        build_access_context, load_server_rules, resolve_server_access_with_rules,
+    };
+    let owner = users::Entity::find_by_id(user)
+        .one(&state.database)
+        .await
+        .map_err(|_| AppError::DbTimeout)?
+        .ok_or(AppError::ResourceNotFound)?;
+    if owner.status != users::UserStatus::Active {
+        return Err(AppError::ResourceNotFound);
+    }
+    let server = mcp_servers::Entity::find_by_id(server)
+        .one(&state.database)
+        .await
+        .map_err(|_| AppError::DbTimeout)?
+        .ok_or(AppError::ResourceNotFound)?;
+    if !server.enabled {
+        return Err(AppError::ResourceNotFound);
+    }
+    let context = build_access_context(&state.database, user).await?;
+    let rules = load_server_rules(&state.database, &[server.id]).await?;
+    if resolve_server_access_with_rules(&state.database, &context, &server, &rules)
+        .await?
+        .permission
+        == mcp_access_policies::McpPermission::Denied
+    {
+        return Err(AppError::ResourceNotFound);
+    }
+    Ok(server)
 }
 
 // Best-effort for rejected codes and provider-reported errors: the provider won't accept the
@@ -907,6 +1106,43 @@ async fn delete_oauth_state(state: &SharedState, oauth_state_id: Uuid) -> Result
 mod tests {
     use super::{OAuthCallbackOutcome, retain_refresh_token};
     use crate::services::mcp_client::{McpClientError, McpOAuthTokens};
+
+    #[test]
+    fn connected_broker_authorization_returns_status_without_requiring_another_url() {
+        use crate::models::connectors::ConnectorStatus;
+        let reply = super::broker_authorize_response(
+            uuid::Uuid::new_v4(),
+            ConnectorStatus::Connected,
+            None,
+        );
+        assert!(reply.success);
+        assert!(reply.authorization_url.is_none());
+        assert!(reply.broker_connection_id.is_some());
+        assert_eq!(serde_json::to_value(reply).unwrap()["status"], "connected");
+    }
+
+    #[test]
+    fn pending_and_terminal_broker_statuses_are_not_reported_as_already_connected() {
+        use crate::models::connectors::ConnectorStatus;
+        let pending = super::broker_authorize_response(
+            uuid::Uuid::new_v4(),
+            ConnectorStatus::Pending,
+            Some("https://service.example/consent".into()),
+        );
+        assert!(pending.success);
+        assert!(pending.authorization_url.is_some());
+        let awaiting = super::broker_authorize_response(
+            uuid::Uuid::new_v4(),
+            ConnectorStatus::AwaitingConfirmation,
+            None,
+        );
+        assert!(awaiting.success);
+        assert_eq!(awaiting.status, Some(ConnectorStatus::AwaitingConfirmation));
+        let revoked =
+            super::broker_authorize_response(uuid::Uuid::new_v4(), ConnectorStatus::Revoked, None);
+        assert!(!revoked.success);
+        assert!(revoked.authorization_url.is_none());
+    }
 
     #[tokio::test]
     #[ignore = "requires DB_URL pointing at the isolated grengin_security_test database"]

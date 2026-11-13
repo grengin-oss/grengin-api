@@ -12,8 +12,8 @@ use crate::{
     error::AppError,
     models::{mcp_access_policies, mcp_servers, mcp_tools},
     services::mcp_access::{
-        build_access_context, load_server_rules, load_tool_rules, resolve_server_access_with_rules,
-        resolve_tool_access_with_rules,
+        McpAccessResolver, ResolvedAccess, build_access_context, load_server_rules,
+        load_tool_rules, resolve_server_access_with_rules, resolve_tool_access_with_rules,
     },
     state::SharedState,
 };
@@ -272,70 +272,93 @@ pub async fn filter_tools_for_user(
     if tools.is_empty() {
         return Ok(tools);
     }
-    let access_context = build_access_context(db, user_id).await?;
-
     let server_ids: Vec<Uuid> = tools
         .iter()
         .map(|tool| tool.server_id)
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    let servers: HashMap<Uuid, mcp_servers::Model> = mcp_servers::Entity::find()
+    let servers = mcp_servers::Entity::find()
         .filter(mcp_servers::Column::Id.is_in(server_ids.clone()))
         .all(db)
         .await
         .map_err(|e| {
             eprintln!("mcp servers fetch error: {e}");
             AppError::DbTimeout
-        })?
-        .into_iter()
-        .map(|server| (server.id, server))
-        .collect();
+        })?;
+    Ok(resolve_listing_access(db, user_id, &servers, tools)
+        .await?
+        .tools)
+}
 
+pub struct McpListingAccess {
+    pub server_access: HashMap<Uuid, ResolvedAccess>,
+    pub tools: Vec<mcp_tools::Model>,
+}
+
+pub async fn resolve_listing_access(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    servers: &[mcp_servers::Model],
+    tools: Vec<mcp_tools::Model>,
+) -> Result<McpListingAccess, AppError> {
+    if servers.is_empty() {
+        return Ok(McpListingAccess {
+            server_access: HashMap::new(),
+            tools: Vec::new(),
+        });
+    }
+    let access_context = build_access_context(db, user_id).await?;
+    let server_ids: Vec<_> = servers.iter().map(|server| server.id).collect();
+    let tool_ids: Vec<_> = tools.iter().map(|tool| tool.id).collect();
+    let mut rules = load_server_rules(db, &server_ids).await?;
+    rules.extend(load_tool_rules(db, &tool_ids).await?);
+    let resolver = McpAccessResolver::load(db, &access_context, &rules).await?;
     let mut server_rule_map: HashMap<Uuid, Vec<mcp_access_policies::Model>> = HashMap::new();
-    for rule in load_server_rules(db, &server_ids).await? {
-        if let Some(server_id) = rule.server_id {
-            server_rule_map.entry(server_id).or_default().push(rule);
-        }
-    }
-    let tool_ids: Vec<Uuid> = tools.iter().map(|tool| tool.id).collect();
     let mut tool_rule_map: HashMap<Uuid, Vec<mcp_access_policies::Model>> = HashMap::new();
-    for rule in load_tool_rules(db, &tool_ids).await? {
-        if let Some(tool_id) = rule.tool_id {
-            tool_rule_map.entry(tool_id).or_default().push(rule);
+    for rule in rules {
+        match rule.target_type {
+            mcp_access_policies::McpAccessTarget::Server => {
+                if let Some(id) = rule.server_id {
+                    server_rule_map.entry(id).or_default().push(rule);
+                }
+            }
+            mcp_access_policies::McpAccessTarget::Tool => {
+                if let Some(id) = rule.tool_id {
+                    tool_rule_map.entry(id).or_default().push(rule);
+                }
+            }
         }
     }
-
-    let mut server_access_cache = HashMap::new();
+    let mut server_access = HashMap::with_capacity(servers.len());
+    for server in servers {
+        if !server.enabled {
+            continue;
+        }
+        let rules = server_rule_map
+            .get(&server.id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        server_access.insert(server.id, resolver.server(server, rules));
+    }
     let mut allowed = Vec::with_capacity(tools.len());
     for tool in tools {
-        let Some(server) = servers.get(&tool.server_id) else {
+        let Some(access) = server_access.get(&tool.server_id) else {
             continue;
-        };
-        let server_access = match server_access_cache.get(&tool.server_id) {
-            Some(access) => access,
-            None => {
-                let rules = server_rule_map
-                    .get(&tool.server_id)
-                    .map(|rules| rules.as_slice())
-                    .unwrap_or(&[]);
-                let access =
-                    resolve_server_access_with_rules(db, &access_context, server, rules).await?;
-                server_access_cache.entry(tool.server_id).or_insert(access)
-            }
         };
         let tool_rules = tool_rule_map
             .get(&tool.id)
             .map(|rules| rules.as_slice())
             .unwrap_or(&[]);
-        let tool_access =
-            resolve_tool_access_with_rules(db, &access_context, &tool, server_access, tool_rules)
-                .await?;
+        let tool_access = resolver.tool(&tool, access, tool_rules);
         if tool_is_usable(tool_access.permission, tool.is_read_only) {
             allowed.push(tool);
         }
     }
-    Ok(allowed)
+    Ok(McpListingAccess {
+        server_access,
+        tools: allowed,
+    })
 }
 
 pub async fn load_mcp_tools(

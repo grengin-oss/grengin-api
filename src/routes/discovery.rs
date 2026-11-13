@@ -5,8 +5,8 @@ use axum::{Router, routing::get};
 
 use crate::{
     handlers::discovery::{
-        get_ai_provider_plugin, get_auth_provider_template, list_ai_provider_plugins,
-        list_auth_provider_templates,
+        get_ai_provider_plugin, get_auth_provider_template, get_connector_plugin,
+        list_ai_provider_plugins, list_auth_provider_templates, list_connector_plugins,
     },
     state::SharedState,
 };
@@ -25,5 +25,10 @@ pub fn discovery_routes() -> Router<SharedState> {
         .route(
             "/discovery/ai-providers/{provider}",
             get(get_ai_provider_plugin),
+        )
+        .route("/discovery/connector-plugins", get(list_connector_plugins))
+        .route(
+            "/discovery/connector-plugins/{provider}",
+            get(get_connector_plugin),
         )
 }

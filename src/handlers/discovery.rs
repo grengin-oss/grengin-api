@@ -12,8 +12,8 @@ use serde::Serialize;
 use crate::{
     auth::error::AuthError,
     dto::discovery::{
-        AiProviderDiscoveryResponse, AuthProviderDiscoveryResponse, DiscoveryListResponse,
-        DiscoveryQuery,
+        AiProviderDiscoveryResponse, AuthProviderDiscoveryResponse,
+        ConnectorPluginDiscoveryResponse, DiscoveryListResponse, DiscoveryQuery,
     },
     services::discovery_catalog::{DiscoveryError, sha256_hex},
     state::SharedState,
@@ -175,6 +175,54 @@ pub async fn get_ai_provider_plugin(
     let response = state
         .discovery_catalog
         .ai_provider(&provider, query.version.as_deref())
+        .await
+        .map_err(map_discovery_error)?;
+    discovery_response(&headers, &response)
+}
+
+#[utoipa::path(
+    get, path="/discovery/connector-plugins", tag="discovery", params(DiscoveryQuery),
+    responses(
+        (status=200,body=DiscoveryListResponse,description="Connector plugins pinned for this backend distribution"),
+        (status=304,description="Catalog unchanged"),
+        (status=400,description="Invalid version selector"),
+        (status=404,description="Distribution has no connector plugin catalog"),
+        (status=503,description="Catalog unavailable or invalid")
+    )
+)]
+pub async fn list_connector_plugins(
+    State(state): State<SharedState>,
+    Query(query): Query<DiscoveryQuery>,
+    headers: HeaderMap,
+) -> Result<Response, AuthError> {
+    let response = state
+        .discovery_catalog
+        .list_connector_plugins(query.version.as_deref())
+        .await
+        .map_err(map_discovery_error)?;
+    discovery_response(&headers, &response)
+}
+
+#[utoipa::path(
+    get, path="/discovery/connector-plugins/{provider}", tag="discovery",
+    params(("provider"=String,Path,description="Connector plugin ID"),DiscoveryQuery),
+    responses(
+        (status=200,body=ConnectorPluginDiscoveryResponse,description="Hash-verified plugin and derived read-only/read-write tool groups"),
+        (status=304,description="Plugin unchanged"),
+        (status=400,description="Invalid version selector"),
+        (status=404,description="No compatible plugin package found"),
+        (status=503,description="Invalid digest, manifest or catalog, or upstream unavailable")
+    )
+)]
+pub async fn get_connector_plugin(
+    State(state): State<SharedState>,
+    Path(provider): Path<String>,
+    Query(query): Query<DiscoveryQuery>,
+    headers: HeaderMap,
+) -> Result<Response, AuthError> {
+    let response = state
+        .discovery_catalog
+        .connector_plugin(&provider, query.version.as_deref())
         .await
         .map_err(map_discovery_error)?;
     discovery_response(&headers, &response)

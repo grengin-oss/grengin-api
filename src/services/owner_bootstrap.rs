@@ -3,7 +3,7 @@
 
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr,
     EntityTrait, PaginatorTrait, QueryFilter, Set, Statement, TransactionTrait,
 };
 use uuid::Uuid;
@@ -19,6 +19,17 @@ use crate::{
 
 const BOOTSTRAP_LOCK_SQL: &str =
     "SELECT pg_advisory_xact_lock(hashtext('grengin.bootstrap_super_admin'))";
+
+// Shared with first-SSO-login provisioning so only one caller can ever become the first user.
+pub async fn lock_first_user_bootstrap<C: ConnectionTrait>(connection: &C) -> Result<(), DbErr> {
+    connection
+        .execute(Statement::from_string(
+            DatabaseBackend::Postgres,
+            BOOTSTRAP_LOCK_SQL,
+        ))
+        .await
+        .map(|_| ())
+}
 
 fn valid_email(value: &str) -> bool {
     let Some((local, domain)) = value.split_once('@') else {
@@ -53,11 +64,7 @@ pub async fn ensure_bootstrap_super_admin(
         .begin()
         .await
         .map_err(|error| format!("start owner bootstrap transaction: {error}"))?;
-    transaction
-        .execute(Statement::from_string(
-            DatabaseBackend::Postgres,
-            BOOTSTRAP_LOCK_SQL,
-        ))
+    lock_first_user_bootstrap(&transaction)
         .await
         .map_err(|error| format!("lock owner bootstrap: {error}"))?;
 

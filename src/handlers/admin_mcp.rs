@@ -33,7 +33,9 @@ use crate::{
     services::{
         auth_audit::{build_audit_payload, record_auth_event},
         authorization::{AuthorizationService, PermissionScopeMode},
-        mcp_access::resolve_role_reference,
+        mcp_access::{
+            ensure_delegation_allowed, ensure_rule_removal_allowed, resolve_role_reference,
+        },
         mcp_helpers::build_access_rule_dtos,
     },
     state::SharedState,
@@ -365,7 +367,7 @@ pub async fn create_mcp_access_rule(
         }
     }
 
-    let _ = mcp_servers::Entity::find_by_id(server_id)
+    let server = mcp_servers::Entity::find_by_id(server_id)
         .one(&app_state.database)
         .await
         .map_err(|e| {
@@ -373,6 +375,10 @@ pub async fn create_mcp_access_rule(
             AuthError::DbTimeout
         })?
         .ok_or(AuthError::ResourceNotFound)?;
+    if req.access_type != McpAccessType::Role {
+        ensure_delegation_allowed(&app_state.database, claims.user_id, &server, req.permission)
+            .await?;
+    }
 
     let target_user_id = if req.access_type == McpAccessType::User {
         Some(req.user_id.ok_or(AuthError::ResourceNotFound)?)
@@ -618,6 +624,7 @@ pub async fn delete_mcp_access_rule(
                 Some(server_id),
             )
             .await?;
+        ensure_rule_removal_allowed(&app_state.database, claims.user_id, &rule).await?;
     }
 
     mcp_access_policies::Entity::delete_by_id(rule_id)
