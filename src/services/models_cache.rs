@@ -6,7 +6,10 @@ use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::{OnceCell, RwLock};
 
-use crate::dto::models::{ModelInfo, ModelType, ProviderInfo};
+use crate::{
+    dto::models::{ModelInfo, ModelType, ProviderInfo},
+    services::catalog_download::{MAX_CATALOG_DOCUMENT_BYTES, read_body_capped},
+};
 
 const PROVIDERS_URLS: [&str; 2] = [
     "https://meta.grengin.com/ai-providers.json",
@@ -264,8 +267,8 @@ async fn fetch_embed_models(
 
 async fn fetch_json(req_client: &reqwest::Client, url: &str) -> Result<Value, Error> {
     let response = req_client.get(url).send().await?.error_for_status()?;
-    let value = response.json::<Value>().await?;
-    Ok(value)
+    let body = read_body_capped(response, MAX_CATALOG_DOCUMENT_BYTES).await?;
+    Ok(serde_json::from_slice(&body)?)
 }
 
 async fn fetch_json_candidates(
@@ -302,7 +305,7 @@ fn parse_provider_stub(value: &Value) -> Result<ProviderStub, Error> {
         models_obj
             .and_then(|m| m.get(field))
             .and_then(Value::as_str)
-            .map(str::to_string)
+            .and_then(https_catalog_url)
     };
 
     Ok(ProviderStub {
@@ -320,8 +323,17 @@ fn parse_provider_stub(value: &Value) -> Result<ProviderStub, Error> {
         plugin_url: value
             .pointer("/plugin/url")
             .and_then(Value::as_str)
-            .map(str::to_string),
+            .and_then(https_catalog_url),
     })
+}
+
+fn https_catalog_url(url: &str) -> Option<String> {
+    if url.starts_with("https://") {
+        Some(url.to_string())
+    } else {
+        eprintln!("ignoring non-https catalog URL {url}");
+        None
+    }
 }
 
 fn parse_text_model(value: &Value) -> Result<ModelInfo, Error> {

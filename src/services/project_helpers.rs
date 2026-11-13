@@ -12,6 +12,8 @@ use crate::{
         project_mcp_servers, project_members, project_members::ProjectMemberRole, project_sources,
         project_sources::ProcessingStatus, projects, projects::ProjectVisibility,
     },
+    services::mcp_helpers::require_server_access,
+    state::SharedState,
 };
 use sea_orm::{
     ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
@@ -27,6 +29,20 @@ pub fn artifact_write_error(error: AppError) -> AuthError {
         AppError::ValidationEmptyField { .. } => AuthError::InvalidRequest { field: "title" },
         _ => AuthError::DbTimeout,
     }
+}
+
+// Linking echoes the server's name and description, so it needs the same access as using it.
+pub async fn find_attachable_mcp_server(
+    state: &SharedState,
+    user_id: Uuid,
+    server_id: Uuid,
+) -> Result<mcp_servers::Model, AuthError> {
+    require_server_access(state, user_id, server_id)
+        .await
+        .map_err(|error| match error {
+            AppError::ResourceNotFound => AuthError::ResourceNotFound,
+            _ => AuthError::DbTimeout,
+        })
 }
 
 pub async fn get_project_or_404(

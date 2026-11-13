@@ -22,11 +22,13 @@ use crate::{
         auth_audit::record_required_auth_event,
         authorization::{AuthorizationService, PermissionScopeMode},
         chat_share_notifications,
+        chat_stream_helpers::ensure_model_whitelisted,
         file_download::download_response,
         file_storage::{
             FileWrite, StorageCategory, file_is_available, find_file_for_user, read_model_bytes,
             remove_model_file, safe_file_name, stage_file_bytes,
         },
+        llm_usage_gate::ensure_user_llm_allowed,
     },
     state::SharedState,
 };
@@ -924,26 +926,6 @@ async fn rebuild_copy_index(
     targets: Vec<crate::services::rag::EmbeddingTarget>,
     source: &SharedChatContent,
 ) -> Result<(), AppError> {
-    use crate::services::{
-        chat_stream_helpers::{
-            DepartmentBudgetGate, department_budget_status, ensure_model_whitelisted,
-        },
-        department_policies::check_model_allowed,
-    };
-    let user = users::Entity::find_by_id(viewer)
-        .one(&state.database)
-        .await
-        .map_err(|_| AppError::DbTimeout)?
-        .ok_or(AppError::ResourceNotFound)?;
-    if user.status != UserStatus::Active {
-        return Err(AppError::ResourceNotFound);
-    }
-    if let Some(department) = user.department_id {
-        let (gate, _, _) = department_budget_status(&state.database, department).await?;
-        if gate == DepartmentBudgetGate::Block {
-            return Err(AppError::DepartmentBudgetExceeded);
-        }
-    }
     let provider = state
         .settings
         .rag
@@ -957,15 +939,7 @@ async fn rebuild_copy_index(
         .summary_llm_model
         .as_deref()
         .unwrap_or(&source.model_name);
-    if !check_model_allowed(&state.database, user.department_id, &provider, model)
-        .await
-        .map_err(|_| AppError::DbTimeout)?
-    {
-        return Err(AppError::DepartmentModelNotAllowed {
-            provider,
-            model: model.to_string(),
-        });
-    }
+    ensure_user_llm_allowed(state, viewer, &provider, model).await?;
     ensure_model_whitelisted(state, &provider, &provider, model, &[model]).await?;
     crate::services::rag::embed_messages(state, targets).await?;
     crate::services::rag::update_conversation_summary(state, chat, &provider, model).await

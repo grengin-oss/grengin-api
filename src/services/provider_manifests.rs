@@ -10,7 +10,13 @@ use std::{
 use anyhow::{Error, anyhow};
 use llm_plugin::ProviderManifestV1;
 
-use crate::{models::ai_engines::PluginConfig, services::models_cache::load_plugin_urls_cached};
+use crate::{
+    models::ai_engines::PluginConfig,
+    services::{
+        catalog_download::{MAX_CATALOG_DOCUMENT_BYTES, read_body_capped},
+        models_cache::load_plugin_urls_cached,
+    },
+};
 
 // std RwLock, not tokio: the read side is called from sync fns such as
 // provider_plugin_version that sit inside non-async response mapping.
@@ -127,13 +133,8 @@ async fn fetch_plugin_config(
         .await?
         .remove(engine_key)
         .ok_or_else(|| anyhow!("provider catalog declares no plugin url for {engine_key}"))?;
-    let bytes = req_client
-        .get(&url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
+    let response = req_client.get(&url).send().await?.error_for_status()?;
+    let bytes = read_body_capped(response, MAX_CATALOG_DOCUMENT_BYTES).await?;
     let manifest = ProviderManifestV1::from_json(&bytes)
         .map_err(|error| anyhow!("catalog manifest at {url} is invalid: {error}"))?;
     if manifest.id != engine_key {

@@ -280,6 +280,8 @@ struct PendingToolCall {
     arguments: String,
 }
 
+const MAX_SERVER_TOOL_QUERY_BYTES: usize = 64 * 1024;
+
 #[derive(Default)]
 struct PendingServerTools {
     next_id: u64,
@@ -322,7 +324,14 @@ impl PendingServerTools {
         fragment: &str,
     ) -> Option<crate::services::provider_stream::StreamWebSearchAction> {
         let buffer = self.query_buffers.entry(id.to_string()).or_default();
+        if buffer.len() + fragment.len() > MAX_SERVER_TOOL_QUERY_BYTES {
+            return None;
+        }
         buffer.push_str(fragment);
+        // Reparsing only once the object can be complete keeps a long stream of fragments linear.
+        if !buffer.trim_end().ends_with('}') {
+            return None;
+        }
         serde_json::from_str::<Value>(buffer)
             .ok()
             .and_then(|value| parse_web_search_action(&value))
@@ -521,6 +530,18 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn server_tool_query_is_parsed_once_complete_and_capped() {
+        let mut tools = PendingServerTools::default();
+        assert!(tools.push_query("a", "{\"query\": \"rust").is_none());
+        let action = tools.push_query("a", " lang\"}").expect("complete query");
+        assert_eq!(action.query.as_deref(), Some("rust lang"));
+
+        let oversized = "x".repeat(MAX_SERVER_TOOL_QUERY_BYTES + 1);
+        assert!(tools.push_query("b", &oversized).is_none());
+        assert!(tools.query_buffers.get("b").is_none_or(String::is_empty));
+    }
 
     struct TitleProvider {
         descriptor: ProviderDescriptor,
