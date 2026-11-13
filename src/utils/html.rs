@@ -28,7 +28,8 @@ pub fn extract_text(html: &str) -> String {
             }
         } else if rest.starts_with('<') {
             rest = &rest[1..]; // consume <
-            let Some(gt) = rest.find('>').filter(|_| tags_closed) else {
+            let found = if tags_closed { rest.find('>') } else { None };
+            let Some(gt) = found else {
                 // No later '>' exists, so every remaining '<' is literal; remembering that avoids rescanning to the end.
                 tags_closed = false;
                 out.push('<');
@@ -179,7 +180,7 @@ mod tests {
     #[test]
     fn hostile_inputs_finish_quickly() {
         let started = std::time::Instant::now();
-        extract_text(&"<".repeat(200_000));
+        extract_text(&"<".repeat(2_000_000));
         extract_text(&"&".repeat(200_000));
         extract_text(&"<script></script>".repeat(20_000));
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
