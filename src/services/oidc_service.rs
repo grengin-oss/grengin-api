@@ -23,7 +23,10 @@ use crate::{
         oauth_sessions, roles, user_role_assignments,
         users::{self, TourGuideMetadata, UserStatus},
     },
-    services::{authorization::AuthorizationService, oidc_proxy::verify_proxy_assertion},
+    services::{
+        authorization::AuthorizationService, oidc_proxy::verify_proxy_assertion,
+        owner_bootstrap::lock_first_user_bootstrap,
+    },
     state::{AuthProtocolClient, SharedState},
     utils::uri::{is_azure_mobile_redirect_uri, origin_from_url},
 };
@@ -173,10 +176,8 @@ struct AzureEmailEvidence {
 fn id_token_email_verified(claim: Option<bool>, azure: Option<AzureEmailEvidence>) -> bool {
     match azure {
         // Any Entra tenant can set any user's `email` (nOAuth); only xms_edov or a single-tenant authority vouches for it.
-        Some(evidence) => evidence
-            .domain_owner_verified
-            .or(claim)
-            .unwrap_or(!evidence.multitenant),
+        Some(evidence) if evidence.multitenant => evidence.domain_owner_verified.unwrap_or(false),
+        Some(evidence) => evidence.domain_owner_verified.or(claim).unwrap_or(true),
         None => claim.unwrap_or(false),
     }
 }
@@ -321,14 +322,43 @@ async fn commit_login_transaction(txn: DatabaseTransaction) -> Result<(), AuthEr
     })
 }
 
+fn oauth_session_key(provider: &str, state: &str) -> String {
+    format!("{}:{state}", provider.trim().to_ascii_lowercase())
+}
+
+pub async fn store_oauth_session(
+    database: &DatabaseConnection,
+    provider: &str,
+    state: &str,
+    pkce_verifier: String,
+    nonce: String,
+    redirect_uri: String,
+) -> Result<(), AuthError> {
+    oauth_sessions::ActiveModel {
+        state: Set(oauth_session_key(provider, state)),
+        pkce_verifier: Set(pkce_verifier),
+        nonce: Set(nonce),
+        redirect_uri: Set(Some(redirect_uri)),
+        created_at: Set(Utc::now()),
+    }
+    .insert(database)
+    .await
+    .map_err(|e| {
+        eprintln!("db error while storing oauth session: {e:?}");
+        AuthError::ServiceTemporarilyUnavailable
+    })?;
+    Ok(())
+}
+
 async fn consume_oauth_session<C>(
     database: &C,
+    provider: &str,
     state: &str,
 ) -> Result<Option<oauth_sessions::Model>, DbErr>
 where
     C: ConnectionTrait,
 {
-    let mut sessions = oauth_sessions::Entity::delete_by_id(state.to_string())
+    let mut sessions = oauth_sessions::Entity::delete_by_id(oauth_session_key(provider, state))
         .exec_with_returning(database)
         .await?;
     Ok(sessions.pop())
@@ -361,8 +391,13 @@ pub async fn oidc_oauth_callback(
         .map_err(|_| AuthError::InvalidProvider {
             provider: Some(provider.clone()),
         })?;
+    if !runtime.is_enabled {
+        return Err(AuthError::SsoProviderDisabledByAdmin {
+            provider: Some(provider.clone()),
+        });
+    }
     let default_redirect_uri = Some(runtime.redirect_url.clone());
-    let sess = consume_oauth_session(&app_state.database, &cb.state)
+    let sess = consume_oauth_session(&app_state.database, &provider, &cb.state)
         .await
         .map_err(|e| {
             eprintln!("db error while consuming oauth session: {e:?}");
@@ -568,15 +603,19 @@ pub async fn oidc_oauth_callback(
                 .and_then(|n| n.get(None).map(|s| s.to_string()))
                 .or(apple_display_name);
             if email.is_none() {
-                if let Ok(request) =
-                    oidc_client.user_info(token_resp.access_token().to_owned(), None)
-                {
+                if let Ok(request) = oidc_client.user_info(
+                    token_resp.access_token().to_owned(),
+                    Some(claims.subject().clone()),
+                ) {
                     let info: CoreUserInfoClaims = request
                         .request_async(&app_state.req_client)
                         .await
                         .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
                     email = info.email().map(|e| e.as_str().to_string());
-                    email_verified = info.email_verified().unwrap_or(email_verified);
+                    email_verified = id_token_email_verified(
+                        info.email_verified().or(claims.email_verified()),
+                        azure_email_evidence,
+                    );
                     if display_name.is_none() {
                         display_name = info.name().and_then(|n| n.get(None).map(|s| s.to_string()));
                     }
@@ -740,14 +779,15 @@ pub async fn oidc_oauth_callback(
         }
     }
     if user.is_none() {
-        let is_first_user = users::Entity::find()
-            .count(&app_state.database)
-            .await
-            .map_err(|e| {
-                eprintln!("db error while counting users {:?}", e);
-                AuthError::ServiceTemporarilyUnavailable
-            })?
-            == 0;
+        let txn = begin_login_transaction(&app_state.database).await?;
+        lock_first_user_bootstrap(&txn).await.map_err(|e| {
+            eprintln!("db error while locking first-user bootstrap {e:?}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
+        let is_first_user = users::Entity::find().count(&txn).await.map_err(|e| {
+            eprintln!("db error while counting users {:?}", e);
+            AuthError::ServiceTemporarilyUnavailable
+        })? == 0;
         let jit_provisioning = app_state.sso_jit_provisioning_enabled(&provider).await;
         if !is_first_user && !jit_provisioning {
             return Err(AuthError::SsoJitProvisioningDisabled {
@@ -790,14 +830,10 @@ pub async fn oidc_oauth_callback(
                 email.as_deref(),
             )),
         };
-        new_user
-            .clone()
-            .insert(&app_state.database)
-            .await
-            .map_err(|e| {
-                eprintln!("{:?}", e);
-                AuthError::ServiceTemporarilyUnavailable
-            })?;
+        new_user.clone().insert(&txn).await.map_err(|e| {
+            eprintln!("{:?}", e);
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
         let inserted_user = new_user.try_into_model().map_err(|e| {
             eprintln!("db error while parsing user {:?}", e);
             AuthError::ServiceTemporarilyUnavailable
@@ -805,7 +841,7 @@ pub async fn oidc_oauth_callback(
         let role_name = if is_first_user { "Super Admin" } else { "User" };
         if let Some(role) = roles::Entity::find()
             .filter(roles::Column::Name.eq(role_name))
-            .one(&app_state.database)
+            .one(&txn)
             .await
             .map_err(|e| {
                 eprintln!("role lookup error: {e}");
@@ -822,8 +858,12 @@ pub async fn oidc_oauth_callback(
                 created_at: Set(now),
                 updated_at: Set(now),
             };
-            let _ = assignment.insert(&app_state.database).await;
+            assignment.insert(&txn).await.map_err(|e| {
+                eprintln!("db error while assigning the new user's role {e:?}");
+                AuthError::ServiceTemporarilyUnavailable
+            })?;
         }
+        commit_login_transaction(txn).await?;
         let authz = AuthorizationService::new(&app_state.database);
         let _ = authz
             .recompute_effective_permissions(inserted_user.id)
@@ -1152,6 +1192,23 @@ mod tests {
         };
 
         assert!(!id_token_email_verified(Some(true), Some(evidence)));
+    }
+
+    #[test]
+    fn multitenant_azure_email_verified_claim_alone_is_not_trusted() {
+        assert!(!id_token_email_verified(
+            Some(true),
+            Some(MULTITENANT_AZURE)
+        ));
+    }
+
+    #[test]
+    fn oauth_sessions_are_bound_to_the_provider_that_started_them() {
+        assert_eq!(oauth_session_key(" Azure ", "abc"), "azure:abc");
+        assert_ne!(
+            oauth_session_key("google", "abc"),
+            oauth_session_key("keycloak", "abc")
+        );
     }
 
     #[test]

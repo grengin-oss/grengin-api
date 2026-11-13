@@ -13,9 +13,9 @@ use crate::{
             AuthCallback, AuthProvider, AuthProviderSummary, CallbackExchangeMode, StartParams,
         },
     },
-    models::oauth_sessions,
     services::{
-        oidc_proxy::provider_uses_proxy, oidc_service::oidc_oauth_callback,
+        oidc_proxy::provider_uses_proxy,
+        oidc_service::{oidc_oauth_callback, store_oauth_session},
         sso_seed::list_effective_auth_providers,
     },
     state::{AuthProtocolClient, SharedState},
@@ -27,11 +27,9 @@ use axum::{
     http::StatusCode,
     response::Redirect,
 };
-use chrono::Utc;
 use openidconnect::{
     CsrfToken, Nonce, PkceCodeChallenge, RedirectUrl, Scope, core::CoreAuthenticationFlow,
 };
-use sea_orm::{ActiveModelTrait, ActiveValue::Set};
 use std::borrow::Cow;
 
 fn apple_frontend_callback_url(
@@ -151,17 +149,15 @@ pub async fn oidc_login_start(
             nonce.secret(),
         )
         .ok_or(AuthError::ServiceTemporarilyUnavailable)?;
-        let sess = oauth_sessions::ActiveModel {
-            state: Set(csrf_state.secret().to_string()),
-            pkce_verifier: Set("proxy-managed".to_string()),
-            nonce: Set(nonce.secret().to_string()),
-            redirect_uri: Set(Some(redirect_uri.to_string())),
-            created_at: Set(Utc::now()),
-        };
-        sess.insert(&app_state.database).await.map_err(|e| {
-            eprintln!("{:?}", e);
-            AuthError::ServiceTemporarilyUnavailable
-        })?;
+        store_oauth_session(
+            &app_state.database,
+            &provider,
+            csrf_state.secret(),
+            "proxy-managed".to_string(),
+            nonce.secret().to_string(),
+            redirect_uri.to_string(),
+        )
+        .await?;
         return Ok(Redirect::to(&proxy_authorize_url));
     }
 
@@ -214,17 +210,15 @@ pub async fn oidc_login_start(
             )
         }
     };
-    let sess = oauth_sessions::ActiveModel {
-        state: Set(state),
-        pkce_verifier: Set(pkce_verifier),
-        nonce: Set(nonce),
-        redirect_uri: Set(Some(redirect_uri.to_string())),
-        created_at: Set(Utc::now()),
-    };
-    sess.insert(&app_state.database).await.map_err(|e| {
-        eprintln!("{:?}", e);
-        AuthError::ServiceTemporarilyUnavailable
-    })?;
+    store_oauth_session(
+        &app_state.database,
+        &provider,
+        &state,
+        pkce_verifier,
+        nonce,
+        redirect_uri.to_string(),
+    )
+    .await?;
     Ok(Redirect::to(auth_url.as_str()))
 }
 
@@ -406,6 +400,7 @@ mod tests {
     use crate::{
         dto::auth::TokenType, models::sso_providers, services::sso_seed::auth_provider_summary,
     };
+    use chrono::Utc;
     use uuid::Uuid;
 
     #[test]
