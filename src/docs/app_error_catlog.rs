@@ -62,6 +62,7 @@ pub fn build_app_error_catalog() -> Vec<AppErrorCatalogItem> {
     for e in [
         AppError::ValidationMissingField { field: "messages" },
         AppError::ValidationEmptyField { field: "messages" },
+        AppError::ValidationInvalidField { field: "files" },
     ] {
         let (status, detail) = e.to_detail();
         items.push(AppErrorCatalogItem::from_detail(status, detail));

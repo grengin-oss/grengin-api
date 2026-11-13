@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::{
@@ -11,7 +11,7 @@ use crate::{
         prompt::Prompt,
     },
     error::AppError,
-    services::file_storage::read_attachments_for_user,
+    services::file_storage::{read_attachments_for_user, stored_attachments_size},
     state::SharedState,
 };
 
@@ -23,7 +23,12 @@ pub async fn validate_incoming_attachments(
     messages: &[MessageRequest],
     image_generation: bool,
 ) -> Result<(), AppError> {
+    ensure_attachment_counts(messages)?;
     let ids = incoming_stored_ids(messages, image_generation);
+    if stored_attachments_size(&state.database, user_id, &ids).await? > MAX_REQUEST_ATTACHMENT_BYTES
+    {
+        return Err(AppError::ValidationInvalidField { field: "files" });
+    }
     read_attachments_for_user(
         &state.database,
         &state.settings.file_storage_root,
@@ -31,6 +36,22 @@ pub async fn validate_incoming_attachments(
         &ids,
     )
     .await?;
+    Ok(())
+}
+
+const MAX_REQUEST_ATTACHMENTS: usize = 32;
+const MAX_REQUEST_ATTACHMENT_BYTES: u64 = 200 * 1024 * 1024;
+
+fn ensure_attachment_counts(messages: &[MessageRequest]) -> Result<(), AppError> {
+    let mut total = 0;
+    for message in messages {
+        total += message.files.len();
+        let mut seen = HashSet::with_capacity(message.files.len());
+        if total > MAX_REQUEST_ATTACHMENTS || !message.files.iter().all(|file| seen.insert(file.id))
+        {
+            return Err(AppError::ValidationInvalidField { field: "files" });
+        }
+    }
     Ok(())
 }
 
@@ -140,6 +161,34 @@ mod tests {
         ];
         assert_eq!(incoming_stored_ids(&messages, false), vec![stored]);
         assert_eq!(incoming_stored_ids(&messages, true), vec![stored, inline]);
+    }
+
+    fn message(files: Vec<File>) -> MessageRequest {
+        MessageRequest {
+            role: ChatRole::User,
+            content: "hi".into(),
+            files,
+        }
+    }
+
+    #[test]
+    fn repeated_file_ids_in_one_message_are_rejected() {
+        let id = Uuid::new_v4();
+        assert!(matches!(
+            ensure_attachment_counts(&[message(vec![file(id, false), file(id, false)])]),
+            Err(AppError::ValidationInvalidField { field: "files" })
+        ));
+        assert!(ensure_attachment_counts(&[message(vec![file(id, false)])]).is_ok());
+    }
+
+    #[test]
+    fn attachment_count_is_capped_across_the_request() {
+        let files = |n: usize| (0..n).map(|_| file(Uuid::new_v4(), false)).collect();
+        assert!(ensure_attachment_counts(&[message(files(MAX_REQUEST_ATTACHMENTS))]).is_ok());
+        assert!(
+            ensure_attachment_counts(&[message(files(MAX_REQUEST_ATTACHMENTS)), message(files(1))])
+                .is_err()
+        );
     }
 
     #[test]

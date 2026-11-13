@@ -43,6 +43,8 @@ fn department_within_scope(scope_paths: &[String], dept_path: &str) -> bool {
             .any(|scope| is_path_within_scope(scope, dept_path))
 }
 
+pub const MAX_USER_ANALYTICS_PAGE: u64 = 100;
+
 fn empty_user_analytics_response(page: u64, limit: u64) -> UserAnalytics {
     UserAnalytics {
         users: Vec::new(),
@@ -106,6 +108,7 @@ pub async fn calculate_user_analytics(
     page: u64,
     limit: u64,
 ) -> Result<UserAnalytics, DbErr> {
+    let limit = limit.clamp(1, MAX_USER_ANALYTICS_PAGE);
     // active_message = (deleted = false) AND created_at between dates (if provided)
     let mut active_msg_cond = Expr::col((messages::Entity, messages::Column::Deleted)).eq(false);
 
@@ -274,6 +277,7 @@ pub async fn calculate_user_analytics_scoped(
     limit: u64,
     scope_paths: &[String],
 ) -> Result<UserAnalytics, DbErr> {
+    let limit = limit.clamp(1, MAX_USER_ANALYTICS_PAGE);
     if scope_paths.is_empty() {
         return Ok(empty_user_analytics_response(page, limit));
     }

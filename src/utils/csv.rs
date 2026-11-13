@@ -54,7 +54,7 @@ impl<'a> CsvReader<'a> {
         }
         if self.data[self.pos] == b'"' {
             self.pos += 1;
-            let mut field = String::new();
+            let mut field = Vec::new();
             loop {
                 if self.pos >= self.data.len() {
                     break;
@@ -63,17 +63,17 @@ impl<'a> CsvReader<'a> {
                     self.pos += 1;
                     if self.pos < self.data.len() && self.data[self.pos] == b'"' {
                         // Escaped double-quote inside a quoted field
-                        field.push('"');
+                        field.push(b'"');
                         self.pos += 1;
                     } else {
                         break;
                     }
                 } else {
-                    field.push(self.data[self.pos] as char);
+                    field.push(self.data[self.pos]);
                     self.pos += 1;
                 }
             }
-            Some(field)
+            Some(String::from_utf8_lossy(&field).into_owned())
         } else {
             let start = self.pos;
             while self.pos < self.data.len()
@@ -127,6 +127,14 @@ impl<'a> CsvReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quoted_fields_keep_multibyte_text() {
+        let data = "name\n\"Zoë, café \"\"ok\"\" 日本\"\n".as_bytes();
+        let mut r = CsvReader::new(data);
+        r.headers();
+        assert_eq!(r.records(), vec![vec!["Zoë, café \"ok\" 日本".to_string()]]);
+    }
 
     #[test]
     fn parses_simple_csv() {

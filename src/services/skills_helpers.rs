@@ -578,9 +578,12 @@ fn extract_knowledge_text(
     Ok(vec![(file_name.to_string(), text)])
 }
 
+const MAX_ZIP_MARKDOWN_BYTES: usize = 20 * 1024 * 1024;
+
 fn extract_zip_markdown(bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
     let archive = ZipArchive::new(bytes).map_err(|e| e.to_string())?;
     let mut results = Vec::new();
+    let mut total_bytes = 0usize;
 
     for i in 0..archive.len() {
         let entry = archive.by_index(i).map_err(|e| e.to_string())?;
@@ -589,7 +592,12 @@ fn extract_zip_markdown(bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
             continue;
         }
         let mut buf = String::new();
-        entry.read_to_string(&mut buf).map_err(|e| e.to_string())?;
+        total_bytes += entry.read_to_string(&mut buf).map_err(|e| e.to_string())?;
+        if total_bytes > MAX_ZIP_MARKDOWN_BYTES {
+            return Err(format!(
+                "zip markdown is larger than {MAX_ZIP_MARKDOWN_BYTES} bytes"
+            ));
+        }
         let text = buf.trim().to_string();
         if !text.is_empty() {
             // Use only the filename component, not the full path inside the zip.
