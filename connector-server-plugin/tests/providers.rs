@@ -239,8 +239,13 @@ async fn every_provider_tool_obeys_its_http_contract_and_preserves_page_cursors(
             };
             let version = manifests[id]["version"].as_str().unwrap();
             let composition: Value = serde_json::from_slice(
-                &std::fs::read(root.join(id).join("versions").join(version).join("composition.json"))
-                    .unwrap(),
+                &std::fs::read(
+                    root.join(id)
+                        .join("versions")
+                        .join(version)
+                        .join("composition.json"),
+                )
+                .unwrap(),
             )
             .unwrap();
             for member in composition["members"].as_array().unwrap() {

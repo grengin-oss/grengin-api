@@ -836,8 +836,16 @@ fn validate_suite_members(kind: &CatalogKind, index: &CatalogIndex) -> Result<()
     if suites.is_empty() {
         return Ok(());
     }
-    let known: HashSet<&str> = index.providers.iter().map(|provider| provider.id.as_str()).collect();
-    for provider in index.providers.iter().filter(|provider| !provider.members.is_empty()) {
+    let known: HashSet<&str> = index
+        .providers
+        .iter()
+        .map(|provider| provider.id.as_str())
+        .collect();
+    for provider in index
+        .providers
+        .iter()
+        .filter(|provider| !provider.members.is_empty())
+    {
         let unique: HashSet<&str> = provider.members.iter().map(String::as_str).collect();
         if !matches!(kind, CatalogKind::Connector)
             || provider.members.len() < 2
@@ -1356,7 +1364,9 @@ mod tests {
         ))
         .unwrap();
         let single = index["connectorPlugins"]["providers"][0].clone();
-        let providers = index["connectorPlugins"]["providers"].as_array_mut().unwrap();
+        let providers = index["connectorPlugins"]["providers"]
+            .as_array_mut()
+            .unwrap();
         for id in ["test-docs", "test-sheets"] {
             let mut member = single.clone();
             member["id"] = serde_json::json!(id);
@@ -1378,9 +1388,18 @@ mod tests {
         )
         .await;
         let listed = catalog.list_connector_plugins(None).await.unwrap();
-        let suite = listed.providers.iter().find(|p| p.id == "test-office").unwrap();
+        let suite = listed
+            .providers
+            .iter()
+            .find(|p| p.id == "test-office")
+            .unwrap();
         assert_eq!(suite.members, ["test-docs", "test-sheets"]);
-        assert!(listed.providers.iter().any(|p| p.id == "test-docs" && p.members.is_empty()));
+        assert!(
+            listed
+                .providers
+                .iter()
+                .any(|p| p.id == "test-docs" && p.members.is_empty())
+        );
         let body = serde_json::to_value(&listed).unwrap();
         let single = body["providers"]
             .as_array()
