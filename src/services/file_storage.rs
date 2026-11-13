@@ -10,7 +10,8 @@ use chrono::Utc;
 use openssl::sha::sha256;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseBackend,
-    DatabaseConnection, DbErr, EntityTrait, QueryFilter, Statement, TransactionTrait, TryIntoModel,
+    DatabaseConnection, DbErr, EntityTrait, QueryFilter, QuerySelect, Statement, TransactionTrait,
+    TryIntoModel,
 };
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
@@ -408,6 +409,34 @@ pub async fn read_attachments_for_user(
         );
     }
     Ok(attachments)
+}
+
+pub async fn stored_attachments_size(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    file_ids: &[Uuid],
+) -> Result<u64, AppError> {
+    if file_ids.is_empty() {
+        return Ok(0);
+    }
+    let unique_ids = file_ids.iter().copied().collect::<HashSet<_>>();
+    let sizes = files::Entity::find()
+        .select_only()
+        .column(files::Column::Size)
+        .filter(files::Column::Id.is_in(unique_ids.iter().copied()))
+        .filter(files::Column::UserId.eq(user_id))
+        .filter(files::Column::Status.eq(FileUploadStatus::Uploaded))
+        .into_tuple::<i64>()
+        .all(db)
+        .await
+        .map_err(|error| {
+            eprintln!("file size batch lookup failed: {error}");
+            AppError::DbTimeout
+        })?;
+    if sizes.len() != unique_ids.len() {
+        return Err(AppError::ResourceNotFound);
+    }
+    Ok(sizes.into_iter().map(|size| size.max(0) as u64).sum())
 }
 
 pub async fn read_model_bytes(root: &Path, model: &files::Model) -> Result<Vec<u8>, AppError> {

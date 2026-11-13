@@ -16,6 +16,7 @@ pub enum ZipError {
     InvalidFormat(String),
     Io(io::Error),
     UnsupportedCompression(u16),
+    EntryTooLarge(String),
 }
 
 impl std::fmt::Display for ZipError {
@@ -24,6 +25,9 @@ impl std::fmt::Display for ZipError {
             ZipError::InvalidFormat(s) => write!(f, "invalid ZIP: {s}"),
             ZipError::Io(e) => write!(f, "I/O error: {e}"),
             ZipError::UnsupportedCompression(m) => write!(f, "unsupported compression method {m}"),
+            ZipError::EntryTooLarge(name) => {
+                write!(f, "{name} is larger than {MAX_ENTRY_BYTES} bytes")
+            }
         }
     }
 }
@@ -34,13 +38,16 @@ impl From<io::Error> for ZipError {
     }
 }
 
-pub struct ZipEntry {
+pub const MAX_ENTRY_BYTES: u64 = 4 * 1024 * 1024;
+
+pub struct ZipEntry<'a> {
     name: String,
     is_dir: bool,
-    data: Vec<u8>,
+    compression: u16,
+    compressed: &'a [u8],
 }
 
-impl ZipEntry {
+impl ZipEntry<'_> {
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -48,20 +55,42 @@ impl ZipEntry {
         self.is_dir
     }
 
-    pub fn read_to_string(&self, buf: &mut String) -> io::Result<usize> {
-        let s = std::str::from_utf8(&self.data)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    pub fn read_to_string(&self, buf: &mut String) -> Result<usize, ZipError> {
+        let data = self.decompress()?;
+        let s = std::str::from_utf8(&data)
+            .map_err(|e| ZipError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))?;
         buf.push_str(s);
         Ok(s.len())
     }
+
+    fn decompress(&self) -> Result<Vec<u8>, ZipError> {
+        let mut out = Vec::new();
+        match self.compression {
+            METHOD_STORED => {
+                self.compressed
+                    .take(MAX_ENTRY_BYTES + 1)
+                    .read_to_end(&mut out)?;
+            }
+            METHOD_DEFLATED => {
+                DeflateDecoder::new(self.compressed)
+                    .take(MAX_ENTRY_BYTES + 1)
+                    .read_to_end(&mut out)?;
+            }
+            m => return Err(ZipError::UnsupportedCompression(m)),
+        }
+        if out.len() as u64 > MAX_ENTRY_BYTES {
+            return Err(ZipError::EntryTooLarge(self.name.clone()));
+        }
+        Ok(out)
+    }
 }
 
-pub struct ZipArchive {
-    entries: Vec<ZipEntry>,
+pub struct ZipArchive<'a> {
+    entries: Vec<ZipEntry<'a>>,
 }
 
-impl ZipArchive {
-    pub fn new(data: &[u8]) -> Result<Self, ZipError> {
+impl<'a> ZipArchive<'a> {
+    pub fn new(data: &'a [u8]) -> Result<Self, ZipError> {
         let eocd = find_eocd(data)?;
         let total = eocd.total_entries as usize;
         let mut entries = Vec::with_capacity(total);
@@ -97,7 +126,6 @@ impl ZipArchive {
 
             let is_dir = name.ends_with('/');
 
-            // Locate file data via the local file header
             if lh_offset + 30 > data.len() {
                 return Err(ZipError::InvalidFormat("local header out of bounds".into()));
             }
@@ -113,22 +141,12 @@ impl ZipArchive {
             if data_start + compressed_sz > data.len() {
                 return Err(ZipError::InvalidFormat("file data out of bounds".into()));
             }
-            let compressed = &data[data_start..data_start + compressed_sz];
-
-            let decompressed = match compression {
-                METHOD_STORED => compressed.to_vec(),
-                METHOD_DEFLATED => {
-                    let mut out = Vec::new();
-                    DeflateDecoder::new(compressed).read_to_end(&mut out)?;
-                    out
-                }
-                m => return Err(ZipError::UnsupportedCompression(m)),
-            };
 
             entries.push(ZipEntry {
                 name,
                 is_dir,
-                data: decompressed,
+                compression,
+                compressed: &data[data_start..data_start + compressed_sz],
             });
         }
 
@@ -142,7 +160,7 @@ impl ZipArchive {
         self.entries.is_empty()
     }
 
-    pub fn by_index(&self, i: usize) -> Result<&ZipEntry, ZipError> {
+    pub fn by_index(&self, i: usize) -> Result<&ZipEntry<'a>, ZipError> {
         self.entries
             .get(i)
             .ok_or_else(|| ZipError::InvalidFormat(format!("entry index {i} out of range")))
@@ -269,6 +287,43 @@ mod tests {
         assert_eq!(buf, "# Hello\nWorld");
 
         assert!(archive.by_index(1).unwrap().is_dir());
+    }
+
+    fn make_deflated_bomb(name: &str, inflated_len: usize) -> Vec<u8> {
+        use flate2::{Compression, write::DeflateEncoder};
+        use std::io::Write;
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&vec![b'a'; inflated_len]).unwrap();
+        let deflated = encoder.finish().unwrap();
+        let mut zip = make_stored_zip(&[(name, &deflated)]);
+        let cd_compression = zip.len() - 22 - 46 - name.len() + 10;
+        zip[cd_compression..cd_compression + 2].copy_from_slice(&METHOD_DEFLATED.to_le_bytes());
+        zip
+    }
+
+    #[test]
+    fn deflated_entry_inflating_past_the_cap_is_rejected() {
+        let zip = make_deflated_bomb("bomb.md", MAX_ENTRY_BYTES as usize + 1);
+        let archive = ZipArchive::new(&zip).unwrap();
+        let mut buf = String::new();
+        assert!(matches!(
+            archive.by_index(0).unwrap().read_to_string(&mut buf),
+            Err(ZipError::EntryTooLarge(_))
+        ));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn deflated_entry_within_the_cap_is_read() {
+        let zip = make_deflated_bomb("ok.md", 1024);
+        let archive = ZipArchive::new(&zip).unwrap();
+        let mut buf = String::new();
+        archive
+            .by_index(0)
+            .unwrap()
+            .read_to_string(&mut buf)
+            .unwrap();
+        assert_eq!(buf.len(), 1024);
     }
 
     #[test]

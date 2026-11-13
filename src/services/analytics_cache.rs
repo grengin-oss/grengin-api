@@ -240,7 +240,10 @@ pub async fn get_user_analytics_cached(
     query: UserAnalyticsQuery,
 ) -> Result<UserAnalytics, DbErr> {
     let page = query.page.unwrap_or(0);
-    let limit = query.limit.unwrap_or(20);
+    let limit = query
+        .limit
+        .unwrap_or(20)
+        .clamp(1, analytics_service::MAX_USER_ANALYTICS_PAGE);
     let live = query.live.unwrap_or(false);
 
     if let Some(window) = cache_window_for_query(query.start_date, query.end_date) {
