@@ -5,7 +5,10 @@ use anyhow::{Error, anyhow};
 use std::collections::HashMap;
 use tokio::sync::{OnceCell, RwLock};
 
-use crate::dto::embeddings::{EmbedderModelMeta, EmbeddersResponse};
+use crate::{
+    dto::embeddings::{EmbedderModelMeta, EmbeddersResponse},
+    services::catalog_download::{MAX_CATALOG_DOCUMENT_BYTES, read_body_capped},
+};
 
 const EMBEDDERS_BASE_URLS: [&str; 2] = [
     "https://meta.grengin.com/ai-providers",
@@ -103,7 +106,8 @@ async fn fetch_embedders_from_bases(
         let url = format!("{base_url}/{provider}/text_embedders.json");
         let result = async {
             let response = req_client.get(&url).send().await?.error_for_status()?;
-            Ok::<_, reqwest::Error>(response.json::<EmbeddersResponse>().await?)
+            let body = read_body_capped(response, MAX_CATALOG_DOCUMENT_BYTES).await?;
+            Ok::<_, Error>(serde_json::from_slice::<EmbeddersResponse>(&body)?)
         }
         .await;
         match result {
@@ -111,9 +115,7 @@ async fn fetch_embedders_from_bases(
             Err(error) => last_error = Some(error),
         }
     }
-    Err(last_error
-        .map(Error::from)
-        .unwrap_or_else(|| anyhow!("no embedder catalog URLs configured")))
+    Err(last_error.unwrap_or_else(|| anyhow!("no embedder catalog URLs configured")))
 }
 
 #[cfg(test)]

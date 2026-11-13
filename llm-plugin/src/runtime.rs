@@ -33,7 +33,9 @@ use crate::{
     ProviderModel, ProviderPlugin, RequestSpec, SseDecoder, SseEventMapper, StructuredBodyEncoding,
     TokenUsage, ToolCall, ToolCallId, ToolResult, UsageMapping, capture_values, evaluate_mapping,
     resolve_path,
-    security::{validate_destination_ip, validate_header_name, validate_provider_url},
+    security::{
+        SafeResolver, validate_destination_ip, validate_header_name, validate_provider_url,
+    },
 };
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -145,7 +147,11 @@ impl DeclarativeProvider {
         }
 
         let client = Client::builder()
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
+            .dns_resolver(Arc::new(SafeResolver {
+                allow_private_network: runtime.allow_private_network,
+            }))
             .build()
             .map_err(ProviderError::from)?;
         // A chat stream stays open for as long as the model keeps talking, so its timeout has to
@@ -159,7 +165,11 @@ impl DeclarativeProvider {
             runtime.default_timeout_ms,
         ));
         let stream_client = Client::builder()
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
+            .dns_resolver(Arc::new(SafeResolver {
+                allow_private_network: runtime.allow_private_network,
+            }))
             .connect_timeout(stream_timeout)
             .read_timeout(stream_timeout)
             .build()

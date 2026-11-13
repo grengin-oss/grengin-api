@@ -30,7 +30,7 @@ use crate::{
     },
     models::project_sources::ProcessingStatus,
     models::{
-        conversation_projects, conversations, mcp_servers, project_mcp_servers, project_members,
+        conversation_projects, conversations, project_mcp_servers, project_members,
         project_sources, projects, projects::ProjectVisibility, users,
     },
     services::{
@@ -605,7 +605,14 @@ pub async fn add_project_source(
     })?;
 
     if let Some(fid) = inserted.file_id {
-        process_source_before_response(app_state, inserted.id, inserted.project_id, fid).await;
+        process_source_before_response(
+            app_state,
+            claims.user_id,
+            inserted.id,
+            inserted.project_id,
+            fid,
+        )
+        .await;
     }
 
     Ok((StatusCode::CREATED, Json(source_to_response(inserted))))
@@ -1058,7 +1065,14 @@ pub async fn add_project_artifact(
         AuthError::DbTimeout
     })?;
 
-    process_source_before_response(app_state, inserted.id, inserted.project_id, file_uuid).await;
+    process_source_before_response(
+        app_state,
+        claims.user_id,
+        inserted.id,
+        inserted.project_id,
+        file_uuid,
+    )
+    .await;
 
     Ok((StatusCode::CREATED, Json(source_to_response(inserted))))
 }
@@ -1216,7 +1230,14 @@ pub async fn update_project_artifact(
     })?;
 
     if let Some(fid) = retrigger_file_id {
-        process_source_before_response(app_state, updated.id, updated.project_id, fid).await;
+        process_source_before_response(
+            app_state,
+            claims.user_id,
+            updated.id,
+            updated.project_id,
+            fid,
+        )
+        .await;
     }
 
     Ok((StatusCode::OK, Json(source_to_response(updated))))
@@ -1323,14 +1344,7 @@ pub async fn add_project_mcp_server(
     let project = get_project_or_404(id, &app_state.database).await?;
     ensure_project_write_access(claims.user_id, &project, &app_state.database).await?;
 
-    let server = mcp_servers::Entity::find_by_id(req.server_id)
-        .one(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("db mcp server lookup error: {e}");
-            AuthError::DbTimeout
-        })?
-        .ok_or(AuthError::ResourceNotFound)?;
+    let server = find_attachable_mcp_server(&app_state, claims.user_id, req.server_id).await?;
 
     let existing = project_mcp_servers::Entity::find()
         .filter(project_mcp_servers::Column::ProjectId.eq(id))

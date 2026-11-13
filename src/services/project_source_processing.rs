@@ -15,6 +15,7 @@ use crate::{
     models::{files, project_source_chunks, project_sources, project_sources::ProcessingStatus},
     services::{
         file_storage::{FileWrite, StorageCategory, store_file_bytes},
+        llm_usage_gate::ensure_user_llm_allowed,
         provider_chat::{generate_provider_response, provider_error_class},
         provider_resolver::resolve_provider,
         rag::{format_pgvector, generate_embeddings},
@@ -155,11 +156,16 @@ fn effective_mime(bytes: &[u8], declared: &str) -> String {
     declared.to_string()
 }
 
+const EXTRACTION_PROVIDER: &str = "anthropic";
+const EXTRACTION_MODEL: &str = "claude-haiku-4-5";
+
 async fn extract_text_via_llm(
     app_state: &SharedState,
+    user_id: Uuid,
     bytes: Vec<u8>,
     content_type: &str,
 ) -> Result<String, AppError> {
+    ensure_user_llm_allowed(app_state, user_id, EXTRACTION_PROVIDER, EXTRACTION_MODEL).await?;
     let data = BASE64_STANDARD.encode(&bytes);
     let prompt_text = if content_type.starts_with("image/") {
         "Describe the content of this image in detail. If it contains text, extract all the text verbatim. If it's a diagram or chart, describe what it shows."
@@ -179,15 +185,15 @@ async fn extract_text_via_llm(
             media_type: content_type.to_string(),
         }
     };
-    let provider = resolve_provider(app_state, "anthropic")
+    let provider = resolve_provider(app_state, EXTRACTION_PROVIDER)
         .await
         .map_err(|_| AppError::LlmProviderNotConfigured {
-            provider: "anthropic".to_string(),
+            provider: EXTRACTION_PROVIDER.to_string(),
         })?;
     let result = generate_provider_response(
         provider.as_ref(),
         llm_plugin::ChatRequest {
-            model: llm_plugin::ModelId::new("claude-haiku-4-5"),
+            model: llm_plugin::ModelId::new(EXTRACTION_MODEL),
             messages: vec![llm_plugin::ChatMessage {
                 role: llm_plugin::ChatRole::User,
                 content: vec![
@@ -218,7 +224,7 @@ async fn extract_text_via_llm(
             );
         }
         AppError::LlmProviderNotConfigured {
-            provider: "anthropic".to_string(),
+            provider: EXTRACTION_PROVIDER.to_string(),
         }
     })?;
 
@@ -227,6 +233,7 @@ async fn extract_text_via_llm(
 
 async fn extract_text_from_file(
     app_state: &SharedState,
+    user_id: Uuid,
     bytes: Vec<u8>,
     content_type: &str,
 ) -> Result<String, AppError> {
@@ -247,13 +254,17 @@ async fn extract_text_from_file(
             }),
         "application/pdf" => match extract_pdf_text(&bytes) {
             Some(text) => text,
-            None => extract_text_via_llm(app_state, bytes, "application/pdf").await?,
+            None => extract_text_via_llm(app_state, user_id, bytes, "application/pdf").await?,
         },
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
         | "application/msword"
-        | "application/vnd.ms-powerpoint" => extract_text_via_llm(app_state, bytes, &mime).await?,
-        m if m.starts_with("image/") => extract_text_via_llm(app_state, bytes, &mime).await?,
+        | "application/vnd.ms-powerpoint" => {
+            extract_text_via_llm(app_state, user_id, bytes, &mime).await?
+        }
+        m if m.starts_with("image/") => {
+            extract_text_via_llm(app_state, user_id, bytes, &mime).await?
+        }
         _ => String::from_utf8_lossy(&bytes).to_string(),
     };
 
@@ -322,6 +333,7 @@ async fn store_chunks(
 
 pub async fn process_project_source(
     app_state: SharedState,
+    user_id: Uuid,
     source_id: Uuid,
     project_id: Uuid,
     file_id: Uuid,
@@ -340,13 +352,6 @@ pub async fn process_project_source(
             .map_err(|_| AppError::DbTimeout)?
             .ok_or(AppError::ResourceNotFound)?;
 
-        let bytes = crate::services::file_storage::read_model_bytes(
-            &app_state.settings.file_storage_root,
-            &file,
-        )
-        .await?;
-        let text = extract_text_from_file(&app_state, bytes, &file.content_type).await?;
-
         let embedding_config = app_state
             .settings
             .get_embedding_config()
@@ -356,6 +361,13 @@ pub async fn process_project_source(
         if !embedding_config.is_enabled {
             return Ok(());
         }
+
+        let bytes = crate::services::file_storage::read_model_bytes(
+            &app_state.settings.file_storage_root,
+            &file,
+        )
+        .await?;
+        let text = extract_text_from_file(&app_state, user_id, bytes, &file.content_type).await?;
 
         let chunks = chunk_text(&text);
         if chunks.is_empty() {
@@ -396,11 +408,12 @@ pub async fn process_project_source(
 /// leave a detached indexing task unfinished.
 pub async fn process_source_before_response(
     app_state: SharedState,
+    user_id: Uuid,
     source_id: Uuid,
     project_id: Uuid,
     file_id: Uuid,
 ) {
-    process_project_source(app_state, source_id, project_id, file_id).await;
+    process_project_source(app_state, user_id, source_id, project_id, file_id).await;
 }
 
 pub async fn write_artifact_file(
