@@ -19,7 +19,8 @@ use crate::{
     error::AppError,
     models::{
         connectors, mcp_access_policies, mcp_connections, mcp_oauth_states, mcp_server_tools,
-        mcp_servers, mcp_tools, project_mcp_servers, users,
+        mcp_servers::{self, McpTransportType},
+        mcp_tools, project_mcp_servers, users,
     },
     services::{
         auth_audit::record_auth_event,
@@ -210,6 +211,62 @@ fn database_error(error: sea_orm::DbErr) -> AuthError {
     AuthError::DbTimeout
 }
 
+const ENDPOINT_FIELDS: [(&str, &str); 4] = [
+    ("/sse_url", "connection_config.sse_url"),
+    ("/oauth/auth_url", "connection_config.oauth.auth_url"),
+    ("/oauth/token_url", "connection_config.oauth.token_url"),
+    (
+        "/oauth/refresh_token_url",
+        "connection_config.oauth.refresh_token_url",
+    ),
+];
+
+// Self-hosted MCP servers may live on private networks or plain HTTP, but never on link-local or
+// cloud-metadata addresses. Queries are allowed in MCP URLs, so they are stripped before checking.
+fn endpoint_is_safe(raw: &str) -> bool {
+    let Ok(mut url) = url::Url::parse(raw) else {
+        return false;
+    };
+    url.set_query(None);
+    connector_server_plugin::validate_endpoint_url(&url, true, true).is_ok()
+}
+
+fn ensure_server_destination(server: &mcp_servers::Model, plugin: bool) -> Result<(), AuthError> {
+    match server.transport_type {
+        McpTransportType::Stdio => {
+            let command = server
+                .connection_config
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            crate::services::mcp_client::ensure_stdio_command_allowed(command).map_err(|error| {
+                eprintln!("MCP stdio server rejected: {error}");
+                AuthError::InvalidRequest {
+                    field: "connection_config.command",
+                }
+            })
+        }
+        McpTransportType::Http | McpTransportType::Sse if !plugin => {
+            if server
+                .url
+                .as_deref()
+                .is_some_and(|url| !endpoint_is_safe(url))
+            {
+                return Err(AuthError::InvalidRequest { field: "url" });
+            }
+            for (pointer, field) in ENDPOINT_FIELDS {
+                if let Some(value) = server.connection_config.pointer(pointer)
+                    && !value.as_str().is_some_and(endpoint_is_safe)
+                {
+                    return Err(AuthError::InvalidRequest { field });
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 pub async fn save_server(
     state: &SharedState,
     mut model: mcp_servers::ActiveModel,
@@ -256,6 +313,9 @@ pub async fn save_server(
             field: "connection_config.connector_plugin",
         }
     })?;
+    if preview.enabled {
+        ensure_server_destination(&preview, plugin.is_some())?;
+    }
     if plugin
         .as_ref()
         .is_some_and(|plugin| plugin.manifest().auth == ConnectorAuth::Oauth2)
@@ -313,10 +373,11 @@ pub async fn save_server(
             field: "connection_config.connector_plugin",
         });
     }
+    // Stored user tokens are not bound to a URL, so any destination or OAuth change must drop them.
     let reset_credentials = previous.as_ref().is_some_and(|old| {
-        (plugin.is_some() || old.connection_config.get("connector_plugin").is_some())
-            && (old.url != preview.url
-                || old.transport_type != preview.transport_type
+        old.url != preview.url
+            || old.connection_config.get("sse_url") != preview.connection_config.get("sse_url")
+            || (old.transport_type != preview.transport_type
                 || old.client_id != preview.client_id
                 || old.client_secret != preview.client_secret
                 || old.connection_config.get("oauth") != preview.connection_config.get("oauth")

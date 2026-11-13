@@ -814,12 +814,47 @@ fn rmcp_args_from_value(args: Value) -> Result<Option<JsonObject>, McpClientErro
     }
 }
 
+const STDIO_COMMANDS_ENV: &str = "MCP_STDIO_COMMANDS";
+const DEFAULT_STDIO_COMMANDS: &str = "sqlx-mcp,/usr/local/bin/sqlx-mcp";
+const MCP_SECRET_ENV_PREFIX: &str = "MCP_SECRET_";
+const STDIO_INHERITED_ENV: [&str; 4] = ["PATH", "HOME", "LANG", "RUST_LOG"];
+
+fn stdio_command_allowed(command: &str, allowlist: &str) -> bool {
+    allowlist
+        .split(',')
+        .map(str::trim)
+        .any(|allowed| !allowed.is_empty() && allowed == command)
+}
+
+// Stdio servers run on the API host, so only operator-approved binaries may be configured.
+pub fn ensure_stdio_command_allowed(command: &str) -> Result<(), McpClientError> {
+    let allowlist =
+        std::env::var(STDIO_COMMANDS_ENV).unwrap_or_else(|_| DEFAULT_STDIO_COMMANDS.to_string());
+    if stdio_command_allowed(command, &allowlist) {
+        Ok(())
+    } else {
+        Err(McpClientError::Config(format!(
+            "stdio command {command} is not allowed; add it to {STDIO_COMMANDS_ENV}"
+        )))
+    }
+}
+
+fn stdio_child_env() -> Vec<(String, String)> {
+    std::env::vars()
+        .filter(|(name, _)| STDIO_INHERITED_ENV.contains(&name.as_str()) || is_mcp_secret_env(name))
+        .collect()
+}
+
 async fn connect_rmcp_stdio(
     command: &str,
     args: &[String],
 ) -> Result<rmcp::service::RunningService<rmcp::service::RoleClient, ()>, McpClientError> {
+    ensure_stdio_command_allowed(command)?;
     let mut cmd = Command::new(command);
     cmd.args(args);
+    // The API's own secrets (APP_KEY, JWT_SECRET, DATABASE_URL) must not reach the child process.
+    cmd.env_clear();
+    cmd.envs(stdio_child_env());
     let transport = TokioChildProcess::new(cmd)
         .map_err(|e| McpClientError::Rmcp(format!("spawn stdio process failed: {e}")))?;
     let service = ()
@@ -1288,7 +1323,17 @@ fn resolve_env_placeholders(value: &str) -> Result<String, McpClientError> {
     Ok(output)
 }
 
+fn is_mcp_secret_env(name: &str) -> bool {
+    name.len() > MCP_SECRET_ENV_PREFIX.len() && name.starts_with(MCP_SECRET_ENV_PREFIX)
+}
+
+// Header placeholders may only read operator-provisioned MCP secrets, never the API's own keys.
 fn resolve_env_var(name: &str) -> Result<String, McpClientError> {
+    if !is_mcp_secret_env(name) {
+        return Err(McpClientError::Config(format!(
+            "environment placeholder {name} is not allowed; use an {MCP_SECRET_ENV_PREFIX}* variable"
+        )));
+    }
     std::env::var(name)
         .map_err(|_| McpClientError::Config(format!("missing environment variable: {name}")))
 }
@@ -1876,6 +1921,75 @@ mod tests {
         }
         service.cancel().await.unwrap();
         server.abort();
+    }
+
+    #[test]
+    fn header_placeholders_cannot_read_the_api_secrets() {
+        for value in [
+            "{{APP_KEY}}",
+            "Bearer ${JWT_SECRET}",
+            "$DATABASE_URL",
+            "{{MCP_SECRET_}}",
+        ] {
+            let error = resolve_env_placeholders(value).unwrap_err();
+            assert!(error.to_string().contains("not allowed"), "{value}");
+        }
+        assert!(
+            mcp_http_client(
+                &serde_json::json!({"transport_config":{"headers":{"X-Key":"{{APP_KEY}}"}}})
+            )
+            .is_err()
+        );
+        assert!(
+            extract_auth_header(
+                &serde_json::json!({"transport_config":{"headers":{"Authorization":"Bearer {{JWT_SECRET}}"}}})
+            )
+            .is_err()
+        );
+        let error = resolve_env_placeholders("{{MCP_SECRET_GRENGIN_TEST_UNSET}}").unwrap_err();
+        assert!(error.to_string().contains("missing environment variable"));
+        assert_eq!(
+            resolve_env_placeholders("plain value").unwrap(),
+            "plain value"
+        );
+    }
+
+    #[test]
+    fn stdio_commands_must_be_on_the_operator_allowlist() {
+        assert!(stdio_command_allowed("sqlx-mcp", DEFAULT_STDIO_COMMANDS));
+        assert!(stdio_command_allowed(
+            "/usr/local/bin/sqlx-mcp",
+            DEFAULT_STDIO_COMMANDS
+        ));
+        for command in [
+            "sh",
+            "bash",
+            "/bin/sh",
+            "echo",
+            "sqlx-mcp-evil",
+            "",
+            " sqlx-mcp",
+        ] {
+            assert!(
+                !stdio_command_allowed(command, DEFAULT_STDIO_COMMANDS),
+                "{command}"
+            );
+        }
+        assert!(stdio_command_allowed("npx", "sqlx-mcp, npx"));
+        assert!(!stdio_command_allowed("npx", "sqlx-mcp,,"));
+    }
+
+    #[test]
+    fn stdio_children_receive_only_basic_and_mcp_secret_variables() {
+        let names: Vec<String> = stdio_child_env()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(names.iter().all(|name| STDIO_INHERITED_ENV.contains(&name.as_str())
+            || is_mcp_secret_env(name)));
+        for secret in ["APP_KEY", "JWT_SECRET", "DATABASE_URL"] {
+            assert!(!names.iter().any(|name| name == secret));
+        }
     }
 
     #[test]
