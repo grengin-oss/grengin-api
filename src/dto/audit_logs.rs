@@ -266,3 +266,10 @@ pub struct AuditLogRedactResponse {
     pub user_id: Uuid,
     pub redacted_count: u64,
 }
+
+// Internal audit payload, not part of the AMI-shipped response contract.
+#[derive(Serialize)]
+pub struct AuditLogsRedactedPayload {
+    pub target_user_id: Uuid,
+    pub redacted_count: u64,
+}

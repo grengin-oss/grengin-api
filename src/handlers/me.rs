@@ -46,7 +46,8 @@ use crate::{
         analytics,
         authorization::{AuthorizationService, is_path_within_scope},
         me_helpers::{
-            load_administered_department_ids, load_administered_department_paths, load_my_metadata,
+            AdministeredScope, load_administered_department_ids,
+            load_administered_department_paths, load_my_metadata,
             needs_effective_permissions_refresh, scope_condition,
             should_refresh_administered_departments, update_guide_page_count,
         },
@@ -181,7 +182,8 @@ pub async fn get_my_administered_department_analytics(
         )
         .await?;
 
-    let administered_ids = load_administered_department_ids(claims, &app_state).await?;
+    let administered_ids =
+        load_administered_department_ids(claims, &app_state, AdministeredScope::Analytics).await?;
     let scope_paths = load_administered_department_paths(&app_state, &administered_ids).await?;
 
     let result =
@@ -234,7 +236,8 @@ pub async fn get_my_administered_department_user_analytics(
         )
         .await?;
 
-    let administered_ids = load_administered_department_ids(claims, &app_state).await?;
+    let administered_ids =
+        load_administered_department_ids(claims, &app_state, AdministeredScope::Analytics).await?;
     let scope_paths = load_administered_department_paths(&app_state, &administered_ids).await?;
 
     let page = query.page.unwrap_or(0);
@@ -278,7 +281,9 @@ pub async fn get_my_administered_departments_list(
     State(app_state): State<SharedState>,
     Query(q): Query<DepartmentListQuery>,
 ) -> Result<(StatusCode, Json<DepartmentsListResponse>), AuthError> {
-    let administered_ids = load_administered_department_ids(claims, &app_state).await?;
+    let administered_ids =
+        load_administered_department_ids(claims, &app_state, AdministeredScope::Departments)
+            .await?;
     if administered_ids.is_empty() {
         return Ok((
             StatusCode::OK,
@@ -501,7 +506,9 @@ pub async fn get_my_administered_departments_tree(
     State(app_state): State<SharedState>,
     Query(q): Query<DepartmentTreeQuery>,
 ) -> Result<(StatusCode, Json<DepartmentTree>), AuthError> {
-    let administered_ids = load_administered_department_ids(claims, &app_state).await?;
+    let administered_ids =
+        load_administered_department_ids(claims, &app_state, AdministeredScope::Departments)
+            .await?;
     if administered_ids.is_empty() {
         return Ok((StatusCode::OK, Json(DepartmentTree { tree: vec![] })));
     }
@@ -726,7 +733,8 @@ pub async fn get_my_administered_department_members(
         )
         .await?;
 
-    let administered_ids = load_administered_department_ids(claims, &app_state).await?;
+    let administered_ids =
+        load_administered_department_ids(claims, &app_state, AdministeredScope::Users).await?;
     if administered_ids.is_empty() {
         return Ok((StatusCode::OK, Json(response)));
     }

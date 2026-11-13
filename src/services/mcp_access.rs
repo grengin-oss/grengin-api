@@ -235,6 +235,80 @@ pub async fn build_access_context(
     })
 }
 
+fn permission_rank(permission: McpPermission) -> u8 {
+    match permission {
+        McpPermission::Denied => 0,
+        McpPermission::ReadOnly => 1,
+        McpPermission::Full => 2,
+    }
+}
+
+pub fn delegation_within_ceiling(holder: McpPermission, requested: McpPermission) -> bool {
+    permission_rank(requested) <= permission_rank(holder)
+}
+
+// Delegation passes on access the delegator already holds; only org-wide MCP admins may unlock a
+// restricted server or lift a deny for someone else.
+pub async fn ensure_delegation_allowed(
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    server: &mcp_servers::Model,
+    requested: McpPermission,
+) -> Result<(), AuthError> {
+    let ctx = build_access_context(db, actor_id)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
+    if ctx.is_admin {
+        return Ok(());
+    }
+    let rules = load_server_rules(db, &[server.id])
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
+    let held = resolve_server_access_with_rules(db, &ctx, server, &rules)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
+    if delegation_within_ceiling(held.permission, requested) {
+        Ok(())
+    } else {
+        Err(AuthError::PermissionDenied)
+    }
+}
+
+// Role-wide rules reach every department, so they stay with org-wide MCP admins like the server rules.
+pub async fn ensure_rule_types_allowed(
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    access_types: &[McpAccessType],
+) -> Result<(), AuthError> {
+    if !access_types.contains(&McpAccessType::Role) {
+        return Ok(());
+    }
+    AuthorizationService::new(db)
+        .ensure_permission(
+            actor_id,
+            PERMISSION_MCP_ADMIN,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            None,
+        )
+        .await
+}
+
+pub async fn ensure_rule_removal_allowed(
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    rule: &mcp_access_policies::Model,
+) -> Result<(), AuthError> {
+    let ctx = build_access_context(db, actor_id)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
+    if ctx.is_admin || rule.created_by == Some(actor_id) {
+        Ok(())
+    } else {
+        Err(AuthError::PermissionDenied)
+    }
+}
+
 pub async fn load_server_rules(
     db: &sea_orm::DatabaseConnection,
     server_ids: &[Uuid],
@@ -494,6 +568,19 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn delegation_never_grants_more_than_the_delegator_holds() {
+        use McpPermission::{Denied, Full, ReadOnly};
+        assert!(delegation_within_ceiling(Full, Full));
+        assert!(delegation_within_ceiling(Full, ReadOnly));
+        assert!(delegation_within_ceiling(ReadOnly, ReadOnly));
+        assert!(delegation_within_ceiling(Denied, Denied));
+        assert!(delegation_within_ceiling(ReadOnly, Denied));
+        assert!(!delegation_within_ceiling(ReadOnly, Full));
+        assert!(!delegation_within_ceiling(Denied, ReadOnly));
+        assert!(!delegation_within_ceiling(Denied, Full));
     }
 
     #[test]
