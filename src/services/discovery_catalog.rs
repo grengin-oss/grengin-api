@@ -425,7 +425,7 @@ impl DiscoveryCatalog {
         requested_version: Option<&str>,
     ) -> Result<DiscoveryListResponse, DiscoveryError> {
         let selector = parse_selector(requested_version)?;
-        let distribution = self.load_distribution().await?;
+        let distribution = self.load_distribution(&kind).await?;
         let index = kind
             .index(&distribution)
             .ok_or(DiscoveryError::NotFound)?
@@ -532,7 +532,7 @@ impl DiscoveryCatalog {
     ) -> Result<(CatalogProvider, Vec<CatalogArtifactVersion>), DiscoveryError> {
         let provider_id = validate_provider_id(provider_id)?;
         let selector = parse_selector(requested_version)?;
-        let distribution = self.load_distribution().await?;
+        let distribution = self.load_distribution(kind).await?;
         let index = kind.index(&distribution).ok_or(DiscoveryError::NotFound)?;
         let provider = index
             .providers
@@ -547,7 +547,10 @@ impl DiscoveryCatalog {
         Ok((provider, candidates))
     }
 
-    async fn load_distribution(&self) -> Result<ApiDistribution, DiscoveryError> {
+    async fn load_distribution(
+        &self,
+        kind: &CatalogKind,
+    ) -> Result<ApiDistribution, DiscoveryError> {
         let path = format!(
             "distributions/grengin-api/{}/index.json",
             self.distribution_version
@@ -556,10 +559,21 @@ impl DiscoveryCatalog {
         let mut distribution: ApiDistribution = serde_json::from_slice(&bytes)
             .map_err(|error| DiscoveryError::InvalidCatalog(error.to_string()))?;
         validate_distribution(&distribution, &self.distribution_version)?;
-        if let Some(connectors) = self.load_connector_line().await? {
+        // Only connector lookups read the release line, so its outage cannot break AI or auth discovery.
+        if matches!(kind, CatalogKind::Connector)
+            && let Some(connectors) = self.load_connector_line().await?
+        {
             distribution.connector_plugins = Some(connectors);
         }
         Ok(distribution)
+    }
+
+    // The broker must resolve the plugin from the same catalog discovery served it from.
+    pub async fn connector_catalog_version(&self) -> String {
+        match self.load_connector_line().await {
+            Ok(Some(_)) => release_line(&self.distribution_version),
+            _ => self.distribution_version.clone(),
+        }
     }
 
     async fn load_connector_line(&self) -> Result<Option<CatalogIndex>, DiscoveryError> {
@@ -722,7 +736,7 @@ fn validate_categories(
     Ok(())
 }
 
-pub fn release_line(version: &str) -> String {
+fn release_line(version: &str) -> String {
     version.splitn(3, '.').take(2).collect::<Vec<_>>().join(".")
 }
 
@@ -1355,6 +1369,74 @@ mod tests {
             other_line.list_connector_plugins(None).await,
             Err(DiscoveryError::InvalidCatalog(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_release_line_outage_only_affects_connectors() {
+        let plugin = connector_manifest("1.0.0");
+        let line = release_line(env!("CARGO_PKG_VERSION"));
+        let line_path = format!("/distributions/grengin-api/{line}/connector-plugins.json");
+        let providers = serde_json::json!([{"id":"test-connector","name":"Test connector","status":"preview",
+            "defaultVersion":"1.0.0","versions":[{"version":"1.0.0","schemaVersion":"1.0","manifestVersion":"1.0","sha256":sha256_hex(&plugin)}]}]);
+        let serve_line = |status: StatusCode, body: Vec<u8>| {
+            let index = connector_distribution("1.0.0", &[("1.0.0", &plugin)]);
+            Router::new()
+                .route(
+                    TEST_DISTRIBUTION_PATH,
+                    get(move || {
+                        let index = index.clone();
+                        async move { index }
+                    }),
+                )
+                .route(
+                    &line_path,
+                    get(move || {
+                        let body = body.clone();
+                        async move { (status, body) }
+                    }),
+                )
+        };
+        for (status, body, connectors_work, served) in [
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Vec::new(),
+                false,
+                env!("CARGO_PKG_VERSION").to_string(),
+            ),
+            (
+                StatusCode::OK,
+                b"not json".to_vec(),
+                false,
+                env!("CARGO_PKG_VERSION").to_string(),
+            ),
+            (
+                StatusCode::NOT_FOUND,
+                Vec::new(),
+                true,
+                env!("CARGO_PKG_VERSION").to_string(),
+            ),
+            (
+                StatusCode::OK,
+                connector_line(&line, providers.clone()),
+                true,
+                line.clone(),
+            ),
+        ] {
+            let catalog =
+                DiscoveryCatalog::new(test_client(), &serve(serve_line(status, body)).await)
+                    .unwrap();
+            assert!(catalog.list_auth(None).await.is_ok(), "{status}");
+            assert_eq!(
+                catalog.list_connector_plugins(None).await.is_ok(),
+                connectors_work,
+                "{status}"
+            );
+            assert_eq!(
+                catalog.connector_catalog_version().await,
+                served,
+                "{status}"
+            );
+        }
     }
 
     #[test]
