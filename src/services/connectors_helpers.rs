@@ -401,8 +401,8 @@ pub async fn start_connection(
     }
     let mut body = json!({"connection_id":row.id,"user_id":user,"connector_key":key,"version":request.version,
         "connection_grant":grant(state,&row)?,"redirect_uri":redirect_uri});
-    // same_binding pinned the manifest, so the fresh identity only updates which catalog serves it.
-    if let Some(native) = native.as_ref() {
+    // The broker replays a connection only for the catalog identity it first saw, so retries keep the sealed one.
+    if let Some(native) = opened_grant(state, &row)?.1 {
         body["catalog_kind"] = json!("native");
         body["distribution_version"] = json!(native.distribution_version);
         body["manifest_sha256"] = json!(native.manifest_sha256);
