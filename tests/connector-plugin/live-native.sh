@@ -9,6 +9,6 @@ set +a
 export GRENGIN_BACKEND_ROOT="$root"
 if [[ $# -eq 0 ]]; then set -- status; fi
 if [[ "$1" == check ]]; then
-  "${GRENGIN_NODE_BIN:-node}" --test "$root/tests/connector-plugin/live-callbacks.test.mjs"
+  "${GRENGIN_NODE_BIN:-node}" --test "$root/tests/connector-plugin/live-callbacks.test.mjs" "$root/tests/connector-plugin/live-release.test.mjs"
 fi
 exec "${GRENGIN_NODE_BIN:-node}" "$root/tests/connector-plugin/live-native.mjs" "$@"
