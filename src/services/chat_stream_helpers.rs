@@ -1,14 +1,16 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
+use axum::response::sse::Event;
 use chrono::Utc;
+use futures_util::{Stream, StreamExt};
 use llm_plugin::ProviderError;
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, UpdateMany, prelude::Decimal,
     sea_query::Expr,
 };
 use serde_json::Value;
-use std::{sync::Arc, time::Duration};
+use std::{convert::Infallible, sync::Arc, time::Duration};
 use tokio::time::Instant;
 use uuid::Uuid;
 
@@ -153,6 +155,24 @@ pub fn next_tool_round(
     } else {
         ToolRoundOutcome::Continue
     }
+}
+
+// A reply keeps generating and is saved when its client goes away (a page refresh), instead
+// of being stopped as a network error; the reloaded chat reads it back. Stop still cancels it.
+pub fn detach_from_client<S>(events: S) -> impl Stream<Item = Result<Event, Infallible>> + Send
+where
+    S: Stream<Item = Result<Event, Infallible>> + Send + 'static,
+{
+    let (sender, receiver) = tokio::sync::mpsc::channel(32);
+    tokio::spawn(async move {
+        let mut events = std::pin::pin!(events);
+        while let Some(event) = events.next().await {
+            let _ = sender.send(event).await;
+        }
+    });
+    futures_util::stream::unfold(receiver, |mut receiver| async move {
+        receiver.recv().await.map(|event| (event, receiver))
+    })
 }
 
 pub fn persistence_error_event_data() -> String {
@@ -351,6 +371,29 @@ pub fn response_stopped_event_data(message_id: Uuid, reason: StopReason) -> Stri
 mod tests {
     use super::*;
     use crate::dto::models::ModelType;
+
+    #[tokio::test]
+    async fn a_reply_keeps_generating_after_its_client_disconnects() {
+        let produced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = produced.clone();
+        let reply = async_stream::stream! {
+            for chunk in 0..100 {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                yield Ok::<_, Infallible>(Event::default().data(chunk.to_string()));
+            }
+        };
+        let mut client = Box::pin(detach_from_client(reply));
+        assert!(client.next().await.is_some());
+        drop(client);
+        for _ in 0..1000 {
+            if produced.load(std::sync::atomic::Ordering::SeqCst) == 100 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("reply stopped after the client disconnected");
+    }
 
     fn model(engine: &str, key: &str, name: &str) -> ModelInfo {
         ModelInfo {
