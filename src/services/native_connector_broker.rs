@@ -53,7 +53,9 @@ pub fn identity(config: &Value) -> Result<Option<NativeBrokerIdentity>, AppError
         return Err(AppError::ResourceNotFound);
     }
     Ok(Some(NativeBrokerIdentity {
-        distribution_version: env!("CARGO_PKG_VERSION").to_owned(),
+        distribution_version: crate::services::discovery_catalog::release_line(env!(
+            "CARGO_PKG_VERSION"
+        )),
         plugin_id: key.to_owned(),
         plugin_version: version.to_owned(),
         manifest_sha256: canonical_digest(manifest)?,

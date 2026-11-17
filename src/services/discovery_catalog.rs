@@ -92,6 +92,17 @@ struct ApiDistribution {
     connector_plugins: Option<CatalogIndex>,
 }
 
+// One add-only connector catalog per release line (MAJOR.MINOR): new plugins and versions reach
+// every backend of the line without a backend release, and published entries never change.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ConnectorLine {
+    format_version: String,
+    grengin_api_line: String,
+    catalog_commit: String,
+    connector_plugins: CatalogIndex,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CatalogIndex {
@@ -426,6 +437,10 @@ impl DiscoveryCatalog {
         };
         let mut providers = Vec::new();
         for provider in index.providers {
+            // A retired plugin stays installable for servers that have it, but is not offered.
+            if provider.status == "retired" {
+                continue;
+            }
             let compatible = compatible_versions(&provider, &selector)?;
             let Some(selected) = compatible.first() else {
                 continue;
@@ -538,10 +553,39 @@ impl DiscoveryCatalog {
             self.distribution_version
         );
         let bytes = self.fetch_document(&path).await?;
-        let distribution: ApiDistribution = serde_json::from_slice(&bytes)
+        let mut distribution: ApiDistribution = serde_json::from_slice(&bytes)
             .map_err(|error| DiscoveryError::InvalidCatalog(error.to_string()))?;
         validate_distribution(&distribution, &self.distribution_version)?;
+        if let Some(connectors) = self.load_connector_line().await? {
+            distribution.connector_plugins = Some(connectors);
+        }
         Ok(distribution)
+    }
+
+    async fn load_connector_line(&self) -> Result<Option<CatalogIndex>, DiscoveryError> {
+        let line = release_line(&self.distribution_version);
+        let bytes = match self
+            .fetch_document(&format!(
+                "distributions/grengin-api/{line}/connector-plugins.json"
+            ))
+            .await
+        {
+            Ok(bytes) => bytes,
+            Err(DiscoveryError::NotFound) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let catalog: ConnectorLine = serde_json::from_slice(&bytes)
+            .map_err(|error| DiscoveryError::InvalidCatalog(error.to_string()))?;
+        if catalog.format_version != SUPPORTED_DISTRIBUTION_FORMAT_VERSION
+            || catalog.grengin_api_line != line
+            || !is_full_git_commit(&catalog.catalog_commit)
+        {
+            return Err(DiscoveryError::InvalidCatalog(
+                "connector catalog does not match this release line".to_string(),
+            ));
+        }
+        validate_catalog_index(&CatalogKind::Connector, &catalog.connector_plugins)?;
+        Ok(Some(catalog.connector_plugins))
     }
 
     async fn fetch_document(&self, path: &str) -> Result<Arc<Vec<u8>>, DiscoveryError> {
@@ -676,6 +720,10 @@ fn validate_categories(
         ));
     }
     Ok(())
+}
+
+pub fn release_line(version: &str) -> String {
+    version.splitn(3, '.').take(2).collect::<Vec<_>>().join(".")
 }
 
 fn configured_distribution_version() -> String {
@@ -1231,6 +1279,88 @@ mod tests {
             catalog.list_connector_plugins(Some("../../")).await,
             Err(DiscoveryError::InvalidVersion)
         ));
+    }
+
+    fn connector_line(line: &str, providers: Value) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({"formatVersion":"1.0","grenginApiLine":line,
+            "catalogCommit":"b".repeat(40),"connectorPlugins":{"catalogVersion":"1.0.0","providers":providers}}))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_release_line_catalog_adds_connectors_without_a_backend_release() {
+        let old = connector_manifest("1.0.0");
+        let new = connector_manifest("1.1.0");
+        let version = |release: &str, bytes: &[u8]| serde_json::json!({"version":release,"schemaVersion":"1.0","manifestVersion":"1.0","sha256":sha256_hex(bytes)});
+        let line = release_line(env!("CARGO_PKG_VERSION"));
+        let line_path = format!("/distributions/grengin-api/{line}/connector-plugins.json");
+        let serve_line = |body: Vec<u8>| {
+            let index = connector_distribution("1.0.0", &[("1.0.0", &old)]);
+            let new = new.clone();
+            Router::new()
+                .route(
+                    TEST_DISTRIBUTION_PATH,
+                    get(move || {
+                        let index = index.clone();
+                        async move { index }
+                    }),
+                )
+                .route(
+                    &line_path,
+                    get(move || {
+                        let body = body.clone();
+                        async move { body }
+                    }),
+                )
+                .route(
+                    "/connector-plugins/test-connector/versions/1.1.0/plugin.json",
+                    get(move || {
+                        let new = new.clone();
+                        async move { new }
+                    }),
+                )
+        };
+        let providers = serde_json::json!([
+            {"id":"test-connector","name":"Test connector","status":"preview","defaultVersion":"1.1.0",
+             "versions":[version("1.0.0",&old),version("1.1.0",&new)]},
+            {"id":"old-connector","name":"Old connector","status":"retired","defaultVersion":"1.1.0",
+             "versions":[version("1.1.0",&new)]}]);
+        let catalog = DiscoveryCatalog::new(
+            test_client(),
+            &serve(serve_line(connector_line(&line, providers.clone()))).await,
+        )
+        .unwrap();
+        let list = catalog.list_connector_plugins(None).await.unwrap();
+        assert_eq!(
+            list.providers.len(),
+            1,
+            "a retired connector is not offered"
+        );
+        assert_eq!(list.providers[0].selected_version, "1.1.0");
+        assert_eq!(
+            catalog
+                .connector_plugin("test-connector", None)
+                .await
+                .unwrap()
+                .sha256,
+            sha256_hex(&new)
+        );
+
+        let other_line = DiscoveryCatalog::new(
+            test_client(),
+            &serve(serve_line(connector_line("0.0", providers))).await,
+        )
+        .unwrap();
+        assert!(matches!(
+            other_line.list_connector_plugins(None).await,
+            Err(DiscoveryError::InvalidCatalog(_))
+        ));
+    }
+
+    #[test]
+    fn the_release_line_is_major_and_minor() {
+        assert_eq!(release_line("0.9.12"), "0.9");
+        assert_eq!(release_line("1.10.0"), "1.10");
     }
 
     #[tokio::test]
