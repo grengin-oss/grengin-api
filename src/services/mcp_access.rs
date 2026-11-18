@@ -4,12 +4,15 @@
 use std::collections::{HashMap, HashSet};
 
 use sea_orm::sea_query::Expr;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect, Set,
+    TransactionTrait,
+};
 use uuid::Uuid;
 
 use crate::{
     auth::{error::AuthError, permissions::PERMISSION_MCP_ADMIN},
-    dto::mcp::McpResolvedVia,
+    dto::mcp::{McpAccessRuleInput, McpResolvedVia},
     error::AppError,
     models::{
         departments, mcp_access_policies,
@@ -307,6 +310,87 @@ pub async fn ensure_rule_removal_allowed(
     } else {
         Err(AuthError::PermissionDenied)
     }
+}
+
+// Tool rules follow the server rules' guards: a delegator cannot grant above its own access to the
+// server (turning inheritance off must not lift that ceiling), and only an admin or a rule's creator
+// may remove a rule. Bulk callers authorize every change before applying any.
+pub async fn authorize_tool_access_change(
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    tool: &mcp_tools::Model,
+    rules: &[McpAccessRuleInput],
+) -> Result<(), AuthError> {
+    let server = mcp_servers::Entity::find_by_id(tool.server_id)
+        .one(db)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?
+        .ok_or(AuthError::ResourceNotFound)?;
+    for rule in rules {
+        if rule.access_type != McpAccessType::Role {
+            ensure_delegation_allowed(db, actor_id, &server, rule.permission).await?;
+        }
+    }
+    for existing in load_tool_rules(db, &[tool.id])
+        .await
+        .map_err(|_| AuthError::DbTimeout)?
+    {
+        ensure_rule_removal_allowed(db, actor_id, &existing).await?;
+    }
+    Ok(())
+}
+
+pub async fn apply_tool_access_change(
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    tool: &mcp_tools::Model,
+    inherit_from_server: Option<bool>,
+    rules: &[McpAccessRuleInput],
+) -> Result<bool, AuthError> {
+    let mut resolved = Vec::with_capacity(rules.len());
+    for rule in rules {
+        let (role_id, _) =
+            resolve_role_reference(db, rule.access_type, rule.role_id, rule.role_name.clone())
+                .await?;
+        resolved.push((rule, role_id));
+    }
+    let inherit = inherit_from_server.unwrap_or(tool.inherit_access_from_server);
+    let txn = db.begin().await.map_err(|_| AuthError::DbTimeout)?;
+    let mut active: mcp_tools::ActiveModel = tool.clone().into();
+    active.inherit_access_from_server = Set(inherit);
+    active
+        .update(&txn)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
+    mcp_access_policies::Entity::delete_many()
+        .filter(mcp_access_policies::Column::TargetType.eq(McpAccessTarget::Tool))
+        .filter(mcp_access_policies::Column::ToolId.eq(tool.id))
+        .exec(&txn)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
+    for (rule, role_id) in resolved {
+        mcp_access_policies::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            target_type: Set(McpAccessTarget::Tool),
+            server_id: Set(Some(tool.server_id)),
+            tool_id: Set(Some(tool.id)),
+            access_type: Set(rule.access_type),
+            permission: Set(rule.permission),
+            role_id: Set(role_id),
+            role_name: Set(None),
+            department_id: Set(rule.department_id),
+            user_id: Set(rule.user_id),
+            inherit_departments: Set(rule.inherit_departments.unwrap_or(true)),
+            inherit_from_server: Set(None),
+            created_at: Set(chrono::Utc::now()),
+            created_by: Set(Some(actor_id)),
+        }
+        .insert(&txn)
+        .await
+        .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
+    }
+    txn.commit().await.map_err(|_| AuthError::DbTimeout)?;
+    Ok(inherit)
 }
 
 pub async fn load_server_rules(
