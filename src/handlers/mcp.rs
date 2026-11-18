@@ -44,8 +44,8 @@ use crate::{
     services::authorization::{AuthorizationService, PermissionScopeMode},
     services::connector_console_helpers::*,
     services::mcp_access::{
-        apply_tool_access_change, authorize_tool_access_change, build_access_context,
-        ensure_rule_types_allowed, load_server_rules, load_tool_rules, resolve_role_reference,
+        ToolAccessChange, build_access_context, ensure_rule_types_allowed, load_server_rules,
+        load_tool_rules, replace_tool_access, resolve_role_reference,
         resolve_server_access_with_rules, resolve_tool_access_with_rules,
     },
     services::mcp_catalog_helpers::*,
@@ -871,29 +871,19 @@ pub async fn update_mcp_server_tools_access(
         .flat_map(|item| item.rules.iter().flatten().map(|rule| rule.access_type))
         .collect();
     ensure_rule_types_allowed(&state.database, claims.user_id, &access_types).await?;
-    let mut changes = Vec::new();
-    for item in req.tools {
-        if let Some(tool) = mcp_tools::Entity::find_by_id(item.tool_id)
-            .filter(mcp_tools::Column::ServerId.eq(server_id))
-            .one(&state.database)
-            .await
-            .map_err(|_| AuthError::DbUnavailable)?
-        {
-            let rules = item.rules.unwrap_or_default();
-            authorize_tool_access_change(&state.database, claims.user_id, &tool, &rules).await?;
-            changes.push((tool, item.inherit_from_server, rules));
-        }
-    }
+    let changes = req
+        .tools
+        .into_iter()
+        .map(|item| ToolAccessChange {
+            tool_id: item.tool_id,
+            inherit_from_server: item.inherit_from_server,
+            rules: item.rules.unwrap_or_default(),
+        })
+        .collect();
+    let applied =
+        replace_tool_access(&state.database, claims.user_id, Some(server_id), changes).await?;
     let mut updated = Vec::new();
-    for (tool, inherit_from_server, rules) in changes {
-        let inherit_flag = apply_tool_access_change(
-            &state.database,
-            claims.user_id,
-            &tool,
-            inherit_from_server,
-            &rules,
-        )
-        .await?;
+    for (tool, inherit_flag) in applied {
         let rules = mcp_access_policies::Entity::find()
             .filter(mcp_access_policies::Column::TargetType.eq(McpAccessTarget::Tool))
             .filter(mcp_access_policies::Column::ToolId.eq(tool.id))
@@ -1004,19 +994,15 @@ pub async fn update_mcp_tool_access(
         .map(|rule| rule.access_type)
         .collect();
     ensure_rule_types_allowed(&state.database, claims.user_id, &access_types).await?;
-    let tool = mcp_tools::Entity::find_by_id(tool_id)
-        .one(&state.database)
-        .await
-        .map_err(|_| AuthError::DbUnavailable)?
-        .ok_or(AuthError::ResourceNotFound)?;
-    let rules = req.rules.unwrap_or_default();
-    authorize_tool_access_change(&state.database, claims.user_id, &tool, &rules).await?;
-    apply_tool_access_change(
+    replace_tool_access(
         &state.database,
         claims.user_id,
-        &tool,
-        req.inherit_from_server,
-        &rules,
+        None,
+        vec![ToolAccessChange {
+            tool_id,
+            inherit_from_server: req.inherit_from_server,
+            rules: req.rules.unwrap_or_default(),
+        }],
     )
     .await?;
     get_mcp_tool_access(claims, State(state), Path(tool_id)).await

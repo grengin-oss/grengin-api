@@ -232,6 +232,9 @@ try {
     sql(`SELECT "userId" || ':' || permission FROM mcp_access_policies WHERE "toolId"=${q(guardedTool)}`),`${viewerId}:read_only`);
   await expect('PUT',`/admin/mcp-tools/${randomUUID()}/access`,{rules:[]},404);
   check('an unknown tool is not found instead of silently changing policies',true);
+  await expect('PUT',`/admin/mcp-servers/${guardedServer}/tools/access`,{tools:[{tool_id:guardedTool,inherit_from_server:true,rules:[]},{tool_id:randomUUID(),rules:[]}]},404);
+  check('a bulk update with an unknown tool changes nothing',
+    [sql(`SELECT count(*) FROM mcp_access_policies WHERE "toolId"=${q(guardedTool)}`),sql(`SELECT "inheritAccessFromServer" FROM mcp_tools WHERE id=${q(guardedTool)}`)],['1','f']);
 
   const serverId=randomUUID();
   const oauth={auth_url:`http://127.0.0.1:${provider.address().port}/authorize`,token_url:`http://127.0.0.1:${provider.address().port}/token`,redirect_url:'http://localhost:5173/mcp/oauth/callback',scopes:[],flow:'oauth2',use_pkce:true};
