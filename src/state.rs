@@ -251,6 +251,13 @@ impl AppState {
         }
     }
 
+    // A reply stays registered until its final text is saved, so a page that polls while this
+    // holds its reply always ends on the complete message.
+    pub async fn generating_replies(&self, conversation_id: Uuid) -> HashSet<Uuid> {
+        let guard = self.stream_cancellations.read().await;
+        generating_in(&guard, conversation_id)
+    }
+
     pub async fn interrupt_older_streams(&self, conversation_id: Uuid, edit_request: i32) {
         let guard = self.stream_cancellations.read().await;
         interrupt_older_streams(&guard, conversation_id, edit_request);
@@ -642,6 +649,17 @@ fn register_stream(
     handle
 }
 
+fn generating_in(
+    streams: &HashMap<Uuid, Arc<StreamCancel>>,
+    conversation_id: Uuid,
+) -> HashSet<Uuid> {
+    streams
+        .iter()
+        .filter(|(_, handle)| handle.conversation_id == conversation_id)
+        .map(|(message_id, _)| *message_id)
+        .collect()
+}
+
 fn interrupt_older_streams(
     streams: &HashMap<Uuid, Arc<StreamCancel>>,
     conversation_id: Uuid,
@@ -661,10 +679,26 @@ fn interrupt_older_streams(
 
 #[cfg(test)]
 mod tests {
-    use super::{StreamCancel, interrupt_older_streams, register_stream};
+    use super::{StreamCancel, generating_in, interrupt_older_streams, register_stream};
     use crate::models::messages::StopReason;
     use std::{collections::HashMap, sync::Arc};
     use uuid::Uuid;
+
+    #[test]
+    fn only_replies_still_registered_in_that_conversation_are_generating() {
+        let mut streams = HashMap::new();
+        let conversation = Uuid::new_v4();
+        let reply = Uuid::new_v4();
+        let elsewhere = Uuid::new_v4();
+        register_stream(&mut streams, reply, conversation, None);
+        register_stream(&mut streams, elsewhere, Uuid::new_v4(), None);
+        assert_eq!(generating_in(&streams, conversation), [reply].into());
+        // A stopped reply still settles its final text before it leaves the registry.
+        streams[&reply].cancel(StopReason::UserCancelled);
+        assert!(generating_in(&streams, conversation).contains(&reply));
+        streams.remove(&reply);
+        assert!(generating_in(&streams, conversation).is_empty());
+    }
 
     #[test]
     fn cancel_records_why_the_stream_stopped() {
