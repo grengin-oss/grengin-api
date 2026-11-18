@@ -215,7 +215,7 @@ try {
 
   const serverId=randomUUID();
   const oauth={auth_url:`http://127.0.0.1:${provider.address().port}/authorize`,token_url:`http://127.0.0.1:${provider.address().port}/token`,redirect_url:'http://localhost:5173/mcp/oauth/callback',scopes:[],flow:'oauth2',use_pkce:true};
-  sql(`INSERT INTO mcp_servers (id,name,"transportType","connectionConfig","clientId",enabled,"toolCount","defaultAccess","createdAt","updatedAt") VALUES (${q(serverId)},'Staging OAuth','http',${j({oauth})},'staging-client',false,0,'admin_only',now(),now())`);
+  sql(`INSERT INTO mcp_servers (id,name,"transportType","connectionConfig","clientId",enabled,"toolCount","defaultAccess","createdAt","updatedAt") VALUES (${q(serverId)},'Staging OAuth','http',${j({oauth})},'staging-client',true,0,'all_users',now(),now())`);
   const state = () => {
     const value=randomUUID();
     sql(`INSERT INTO mcp_oauth_states (id,"serverId","userId",state,"pkceVerifier","expiresAt","createdAt") VALUES (${q(randomUUID())},${q(serverId)},${q(ownerId)},${q(value)},'fixture-verifier',now()+interval '5 minutes',now())`);return value;
