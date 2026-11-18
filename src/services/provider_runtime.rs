@@ -152,6 +152,13 @@ pub fn embedded_plugin_config(engine_key: &str) -> Result<Option<PluginConfig>, 
     }))
 }
 
+fn with_engine_base_url(mut config: PluginConfig, engine: &ai_engines::Model) -> PluginConfig {
+    if let Some(base_url) = engine.base_url_override.clone() {
+        config.base_url_override = Some(base_url);
+    }
+    config
+}
+
 pub async fn plugin_config_for(
     req_client: &reqwest::Client,
     engine: &ai_engines::Model,
@@ -160,10 +167,11 @@ pub async fn plugin_config_for(
         return parse_plugin_config(value);
     }
     if let Some(config) = embedded_plugin_config(&engine.engine_key)? {
-        return Ok(config);
+        return Ok(with_engine_base_url(config, engine));
     }
     provider_manifests::catalog_plugin_config(req_client, &engine.engine_key)
         .await
+        .map(|config| with_engine_base_url(config, engine))
         .map_err(|error| {
             eprintln!(
                 "catalog manifest for AI engine {} was not loaded: {error}",
@@ -306,6 +314,7 @@ mod tests {
             default_model: "<empty>".to_string(),
             default_image_gen_model: None,
             plugin_config,
+            base_url_override: None,
             api_key_validated_at: None,
             created_at: now,
             updated_at: now,
@@ -330,6 +339,33 @@ mod tests {
             assert_eq!(provider.descriptor().id.as_str(), engine_key);
             assert_eq!(provider.descriptor().version, version);
         }
+    }
+
+    #[tokio::test]
+    async fn engine_base_url_override_reaches_the_runtime_for_catalog_engines_only() {
+        let client = reqwest::Client::new();
+        let mut engine = test_engine("openai", None);
+        engine.base_url_override =
+            Some("https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1/".to_string());
+        let config = plugin_config_for(&client, &engine).await.expect("config");
+        assert_eq!(
+            config.base_url_override.as_deref(),
+            Some("https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1/")
+        );
+        compile_provider(config, "openai", Some("test-key".to_string()))
+            .expect("override compiles");
+
+        let mut stored = embedded_plugin_config("openai")
+            .expect("embedded manifest")
+            .expect("engine is embedded");
+        stored.base_url_override = Some("https://custom.example.com/v1/".to_string());
+        let mut custom = test_engine("openai", Some(serde_json::to_value(stored).unwrap()));
+        custom.base_url_override = Some("https://ignored.example.com/".to_string());
+        let config = plugin_config_for(&client, &custom).await.expect("config");
+        assert_eq!(
+            config.base_url_override.as_deref(),
+            Some("https://custom.example.com/v1/")
+        );
     }
 
     #[test]

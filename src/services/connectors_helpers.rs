@@ -323,10 +323,13 @@ pub async fn start_connection(
         .admit(user, std::time::Instant::now())
         .map_err(|retry| ConnectorError::Broker(BrokerIssue::RateLimited(retry)))?;
     let _lock = LOCKS.lock(user, lock_id(&key)).await;
-    let native = match request.server_id {
+    let mut native = match request.server_id {
         Some(server) => allowed_server(state, user, server, None).await?,
         None => None,
     };
+    if let Some(native) = native.as_mut() {
+        native.distribution_version = state.discovery_catalog.connector_catalog_version().await;
+    }
     if native
         .as_ref()
         .is_some_and(|native| native.plugin_id != key || native.plugin_version != request.version)
@@ -398,6 +401,7 @@ pub async fn start_connection(
     }
     let mut body = json!({"connection_id":row.id,"user_id":user,"connector_key":key,"version":request.version,
         "connection_grant":grant(state,&row)?,"redirect_uri":redirect_uri});
+    // The broker replays a connection only for the catalog identity it first saw, so retries keep the sealed one.
     if let Some(native) = opened_grant(state, &row)?.1 {
         body["catalog_kind"] = json!("native");
         body["distribution_version"] = json!(native.distribution_version);

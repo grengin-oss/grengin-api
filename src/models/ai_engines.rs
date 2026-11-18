@@ -57,6 +57,7 @@ pub struct Model {
     pub default_model: String,
     pub default_image_gen_model: Option<String>,
     pub plugin_config: Option<Json>,
+    pub base_url_override: Option<String>,
     pub api_key_validated_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

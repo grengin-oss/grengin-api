@@ -3,6 +3,8 @@
 
 pub use sea_orm_migration::prelude::*;
 mod m20261028_000001_create_connectors;
+mod m20261113_000001_grant_it_admin_ai_platform_view;
+mod m20261113_000002_add_base_url_override_to_ai_engines;
 
 mod m20250102_000001_add_redirect_url_to_sso_providers;
 mod m20250107_000001_create_usage_logs;
@@ -182,6 +184,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20261015_000001_disable_seeded_system_prompts::Migration),
             Box::new(m20261019_000001_create_chat_shares::Migration),
             Box::new(m20261028_000001_create_connectors::Migration),
+            Box::new(m20261113_000001_grant_it_admin_ai_platform_view::Migration),
+            Box::new(m20261113_000002_add_base_url_override_to_ai_engines::Migration),
         ]
     }
 }
@@ -190,6 +194,48 @@ impl MigratorTrait for Migrator {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    async fn it_admin_ai_platform_view_grants(
+        db: &sea_orm_migration::sea_orm::DatabaseConnection,
+    ) -> i64 {
+        use sea_orm_migration::sea_orm::{ConnectionTrait, Statement};
+        let row = db
+            .query_one(Statement::from_string(
+                db.get_database_backend(),
+                r#"SELECT count(*) AS grants FROM role_permissions rp
+                   JOIN roles r ON r.id = rp."roleId"
+                   JOIN permissions p ON p.id = rp."permissionId"
+                   WHERE r.name = 'IT Admin' AND p.domain = 'ai_platform' AND p.action = 'view'"#,
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        row.try_get("", "grants").unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires GRENGIN_MIGRATION_TEST_DATABASE_URL pointing at a disposable database"]
+    async fn it_admin_views_ai_engines_and_engines_store_a_base_url_override() {
+        use sea_orm_migration::sea_orm::{ConnectionTrait, Database, Statement};
+        let url = std::env::var("GRENGIN_MIGRATION_TEST_DATABASE_URL").expect("test database");
+        let db = Database::connect(url).await.unwrap();
+        let column_query = Statement::from_string(
+            db.get_database_backend(),
+            r#"SELECT "baseUrlOverride" FROM ai_engines LIMIT 0"#,
+        );
+
+        Migrator::up(&db, None).await.unwrap();
+        assert_eq!(it_admin_ai_platform_view_grants(&db).await, 1);
+        db.execute(column_query.clone()).await.unwrap();
+
+        Migrator::down(&db, Some(2)).await.unwrap();
+        assert_eq!(it_admin_ai_platform_view_grants(&db).await, 0);
+        assert!(db.execute(column_query.clone()).await.is_err());
+
+        Migrator::up(&db, None).await.unwrap();
+        assert_eq!(it_admin_ai_platform_view_grants(&db).await, 1);
+        db.execute(column_query).await.unwrap();
+    }
 
     #[test]
     fn provider_storage_migration_histories_are_preserved() {

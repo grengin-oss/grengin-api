@@ -21,6 +21,7 @@ use crate::{
     },
     services::{
         ai_engine_defaults::{enabled_after_key, starter_models},
+        ai_plugin::apply_base_url_override,
         authorization::{AuthorizationService, PermissionScopeMode},
         provider_manifests,
         provider_models::{is_chat_selectable_model, to_model_info},
@@ -109,6 +110,7 @@ pub async fn get_ai_engines(
                 default_model: Some(model.default_model),
                 default_image_gen_model: model.default_image_gen_model,
                 plugin_config,
+                base_url_override: model.base_url_override,
                 created_at: model.created_at,
                 updated_at: model.updated_at,
             }
@@ -176,6 +178,7 @@ pub async fn get_ai_engines_by_key(
         default_model: Some(model.default_model),
         default_image_gen_model: model.default_image_gen_model,
         plugin_config,
+        base_url_override: model.base_url_override,
         created_at: model.created_at,
         updated_at: model.updated_at,
     };
@@ -416,6 +419,12 @@ pub async fn update_ai_engines_by_key(
     if let Some(default_image_gen_model) = req.default_image_gen_model {
         active_model.default_image_gen_model = Set(Some(default_image_gen_model));
     }
+    apply_base_url_override(
+        &mut active_model,
+        &ai_engine,
+        req.base_url_override.as_deref(),
+        req.plugin_config.is_some(),
+    )?;
     if let Some(plugin_config) = req.plugin_config {
         let manifest = parse_manifest(&plugin_config).map_err(|_| AuthError::InvalidRequest {
             field: "plugin_config",
@@ -543,6 +552,7 @@ pub async fn update_ai_engines_by_key(
         default_model: Some(model.default_model),
         default_image_gen_model: model.default_image_gen_model,
         plugin_config,
+        base_url_override: model.base_url_override,
         created_at: model.created_at,
         updated_at: model.updated_at,
     };
@@ -645,6 +655,7 @@ pub async fn delete_ai_engines_api_key_key(
         default_model: Some(model.default_model),
         default_image_gen_model: model.default_image_gen_model,
         plugin_config,
+        base_url_override: model.base_url_override,
         created_at: model.created_at,
         updated_at: model.updated_at,
     };

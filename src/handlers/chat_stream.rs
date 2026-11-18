@@ -40,9 +40,9 @@ use crate::{
         },
         chat_stream_helpers::{
             ContentCheckpoint, DepartmentBudgetGate, ToolRoundOutcome, department_budget_status,
-            ensure_budget_pricing, ensure_model_whitelisted, model_identifiers, next_tool_round,
-            persistence_error_event_data, record_stop_reason, response_stopped_event_data,
-            stop_reason_for_provider_error, with_stop_reason,
+            detach_from_client, ensure_budget_pricing, ensure_model_whitelisted, model_identifiers,
+            next_tool_round, persistence_error_event_data, record_stop_reason,
+            response_stopped_event_data, stop_reason_for_provider_error, with_stop_reason,
         },
         conversation_access::{
             can_access_conversation, find_active_conversation_for_user,
@@ -220,7 +220,7 @@ use uuid::Uuid;
       })
     )),
     ("response_stopped" = (
-      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation or switched to another version while it was generating, including before it started streaming, or a newer edit of the same message took over; the reply stays with the version it was sent in), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnected is stored as network_error, or as user_cancelled when POST /chat/stream/{message_id}/cancel arrives within 5 seconds.",
+      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation or switched to another version while it was generating, including before it started streaming, or a newer edit of the same message took over; the reply stays with the version it was sent in), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnects (for example a page refresh) keeps generating and is saved complete; GET /chat/{chat_id} returns it.",
       value = json!({
         "event": "response_stopped",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "stop_reason": "user_cancelled" }
@@ -380,7 +380,7 @@ pub async fn handle_chat_stream_path_doc() {}
       })
     )),
     ("response_stopped" = (
-      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation or switched to another version while it was generating, including before it started streaming, or a newer edit of the same message took over; the reply stays with the version it was sent in), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnected is stored as network_error, or as user_cancelled when POST /chat/stream/{message_id}/cancel arrives within 5 seconds.",
+      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation or switched to another version while it was generating, including before it started streaming, or a newer edit of the same message took over; the reply stays with the version it was sent in), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnects (for example a page refresh) keeps generating and is saved complete; GET /chat/{chat_id} returns it.",
       value = json!({
         "event": "response_stopped",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "stop_reason": "user_cancelled" }
@@ -429,13 +429,13 @@ pub async fn handle_chat_stream_doc() {}
     post,
     path = "/chat/stream/{message_id}/cancel",
     tag = "chat",
-    description = "Stops an assistant reply that is still generating (the Stop button). Pass the message_id from the reply's message_start event; this works for replies from POST /chat/stream, POST /chat/stream/{chat_id} and PATCH /chat/{chat_id}/message/{message_id}/stream.\n\nIf the client still has the stream open, it ends with cancelled, response_stopped (stop_reason user_cancelled), stream_finished and done. The text generated so far is kept, and GET /chat/{chat_id} returns the message with stop_reason user_cancelled. Stopping an edit's reply keeps the edit with the partial reply.\n\nThe client may close the stream at the same moment it calls this endpoint: a reply whose client disconnected waits 5 seconds for a stop request before it is recorded as network_error, so a Stop sent within that window is still stored as user_cancelled. A reply that was already stopped for another reason (for example user_edited) keeps that reason.\n\nOnly a reply generating on the server instance that receives this request can be stopped.",
+    description = "Stops an assistant reply that is still generating (the Stop button). Pass the message_id from the reply's message_start event; this works for replies from POST /chat/stream, POST /chat/stream/{chat_id} and PATCH /chat/{chat_id}/message/{message_id}/stream.\n\nIf the client still has the stream open, it ends with cancelled, response_stopped (stop_reason user_cancelled), stream_finished and done. The text generated so far is kept, and GET /chat/{chat_id} returns the message with stop_reason user_cancelled. Stopping an edit's reply keeps the edit with the partial reply.\n\nClosing the stream does not stop a reply: it keeps generating and is saved, so Stop works whether or not the client still has the stream open. A reply that was already stopped for another reason (for example user_edited) keeps that reason.\n\nOnly a reply generating on the server instance that receives this request can be stopped.",
     params(
         ("message_id" = Uuid, Path, description = "Assistant message id from the reply's message_start event")
     ),
     responses(
-        (status = 202, description = "The reply was generating, or its client disconnected less than 5 seconds ago, and has been stopped; it is stored with stop_reason user_cancelled unless it had already stopped for another reason"),
-        (status = 204, description = "Nothing to stop: the reply already finished, failed, was disconnected more than 5 seconds ago, or is generating on another server instance; the message is left unchanged"),
+        (status = 202, description = "The reply was generating and has been stopped; it is stored with stop_reason user_cancelled unless it had already stopped for another reason"),
+        (status = 204, description = "Nothing to stop: the reply already finished, failed, or is generating on another server instance; the message is left unchanged"),
         (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
         (status = 404, content_type = "application/json", body = ErrorResponse, description = "Message not found, or it belongs to another user's conversation (code=1001)"),
         (status = 503, content_type = "application/json", body = ErrorResponse, description = "DB unavailable (code=5000) or timeout (code=5001)"),
@@ -2930,6 +2930,6 @@ pub async fn handle_chat_stream(
            }
        }
     };
-    let sse_response = Sse::new(sse_stream).keep_alive(KeepAlive::new());
+    let sse_response = Sse::new(detach_from_client(sse_stream)).keep_alive(KeepAlive::new());
     Ok(sse_response)
 }

@@ -227,10 +227,42 @@ pub async fn upsert_connection(
     server_id: Uuid,
     connected: bool,
 ) -> Result<(), AppError> {
+    let txn = state
+        .database
+        .begin()
+        .await
+        .map_err(|_| AppError::DbUnavailable)?;
+    upsert_connection_with(&txn, user_id, server_id, connected).await?;
+    txn.commit().await.map_err(|_| AppError::DbTimeout)?;
+    if !connected {
+        let client = state.mcp_clients.read().await.get(&server_id).cloned();
+        if let Some(client) = client {
+            client.invalidate_user_session(user_id).await;
+        }
+    }
+    Ok(())
+}
+
+async fn upsert_connection_with<C: ConnectionTrait>(
+    db: &C,
+    user_id: Uuid,
+    server_id: Uuid,
+    connected: bool,
+) -> Result<(), AppError> {
+    if !connected {
+        // A disconnect also withdraws sign-ins still in flight; otherwise their late
+        // callback would redeem the state and reconnect the account.
+        mcp_oauth_states::Entity::delete_many()
+            .filter(mcp_oauth_states::Column::UserId.eq(user_id))
+            .filter(mcp_oauth_states::Column::ServerId.eq(server_id))
+            .exec(db)
+            .await
+            .map_err(|_| AppError::DbTimeout)?;
+    }
     if let Some(existing) = mcp_connections::Entity::find()
         .filter(mcp_connections::Column::UserId.eq(user_id))
         .filter(mcp_connections::Column::ServerId.eq(server_id))
-        .one(&state.database)
+        .one(db)
         .await
         .map_err(|_| AppError::DbUnavailable)?
     {
@@ -247,7 +279,7 @@ pub async fn upsert_connection(
             active.token_type = Set(None);
         }
         active.updated_at = Set(Utc::now());
-        active.update(&state.database).await.map_err(|e| {
+        active.update(db).await.map_err(|e| {
             eprintln!("Db update error {}", e);
             AppError::DbTimeout
         })?;
@@ -267,16 +299,10 @@ pub async fn upsert_connection(
             created_at: Set(Utc::now()),
             updated_at: Set(Utc::now()),
         };
-        model.insert(&state.database).await.map_err(|e| {
+        model.insert(db).await.map_err(|e| {
             eprintln!("Db insert error {}", e);
             AppError::DbTimeout
         })?;
-    }
-    if !connected {
-        let client = state.mcp_clients.read().await.get(&server_id).cloned();
-        if let Some(client) = client {
-            client.invalidate_user_session(user_id).await;
-        }
     }
     Ok(())
 }
@@ -999,9 +1025,32 @@ async fn redeem_oauth_state(
         eprintln!("mcp oauth redeem begin error: {e}");
         AppError::DbTimeout
     })?;
+    redeem_oauth_state_with(
+        &txn,
+        &state.settings.auth.app_key,
+        oauth_state_id,
+        user_id,
+        server,
+        tokens,
+    )
+    .await?;
+    txn.commit().await.map_err(|e| {
+        eprintln!("mcp oauth redeem commit error: {e}");
+        AppError::DbTimeout
+    })
+}
+
+async fn redeem_oauth_state_with<C: ConnectionTrait>(
+    txn: &C,
+    app_key: &[u8; 32],
+    oauth_state_id: Uuid,
+    user_id: Uuid,
+    server: &mcp_servers::Model,
+    tokens: McpOAuthTokens,
+) -> Result<(), AppError> {
     let fresh = mcp_servers::Entity::find_by_id(server.id)
         .lock_exclusive()
-        .one(&txn)
+        .one(txn)
         .await
         .map_err(|_| AppError::DbTimeout)?
         .ok_or(AppError::ResourceNotFound)?;
@@ -1009,7 +1058,7 @@ async fn redeem_oauth_state(
         return Err(AppError::ResourceNotFound);
     }
     let removed = mcp_oauth_states::Entity::delete_by_id(oauth_state_id)
-        .exec(&txn)
+        .exec(txn)
         .await
         .map_err(|e| {
             eprintln!("mcp oauth state delete error: {e}");
@@ -1018,19 +1067,7 @@ async fn redeem_oauth_state(
     if removed.rows_affected != 1 {
         return Err(AppError::ResourceNotFound);
     }
-    store_oauth_tokens_with(
-        &txn,
-        &state.settings.auth.app_key,
-        user_id,
-        server.id,
-        &server.name,
-        tokens,
-    )
-    .await?;
-    txn.commit().await.map_err(|e| {
-        eprintln!("mcp oauth redeem commit error: {e}");
-        AppError::DbTimeout
-    })
+    store_oauth_tokens_with(txn, app_key, user_id, server.id, &server.name, tokens).await
 }
 
 fn oauth_binding_changed(old: &mcp_servers::Model, current: &mcp_servers::Model) -> bool {
@@ -1254,6 +1291,92 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        txn.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DB_URL pointing at the isolated grengin_security_test database"]
+    async fn disconnect_withdraws_sign_ins_whose_callback_arrives_or_finishes_later() {
+        use super::*;
+        use sea_orm::Database;
+        async fn pending_sign_in<C: ConnectionTrait>(
+            db: &C,
+            user_id: Uuid,
+            server_id: Uuid,
+        ) -> mcp_oauth_states::Model {
+            let now = Utc::now();
+            mcp_oauth_states::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                server_id: Set(server_id),
+                user_id: Set(user_id),
+                state: Set(Uuid::new_v4().to_string()),
+                pkce_verifier: Set("verifier".into()),
+                redirect_uri: Set(None),
+                expires_at: Set(Some(now + Duration::minutes(10))),
+                created_at: Set(now),
+            }
+            .insert(db)
+            .await
+            .unwrap()
+        }
+
+        let url = std::env::var("DB_URL").expect("test DB URL");
+        assert_eq!(
+            url::Url::parse(&url).unwrap().path(),
+            "/grengin_security_test"
+        );
+        let db = Database::connect(url).await.unwrap();
+        let txn = db.begin().await.unwrap();
+        let users = users::Entity::find().limit(2).all(&txn).await.unwrap();
+        let (user, other) = (users[0].id, users.get(1).expect("two fixture users").id);
+        let server = mcp_servers::Entity::find()
+            .one(&txn)
+            .await
+            .unwrap()
+            .expect("fixture MCP server");
+        mcp_oauth_states::Entity::delete_many()
+            .filter(mcp_oauth_states::Column::ServerId.eq(server.id))
+            .exec(&txn)
+            .await
+            .unwrap();
+        let key = [7u8; 32];
+
+        // Callback delivered after the disconnect.
+        let undelivered = pending_sign_in(&txn, user, server.id).await;
+        // Callback that already read its state and is exchanging the code at the provider.
+        let exchanging = pending_sign_in(&txn, user, server.id).await;
+        let unrelated = pending_sign_in(&txn, other, server.id).await;
+        upsert_connection_with(&txn, user, server.id, false)
+            .await
+            .unwrap();
+
+        for withdrawn in [undelivered.id, exchanging.id] {
+            assert!(matches!(
+                redeem_oauth_state_with(&txn, &key, withdrawn, user, &server, tokens(Some("late")))
+                    .await,
+                Err(AppError::ResourceNotFound)
+            ));
+        }
+        let row = mcp_connections::Entity::find()
+            .filter(mcp_connections::Column::UserId.eq(user))
+            .filter(mcp_connections::Column::ServerId.eq(server.id))
+            .one(&txn)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!row.connected);
+        assert_eq!(row.access_token, None);
+
+        redeem_oauth_state_with(
+            &txn,
+            &key,
+            unrelated.id,
+            other,
+            &server,
+            tokens(Some("theirs")),
+        )
+        .await
+        .expect("another user's sign-in is untouched");
         txn.rollback().await.unwrap();
     }
 

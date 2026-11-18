@@ -6,6 +6,7 @@ import {createServer} from 'node:http';
 import {mkdir,readFile,writeFile,open,chmod,rename} from 'node:fs/promises';
 import {resolve,join,sep} from 'node:path';
 import {callbackFor,callbackPaths,microsoftConnectorIds} from './live-callbacks.mjs';
+import {jiraSite,releaseVersion} from './live-release.mjs';
 import {runLiveChats} from './live-chat.mjs';
 import {runLiveUi} from './live-ui.mjs';
 
@@ -14,6 +15,7 @@ const root=process.env.GRENGIN_BACKEND_ROOT;
 const directory=join(process.env.HOME,'.local/state/grengin/native-plugin-live');
 const webapp=process.env.GRENGIN_NATIVE_WEBAPP ?? '/home/anurag/work/fresh/webapp';
 const master=resolve(root,'../grengin-list/master-data');
+const version=releaseVersion(await readFile(join(root,'Cargo.toml'),'utf8'));
 const api='http://127.0.0.1:8083';
 const container='grengin-native-plugin-live-db';
 await mkdir(directory,{recursive:true,mode:0o700});await chmod(directory,0o700);
@@ -155,8 +157,8 @@ if(command==='frontend'||command==='restore-webapp'){
     await save();
   }
   if(command==='check'){
-    assert.equal(health.version,'0.9.8');
-    assert.equal((await(await fetch('http://localhost:5173/api/')).json()).version,'0.9.8');
+    assert.equal(health.version,version);
+    assert.equal((await(await fetch('http://localhost:5173/api/')).json()).version,version);
     assert.equal((await(await fetch('http://127.0.0.1:8080/')).json()).version,'0.9.7');
     for(const [key,id]of Object.entries(saved.servers)){
       if(selected.size&&!selected.has(key))continue;
@@ -203,11 +205,9 @@ if(command==='frontend'||command==='restore-webapp'){
       const server=servers.find(row=>row.id===id);
       if(key==='jira'){
         const response=await fetch('https://api.atlassian.com/oauth/token/accessible-resources',{redirect:'manual',headers:{Authorization:`Bearer ${access}`,Accept:'application/json'},signal:AbortSignal.timeout(15000)});
-        if(!response.ok){console.log(`jira: BLOCKED accessible resources HTTP ${response.status}`);continue;}
-        const resources=(await jsonResponse(response)).filter(site=>site.scopes?.includes('read:jira-work'));
-        const unique=[...new Map(resources.map(site=>[site.id,site])).values()];
-        if(unique.length!==1){console.log(`jira: select one of ${unique.length} accessible Jira sites before tool testing`);continue;}
-        server.connection_config.connector_plugin.configuration.cloud_id=unique[0].id;
+        const selection=jiraSite(response.status,response.ok?await jsonResponse(response):null);
+        if(selection.blocked){failed++;console.log(`jira: BLOCKED ${selection.blocked}`);continue;}
+        server.connection_config.connector_plugin.configuration.cloud_id=selection.site.id;
         await request('PUT',`/admin/mcp-servers/${id}`,{connection_config:server.connection_config});
         console.log('jira: selected the single authorized resource without exposing site data');
       }
@@ -252,8 +252,9 @@ if(command==='frontend'||command==='restore-webapp'){
       const url=new URL(req.url,'http://localhost');assert.equal(req.method,'GET');
       assert(/^[a-zA-Z0-9._/-]+$/.test(url.pathname));
       let bytes;
-      if(url.pathname==='/distributions/grengin-api/0.9.8/index.json'){
-        const draft=JSON.parse(await readFile(resolve(root,'../grengin-list/docs/drafts/grengin-api/0.9.8/index.json'),'utf8'));
+      const published=resolve(master,`distributions/grengin-api/${version}/index.json`);
+      if(url.pathname===`/distributions/grengin-api/${version}/index.json`&&!await readFile(published).then(()=>true,()=>false)){
+        const draft=JSON.parse(await readFile(resolve(root,`../grengin-list/docs/drafts/grengin-api/${version}/index.json`),'utf8'));
         draft.grenginApiCommit='0'.repeat(40);draft.catalogCommit='0'.repeat(40);bytes=Buffer.from(JSON.stringify(draft));
       }else{
         const file=resolve(master,'.'+url.pathname);assert(file.startsWith(master+sep)&&file.endsWith('.json'));
@@ -270,17 +271,19 @@ if(command==='frontend'||command==='restore-webapp'){
   let closing=false;
   async function stop(){if(closing)return;closing=true;backend.kill('SIGTERM');metadata.closeAllConnections();await new Promise(resolve=>metadata.close(resolve));if(backend.exitCode===null)await once(backend,'exit');process.exit(0);}
   process.on('SIGTERM',()=>void stop());process.on('SIGINT',()=>void stop());
+  let reported;
   for(let n=0;n<120;n++){
     assert(backend.exitCode===null,'Native backend exited; inspect private backend.log');
-    try{const response=await fetch(api+'/',{signal:AbortSignal.timeout(1000)});if(response.ok){assert.equal((await response.json()).version,'0.9.8');break;}}catch{}
+    try{const response=await fetch(api+'/',{signal:AbortSignal.timeout(1000)});if(response.ok){reported=(await response.json()).version;break;}}catch{}
     assert(n<119,'Native backend readiness timed out');await sleep(250);
   }
+  assert.equal(reported,version,`Native backend reports ${reported}; this checkout builds ${version}`);
   if(!pg(`SELECT id FROM users WHERE id=${quote(saved.owner.id)}`,saved.database)){
     const o=saved.owner;
     pg(`BEGIN;INSERT INTO users(id,status,email,"emailVerified",name,"googleId","azureId",identities,"mfaEnabled","createdAt","updatedAt","lastLoginAt","isIndependent") VALUES(${quote(o.id)},'active',${quote(o.email)},true,${o.name?quote(o.name):'NULL'},${o.google_id?quote(o.google_id):'NULL'},${o.azure_id?quote(o.azure_id):'NULL'},${o.identities?quote(JSON.stringify(o.identities))+'::jsonb':'NULL'},false,now(),now(),now(),true);INSERT INTO user_role_assignments(id,"userId","roleId","assignedBy","createdAt","updatedAt") SELECT gen_random_uuid(),${quote(o.id)},id,${quote(o.id)},now(),now() FROM roles WHERE name='Super Admin';COMMIT;`,saved.database);
   }
   await installConnectors(['jira','github','slack','gmail','google-calendar','google-drive']);
-  console.log('READY: isolated native API 0.9.8 at http://127.0.0.1:8083; six explicitly installed plugins.');
+  console.log(`READY: isolated native API ${version} at http://127.0.0.1:8083; six explicitly installed plugins.`);
   console.log('Jira cloud_id awaits accessible-resource selection after consent. No existing server or user tokens were copied.');
   backend.once('exit',()=>{if(!closing){console.error('Native backend exited');void stop();}});
 }else throw new Error('Usage: live-native.sh serve|frontend|restore-webapp|status|check|probe|configure|chat|install|ui|diagnose [connector IDs]');
