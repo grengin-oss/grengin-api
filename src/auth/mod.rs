@@ -15,6 +15,4 @@ pub mod sso_provider;
 pub mod sso_proxy;
 
 #[cfg(test)]
-mod mock_oauth2_tests;
-#[cfg(test)]
-mod social_mock_tests;
+mod tests;
