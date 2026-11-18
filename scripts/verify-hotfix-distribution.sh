@@ -8,7 +8,7 @@ bash "$root/scripts/verify-release-distribution.sh" "$1" "$2" "$3"
 [[ "$4" =~ ^[a-f0-9]{40}$ ]]
 git -C "$root" merge-base --is-ancestor "$3" "$4"
 jq -e '
-  [.authProviders.providers[], .aiProviders.providers[]]
+  [.authProviders.providers[], .aiProviders.providers[], (.connectorPlugins.providers // [])[]]
   | all(.[]; (.id | test("^[a-z][a-z0-9-]{0,62}$"))
       and (.versions | type == "array" and length > 0)
       and all(.versions[];
@@ -28,7 +28,9 @@ done < <(jq -r '
   (.authProviders.providers[] as $provider | $provider.versions[]
     | ["auth-providers/\($provider.id)/versions/\(.version)/provider.json", .sha256]),
   (.aiProviders.providers[] as $provider | $provider.versions[]
-    | ["ai-providers/\($provider.id)/versions/\(.version)/plugin.json", .sha256])
+    | ["ai-providers/\($provider.id)/versions/\(.version)/plugin.json", .sha256]),
+  ((.connectorPlugins.providers // [])[] as $provider | $provider.versions[]
+    | ["connector-plugins/\($provider.id)/versions/\(.version)/plugin.json", .sha256])
   | @tsv
 ' "$1")
 GRENGIN_PROVIDER_CATALOG_ROOT="$scratch" cargo test \
