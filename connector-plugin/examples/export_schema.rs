@@ -4,9 +4,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "{}",
-        serde_json::to_string_pretty(&schemars::schema_for!(
-            connector_server_plugin::ConnectorManifest
-        ))?
+        serde_json::to_string_pretty(&schemars::schema_for!(connector_plugin::ConnectorManifest))?
     );
     Ok(())
 }

@@ -27,11 +27,11 @@ cargo test --locked --workspace -j "$jobs" \
   --config "profile.test.package.grengin-api.codegen-units=$codegen_units" -- --test-threads=2
 cargo build --locked --workspace -j "$jobs" --config 'profile.dev.package.grengin-api.debug=0' \
   --config "profile.dev.package.grengin-api.codegen-units=$codegen_units"
-cargo clippy --locked -p connector-server-plugin --all-targets --no-deps -j "$jobs" -- -D warnings
+cargo clippy --locked -p connector-plugin --all-targets --no-deps -j "$jobs" -- -D warnings
 if [[ -n "$catalog" ]]; then
   GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR="$catalog" \
-    cargo test --locked -p connector-server-plugin --test providers -j "$jobs" -- --ignored --test-threads=2
-  cargo run --locked -p connector-server-plugin --example validate_connector_manifests -j "$jobs" -- "$catalog"
+    cargo test --locked -p connector-plugin --test providers -j "$jobs" -- --ignored --test-threads=2
+  cargo run --locked -p connector-plugin --example validate_connector_manifests -j "$jobs" -- "$catalog"
 fi
 if "$http"; then
   bash "$root/tests/connector-plugin/http.sh"

@@ -821,9 +821,9 @@ async fn start_server_oauth_authorization(
             server.url.as_deref(),
         )
         .map_err(|_| AppError::ResourceNotFound)?;
-        if plugin.is_some_and(|plugin| {
-            plugin.manifest().auth != connector_server_plugin::ConnectorAuth::Oauth2
-        }) {
+        if plugin
+            .is_some_and(|plugin| plugin.manifest().auth != connector_plugin::ConnectorAuth::Oauth2)
+        {
             return Err(AppError::ResourceNotFound);
         }
     }

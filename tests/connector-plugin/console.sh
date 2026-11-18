@@ -20,7 +20,7 @@ export CARGO_PROFILE_DEV_DEBUG=0
 export CARGO_PROFILE_TEST_DEBUG=0
 case "$mode" in
   check) cargo check --locked --workspace --all-targets -j 1 ;;
-  runtime) cargo test --locked -p connector-server-plugin -j 1 -- --test-threads=1 ;;
+  runtime) cargo test --locked -p connector-plugin -j 1 -- --test-threads=1 ;;
   lint) cargo clippy --locked --workspace --all-targets --no-deps -j 1 ;;
   local-compatibility)
     node --input-type=module <<'NODE'
@@ -45,7 +45,7 @@ NODE
     ;;
   catalog)
     export GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR="$root/../grengin-list/master-data/connector-plugins"
-    cargo test --locked -p connector-server-plugin --test providers -j 1 -- --ignored --test-threads=1
+    cargo test --locked -p connector-plugin --test providers -j 1 -- --ignored --test-threads=1
     ;;
   unit)
     cargo test --locked --workspace -j 1 \
@@ -66,7 +66,7 @@ NODE
   http)
     binary=${GRENGIN_BACKEND_BINARY:-${CARGO_TARGET_DIR:-$root/target}/debug/grengin-api}
     [[ -x "$binary" ]] || { printf 'Build the patched backend before HTTP testing\n' >&2; exit 1; }
-    sources=$(rg --files src connector-server-plugin/src -g '*.rs') || {
+    sources=$(rg --files src connector-plugin/src -g '*.rs') || {
       printf 'Cannot enumerate patched sources; HTTP testing refused\n' >&2
       exit 1
     }

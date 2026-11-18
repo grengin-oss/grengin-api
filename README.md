@@ -76,7 +76,7 @@ for the backend release; `GET /discovery/connector-plugins/{id}?version=1`
 returns a digest-checked manifest for explicit installation. Nothing is
 automatically saved merely by fetching the catalog.
 No separate connector process or Redis service is required. See the
-[connector plugin guide](connector-server-plugin/README.md) for the format,
+[connector plugin guide](connector-plugin/README.md) for the format,
 Microsoft Graph example, limitations and repeatable local tests.
 
 ## Configurable Authentication
@@ -96,8 +96,7 @@ under one Grengin version.
 Each product release pins an exact `grengin-api` commit and includes:
 
 - frontend and backend source in ZIP and TAR.GZ formats;
-- static Linux amd64 and arm64 `grengin-api` binaries;
-- static Linux amd64 and arm64 `sqlx-mcp` binaries; and
+- static Linux amd64 and arm64 `grengin-api` binaries; and
 - a release manifest containing component versions and commit SHAs.
 
 The backend is never pulled from a moving branch when a product release is
@@ -258,18 +257,11 @@ presented as durable.
 Review migration files before running `down`, `reset`, `refresh`, or `fresh` in
 an environment that contains data.
 
-## SQLx MCP Server
+## Stdio MCP Servers
 
-The workspace includes `sqlx-mcp`, a read-only PostgreSQL MCP server for schema
-discovery and parameterized queries:
-
-```bash
-cargo run --locked -p sqlx-mcp -- \
-  --database-url "$DATABASE_URL"
-```
-
-It exposes read-only tools for queries, table descriptions, foreign keys,
-`ltree` columns, and database status over stdio.
+Stdio MCP servers run on the API host, so the API starts only commands an operator lists in
+`MCP_STDIO_COMMANDS` (comma-separated, exact names or paths). None are allowed by default. The
+bundled `sqlx-mcp` server is retired; stdio servers configured to run it are disabled on upgrade.
 
 ## Repository Structure
 
@@ -284,9 +276,8 @@ grengin-api/
 |   |-- dto/               # API request and response types
 |   `-- docs/              # OpenAPI definitions
 |-- llm-plugin/            # Declarative provider runtime and manifests
-|-- connector-server-plugin/ # Declarative HTTP connector tools
+|-- connector-plugin/      # Declarative HTTP connector tools
 |-- migration/             # Versioned database migrations
-|-- sqlx-mcp/              # Read-only PostgreSQL MCP server
 |-- swagger-overrides/     # Branded Swagger UI assets
 |-- Dockerfile             # Static multi-architecture image
 `-- .github/workflows/     # Build, test, and GHCR publishing
