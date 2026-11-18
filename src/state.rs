@@ -241,6 +241,10 @@ impl AppState {
         register_stream(&mut guard, message_id, conversation_id, edit_request)
     }
 
+    pub async fn release_stream_cancel(&self, message_id: Uuid) {
+        self.stream_cancellations.write().await.remove(&message_id);
+    }
+
     pub async fn cancel_stream(&self, message_id: Uuid) -> bool {
         let guard = self.stream_cancellations.read().await;
         if let Some(handle) = guard.get(&message_id) {

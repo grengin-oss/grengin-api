@@ -159,6 +159,22 @@ pub fn next_tool_round(
 
 // A reply keeps generating and is saved when its client goes away (a page refresh), instead
 // of being stopped as a network error; the reloaded chat reads it back. Stop still cancels it.
+// An edit becomes a version only for the client that asked for it, so it stops with its stream (the
+// documented "no version is added" on disconnect); any other reply keeps generating and is saved.
+pub fn deliver_reply<S>(
+    events: S,
+    is_edit: bool,
+) -> std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>
+where
+    S: Stream<Item = Result<Event, Infallible>> + Send + 'static,
+{
+    if is_edit {
+        Box::pin(events)
+    } else {
+        Box::pin(detach_from_client(events))
+    }
+}
+
 pub fn detach_from_client<S>(events: S) -> impl Stream<Item = Result<Event, Infallible>> + Send
 where
     S: Stream<Item = Result<Event, Infallible>> + Send + 'static,
@@ -393,6 +409,29 @@ mod tests {
             tokio::task::yield_now().await;
         }
         panic!("reply stopped after the client disconnected");
+    }
+
+    #[tokio::test]
+    async fn an_edit_stops_with_its_client_but_a_reply_keeps_generating() {
+        for (is_edit, expect_finished) in [(true, false), (false, true)] {
+            let produced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counter = produced.clone();
+            let reply = async_stream::stream! {
+                for chunk in 0..100 {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                    yield Ok::<_, Infallible>(Event::default().data(chunk.to_string()));
+                }
+            };
+            let mut client = deliver_reply(reply, is_edit);
+            assert!(client.next().await.is_some());
+            drop(client);
+            for _ in 0..1000 {
+                tokio::task::yield_now().await;
+            }
+            let finished = produced.load(std::sync::atomic::Ordering::SeqCst) == 100;
+            assert_eq!(finished, expect_finished, "is_edit={is_edit}");
+        }
     }
 
     fn model(engine: &str, key: &str, name: &str) -> ModelInfo {

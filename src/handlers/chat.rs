@@ -370,6 +370,9 @@ pub async fn get_chat_by_id(
         })?
         .ok_or(AppError::DbNotFound)?;
 
+    // Read before the messages: a reply leaves this set only after its final text is saved, so one
+    // that is not in it here is already complete in the rows read below.
+    let generating = app_state.generating_replies(chat_id).await;
     let messages_models = messages::Entity::find()
         .filter(messages::Column::ConversationId.eq(chat_id))
         .filter(messages::Column::Deleted.eq(false))
@@ -383,7 +386,6 @@ pub async fn get_chat_by_id(
 
     let message_count = messages_models.len() as u64;
     let versions = load_message_versions(&app_state.database, chat_id).await?;
-    let generating = app_state.generating_replies(chat_id).await;
 
     let web_search_enabled = resolve_web_search_enabled(conversation_model.metadata.as_ref());
     let mut conversation_response = ConversationResponse {
