@@ -243,7 +243,7 @@ try {
   check('a reply still generating after its page closed is marked generating',live.length>=2);
   check('its saved text grows while it generates',new Set(live.map(state=>state.text)).size>=2&&live.at(-1).text.length>live[0].text.length);
   check('generating clears only with the complete reply',[last.generating,last.text.trim().endsWith('part20')],[false,true]);
-  check('a reply completed after disconnect has no stop reason',(await reply()).stop_reason,undefined);
+  check('a reply completed after disconnect has no stop reason',(await reply()).stop_reason??null,null);
   check('a finished reply in another chat view is not generating',(await expect('GET',`/chat/${chat}`,undefined,200,owner)).json().messages.every(message=>message.generating===false));
 
   const serverId=randomUUID();
