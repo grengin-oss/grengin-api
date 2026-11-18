@@ -20,8 +20,8 @@ SET configuration = COALESCE(configuration, '{"version": "1.1", "scopes": ["read
         "verifiedEmails": {"url": "https://api.github.com/user/emails", "address": "/email",
                            "verified": "/verified", "primary": "/primary"},
         "requiredScopes": ["read:user", "user:email"],
-        "credentialProbe": {"validError": "bad_verification_code",
-                            "invalidCredentials": ["incorrect_client_credentials", "unauthorized_client"]}
+        "clientCheck": {"acceptedError": "bad_verification_code",
+                            "rejectedErrors": ["incorrect_client_credentials", "unauthorized_client"]}
     }'::jsonb)
 WHERE provider = 'github' AND (configuration IS NULL OR NOT configuration ? 'oauth2');
 "#;

@@ -36,7 +36,7 @@ pub struct OAuth2IdentityProfile {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_scopes: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential_probe: Option<OAuth2CredentialProbe>,
+    pub client_check: Option<OAuth2ClientCheck>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -63,13 +63,13 @@ pub struct OAuth2VerifiedEmailsEndpoint {
     pub primary: Option<String>,
 }
 
-// The token endpoint is probed with a code that cannot be valid: valid_error means the client
-// credentials were accepted; any of invalid_credentials means they were not.
+// The token endpoint is probed with a code that cannot be valid: accepted_error means the client
+// credentials were accepted; any of rejected_errors means they were not.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct OAuth2CredentialProbe {
-    pub valid_error: String,
-    pub invalid_credentials: Vec<String>,
+pub struct OAuth2ClientCheck {
+    pub accepted_error: String,
+    pub rejected_errors: Vec<String>,
 }
 
 impl OAuth2IdentityProfile {
@@ -230,12 +230,12 @@ impl OAuth2IdentityAdapter {
         })
     }
 
-    // Without a credential probe there is nothing to check before a real sign-in.
+    // Without a client check there is nothing to verify before a real sign-in.
     pub async fn validate_remote(
         &self,
         http_client: &ReqwestClient,
     ) -> Result<bool, OAuth2AdapterError> {
-        let Some(probe) = &self.profile.credential_probe else {
+        let Some(probe) = &self.profile.client_check else {
             return Ok(false);
         };
         let response = http_client
@@ -255,8 +255,8 @@ impl OAuth2IdentityAdapter {
             .await
             .map_err(|_| OAuth2AdapterError::OAuthRequest)?;
         match body.get("error").and_then(Value::as_str) {
-            Some(error) if error == probe.valid_error => Ok(true),
-            Some(error) if probe.invalid_credentials.iter().any(|known| known == error) => {
+            Some(error) if error == probe.accepted_error => Ok(true),
+            Some(error) if probe.rejected_errors.iter().any(|known| known == error) => {
                 Err(OAuth2AdapterError::InvalidCredentials)
             }
             _ => Err(OAuth2AdapterError::OAuthRequest),
@@ -425,8 +425,8 @@ mod tests {
             "verifiedEmails": {"url": format!("{base}/user/emails"), "address": "/email",
                                "verified": "/verified", "primary": "/primary"},
             "requiredScopes": ["read:user", "user:email"],
-            "credentialProbe": {"validError": "bad_verification_code",
-                                "invalidCredentials": ["incorrect_client_credentials", "unauthorized_client"]}
+            "clientCheck": {"acceptedError": "bad_verification_code",
+                                "rejectedErrors": ["incorrect_client_credentials", "unauthorized_client"]}
         }))
         .expect("profile")
     }
