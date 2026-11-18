@@ -347,6 +347,62 @@ pub async fn replace_tool_access(
         role_ids.push(resolved);
     }
 
+    // Everything that does not depend on the locked rows is read first, from the pool: holding the
+    // transaction while waiting for another pooled connection could stall behind requests that are
+    // themselves waiting for these locks. Under the lock only the transaction's connection is used.
+    let ctx = build_access_context(db, actor_id)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
+    let tool_servers: HashMap<Uuid, Uuid> = mcp_tools::Entity::find()
+        .filter(mcp_tools::Column::Id.is_in(ids.iter().copied()))
+        .all(db)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?
+        .into_iter()
+        .map(|tool| (tool.id, tool.server_id))
+        .collect();
+    if tool_servers.len() != ids.len()
+        || server_id.is_some_and(|server| tool_servers.values().any(|owner| *owner != server))
+    {
+        return Err(AuthError::ResourceNotFound);
+    }
+    if !ctx.is_admin {
+        let server_ids: Vec<Uuid> = tool_servers
+            .values()
+            .copied()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let servers = mcp_servers::Entity::find()
+            .filter(mcp_servers::Column::Id.is_in(server_ids.iter().copied()))
+            .all(db)
+            .await
+            .map_err(|_| AuthError::DbTimeout)?;
+        let rules = load_server_rules(db, &server_ids)
+            .await
+            .map_err(|_| AuthError::DbTimeout)?;
+        let mut held = HashMap::new();
+        for server in &servers {
+            let access = resolve_server_access_with_rules(db, &ctx, server, &rules)
+                .await
+                .map_err(|_| AuthError::DbTimeout)?;
+            held.insert(server.id, access.permission);
+        }
+        for change in &changes {
+            let ceiling = held
+                .get(&tool_servers[&change.tool_id])
+                .copied()
+                .ok_or(AuthError::ResourceNotFound)?;
+            for rule in &change.rules {
+                if rule.access_type != McpAccessType::Role
+                    && !delegation_within_ceiling(ceiling, rule.permission)
+                {
+                    return Err(AuthError::PermissionDenied);
+                }
+            }
+        }
+    }
+
     let txn = db.begin().await.map_err(|_| AuthError::DbTimeout)?;
     let tools: HashMap<Uuid, mcp_tools::Model> = mcp_tools::Entity::find()
         .filter(mcp_tools::Column::Id.is_in(ids.iter().copied()))
@@ -358,31 +414,26 @@ pub async fn replace_tool_access(
         .into_iter()
         .map(|tool| (tool.id, tool))
         .collect();
+    // The ceiling was computed for the server each tool belonged to before the lock.
     if tools.len() != ids.len()
-        || server_id.is_some_and(|server| tools.values().any(|tool| tool.server_id != server))
+        || tools
+            .values()
+            .any(|tool| tool_servers.get(&tool.id) != Some(&tool.server_id))
     {
         return Err(AuthError::ResourceNotFound);
     }
-    for change in &changes {
-        let tool = &tools[&change.tool_id];
-        let server = mcp_servers::Entity::find_by_id(tool.server_id)
-            .one(&txn)
-            .await
-            .map_err(|_| AuthError::DbTimeout)?
-            .ok_or(AuthError::ResourceNotFound)?;
-        for rule in &change.rules {
-            if rule.access_type != McpAccessType::Role {
-                ensure_delegation_allowed(db, actor_id, &server, rule.permission).await?;
-            }
-        }
+    if !ctx.is_admin {
         let existing = mcp_access_policies::Entity::find()
             .filter(mcp_access_policies::Column::TargetType.eq(McpAccessTarget::Tool))
-            .filter(mcp_access_policies::Column::ToolId.eq(tool.id))
+            .filter(mcp_access_policies::Column::ToolId.is_in(ids.iter().copied()))
             .all(&txn)
             .await
             .map_err(|_| AuthError::DbTimeout)?;
-        for rule in &existing {
-            ensure_rule_removal_allowed(db, actor_id, rule).await?;
+        if existing
+            .iter()
+            .any(|rule| rule.created_by != Some(actor_id))
+        {
+            return Err(AuthError::PermissionDenied);
         }
     }
 
@@ -644,6 +695,92 @@ pub async fn resolve_role_reference(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+
+    // Runs on the disposable security-test database. With a two-connection pool, three replacements
+    // of one tool hold or wait for every connection; the lock holder must finish with its own
+    // transaction instead of waiting for a pooled connection that never frees up.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+    async fn concurrent_replacements_finish_on_an_exhausted_pool() {
+        use sea_orm::{ConnectOptions, ConnectionTrait, Database};
+        let url = std::env::var("GRENGIN_SECURITY_TEST_DATABASE_URL").expect("test database URL");
+        assert!(
+            url.contains("/grengin_security_test"),
+            "refusing a non-test database"
+        );
+        let setup = Database::connect(&url).await.expect("test database");
+        let (delegator, server, tool) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        setup
+            .execute_unprepared(&format!(
+                r#"INSERT INTO users (id, status, email, "emailVerified", "mfaEnabled", "createdAt", "updatedAt", "lastLoginAt")
+                     VALUES ('{delegator}', 'active', 'pool-{delegator}@example.invalid', true, false, now(), now(), now());
+                   INSERT INTO mcp_servers (id, name, "transportType", "connectionConfig", enabled, "toolCount", "defaultAccess", "createdAt", "updatedAt")
+                     VALUES ('{server}', 'Pool fixture', 'http', '{{}}', true, 1, 'admin_only', now(), now());
+                   INSERT INTO mcp_tools (id, "serverId", "serverName", name, "originalName", "inputSchema", parameters, enabled, "isReadOnly", "inheritAccessFromServer", "createdAt", "updatedAt")
+                     VALUES ('{tool}', '{server}', 'Pool fixture', 'pool_tool', 'pool_tool', '{{}}', '{{}}', true, false, true, now(), now());"#
+            ))
+            .await
+            .expect("fixture rows");
+
+        let mut options = ConnectOptions::new(url.clone());
+        options
+            .max_connections(2)
+            .min_connections(0)
+            .acquire_timeout(std::time::Duration::from_secs(3));
+        let pool = Database::connect(options)
+            .await
+            .expect("two-connection pool");
+        let change = || ToolAccessChange {
+            tool_id: tool,
+            inherit_from_server: Some(false),
+            rules: vec![McpAccessRuleInput {
+                access_type: McpAccessType::User,
+                role_id: None,
+                role_name: None,
+                department_id: None,
+                user_id: Some(delegator),
+                permission: McpPermission::Denied,
+                inherit_departments: None,
+            }],
+        };
+        let tasks: Vec<_> = (0..3)
+            .map(|_| {
+                let pool = pool.clone();
+                let change = change();
+                tokio::spawn(async move {
+                    replace_tool_access(&pool, delegator, None, vec![change]).await
+                })
+            })
+            .collect();
+        let mut outcomes = Vec::new();
+        for task in tasks {
+            outcomes.push(
+                tokio::time::timeout(std::time::Duration::from_secs(20), task)
+                    .await
+                    .expect("no replacement may hang")
+                    .expect("task")
+                    .map(|_| ()),
+            );
+        }
+        let kept = mcp_access_policies::Entity::find()
+            .filter(mcp_access_policies::Column::ToolId.eq(tool))
+            .all(&setup)
+            .await
+            .expect("tool rules");
+        setup
+            .execute_unprepared(&format!(
+                "DELETE FROM mcp_access_policies WHERE \"toolId\" = '{tool}'; DELETE FROM mcp_tools WHERE id = '{tool}'; \
+                 DELETE FROM mcp_servers WHERE id = '{server}'; DELETE FROM users WHERE id = '{delegator}'"
+            ))
+            .await
+            .expect("cleanup");
+        assert!(
+            outcomes.iter().all(Result::is_ok),
+            "every replacement completes: {outcomes:?}"
+        );
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].created_by, Some(delegator));
+    }
 
     // Runs on the disposable security-test database. An admin rule committed while a delegator's
     // replacement waits must be seen by the delegator's check, never deleted by it.
