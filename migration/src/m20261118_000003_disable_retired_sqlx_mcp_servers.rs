@@ -14,13 +14,6 @@ WHERE "transportType" = 'stdio' AND enabled
   AND "connectionConfig"->>'command' IN ('sqlx-mcp', '/usr/local/bin/sqlx-mcp');
 "#;
 
-// Re-enabling cannot tell which of them an admin had disabled before; it restores all of them.
-const DOWN: &str = r#"
-UPDATE mcp_servers SET enabled = true, "updatedAt" = now()
-WHERE "transportType" = 'stdio' AND NOT enabled
-  AND "connectionConfig"->>'command' IN ('sqlx-mcp', '/usr/local/bin/sqlx-mcp');
-"#;
-
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
@@ -31,11 +24,10 @@ impl MigrationTrait for Migration {
             .map(|_| ())
     }
 
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .get_connection()
-            .execute_unprepared(DOWN)
-            .await
-            .map(|_| ())
+    // Rolling back leaves these servers disabled: nothing records which of them an admin had
+    // already disabled, and re-enabling those would undo a deliberate choice. Admins re-enable
+    // the ones they want once a build that ships sqlx-mcp is back.
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        Ok(())
     }
 }

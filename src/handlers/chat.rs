@@ -17,7 +17,8 @@ use crate::{
         messages::{self, StopReason},
     },
     services::{
-        chat_helpers::resolve_web_search_enabled, message_branches::load_message_versions, search,
+        chat_helpers::resolve_web_search_enabled, chat_stream_helpers::messages_with_generating,
+        message_branches::load_message_versions, search,
     },
     state::SharedState,
 };
@@ -370,19 +371,7 @@ pub async fn get_chat_by_id(
         })?
         .ok_or(AppError::DbNotFound)?;
 
-    // Read before the messages: a reply leaves this set only after its final text is saved, so one
-    // that is not in it here is already complete in the rows read below.
-    let generating = app_state.generating_replies(chat_id).await;
-    let messages_models = messages::Entity::find()
-        .filter(messages::Column::ConversationId.eq(chat_id))
-        .filter(messages::Column::Deleted.eq(false))
-        .order_by_asc(messages::Column::CreatedAt)
-        .all(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("{}", e);
-            AppError::DbTimeout
-        })?;
+    let (messages_models, generating) = messages_with_generating(&app_state, chat_id).await?;
 
     let message_count = messages_models.len() as u64;
     let versions = load_message_versions(&app_state.database, chat_id).await?;
