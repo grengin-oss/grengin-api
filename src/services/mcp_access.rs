@@ -4,12 +4,15 @@
 use std::collections::{HashMap, HashSet};
 
 use sea_orm::sea_query::Expr;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
+    QueryOrder, QuerySelect, Set, TransactionTrait,
+};
 use uuid::Uuid;
 
 use crate::{
     auth::{error::AuthError, permissions::PERMISSION_MCP_ADMIN},
-    dto::mcp::McpResolvedVia,
+    dto::mcp::{McpAccessRuleInput, McpResolvedVia},
     error::AppError,
     models::{
         departments, mcp_access_policies,
@@ -50,8 +53,8 @@ pub struct McpAccessResolver<'a> {
 }
 
 impl<'a> McpAccessResolver<'a> {
-    pub async fn load(
-        db: &DatabaseConnection,
+    pub async fn load<C: ConnectionTrait>(
+        db: &C,
         context: &'a McpAccessContext,
         rules: &[mcp_access_policies::Model],
     ) -> Result<Self, AppError> {
@@ -137,8 +140,8 @@ impl<'a> McpAccessResolver<'a> {
     }
 }
 
-pub async fn build_access_context(
-    db: &sea_orm::DatabaseConnection,
+pub async fn build_access_context<C: ConnectionTrait>(
+    db: &C,
     user_id: Uuid,
 ) -> Result<McpAccessContext, AppError> {
     let user = users::Entity::find_by_id(user_id)
@@ -309,8 +312,162 @@ pub async fn ensure_rule_removal_allowed(
     }
 }
 
-pub async fn load_server_rules(
-    db: &sea_orm::DatabaseConnection,
+pub struct ToolAccessChange {
+    pub tool_id: Uuid,
+    pub inherit_from_server: Option<bool>,
+    pub rules: Vec<McpAccessRuleInput>,
+}
+
+// Tool rules follow the server rules' guards: a delegator cannot grant above its own access to the
+// server (turning inheritance off must not lift that ceiling), and only an admin or a rule's creator
+// may remove a rule. Every change locks its tool rows first and is authorized and applied in that one
+// transaction, so a rule committed concurrently is either seen by the check or written afterwards.
+// With server_id, every tool must belong to that server; any unknown tool rejects the whole request.
+pub async fn replace_tool_access(
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    server_id: Option<Uuid>,
+    changes: Vec<ToolAccessChange>,
+) -> Result<Vec<(mcp_tools::Model, bool)>, AuthError> {
+    let mut ids: Vec<Uuid> = changes.iter().map(|change| change.tool_id).collect();
+    ids.sort();
+    ids.dedup();
+    if ids.len() != changes.len() {
+        return Err(AuthError::InvalidRequest { field: "tools" });
+    }
+    let mut role_ids = Vec::with_capacity(changes.len());
+    for change in &changes {
+        let mut resolved = Vec::with_capacity(change.rules.len());
+        for rule in &change.rules {
+            let (role_id, _) =
+                resolve_role_reference(db, rule.access_type, rule.role_id, rule.role_name.clone())
+                    .await?;
+            resolved.push(role_id);
+        }
+        role_ids.push(resolved);
+    }
+
+    let txn = db.begin().await.map_err(|_| AuthError::DbTimeout)?;
+    let tools: HashMap<Uuid, mcp_tools::Model> = mcp_tools::Entity::find()
+        .filter(mcp_tools::Column::Id.is_in(ids.iter().copied()))
+        .order_by_asc(mcp_tools::Column::Id)
+        .lock_exclusive()
+        .all(&txn)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?
+        .into_iter()
+        .map(|tool| (tool.id, tool))
+        .collect();
+    if tools.len() != ids.len()
+        || server_id.is_some_and(|server| tools.values().any(|tool| tool.server_id != server))
+    {
+        return Err(AuthError::ResourceNotFound);
+    }
+    // Read permissions after any lock wait, through this connection: pre-reading permits revoked
+    // grants, and returning to the pool while holding locks can exhaust every connection.
+    let ctx = build_access_context(&txn, actor_id)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
+    if !ctx.is_admin {
+        let server_ids: Vec<_> = tools
+            .values()
+            .map(|tool| tool.server_id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let servers = mcp_servers::Entity::find()
+            .filter(mcp_servers::Column::Id.is_in(server_ids.iter().copied()))
+            .all(&txn)
+            .await
+            .map_err(|_| AuthError::DbTimeout)?;
+        let rules = load_server_rules(&txn, &server_ids)
+            .await
+            .map_err(|_| AuthError::DbTimeout)?;
+        let mut held = HashMap::new();
+        for server in &servers {
+            let server_rules: Vec<_> = rules
+                .iter()
+                .filter(|rule| rule.server_id == Some(server.id))
+                .cloned()
+                .collect();
+            let access = resolve_server_access_with_rules(&txn, &ctx, server, &server_rules)
+                .await
+                .map_err(|_| AuthError::DbTimeout)?;
+            held.insert(server.id, access.permission);
+        }
+        for change in &changes {
+            let ceiling = held
+                .get(&tools[&change.tool_id].server_id)
+                .copied()
+                .ok_or(AuthError::ResourceNotFound)?;
+            if change.rules.iter().any(|rule| {
+                rule.access_type == McpAccessType::Role
+                    || !delegation_within_ceiling(ceiling, rule.permission)
+            }) {
+                return Err(AuthError::PermissionDenied);
+            }
+        }
+        let existing = mcp_access_policies::Entity::find()
+            .filter(mcp_access_policies::Column::TargetType.eq(McpAccessTarget::Tool))
+            .filter(mcp_access_policies::Column::ToolId.is_in(ids.iter().copied()))
+            .all(&txn)
+            .await
+            .map_err(|_| AuthError::DbTimeout)?;
+        if existing
+            .iter()
+            .any(|rule| rule.created_by != Some(actor_id))
+        {
+            return Err(AuthError::PermissionDenied);
+        }
+    }
+
+    let mut applied = Vec::with_capacity(changes.len());
+    for (change, role_ids) in changes.into_iter().zip(role_ids) {
+        let tool = tools[&change.tool_id].clone();
+        let inherit = change
+            .inherit_from_server
+            .unwrap_or(tool.inherit_access_from_server);
+        let mut active: mcp_tools::ActiveModel = tool.clone().into();
+        active.inherit_access_from_server = Set(inherit);
+        active
+            .update(&txn)
+            .await
+            .map_err(|_| AuthError::DbTimeout)?;
+        mcp_access_policies::Entity::delete_many()
+            .filter(mcp_access_policies::Column::TargetType.eq(McpAccessTarget::Tool))
+            .filter(mcp_access_policies::Column::ToolId.eq(tool.id))
+            .exec(&txn)
+            .await
+            .map_err(|_| AuthError::DbTimeout)?;
+        for (rule, role_id) in change.rules.iter().zip(role_ids) {
+            mcp_access_policies::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                target_type: Set(McpAccessTarget::Tool),
+                server_id: Set(Some(tool.server_id)),
+                tool_id: Set(Some(tool.id)),
+                access_type: Set(rule.access_type),
+                permission: Set(rule.permission),
+                role_id: Set(role_id),
+                role_name: Set(None),
+                department_id: Set(rule.department_id),
+                user_id: Set(rule.user_id),
+                inherit_departments: Set(rule.inherit_departments.unwrap_or(true)),
+                inherit_from_server: Set(None),
+                created_at: Set(chrono::Utc::now()),
+                created_by: Set(Some(actor_id)),
+            }
+            .insert(&txn)
+            .await
+            .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
+        }
+        applied.push((tool, inherit));
+    }
+    txn.commit().await.map_err(|_| AuthError::DbTimeout)?;
+    Ok(applied)
+}
+
+pub async fn load_server_rules<C: ConnectionTrait>(
+    db: &C,
     server_ids: &[Uuid],
 ) -> Result<Vec<mcp_access_policies::Model>, AppError> {
     if server_ids.is_empty() {
@@ -452,8 +609,8 @@ fn resolve_access_from_rules(
     None
 }
 
-pub async fn resolve_server_access_with_rules(
-    db: &sea_orm::DatabaseConnection,
+pub async fn resolve_server_access_with_rules<C: ConnectionTrait>(
+    db: &C,
     ctx: &McpAccessContext,
     server: &mcp_servers::Model,
     rules: &[mcp_access_policies::Model],
@@ -522,6 +679,369 @@ pub async fn resolve_role_reference(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+
+    enum QueuedRevocation {
+        ServerAccess,
+        AdminRole,
+    }
+
+    async fn assert_queued_revocation_is_respected(revocation: QueuedRevocation) {
+        use sea_orm::{ConnectOptions, Database, Statement};
+        let url = std::env::var("GRENGIN_SECURITY_TEST_DATABASE_URL").expect("test database URL");
+        assert!(
+            url.contains("/grengin_security_test"),
+            "refusing a non-test database"
+        );
+        let db = Database::connect(&url).await.expect("fixture database");
+        let (actor, creator, server, tool) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        db.execute_unprepared(&format!(
+            r#"INSERT INTO users (id, status, email, "emailVerified", "mfaEnabled", "createdAt", "updatedAt", "lastLoginAt")
+                 VALUES ('{actor}', 'active', 'queued-{actor}@example.invalid', true, false, now(), now(), now()),
+                        ('{creator}', 'active', 'queued-{creator}@example.invalid', true, false, now(), now(), now());
+               INSERT INTO mcp_servers (id, name, "transportType", "connectionConfig", enabled, "toolCount", "defaultAccess", "createdAt", "updatedAt")
+                 VALUES ('{server}', 'Queued revocation fixture', 'http', '{{}}', true, 1, 'all_users', now(), now());
+               INSERT INTO mcp_tools (id, "serverId", "serverName", name, "originalName", "inputSchema", parameters, enabled, "isReadOnly", "inheritAccessFromServer", "createdAt", "updatedAt")
+                 VALUES ('{tool}', '{server}', 'Queued revocation fixture', 'queued_tool', 'queued_tool', '{{}}', '{{}}', true, false, true, now(), now());"#
+        )).await.expect("fixture rows");
+        if matches!(revocation, QueuedRevocation::AdminRole) {
+            let role = roles::Entity::find()
+                .filter(roles::Column::Name.eq("Super Admin"))
+                .one(&db)
+                .await
+                .unwrap()
+                .expect("seeded Super Admin role");
+            db.execute_unprepared(&format!(
+                r#"INSERT INTO user_role_assignments (id, "userId", "roleId", "scopeDepartmentId", "assignedBy", "createdAt", "updatedAt")
+                     VALUES ('{}', '{actor}', '{}', NULL, '{creator}', now(), now());
+                   INSERT INTO mcp_access_policies (id, "targetType", "serverId", "toolId", "accessType", permission, "userId", "inheritDepartments", "createdAt", "createdBy")
+                     VALUES ('{}', 'tool', '{server}', '{tool}', 'user', 'read_only', '{creator}', true, now(), '{creator}');"#,
+                Uuid::new_v4(), role.id, Uuid::new_v4()
+            )).await.expect("admin role and protected rule");
+        }
+        let initial_context = build_access_context(&db, actor)
+            .await
+            .expect("initial access context");
+        assert_eq!(
+            initial_context.is_admin,
+            matches!(revocation, QueuedRevocation::AdminRole)
+        );
+        let holder = db.begin().await.expect("holder transaction");
+        holder
+            .execute_unprepared(&format!(
+                "SELECT id FROM mcp_tools WHERE id = '{tool}' FOR UPDATE"
+            ))
+            .await
+            .expect("hold tool");
+        let mut options = ConnectOptions::new(url);
+        options
+            .max_connections(1)
+            .min_connections(0)
+            .sqlx_logging(false);
+        let pool = Database::connect(options)
+            .await
+            .expect("single-connection pool");
+        let pid: i32 = pool
+            .query_one(Statement::from_string(
+                pool.get_database_backend(),
+                "SELECT pg_backend_pid() AS pid".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get("", "pid")
+            .unwrap();
+        let rules = if matches!(revocation, QueuedRevocation::ServerAccess) {
+            vec![McpAccessRuleInput {
+                access_type: McpAccessType::User,
+                role_id: None,
+                role_name: None,
+                department_id: None,
+                user_id: Some(actor),
+                permission: McpPermission::Full,
+                inherit_departments: None,
+            }]
+        } else {
+            Vec::new()
+        };
+        let replacing = tokio::spawn(async move {
+            replace_tool_access(
+                &pool,
+                actor,
+                None,
+                vec![ToolAccessChange {
+                    tool_id: tool,
+                    inherit_from_server: Some(false),
+                    rules,
+                }],
+            )
+            .await
+        });
+        let mut waiting = false;
+        for _ in 0..250 {
+            // PostgreSQL's lock-wait state makes this interleaving independent of task scheduling.
+            let row = db.query_one(Statement::from_sql_and_values(db.get_database_backend(), "SELECT COALESCE(wait_event_type = 'Lock', false) AS waiting FROM pg_stat_activity WHERE pid = $1", [pid.into()])).await.unwrap().unwrap();
+            if row.try_get::<bool>("", "waiting").unwrap() {
+                waiting = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(waiting, "replacement must reach the blocked tool lock");
+        match revocation {
+            QueuedRevocation::ServerAccess => {
+                db.execute_unprepared(&format!(
+                    "UPDATE mcp_servers SET \"defaultAccess\" = 'admin_only' WHERE id = '{server}'"
+                ))
+                .await
+                .expect("revoke server access");
+            }
+            QueuedRevocation::AdminRole => {
+                db.execute_unprepared(&format!(
+                    "DELETE FROM user_role_assignments WHERE \"userId\" = '{actor}'"
+                ))
+                .await
+                .expect("revoke admin role");
+            }
+        }
+        holder.commit().await.expect("release tool lock");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), replacing)
+            .await
+            .expect("no pool stall")
+            .expect("replacement task");
+        let kept = mcp_access_policies::Entity::find()
+            .filter(mcp_access_policies::Column::ToolId.eq(tool))
+            .all(&db)
+            .await
+            .unwrap();
+        let unchanged = mcp_tools::Entity::find_by_id(tool)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .inherit_access_from_server;
+        db.execute_unprepared(&format!(
+            "DELETE FROM mcp_access_policies WHERE \"toolId\" = '{tool}'; DELETE FROM mcp_tools WHERE id = '{tool}'; DELETE FROM mcp_servers WHERE id = '{server}'; DELETE FROM users WHERE id IN ('{actor}', '{creator}')"
+        )).await.expect("cleanup");
+        assert!(
+            matches!(result, Err(AuthError::PermissionDenied)),
+            "{:?}",
+            result.map(|_| ())
+        );
+        assert!(
+            unchanged,
+            "a refused replacement must not disable inheritance"
+        );
+        match revocation {
+            QueuedRevocation::ServerAccess => {
+                assert!(kept.is_empty(), "a revoked delegator cannot add a grant")
+            }
+            QueuedRevocation::AdminRole => {
+                assert_eq!(kept.len(), 1, "the protected rule must survive");
+                assert_eq!(kept[0].created_by, Some(creator));
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+    async fn server_access_revoked_while_waiting_cannot_be_delegated() {
+        assert_queued_revocation_is_respected(QueuedRevocation::ServerAccess).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+    async fn admin_revoked_while_waiting_cannot_remove_another_creators_rules() {
+        assert_queued_revocation_is_respected(QueuedRevocation::AdminRole).await;
+    }
+
+    // Runs on the disposable security-test database. With a two-connection pool, three replacements
+    // of one tool hold or wait for every connection; the lock holder must finish with its own
+    // transaction instead of waiting for a pooled connection that never frees up.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+    async fn concurrent_replacements_finish_on_an_exhausted_pool() {
+        use sea_orm::{ConnectOptions, ConnectionTrait, Database};
+        let url = std::env::var("GRENGIN_SECURITY_TEST_DATABASE_URL").expect("test database URL");
+        assert!(
+            url.contains("/grengin_security_test"),
+            "refusing a non-test database"
+        );
+        let setup = Database::connect(&url).await.expect("test database");
+        let (delegator, server, tool) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        setup
+            .execute_unprepared(&format!(
+                r#"INSERT INTO users (id, status, email, "emailVerified", "mfaEnabled", "createdAt", "updatedAt", "lastLoginAt")
+                     VALUES ('{delegator}', 'active', 'pool-{delegator}@example.invalid', true, false, now(), now(), now());
+                   INSERT INTO mcp_servers (id, name, "transportType", "connectionConfig", enabled, "toolCount", "defaultAccess", "createdAt", "updatedAt")
+                     VALUES ('{server}', 'Pool fixture', 'http', '{{}}', true, 1, 'admin_only', now(), now());
+                   INSERT INTO mcp_tools (id, "serverId", "serverName", name, "originalName", "inputSchema", parameters, enabled, "isReadOnly", "inheritAccessFromServer", "createdAt", "updatedAt")
+                     VALUES ('{tool}', '{server}', 'Pool fixture', 'pool_tool', 'pool_tool', '{{}}', '{{}}', true, false, true, now(), now());"#
+            ))
+            .await
+            .expect("fixture rows");
+
+        let mut options = ConnectOptions::new(url.clone());
+        options
+            .max_connections(2)
+            .min_connections(0)
+            .acquire_timeout(std::time::Duration::from_secs(3));
+        let pool = Database::connect(options)
+            .await
+            .expect("two-connection pool");
+        let change = || ToolAccessChange {
+            tool_id: tool,
+            inherit_from_server: Some(false),
+            rules: vec![McpAccessRuleInput {
+                access_type: McpAccessType::User,
+                role_id: None,
+                role_name: None,
+                department_id: None,
+                user_id: Some(delegator),
+                permission: McpPermission::Denied,
+                inherit_departments: None,
+            }],
+        };
+        let tasks: Vec<_> = (0..3)
+            .map(|_| {
+                let pool = pool.clone();
+                let change = change();
+                tokio::spawn(async move {
+                    replace_tool_access(&pool, delegator, None, vec![change]).await
+                })
+            })
+            .collect();
+        let mut outcomes = Vec::new();
+        for task in tasks {
+            outcomes.push(
+                tokio::time::timeout(std::time::Duration::from_secs(20), task)
+                    .await
+                    .expect("no replacement may hang")
+                    .expect("task")
+                    .map(|_| ()),
+            );
+        }
+        let kept = mcp_access_policies::Entity::find()
+            .filter(mcp_access_policies::Column::ToolId.eq(tool))
+            .all(&setup)
+            .await
+            .expect("tool rules");
+        setup
+            .execute_unprepared(&format!(
+                "DELETE FROM mcp_access_policies WHERE \"toolId\" = '{tool}'; DELETE FROM mcp_tools WHERE id = '{tool}'; \
+                 DELETE FROM mcp_servers WHERE id = '{server}'; DELETE FROM users WHERE id = '{delegator}'"
+            ))
+            .await
+            .expect("cleanup");
+        assert!(
+            outcomes.iter().all(Result::is_ok),
+            "every replacement completes: {outcomes:?}"
+        );
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].created_by, Some(delegator));
+    }
+
+    // Runs on the disposable security-test database. An admin rule committed while a delegator's
+    // replacement waits must be seen by the delegator's check, never deleted by it.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+    async fn a_rule_committed_while_a_delegator_waits_is_not_deleted() {
+        use sea_orm::{ConnectionTrait, Database, TransactionTrait};
+        let url = std::env::var("GRENGIN_SECURITY_TEST_DATABASE_URL").expect("test database URL");
+        assert!(
+            url.contains("/grengin_security_test"),
+            "refusing a non-test database"
+        );
+        let db = Database::connect(&url).await.expect("test database");
+        let (delegator, creator, server, tool) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        db.execute_unprepared(&format!(
+            r#"INSERT INTO users (id, status, email, "emailVerified", "mfaEnabled", "createdAt", "updatedAt", "lastLoginAt")
+                 VALUES ('{delegator}', 'active', 'delegator-{delegator}@example.invalid', true, false, now(), now(), now()),
+                        ('{creator}', 'active', 'creator-{creator}@example.invalid', true, false, now(), now(), now());
+               INSERT INTO mcp_servers (id, name, "transportType", "connectionConfig", enabled, "toolCount", "defaultAccess", "createdAt", "updatedAt")
+                 VALUES ('{server}', 'Race fixture', 'http', '{{}}', true, 1, 'admin_only', now(), now());
+               INSERT INTO mcp_tools (id, "serverId", "serverName", name, "originalName", "inputSchema", parameters, enabled, "isReadOnly", "inheritAccessFromServer", "createdAt", "updatedAt")
+                 VALUES ('{tool}', '{server}', 'Race fixture', 'race_tool', 'race_tool', '{{}}', '{{}}', true, false, true, now(), now());"#
+        ))
+        .await
+        .expect("fixture rows");
+
+        let holder_db = Database::connect(&url).await.expect("second connection");
+        let holder = holder_db.begin().await.expect("holder transaction");
+        holder
+            .execute_unprepared(&format!(
+                "SELECT id FROM mcp_tools WHERE id = '{tool}' FOR UPDATE"
+            ))
+            .await
+            .expect("hold the tool row");
+        let replacing = {
+            let db = db.clone();
+            tokio::spawn(async move {
+                replace_tool_access(
+                    &db,
+                    delegator,
+                    None,
+                    vec![ToolAccessChange {
+                        tool_id: tool,
+                        inherit_from_server: Some(false),
+                        rules: vec![McpAccessRuleInput {
+                            access_type: McpAccessType::User,
+                            role_id: None,
+                            role_name: None,
+                            department_id: None,
+                            user_id: Some(delegator),
+                            permission: McpPermission::Denied,
+                            inherit_departments: None,
+                        }],
+                    }],
+                )
+                .await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !replacing.is_finished(),
+            "the replacement waits for the tool lock"
+        );
+        holder
+            .execute_unprepared(&format!(
+                r#"INSERT INTO mcp_access_policies (id, "targetType", "serverId", "toolId", "accessType", permission, "userId", "inheritDepartments", "createdAt", "createdBy")
+                     VALUES ('{}', 'tool', '{server}', '{tool}', 'user', 'read_only', '{creator}', true, now(), '{creator}')"#,
+                Uuid::new_v4()
+            ))
+            .await
+            .expect("protected rule");
+        holder.commit().await.expect("commit the protected rule");
+
+        let outcome = replacing.await.expect("replacement task");
+        let kept = mcp_access_policies::Entity::find()
+            .filter(mcp_access_policies::Column::ToolId.eq(tool))
+            .all(&db)
+            .await
+            .expect("tool rules");
+        db.execute_unprepared(&format!(
+            "DELETE FROM mcp_access_policies WHERE \"toolId\" = '{tool}'; DELETE FROM mcp_tools WHERE id = '{tool}'; \
+             DELETE FROM mcp_servers WHERE id = '{server}'; DELETE FROM users WHERE id IN ('{delegator}', '{creator}')"
+        ))
+        .await
+        .expect("cleanup");
+        assert!(
+            matches!(outcome, Err(AuthError::PermissionDenied)),
+            "{:?}",
+            outcome.map(|_| ())
+        );
+        assert_eq!(kept.len(), 1, "the protected rule must survive");
+        assert_eq!(kept[0].created_by, Some(creator));
+    }
 
     fn context() -> McpAccessContext {
         McpAccessContext {

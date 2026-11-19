@@ -8,10 +8,13 @@ pub mod http_client;
 pub mod mcp_client;
 #[path = "../../src/services/mcp_plugin_config.rs"]
 pub mod mcp_plugin_config;
+#[path = "../../src/services/safe_egress.rs"]
+pub mod safe_egress;
 
 pub mod services {
     pub use super::http_client;
     pub use super::mcp_plugin_config as mcp_plugin_helpers;
+    pub use super::safe_egress;
 }
 
 pub mod models {

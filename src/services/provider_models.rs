@@ -46,6 +46,13 @@ pub fn is_chat_selectable_model(model: &ModelInfo) -> bool {
     model.model_type != ModelType::TextEmbedder
 }
 
+pub fn native_web_search_support(model: &ProviderModel) -> Option<bool> {
+    model
+        .metadata
+        .get("supportsWebSearch")
+        .map(|value| value.as_bool().unwrap_or(false))
+}
+
 pub fn to_model_info(provider_key: &str, model: ProviderModel) -> ModelInfo {
     let chat = model.capabilities.chat.as_ref();
     let resolved_model_type = model_type(&model);
@@ -108,6 +115,24 @@ mod tests {
     use llm_plugin::{ModelId, ProviderCapabilities, ProviderModel};
 
     use super::*;
+
+    #[test]
+    fn native_search_distinguishes_a_missing_flag_from_an_explicit_denial() {
+        let mut model = ProviderModel {
+            id: ModelId::new("fixture"),
+            name: "Fixture".into(),
+            model_type: ProviderModelType::TextGenerator,
+            capabilities: ProviderCapabilities::default(),
+            metadata: serde_json::json!({}),
+        };
+        assert_eq!(native_web_search_support(&model), None);
+        for enabled in [true, false] {
+            model.metadata = serde_json::json!({"supportsWebSearch": enabled});
+            assert_eq!(native_web_search_support(&model), Some(enabled));
+        }
+        model.metadata = serde_json::json!({"supportsWebSearch": "false"});
+        assert_eq!(native_web_search_support(&model), Some(false));
+    }
 
     fn model_info(model_type: ModelType) -> ModelInfo {
         ModelInfo {

@@ -246,6 +246,29 @@ try {
   check('a reply completed after disconnect has no stop reason',(await reply()).stop_reason??null,null);
   check('a finished reply in another chat view is not generating',(await expect('GET',`/chat/${chat}`,undefined,200,owner)).json().messages.every(message=>message.generating===false));
 
+  // A delegator cannot use tool-level rules to exceed its own server access or to wipe others' rules.
+  const delegatorId=await newUser(), delegator=token(delegatorId);
+  const delegateRole=(await expect('POST','/admin/roles',{name:`Staging delegate ${randomUUID()}`,permissions:['mcp_servers:delegate']},201)).json();
+  await expect('POST',`/admin/users/${delegatorId}/roles`,{role_id:delegateRole.id},201);
+  const guardedServer=randomUUID(), guardedTool=randomUUID();
+  sql(`INSERT INTO mcp_servers (id,name,"transportType","connectionConfig",enabled,"toolCount","defaultAccess","createdAt","updatedAt") VALUES (${q(guardedServer)},'Staging guarded','http','{}'::jsonb,true,1,'admin_only',now(),now())`);
+  sql(`INSERT INTO mcp_tools (id,"serverId","serverName",name,"originalName","inputSchema",parameters,enabled,"isReadOnly","inheritAccessFromServer","createdAt","updatedAt") VALUES (${q(guardedTool)},${q(guardedServer)},'Staging guarded','guarded_tool','guarded_tool','{}'::jsonb,'{}'::jsonb,true,false,true,now(),now())`);
+  const selfGrant={inherit_from_server:false,rules:[{access_type:'user',user_id:delegatorId,permission:'full'}]};
+  await expect('PUT',`/admin/mcp-tools/${guardedTool}/access`,selfGrant,403,delegator);
+  await expect('PUT',`/admin/mcp-servers/${guardedServer}/tools/access`,{tools:[{tool_id:guardedTool,...selfGrant}]},403,delegator);
+  check('a delegator cannot grant itself a tool on a server it is denied',
+    [sql(`SELECT count(*) FROM mcp_access_policies WHERE "toolId"=${q(guardedTool)}`),sql(`SELECT "inheritAccessFromServer" FROM mcp_tools WHERE id=${q(guardedTool)}`)],['0','t']);
+  await expect('PUT',`/admin/mcp-tools/${guardedTool}/access`,{inherit_from_server:false,rules:[{access_type:'user',user_id:viewerId,permission:'read_only'}]},200);
+  check('an admin tool rule records its creator',sql(`SELECT "createdBy" FROM mcp_access_policies WHERE "toolId"=${q(guardedTool)}`),adminId);
+  await expect('PUT',`/admin/mcp-tools/${guardedTool}/access`,{inherit_from_server:false,rules:[{access_type:'user',user_id:delegatorId,permission:'denied'}]},403,delegator);
+  check('a delegator cannot replace rules it did not create',
+    sql(`SELECT "userId" || ':' || permission FROM mcp_access_policies WHERE "toolId"=${q(guardedTool)}`),`${viewerId}:read_only`);
+  await expect('PUT',`/admin/mcp-tools/${randomUUID()}/access`,{rules:[]},404);
+  check('an unknown tool is not found instead of silently changing policies',true);
+  await expect('PUT',`/admin/mcp-servers/${guardedServer}/tools/access`,{tools:[{tool_id:guardedTool,inherit_from_server:true,rules:[]},{tool_id:randomUUID(),rules:[]}]},404);
+  check('a bulk update with an unknown tool changes nothing',
+    [sql(`SELECT count(*) FROM mcp_access_policies WHERE "toolId"=${q(guardedTool)}`),sql(`SELECT "inheritAccessFromServer" FROM mcp_tools WHERE id=${q(guardedTool)}`)],['1','f']);
+
   const serverId=randomUUID();
   const oauth={auth_url:`http://127.0.0.1:${provider.address().port}/authorize`,token_url:`http://127.0.0.1:${provider.address().port}/token`,redirect_url:'http://localhost:5173/mcp/oauth/callback',scopes:[],flow:'oauth2',use_pkce:true};
   sql(`INSERT INTO mcp_servers (id,name,"transportType","connectionConfig","clientId",enabled,"toolCount","defaultAccess","createdAt","updatedAt") VALUES (${q(serverId)},'Staging OAuth','http',${j({oauth})},'staging-client',true,0,'all_users',now(),now())`);
