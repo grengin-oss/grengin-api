@@ -560,7 +560,7 @@ pub async fn handle_chat_stream(
         }
     }
 
-    let plugin_model_info = match crate::services::provider_models::find_provider_model(
+    let plugin_model = match crate::services::provider_models::find_provider_model(
         provider_config.as_ref(),
         &provider_key,
         &app_state.live_models_cache,
@@ -568,10 +568,7 @@ pub async fn handle_chat_stream(
     )
     .await
     {
-        Ok(Some(model)) => Some(crate::services::provider_models::to_model_info(
-            &provider_key,
-            model,
-        )),
+        Ok(Some(model)) => Some(model),
         Ok(None) => None,
         Err(error) => {
             eprintln!(
@@ -583,9 +580,11 @@ pub async fn handle_chat_stream(
     };
     let plugin_is_image_only =
         provider_config.images().is_some() && provider_config.chat().is_none();
-    let plugin_model_supports_web_search = plugin_model_info
+    let plugin_model_supports_web_search = plugin_model
         .as_ref()
-        .is_some_and(|model| model.supports_web_search);
+        .and_then(crate::services::provider_models::native_web_search_support);
+    let plugin_model_info = plugin_model
+        .map(|model| crate::services::provider_models::to_model_info(&provider_key, model));
     let catalog_model =
         match get_model_info_cached(&app_state.req_client, &provider_key, &model_name).await {
             Ok(model) => model,
@@ -596,7 +595,7 @@ pub async fn handle_chat_stream(
         };
     let catalog_model_supports_web_search = catalog_model
         .as_ref()
-        .is_some_and(|model| model.supports_web_search);
+        .map(|model| model.supports_web_search);
     let (
         input_rate,
         output_rate,
@@ -654,7 +653,6 @@ pub async fn handle_chat_stream(
         });
     }
     let model_supports_web_search = supports_native_web_search(
-        &provider_key,
         plugin_model_supports_web_search,
         catalog_model_supports_web_search,
     );
