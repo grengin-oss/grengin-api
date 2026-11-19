@@ -16,10 +16,10 @@ export PYTHONDONTWRITEBYTECODE=1
 export GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR="$catalog/master-data/connector-plugins"
 cd "$root"
 cargo test --locked -p llm-plugin -j1
-cargo test --locked -p connector-server-plugin -j1 -- --test-threads=1
-cargo test --locked -p connector-server-plugin --test providers --test business -j1 -- --ignored --test-threads=1
-cargo build --locked -p connector-server-plugin -p llm-plugin -j1
-cargo clippy --locked -p connector-server-plugin -p llm-plugin --all-targets --no-deps -j1
+cargo test --locked -p connector-plugin -j1 -- --test-threads=1
+cargo test --locked -p connector-plugin --test providers --test business -j1 -- --ignored --test-threads=1
+cargo build --locked -p connector-plugin -p llm-plugin -j1
+cargo clippy --locked -p connector-plugin -p llm-plugin --all-targets --no-deps -j1
 cd "$catalog"
 python3 -m unittest discover -s scripts/tests -q
 python3 scripts/connector_plugins_catalog.py

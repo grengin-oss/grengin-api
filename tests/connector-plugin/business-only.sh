@@ -15,5 +15,5 @@ cd "$root"
 export CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 export PYTHONDONTWRITEBYTECODE=1
 export GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR="$catalog/master-data/connector-plugins"
-cargo test --locked -p connector-server-plugin --test business -j 1 -- --ignored --test-threads=1
+cargo test --locked -p connector-plugin --test business -j 1 -- --ignored --test-threads=1
 python3 -m unittest discover -s "$catalog/scripts/tests" -p test_business_connectors.py -v

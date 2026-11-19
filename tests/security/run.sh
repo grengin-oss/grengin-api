@@ -94,5 +94,4 @@ cargo test --locked --workspace --jobs 2 refresh_cannot_undo_disconnect_reauthor
 docker exec "$container" createdb -U local grengin_upload_test
 GRENGIN_UPLOAD_TEST_DATABASE_URL="${DATABASE_URL%/*}/grengin_upload_test" \
   cargo test --locked --workspace --jobs 2 concurrent_uploads_keep_distinct_rows_and_share_bytes -- --ignored --test-threads=1
-cargo test --locked -p sqlx-mcp --jobs 2 -- --ignored --test-threads=1
 printf '\nSecurity regressions passed; disposable server and database will be removed.\n'

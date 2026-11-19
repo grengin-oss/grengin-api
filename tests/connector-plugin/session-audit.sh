@@ -18,7 +18,7 @@ bash tests/connector-plugin/console.sh check
 systemd-run --user --quiet --wait --pipe -p MemoryMax=2G -p MemorySwapMax=0 \
   --setenv="PATH=$PATH" --setenv=CARGO_BUILD_JOBS=1 --setenv=CARGO_INCREMENTAL=0 \
   --setenv=CARGO_PROFILE_DEV_DEBUG=0 --working-directory="$root" \
-  cargo clippy --locked -p connector-server-plugin --all-targets --no-deps -j 1
+  cargo clippy --locked -p connector-plugin --all-targets --no-deps -j 1
 systemd-run --user --quiet --wait --pipe -p MemoryMax=256M -p MemorySwapMax=0 \
   --setenv="PATH=$PATH" --working-directory="$catalog" \
   bash scripts/test_native_expansion.sh

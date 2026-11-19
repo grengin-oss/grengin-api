@@ -33,7 +33,7 @@ if [[ "$mode" == protocols ]]; then
     --setenv=CARGO_PROFILE_TEST_DEBUG=0 --setenv=CARGO_PROFILE_DEV_DEBUG=0 \
     --setenv="MOCK_OAUTH2_BASE_URL=$MOCK_OAUTH2_BASE_URL" \
     --setenv="GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR=$GRENGIN_CONNECTOR_PLUGIN_CATALOG_DIR" \
-    --working-directory="$root" cargo test --locked -p connector-server-plugin --test mcp_transport navikt_exchanges -- --ignored --nocapture
+    --working-directory="$root" cargo test --locked -p connector-plugin --test mcp_transport navikt_exchanges -- --ignored --nocapture
 else
   bash "$root/tests/connector-plugin/http.sh" oauth-navikt
 fi

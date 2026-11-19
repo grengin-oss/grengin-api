@@ -10,8 +10,8 @@ cd "$catalog"
 python3 scripts/calendar_identifier_fix.py
 python3 -m unittest discover -s scripts/tests -p test_calendar_identifier_fix.py -v
 cd "$root"
-cargo test --locked -p connector-server-plugin --test providers google_calendar_opaque_ids -j2 -- --ignored
+cargo test --locked -p connector-plugin --test providers google_calendar_opaque_ids -j2 -- --ignored
 if [[ ${1:-} == --live-read ]]; then
-  cargo build --locked -p connector-server-plugin --example live_probe -j2
+  cargo build --locked -p connector-plugin --example live_probe -j2
   node tests/connector-plugin/calendar-id-live.mjs
 fi

@@ -4,7 +4,7 @@
 use crate::models::mcp_servers::McpTransportType;
 use crate::services::http_client::HttpTimeouts;
 use chrono::{DateTime, Duration, Utc};
-use connector_server_plugin::{
+use connector_plugin::{
     CallContext, CompiledConnector, SessionCache, SessionCachePolicy, SessionLease,
 };
 use oauth2::{
@@ -114,7 +114,7 @@ pub struct McpTokenResponsePaths {
     pub scope: Option<String>,
     pub success: Option<String>,
     #[serde(default)]
-    pub expiry_source: connector_server_plugin::OAuthExpirySource,
+    pub expiry_source: connector_plugin::OAuthExpirySource,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -815,7 +815,6 @@ fn rmcp_args_from_value(args: Value) -> Result<Option<JsonObject>, McpClientErro
 }
 
 const STDIO_COMMANDS_ENV: &str = "MCP_STDIO_COMMANDS";
-const DEFAULT_STDIO_COMMANDS: &str = "sqlx-mcp,/usr/local/bin/sqlx-mcp";
 const MCP_SECRET_ENV_PREFIX: &str = "MCP_SECRET_";
 const STDIO_INHERITED_ENV: [&str; 4] = ["PATH", "HOME", "LANG", "RUST_LOG"];
 
@@ -826,10 +825,10 @@ fn stdio_command_allowed(command: &str, allowlist: &str) -> bool {
         .any(|allowed| !allowed.is_empty() && allowed == command)
 }
 
-// Stdio servers run on the API host, so only operator-approved binaries may be configured.
+// Stdio servers run on the API host, so only operator-approved binaries may be configured; none are
+// approved by default.
 pub fn ensure_stdio_command_allowed(command: &str) -> Result<(), McpClientError> {
-    let allowlist =
-        std::env::var(STDIO_COMMANDS_ENV).unwrap_or_else(|_| DEFAULT_STDIO_COMMANDS.to_string());
+    let allowlist = std::env::var(STDIO_COMMANDS_ENV).unwrap_or_default();
     if stdio_command_allowed(command, &allowlist) {
         Ok(())
     } else {
@@ -963,9 +962,7 @@ impl McpServerClient {
             .as_ref()
             .ok()
             .and_then(Option::as_ref)
-            .is_some_and(|plugin| {
-                plugin.manifest().auth != connector_server_plugin::ConnectorAuth::None
-            })
+            .is_some_and(|plugin| plugin.manifest().auth != connector_plugin::ConnectorAuth::None)
     }
     pub fn new(
         server_id: Uuid,
@@ -1667,8 +1664,7 @@ mod tests {
     #[test]
     fn api_key_plugins_require_the_same_per_user_token_lookup_as_oauth_plugins() {
         let mut manifest: Value =
-            serde_json::from_str(include_str!("../../connector-server-plugin/example.json"))
-                .unwrap();
+            serde_json::from_str(include_str!("../../connector-plugin/example.json")).unwrap();
         for (kind, expected) in [("api_key", true), ("none", false)] {
             manifest["auth"] = serde_json::json!(kind);
             let client = McpServerClient::new(
@@ -1955,27 +1951,26 @@ mod tests {
 
     #[test]
     fn stdio_commands_must_be_on_the_operator_allowlist() {
-        assert!(stdio_command_allowed("sqlx-mcp", DEFAULT_STDIO_COMMANDS));
-        assert!(stdio_command_allowed(
-            "/usr/local/bin/sqlx-mcp",
-            DEFAULT_STDIO_COMMANDS
-        ));
+        let allowlist = "db-mcp,/usr/local/bin/db-mcp";
+        assert!(stdio_command_allowed("db-mcp", allowlist));
+        assert!(stdio_command_allowed("/usr/local/bin/db-mcp", allowlist));
         for command in [
             "sh",
             "bash",
             "/bin/sh",
             "echo",
-            "sqlx-mcp-evil",
+            "db-mcp-evil",
             "",
-            " sqlx-mcp",
+            " db-mcp",
         ] {
-            assert!(
-                !stdio_command_allowed(command, DEFAULT_STDIO_COMMANDS),
-                "{command}"
-            );
+            assert!(!stdio_command_allowed(command, allowlist), "{command}");
         }
-        assert!(stdio_command_allowed("npx", "sqlx-mcp, npx"));
-        assert!(!stdio_command_allowed("npx", "sqlx-mcp,,"));
+        assert!(stdio_command_allowed("npx", "db-mcp, npx"));
+        assert!(!stdio_command_allowed("npx", "db-mcp,,"));
+        assert!(
+            !stdio_command_allowed("sqlx-mcp", ""),
+            "nothing is approved without an operator allow-list"
+        );
     }
 
     #[test]
