@@ -344,7 +344,7 @@ async fn fetch_conversations_by_ids(
     get,
     path = "/chat/{chat_id}",
     tag = "chat",
-    description = "Returns the conversation with the messages of the version shown, oldest first; message_count here is the number of those messages.\n\n- A message that has other versions (editing a message adds one) carries `versions`: `current` of `total`, and `message_ids` oldest first. Send one of those ids to PUT /chat/{chat_id}/branch to show that version.\n- A reply that stopped before it finished carries `stop_reason`: user_cancelled, user_edited, provider_error, network_error or server_error.",
+    description = "Returns the conversation with the messages of the version shown, oldest first; message_count here is the number of those messages.\n\n- A message that has other versions (editing a message adds one) carries `versions`: `current` of `total`, and `message_ids` oldest first. Send one of those ids to PUT /chat/{chat_id}/branch to show that version.\n- A reply that stopped before it finished carries `stop_reason`: user_cancelled, user_edited, provider_error, network_error or server_error.\n- A reply still being generated (for example after a page refresh) has `generating: true` and the text saved so far; fetch again about once a second until `generating` is false.",
     params(
         ("chat_id" = Uuid, Path, description = "Unique identifier for the conversation"),
     ),
@@ -370,6 +370,9 @@ pub async fn get_chat_by_id(
         })?
         .ok_or(AppError::DbNotFound)?;
 
+    // Read before the messages: a reply leaves this set only after its final text is saved, so one
+    // that is not in it here is already complete in the rows read below.
+    let generating = app_state.generating_replies(chat_id).await;
     let messages_models = messages::Entity::find()
         .filter(messages::Column::ConversationId.eq(chat_id))
         .filter(messages::Column::Deleted.eq(false))
@@ -458,6 +461,7 @@ pub async fn get_chat_by_id(
                     .unwrap_or(0),
             },
             stop_reason: StopReason::from_metadata(metadata),
+            generating: generating.contains(&message_model.id),
         };
         conversation_response
             .messages

@@ -39,9 +39,9 @@ use crate::{
             effective_max_tokens, effective_native_web_search, supports_native_web_search,
         },
         chat_stream_helpers::{
-            ContentCheckpoint, DepartmentBudgetGate, ToolRoundOutcome, department_budget_status,
-            detach_from_client, ensure_budget_pricing, ensure_model_whitelisted, model_identifiers,
-            next_tool_round, persistence_error_event_data, record_stop_reason,
+            ContentCheckpoint, DepartmentBudgetGate, ToolRoundOutcome, deliver_reply,
+            department_budget_status, ensure_budget_pricing, ensure_model_whitelisted,
+            model_identifiers, next_tool_round, persistence_error_event_data, record_stop_reason,
             response_stopped_event_data, stop_reason_for_provider_error, with_stop_reason,
         },
         conversation_access::{
@@ -483,6 +483,7 @@ pub async fn handle_chat_stream(
     Json(req): Json<ChatInput>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, AppError> {
     let start = Instant::now();
+    let is_edit = pending_edit.is_some();
     let provider = req.provider.clone();
     let selected_tools = req.selected_tools.clone().unwrap_or_default();
     let request_selected_mcp_servers = req.selected_mcp_servers.clone().unwrap_or_default();
@@ -1521,6 +1522,13 @@ pub async fn handle_chat_stream(
            cost: Set(Decimal::from(0)),
            metadata: Set(Some(json!({"webSearch":req.web_search}))),
          };
+        // A plain reply is registered before its row exists, so a page reading the conversation never
+        // sees it without generating. An edit's rows stay hidden until it commits, so it registers later.
+        let early_cancel = if edit_in_progress.is_none() {
+            Some(app_state.register_stream_cancel(new_message_id, conversation_id, None).await)
+        } else {
+            None
+        };
         let inserted = if edit_in_progress.is_some() {
             new_llm_message.clone().insert(&app_state.database).await.map(|_| ()).map_err(|e| {
                 eprintln!("assistant message insert error: {e}");
@@ -1533,6 +1541,7 @@ pub async fn handle_chat_stream(
         };
         if let Err(error) = inserted {
             eprintln!("assistant message insert error: {error:?}");
+            app_state.release_stream_cancel(new_message_id).await;
             yield Event::default()
                 .event(ChatStreamEvents::AiError.to_string())
                 .data(persistence_error_event_data());
@@ -1567,13 +1576,18 @@ pub async fn handle_chat_stream(
                 }
             }
         }
-        let cancel_handle = app_state
-            .register_stream_cancel(
-                new_message_id,
-                conversation_id,
-                edit_in_progress.as_ref().map(EditInProgress::request),
-            )
-            .await;
+        let cancel_handle = match early_cancel {
+            Some(handle) => handle,
+            None => {
+                app_state
+                    .register_stream_cancel(
+                        new_message_id,
+                        conversation_id,
+                        edit_in_progress.as_ref().map(EditInProgress::request),
+                    )
+                    .await
+            }
+        };
         // A switch can only stop replies registered above; one that landed earlier has hidden
         // this reply with its version, so it stops the same way.
         if edit_in_progress.is_none()
@@ -2930,6 +2944,6 @@ pub async fn handle_chat_stream(
            }
        }
     };
-    let sse_response = Sse::new(detach_from_client(sse_stream)).keep_alive(KeepAlive::new());
+    let sse_response = Sse::new(deliver_reply(sse_stream, is_edit)).keep_alive(KeepAlive::new());
     Ok(sse_response)
 }
