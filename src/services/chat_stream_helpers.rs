@@ -353,7 +353,7 @@ pub fn with_stop_reason(metadata: Option<Value>, reason: StopReason) -> Value {
 // A provider that couldn't be reached or dropped the connection is a network problem;
 // anything it answered with is the provider's.
 pub fn stop_reason_for_provider_error(error: &ProviderError) -> StopReason {
-    match error {
+    match error.underlying() {
         ProviderError::Transport(_) | ProviderError::StreamEnded => StopReason::NetworkError,
         _ => StopReason::ProviderError,
     }
@@ -549,18 +549,37 @@ mod tests {
 
     #[test]
     fn unreachable_or_dropped_providers_are_network_errors() {
-        assert_eq!(
-            stop_reason_for_provider_error(&ProviderError::StreamEnded),
-            StopReason::NetworkError
-        );
-        assert_eq!(
-            stop_reason_for_provider_error(&ProviderError::QuotaExhausted),
-            StopReason::ProviderError
-        );
-        assert_eq!(
-            stop_reason_for_provider_error(&ProviderError::PaymentRequired),
-            StopReason::ProviderError
-        );
+        for (error, reason, class) in [
+            (
+                ProviderError::Transport("connection reset".into()),
+                StopReason::NetworkError,
+                "transport",
+            ),
+            (
+                ProviderError::StreamEnded,
+                StopReason::NetworkError,
+                "stream_ended",
+            ),
+            (
+                ProviderError::QuotaExhausted,
+                StopReason::ProviderError,
+                "quota_exhausted",
+            ),
+            (
+                ProviderError::PaymentRequired,
+                StopReason::ProviderError,
+                "payment_required",
+            ),
+        ] {
+            assert_eq!(stop_reason_for_provider_error(&error), reason);
+            let wrapped = ProviderError::NonReplayable(Box::new(error));
+            assert_eq!(stop_reason_for_provider_error(&wrapped), reason);
+            assert_eq!(
+                crate::services::provider_chat::provider_error_class(&wrapped),
+                class
+            );
+            assert!(!wrapped.is_retryable());
+        }
     }
 
     #[test]

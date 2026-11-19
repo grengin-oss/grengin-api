@@ -26,8 +26,8 @@ use crate::{
         provider_manifests,
         provider_models::{is_chat_selectable_model, to_model_info},
         provider_runtime::{
-            ProviderLoadError, build_provider, compile_provider, parse_manifest,
-            parse_plugin_config, provider_plugin_version, unregister_provider,
+            ProviderLoadError, build_provider, compile_engine, parse_manifest, parse_plugin_config,
+            provider_plugin_version, unregister_provider,
         },
     },
     state::SharedState,
@@ -37,13 +37,12 @@ use axum::{
     extract::{Path, State},
 };
 use chrono::Utc;
-use llm_plugin::{ProviderError, ProviderPlugin};
+use llm_plugin::ProviderError;
 use reqwest::StatusCode;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
     QueryOrder, TryIntoModel,
 };
-use std::sync::Arc;
 
 #[utoipa::path(
     get,
@@ -107,7 +106,7 @@ pub async fn get_ai_engines(
                 api_key_preview: app_state.get_decrypted_api_key_preview(&model.api_key),
                 api_key_last_validated_at: model.api_key_validated_at,
                 whitelisted_models: model.whitelist_models,
-                default_model: Some(model.default_model),
+                default_model: Some(model.default_model).filter(|model| !model.is_empty()),
                 default_image_gen_model: model.default_image_gen_model,
                 plugin_config,
                 base_url_override: model.base_url_override,
@@ -175,7 +174,7 @@ pub async fn get_ai_engines_by_key(
         api_key_preview: app_state.get_decrypted_api_key_preview(&model.api_key),
         api_key_last_validated_at: model.api_key_validated_at,
         whitelisted_models: model.whitelist_models,
-        default_model: Some(model.default_model),
+        default_model: Some(model.default_model).filter(|model| !model.is_empty()),
         default_image_gen_model: model.default_image_gen_model,
         plugin_config,
         base_url_override: model.base_url_override,
@@ -226,14 +225,10 @@ pub async fn get_ai_engine_models_by_key(
         })?
         .ok_or(AuthError::ResourceNotFound)?;
     let mut response = AIEngineModels { models: Vec::new() };
-    if ai_engine.plugin_config.is_some() {
-        let provider = build_provider(
-            &app_state.settings.auth.app_key,
-            &app_state.req_client,
-            &ai_engine,
-        )
-        .await
-        .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
+    if ai_engine.plugin_config.is_some() || ai_engine_key == "grengin" {
+        let provider = build_provider(&app_state, &ai_engine)
+            .await
+            .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
         let model_provider = provider
             .models()
             .ok_or(AuthError::ServiceTemporarilyUnavailable)?;
@@ -329,7 +324,7 @@ pub async fn update_ai_engines_by_key(
     claims: Claims,
     Path(ai_engine_key): Path<String>,
     State(app_state): State<SharedState>,
-    Json(req): Json<AIEngineUpdate>,
+    Json(mut req): Json<AIEngineUpdate>,
 ) -> Result<(StatusCode, Json<AIEngineDetail>), AuthError> {
     let authz = AuthorizationService::new(&app_state.database);
     authz
@@ -341,7 +336,6 @@ pub async fn update_ai_engines_by_key(
             None,
         )
         .await?;
-    let ai_models = load_models_response(&app_state).await?;
     let ai_engine = ai_engines::Entity::find()
         .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
         .order_by_desc(ai_engines::Column::CreatedAt)
@@ -353,6 +347,60 @@ pub async fn update_ai_engines_by_key(
         })?
         .ok_or(AuthError::ResourceNotFound)?;
     let mut active_model = ai_engine.clone().into_active_model();
+    let catalog_grengin = crate::services::ai_plugin::is_catalog_grengin(&ai_engine);
+    let (icon, icon_dark) = if catalog_grengin {
+        (None, None)
+    } else {
+        load_models_response(&app_state)
+            .await?
+            .get_icons(&ai_engine_key)
+    };
+    if catalog_grengin && (req.api_key.is_some() || req.plugin_config.is_some()) {
+        return Err(AuthError::InvalidRequest {
+            field: "api_key/plugin_config",
+        });
+    }
+    if catalog_grengin
+        && (req.whitelisted_models.is_some()
+            || req.default_model.is_some()
+            || req.default_image_gen_model.is_some())
+    {
+        let additions = req.whitelisted_models.as_ref().is_some_and(|models| {
+            models
+                .iter()
+                .any(|id| !ai_engine.whitelist_models.contains(id))
+        });
+        let new_default = req
+            .default_model
+            .as_deref()
+            .is_some_and(|id| !id.is_empty() && id != ai_engine.default_model)
+            || req.default_image_gen_model.as_deref().is_some_and(|id| {
+                !id.is_empty() && Some(id) != ai_engine.default_image_gen_model.as_deref()
+            });
+        let models = if additions || new_default {
+            let provider = build_provider(&app_state, &ai_engine)
+                .await
+                .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
+            provider
+                .models()
+                .ok_or(AuthError::ServiceTemporarilyUnavailable)?
+                .list_models()
+                .await
+                .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?
+        } else {
+            Vec::new()
+        };
+        let (models, text, image) = crate::services::ai_plugin::grengin_model_policy(
+            &models,
+            Some(&ai_engine),
+            req.whitelisted_models.take(),
+            req.default_model.take(),
+            req.default_image_gen_model.take(),
+        )?;
+        active_model.whitelist_models = Set(models);
+        active_model.default_model = Set(text);
+        active_model.default_image_gen_model = Set(image);
+    }
     let first_key = ai_engine.api_key.is_none()
         && req
             .api_key
@@ -464,17 +512,16 @@ pub async fn update_ai_engines_by_key(
         ),
         None => None,
     };
-    let compiled_provider = if model.is_enabled {
+    let compiled_provider = if catalog_grengin && req.is_enabled != Some(true) {
+        // Local policy and display edits do not change the compiled plugin.
+        None
+    } else if model.is_enabled {
         Some(
-            build_provider(
-                &app_state.settings.auth.app_key,
-                &app_state.req_client,
-                &model,
-            )
-            .await
-            .map_err(|_| AuthError::InvalidRequest {
-                field: "plugin_config",
-            })?,
+            build_provider(&app_state, &model)
+                .await
+                .map_err(|_| AuthError::InvalidRequest {
+                    field: "plugin_config",
+                })?,
         )
     } else if let Some(config_value) = model.plugin_config.as_ref() {
         let config = parse_plugin_config(config_value).map_err(|_| AuthError::InvalidRequest {
@@ -490,7 +537,7 @@ pub async fn update_ai_engines_by_key(
                 .map(|_| "validation-placeholder".to_string())
         });
         Some(
-            compile_provider(config, &model.engine_key, compile_key).map_err(|_| {
+            compile_engine(config, &model.engine_key, compile_key, None).map_err(|_| {
                 AuthError::InvalidRequest {
                     field: "plugin_config",
                 }
@@ -525,10 +572,7 @@ pub async fn update_ai_engines_by_key(
         })?;
     if model.is_enabled {
         if let Some(provider) = compiled_provider {
-            app_state
-                .provider_registry
-                .register(Arc::new(provider))
-                .await;
+            app_state.provider_registry.register(provider).await;
         }
     } else {
         unregister_provider(&app_state, &model.engine_key).await;
@@ -538,8 +582,8 @@ pub async fn update_ai_engines_by_key(
         .as_ref()
         .and_then(|value| serde_json::from_value(value.clone()).ok());
     let response = AIEngineDetail {
-        icon: ai_models.get_icons(&model.engine_key).0,
-        icon_dark: ai_models.get_icons(&model.engine_key).1,
+        icon,
+        icon_dark,
         plugin_version: provider_plugin_version(&model),
         engine_key: model.engine_key,
         display_name: model.display_name,
@@ -549,7 +593,7 @@ pub async fn update_ai_engines_by_key(
         api_key_preview: app_state.get_decrypted_api_key_preview(&model.api_key),
         api_key_last_validated_at: model.api_key_validated_at,
         whitelisted_models: model.whitelist_models,
-        default_model: Some(model.default_model),
+        default_model: Some(model.default_model).filter(|model| !model.is_empty()),
         default_image_gen_model: model.default_image_gen_model,
         plugin_config,
         base_url_override: model.base_url_override,
@@ -588,7 +632,6 @@ pub async fn delete_ai_engines_api_key_key(
             None,
         )
         .await?;
-    let ai_models = load_models_response(&app_state).await?;
     let ai_engine = ai_engines::Entity::find()
         .filter(ai_engines::Column::EngineKey.eq(ai_engine_key))
         .order_by_desc(ai_engines::Column::CreatedAt)
@@ -599,6 +642,10 @@ pub async fn delete_ai_engines_api_key_key(
             AuthError::DbTimeout
         })?
         .ok_or(AuthError::ResourceNotFound)?;
+    if crate::services::ai_plugin::is_catalog_grengin(&ai_engine) {
+        return Err(AuthError::InvalidRequest { field: "api_key" });
+    }
+    let ai_models = load_models_response(&app_state).await?;
     let mut active_model = ai_engine.clone().into_active_model();
     active_model.api_key = Set(None);
     active_model.updated_at = Set(Utc::now());
@@ -652,7 +699,7 @@ pub async fn delete_ai_engines_api_key_key(
         api_key_preview: app_state.get_decrypted_api_key_preview(&model.api_key),
         api_key_last_validated_at: model.api_key_validated_at,
         whitelisted_models: model.whitelist_models,
-        default_model: Some(model.default_model),
+        default_model: Some(model.default_model).filter(|model| !model.is_empty()),
         default_image_gen_model: model.default_image_gen_model,
         plugin_config,
         base_url_override: model.base_url_override,
@@ -699,13 +746,33 @@ pub async fn validate_ai_engines_by_key(
             AuthError::DbTimeout
         })?
         .ok_or(AuthError::ResourceNotFound)?;
-    let validation = match build_provider(
-        &app_state.settings.auth.app_key,
-        &app_state.req_client,
-        &ai_engine,
-    )
-    .await
-    {
+    if crate::services::ai_plugin::is_catalog_grengin(&ai_engine) {
+        let result = match crate::services::grengin_grant::GrenginGrant::configured() {
+            Ok(grant) => grant.status().await,
+            Err(error) => Err(error),
+        };
+        let (valid, message) = match result {
+            Ok(access) => (
+                true,
+                format!(
+                    "Workspace connection validated. Grengin model access is {access}; model availability was not tested."
+                ),
+            ),
+            Err(error) => (
+                false,
+                format!("Workspace connection could not be validated: {error}"),
+            ),
+        };
+        return Ok((
+            StatusCode::OK,
+            Json(AIEngineValidation {
+                valid,
+                message,
+                models_available: 0,
+            }),
+        ));
+    }
+    let validation = match build_provider(&app_state, &ai_engine).await {
         Ok(provider) => match provider.models() {
             Some(models) => {
                 classify_model_validation(models.list_models().await.map(|models| models.len()))

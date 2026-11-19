@@ -1723,3 +1723,341 @@ fn manifests_cannot_map_credentials_into_query_parameters() {
         Err(ProviderError::InvalidManifest(_))
     ));
 }
+
+// Authorization is owned by the embedding API, never by a provider manifest.
+struct TestAuthorization {
+    base: reqwest::Url,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl TestAuthorization {
+    fn new(base: &str) -> Arc<Self> {
+        Arc::new(Self {
+            base: reqwest::Url::parse(base).unwrap(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl llm_plugin::RequestAuthorization for TestAuthorization {
+    async fn authorize(&self, url: &reqwest::Url) -> Result<String, ProviderError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if url.origin() != self.base.origin() || !url.path().starts_with(self.base.path()) {
+            return Err(ProviderError::UrlNotAllowed(
+                "destination not authorized".into(),
+            ));
+        }
+        Ok(format!("grant-{}", self.calls.fetch_add(1, SeqCst) + 1))
+    }
+}
+
+fn authorized_runtime(base: String) -> ProviderRuntimeConfig {
+    let mut config = runtime(base);
+    config.credentials.clear();
+    config
+}
+
+fn authorized_provider(base: &str, capabilities: Value, operations: Value) -> DeclarativeProvider {
+    authorize_manifest(base, manifest(base, capabilities, operations))
+}
+
+fn authorize_manifest(base: &str, manifest: ProviderManifestV1) -> DeclarativeProvider {
+    DeclarativeProvider::new_authorized(
+        manifest,
+        authorized_runtime(base.to_owned()),
+        TestAuthorization::new(base),
+    )
+    .unwrap()
+}
+
+fn assert_minimal_headers(request: &CapturedRequest, token: &str, streaming: bool) {
+    let head = request.head.to_ascii_lowercase();
+    assert!(head.contains(&format!("authorization: bearer {token}\r\n")));
+    assert!(head.contains(if streaming {
+        "accept: text/event-stream\r\n"
+    } else {
+        "accept: application/json\r\n"
+    }));
+    for line in request.head.lines().skip(1).filter(|line| !line.is_empty()) {
+        let (name, _) = line.split_once(':').unwrap();
+        assert!(
+            [
+                "authorization",
+                "accept",
+                "content-type",
+                "content-length",
+                "host"
+            ]
+            .contains(&name.to_ascii_lowercase().as_str()),
+            "unexpected wire header: {name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn authorized_native_tool_continuation_refreshes_auth_and_omits_manifest_headers() {
+    let first = concat!(
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\"lookup\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"q\\\":\\\"rust\\\"}\"}}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":1}}\n\n"
+    );
+    let second = "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n";
+    let (base, requests) = serve(vec![
+        MockResponse::new("200 OK", "text/event-stream", first),
+        MockResponse::new("200 OK", "text/event-stream", second),
+    ])
+    .await;
+    let mut document: Value =
+        serde_json::from_slice(include_bytes!("../examples/anthropic.provider.json")).unwrap();
+    document["operations"]["chatStream"]["headers"]["x-user-email"] =
+        json!({"literal":"private@example.test"});
+    document["operations"]["chatStream"]["headers"]["anthropic-beta"] =
+        json!({"literal":"private-feature"});
+    let manifest = ProviderManifestV1::from_json(&serde_json::to_vec(&document).unwrap()).unwrap();
+    let provider = authorize_manifest(&base, manifest);
+    let mut session = provider
+        .clone()
+        .chat()
+        .unwrap()
+        .start(chat_request("claude-test"))
+        .await
+        .unwrap();
+    let mut stream = session.stream().await.unwrap();
+    while let Some(event) = stream.next().await {
+        event.unwrap();
+    }
+    drop(stream);
+    let mut stream = session
+        .continue_with_tools(vec![ToolResult {
+            call_id: ToolCallId::new("call-1"),
+            name: "lookup".into(),
+            output: json!({"answer":42}),
+            is_error: false,
+        }])
+        .await
+        .unwrap();
+    while let Some(event) = stream.next().await {
+        event.unwrap();
+    }
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 2);
+    assert_minimal_headers(&requests[0], "grant-1", true);
+    assert_minimal_headers(&requests[1], "grant-2", true);
+    assert!(requests[0].head.starts_with("POST /v1/messages HTTP/1.1"));
+    assert_eq!(requests[0].json()["model"], "claude-test");
+    assert_eq!(
+        requests[1].json()["messages"][1]["content"][0]["type"],
+        "tool_use"
+    );
+    assert_eq!(
+        requests[1].json()["messages"][2]["content"][0]["type"],
+        "tool_result"
+    );
+    assert!(!requests[1].head.contains("private"));
+}
+
+#[tokio::test]
+async fn authorized_requests_reject_native_credentials_untrusted_destinations_and_extra_queries() {
+    let (base, requests) = serve(vec![]).await;
+    let document = manifest(
+        &base,
+        json!({"embeddings":true}),
+        json!({"embeddings":stub_embeddings_operation()}),
+    );
+    assert!(
+        DeclarativeProvider::new_authorized(
+            document.clone(),
+            runtime(base.clone()),
+            TestAuthorization::new(&base)
+        )
+        .is_err()
+    );
+    let authorization = TestAuthorization::new("http://127.0.0.1:1/authorized/");
+    let provider = DeclarativeProvider::new_authorized(
+        document,
+        authorized_runtime(base.clone()),
+        authorization,
+    )
+    .unwrap();
+    assert!(matches!(
+        provider
+            .embeddings()
+            .unwrap()
+            .embed(embedding_request())
+            .await,
+        Err(ProviderError::UrlNotAllowed(_))
+    ));
+    let authorization = TestAuthorization::new(&base);
+    let mut operation = stub_chat_operation();
+    operation["query"] = json!({"alt":{"$literal":"sse"}, "user":{"$literal":"private"}});
+    let document = manifest(
+        &base,
+        json!({"chat":{"streaming":true}}),
+        json!({"chatStream":operation}),
+    );
+    let provider = DeclarativeProvider::new_authorized(
+        document,
+        authorized_runtime(base),
+        authorization.clone(),
+    )
+    .unwrap();
+    let mut session = provider
+        .chat()
+        .unwrap()
+        .start(chat_request("test"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        stream_error(session.stream().await),
+        ProviderError::UrlNotAllowed(_)
+    ));
+    assert_eq!(
+        authorization
+            .calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(requests.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn authorized_buffered_failures_are_not_replayable_and_error_bodies_stay_private() {
+    for status in [
+        "401 Unauthorized",
+        "429 Too Many Requests",
+        "503 Unavailable",
+    ] {
+        let (base, requests) = serve(vec![MockResponse::new(
+            status,
+            "application/json",
+            r#"{"error":{"message":"private-provider-details"}}"#,
+        )])
+        .await;
+        let provider = authorized_provider(
+            &base,
+            json!({"embeddings":true}),
+            json!({"embeddings":stub_embeddings_operation()}),
+        );
+        let error = provider
+            .embeddings()
+            .unwrap()
+            .embed(embedding_request())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ProviderError::NonReplayable(_)));
+        assert!(!error.is_retryable());
+        assert!(!error.to_string().contains("private-provider-details"));
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        assert_minimal_headers(&requests[0], "grant-1", false);
+    }
+}
+
+#[tokio::test]
+async fn authorized_images_cannot_download_secondary_urls() {
+    let (base, requests) = serve(vec![MockResponse::json(
+        "200 OK",
+        &json!({"data":[{"url":"https://example.com/private-image?token=secret"}]}),
+    )])
+    .await;
+    let mut operations = json_image_operations();
+    operations["imageGeneration"]["response"]["urlPointer"] = json!("/url");
+    let provider = authorized_provider(&base, json!({"imageGeneration":true}), operations);
+    let error = provider
+        .images()
+        .unwrap()
+        .generate(image_request(1))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ProviderError::UrlNotAllowed(_)));
+    assert!(!error.to_string().contains("secret"));
+    assert_eq!(requests.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn authorized_payload_and_transport_failures_are_bounded_and_safe() {
+    let (base, requests) = serve(vec![]).await;
+    let mut operation = stub_embeddings_operation();
+    operation["body"] = json!({"input":{"$get":"request.inputs"}});
+    let provider = authorized_provider(
+        &base,
+        json!({"embeddings":true}),
+        json!({"embeddings":operation}),
+    );
+    let mut request = embedding_request();
+    request.inputs = vec!["x".repeat(33 * 1024 * 1024)];
+    assert!(matches!(
+        provider.embeddings().unwrap().embed(request).await,
+        Err(ProviderError::PayloadMapping(_))
+    ));
+    assert!(requests.lock().await.is_empty());
+    let error = provider
+        .embeddings()
+        .unwrap()
+        .embed(embedding_request())
+        .await
+        .unwrap_err();
+    assert!(!error.is_retryable());
+    assert!(!error.to_string().contains("127.0.0.1"));
+}
+
+#[test]
+fn native_provider_packages_cannot_be_compiled_as_operation_manifests() {
+    let base = "https://example.com/v1/";
+    let mut document = manifest_value(base, json!({"chat":{"streaming":true}}), json!({}));
+    document["credentials"] = json!([]);
+    document["nativeProviders"] = json!(["native-one"]);
+    let manifest = ProviderManifestV1::from_json(&serde_json::to_vec(&document).unwrap()).unwrap();
+    assert!(matches!(
+        DeclarativeProvider::new(manifest.clone(), ProviderRuntimeConfig::default()),
+        Err(ProviderError::Configuration(_))
+    ));
+    assert!(matches!(
+        DeclarativeProvider::new_authorized(
+            manifest,
+            ProviderRuntimeConfig::default(),
+            TestAuthorization::new(base)
+        ),
+        Err(ProviderError::Configuration(_))
+    ));
+}
+
+#[tokio::test]
+async fn authorized_partial_and_error_streams_are_safe_and_cannot_be_replayed() {
+    for tail in [
+        "",
+        "data: {\"error\":{\"message\":\"private-provider-details\"}}\n\n",
+    ] {
+        let wire =
+            format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"partial\"}}}}]}}\n\n{tail}");
+        let (base, requests) =
+            serve(vec![MockResponse::new("200 OK", "text/event-stream", wire)]).await;
+        let mut operations = openai_chat_operations(json!({"query":{"alt":{"$literal":"sse"}}}));
+        operations["chatStream"]["response"]["rules"].as_array_mut().unwrap().push(json!({
+            "id":"error", "when":{"pointer":"/error","exists":true}, "emit":"error", "fields":{"message":"/error/message"}
+        }));
+        let provider = authorized_provider(&base, json!({"chat":{"streaming":true}}), operations);
+        let mut session = provider
+            .chat()
+            .unwrap()
+            .start(chat_request("chat-1"))
+            .await
+            .unwrap();
+        let mut stream = session.stream().await.unwrap();
+        assert!(
+            matches!(stream.next().await.unwrap().unwrap(), ProviderEvent::TextDelta { text } if text=="partial")
+        );
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(matches!(error, ProviderError::NonReplayable(_)));
+        assert!(!error.is_retryable());
+        assert!(!error.to_string().contains("private-provider-details"));
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]
+                .head
+                .starts_with("POST /v1/chat/completions?alt=sse HTTP/1.1")
+        );
+    }
+}

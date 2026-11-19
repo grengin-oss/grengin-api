@@ -54,7 +54,7 @@ use crate::{
             McpOauthErrorPayload, McpOauthPrompt, McpOauthRequiredEvent, build_mcp_oauth_prompt,
             build_mcp_server_context, resolve_mcp_oauth_token, resolve_mcp_tool_descriptor,
         },
-        mcp_tools::load_mcp_tools,
+        mcp_tools::{gateway_tool_output, load_mcp_tools, request_local_tool_names},
         message_branches::{ThreadEntry, add_to_thread, is_shown, last_shown_message},
         message_helpers::{EditInProgress, EditStatus, PendingEdit, begin_pending_edit},
         notifications::emit_budget_alerts,
@@ -62,7 +62,7 @@ use crate::{
             LlmStreamError, LlmStreamEvent, PluginStreamParser, build_plugin_chat_request,
             generate_provider_title, plugin_event_stream, provider_error_class,
         },
-        provider_resolver::{ResolveProviderError, resolve_provider},
+        provider_resolver::{ResolveProviderError, model_route, resolve_provider},
         rag::{
             EmbeddingTarget, assemble_prompts_with_budget, begin_history_snapshot,
             build_project_retrieval_prompt, build_retrieval_prompt, embed_messages,
@@ -483,7 +483,9 @@ pub async fn handle_chat_stream(
     Json(req): Json<ChatInput>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, AppError> {
     let start = Instant::now();
-    let provider = req.provider.clone();
+    let (provider, model_name, gateway_installation) =
+        model_route(&app_state, &req.provider, &req.model_name).await?;
+    let via_gateway = gateway_installation.is_some() && provider == "grengin";
     let selected_tools = req.selected_tools.clone().unwrap_or_default();
     let request_selected_mcp_servers = req.selected_mcp_servers.clone().unwrap_or_default();
     let selected_mcp_servers = request_selected_mcp_servers.clone();
@@ -508,7 +510,6 @@ pub async fn handle_chat_stream(
             provider: provider.clone(),
         });
     }
-    let model_name = req.model_name.clone();
     let mut budget_warning: Option<BudgetWarningPayload> = None;
     let mut budget_configured = false;
     let user = users::Entity::find_by_id(claims.user_id)
@@ -581,6 +582,15 @@ pub async fn handle_chat_stream(
             None
         }
     };
+    if via_gateway
+        && plugin_model_info
+            .as_ref()
+            .is_none_or(|model| model.key != model_name)
+    {
+        return Err(AppError::ValidationInvalidField {
+            field: "model_name",
+        });
+    }
     let plugin_is_image_only =
         provider_config.images().is_some() && provider_config.chat().is_none();
     let plugin_model_supports_web_search = plugin_model_info
@@ -670,6 +680,10 @@ pub async fn handle_chat_stream(
        "webSearch":req.web_search,
        "selectedTools":selected_tools.clone()
     });
+    if gateway_installation.is_some() {
+        metadata["requestedModel"] = json!(&req.model_name);
+        metadata["fundingSource"] = json!(if via_gateway { "grengin" } else { "own_key" });
+    }
     let last_message = req.messages.last();
     let retrieval_query = last_message.map(|m| m.content.clone()).unwrap_or_default();
     let input_image_file_ids: Vec<Uuid> = req
@@ -722,7 +736,13 @@ pub async fn handle_chat_stream(
             let (embedding_result, project_retrieval_results) = tokio::join!(
                 retrieval_future,
                 futures_util::future::join_all(linked_projects.iter().map(|project| {
-                    build_project_retrieval_prompt(&app_state, project.id, &retrieval_query, top_k)
+                    build_project_retrieval_prompt(
+                        &app_state,
+                        project.id,
+                        &retrieval_query,
+                        top_k,
+                        !via_gateway,
+                    )
                 })),
             );
             retrieval_embedding = embedding_result?;
@@ -832,7 +852,7 @@ pub async fn handle_chat_stream(
         }
         let new_conversation_id = Uuid::new_v4();
         let mut new_metadata = metadata.clone();
-        let title_result = if is_image_gen {
+        let title_result = if is_image_gen || via_gateway {
             None
         } else {
             generate_provider_title(
@@ -844,7 +864,7 @@ pub async fn handle_chat_stream(
             .await
             .map_err(|error| {
                 if !matches!(
-                    error,
+                    error.underlying(),
                     llm_plugin::ProviderError::QuotaExhausted
                         | llm_plugin::ProviderError::ResponseMapping(_)
                 ) {
@@ -1010,7 +1030,11 @@ pub async fn handle_chat_stream(
                 if trimmed.is_empty() {
                     return None;
                 }
-                Some(format!("## Project: {}\n{}", p.name, trimmed))
+                Some(if via_gateway {
+                    trimmed
+                } else {
+                    format!("## Project: {}\n{}", p.name, trimmed)
+                })
             })
             .collect();
         if !project_blocks.is_empty() {
@@ -1051,7 +1075,8 @@ pub async fn handle_chat_stream(
     let mut skill_mcp_server_ids: Vec<Uuid> = Vec::new();
     if !active_skills.is_empty() {
         let skill_ids: Vec<uuid::Uuid> = active_skills.iter().map(|s| s.id).collect();
-        let knowledge_map = load_skill_knowledge_for_stream(&app_state.database, &skill_ids).await;
+        let knowledge_map =
+            load_skill_knowledge_for_stream(&app_state.database, &skill_ids, !via_gateway).await;
         let skill_role_blocks: Vec<String> = active_skills
             .iter()
             .filter_map(|s| {
@@ -1060,7 +1085,11 @@ pub async fn handle_chat_stream(
                 if instructions.is_empty() && knowledge.is_empty() {
                     return None;
                 }
-                let mut block = format!("## Skill: {}", s.name);
+                let mut block = if via_gateway {
+                    String::new()
+                } else {
+                    format!("## Skill: {}", s.name)
+                };
                 if !instructions.is_empty() {
                     block.push('\n');
                     block.push_str(&instructions);
@@ -1152,7 +1181,13 @@ pub async fn handle_chat_stream(
     } else {
         (HashMap::new(), Vec::new())
     };
+    let mcp_tool_lookup = if via_gateway {
+        request_local_tool_names(mcp_tool_lookup)
+    } else {
+        mcp_tool_lookup
+    };
     if supports_mcp_tools
+        && !via_gateway
         && let Some(context) = build_mcp_server_context(&mcp_server_summaries, &mcp_tool_lookup)
     {
         let insert_at = previous_prompts
@@ -1198,6 +1233,22 @@ pub async fn handle_chat_stream(
     };
 
     let sse_stream = async_stream::try_stream! {
+       let check_access = || async {
+           if let Some(installation) = gateway_installation {
+               let route = model_route(&app_state, "grengin", &req.model_name).await?;
+               if route.2 != Some(installation) || route.0 != provider || route.1 != model_name {
+                   return Err(AppError::LlmProviderDisabledByAdmin { provider: "grengin".into() });
+               }
+               crate::services::llm_usage_gate::ensure_user_llm_allowed(&app_state, claims.user_id, &provider, &model_name).await?;
+           }
+           Ok::<(), AppError>(())
+       };
+       if check_access().await.is_err() {
+           let error = ChatStreamError::ProviderError { provider: provider.clone(), message: "Model access changed".into() };
+           yield Event::default().event(ChatStreamEvents::AiError.to_string()).data(serde_json::to_string(&error.to_response()).unwrap_or_default());
+           yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+           return;
+       }
        let mut message_content = String::new();
        let mut artifact_parser = ArtifactParser::new();
        let mut artifact_accumulator: HashMap<String, ArtifactAccum> = HashMap::new();
@@ -1476,7 +1527,7 @@ pub async fn handle_chat_stream(
             Ok(source) => plugin_event_stream(source),
             Err(error) => {
                 eprintln!("provider stream start failed: {}", provider_error_class(&error));
-                let stream_err = if matches!(&error, llm_plugin::ProviderError::QuotaExhausted) {
+                let stream_err = if matches!(error.underlying(), llm_plugin::ProviderError::QuotaExhausted) {
                     ChatStreamError::ApiQuotaExhausted { provider: provider.clone() }
                 } else {
                     ChatStreamError::ProviderError {
@@ -2555,7 +2606,7 @@ pub async fn handle_chat_stream(
                                    provider_tool_results.push(llm_plugin::ToolResult {
                                        call_id: llm_plugin::ToolCallId::new(call_id),
                                        name: call.tool_name.clone(),
-                                       output: output_payload,
+                                       output: if via_gateway { gateway_tool_output(&result_value, is_error) } else { output_payload },
                                        is_error,
                                    });
                                }
@@ -2580,7 +2631,7 @@ pub async fn handle_chat_stream(
                        break;
                        },
                        LlmStreamError::Provider(error) => {
-                           let stream_err = if matches!(&error, llm_plugin::ProviderError::QuotaExhausted) {
+                           let stream_err = if matches!(error.underlying(), llm_plugin::ProviderError::QuotaExhausted) {
                                ChatStreamError::ApiQuotaExhausted { provider: provider.clone() }
                            } else {
                                ChatStreamError::ProviderError {
@@ -2621,7 +2672,15 @@ pub async fn handle_chat_stream(
                    let results = next_tool_results.take();
                    match results {
                        Some(results) => {
-                           match provider_session.continue_with_tools(results).await {
+                           let continuation = tokio::select! {
+                               biased;
+                               _ = cancel_handle.cancelled() => continue,
+                               next = async {
+                                   check_access().await.map_err(|_| llm_plugin::ProviderError::Configuration("model access changed".into()))?;
+                                   provider_session.continue_with_tools(results).await
+                               } => next,
+                           };
+                           match continuation {
                                Ok(stream) => {
                                    event_source = plugin_event_stream(stream);
                                    continue;
@@ -2907,7 +2966,7 @@ pub async fn handle_chat_stream(
                // update run after it, and not at all for an edit that didn't commit.
                if turn_visible && app_state.settings.rag.enabled {
                    let do_embed = app_state.settings.rag.retrieval_enabled;
-                   let do_summary = app_state.settings.rag.summary_enabled;
+                   let do_summary = app_state.settings.rag.summary_enabled && !via_gateway;
                    if do_embed || do_summary {
                        let targets = std::mem::take(&mut embedding_targets);
                        let state = app_state.clone();

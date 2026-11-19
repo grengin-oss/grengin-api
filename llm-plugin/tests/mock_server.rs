@@ -879,10 +879,10 @@ async fn anthropic_manifest_routes_web_search_and_a_client_tool_from_one_index_s
 }
 
 #[tokio::test]
-#[ignore = "requires GRENGIN_PROVIDER_CATALOG_DIR pointing at grengin-list/master-data/providers"]
+#[ignore = "requires GRENGIN_PROVIDER_CATALOG_DIR pointing at grengin-list/master-data/ai-providers"]
 async fn every_catalog_manifest_streams_against_the_mock_provider() {
     let catalog = std::env::var("GRENGIN_PROVIDER_CATALOG_DIR")
-        .expect("set GRENGIN_PROVIDER_CATALOG_DIR to master-data/providers");
+        .expect("set GRENGIN_PROVIDER_CATALOG_DIR to master-data/ai-providers");
     let mut manifests = fs::read_dir(&catalog)
         .expect("catalog directory")
         .filter_map(Result::ok)
@@ -900,10 +900,20 @@ async fn every_catalog_manifest_streams_against_the_mock_provider() {
         let bytes = fs::read(&path).unwrap_or_else(|error| {
             panic!("could not read {}: {error}", path.display());
         });
-        let id = serde_json::from_slice::<Value>(&bytes).unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let manifest = ProviderManifestV1::from_json(&bytes).unwrap();
+        if !manifest.native_providers.is_empty() {
+            // This package delegates its wire operations to the native packages tested here.
+            for native in manifest.native_providers {
+                assert!(
+                    std::path::Path::new(&catalog)
+                        .join(native)
+                        .join("plugin.json")
+                        .is_file()
+                );
+            }
+            continue;
+        }
+        let id = manifest.id;
         let provider = server.provider(&bytes, |_| {});
         let mut chat = request("mock-model", "hello there", Vec::new());
         if id == "openrouter" {

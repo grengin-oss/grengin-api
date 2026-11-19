@@ -19,6 +19,6 @@ pub use mapping::{
     validate_mapping, validate_mapping_definitions,
 };
 pub use registry::ProviderRegistry;
-pub use runtime::{DeclarativeProvider, ProviderRuntimeConfig};
+pub use runtime::{DeclarativeProvider, ProviderRuntimeConfig, RequestAuthorization};
 pub use sse::{DecodedSseEvent, SseDecoder, SseEventMapper, capture_values};
 pub use traits::*;

@@ -1,10 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
-
 use chrono::Utc;
-use llm_plugin::ProviderPlugin;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait,
     IntoActiveModel, QueryFilter, Statement, TransactionTrait,
@@ -21,20 +18,20 @@ use crate::{
     dto::admin_ai::{
         AIEngineConnectionTest, AIEngineCreate, AIEngineDetail, AIEnginePluginValidationResponse,
     },
-    models::ai_engines::{self, ApiKeyStatus, PluginConfig},
+    models::ai_engines::{self, ApiKeyStatus},
     services::{
         ai_engine_defaults::{enabled_after_key, starter_models},
         authorization::{AuthorizationService, PermissionScopeMode},
         provider_chat::provider_error_class,
         provider_runtime::{
-            ProviderLoadError, build_provider, compile_provider, parse_manifest,
+            ProviderLoadError, build_provider, compile_engine, parse_manifest,
             provider_plugin_version,
         },
     },
     state::SharedState,
 };
 
-pub const RESERVED_ENGINE_KEYS: &[&str] = &["openai", "anthropic", "mistral", "gemini"];
+pub const RESERVED_ENGINE_KEYS: &[&str] = &["openai", "anthropic", "mistral", "gemini", "grengin"];
 
 const BASE_URL_OVERRIDE_FIELD: AuthError = AuthError::InvalidRequest {
     field: "base_url_override",
@@ -42,7 +39,10 @@ const BASE_URL_OVERRIDE_FIELD: AuthError = AuthError::InvalidRequest {
 
 // Catalog engines such as Azure OpenAI (per-resource host) and Bedrock (per-region host) need
 // the customer's own endpoint; it gets the same destination rules as a custom plugin URL.
-pub fn catalog_base_url_override(raw: &str) -> Result<Option<String>, AuthError> {
+fn catalog_base_url_override(engine_key: &str, raw: &str) -> Result<Option<String>, AuthError> {
+    if engine_key == "grengin" {
+        return Err(BASE_URL_OVERRIDE_FIELD);
+    }
     let raw = raw.trim();
     if raw.is_empty() {
         return Ok(None);
@@ -68,7 +68,7 @@ pub fn apply_base_url_override(
             Err(BASE_URL_OVERRIDE_FIELD)
         }
         Some(raw) => {
-            active.base_url_override = Set(catalog_base_url_override(raw)?);
+            active.base_url_override = Set(catalog_base_url_override(&engine.engine_key, raw)?);
             Ok(())
         }
         None if plugin_config_replaced => {
@@ -128,7 +128,7 @@ fn engine_detail(state: &SharedState, engine: ai_engines::Model) -> AIEngineDeta
         api_key_preview: state.get_decrypted_api_key_preview(&engine.api_key),
         api_key_last_validated_at: engine.api_key_validated_at,
         whitelisted_models: engine.whitelist_models,
-        default_model: Some(engine.default_model),
+        default_model: Some(engine.default_model).filter(|model| !model.is_empty()),
         default_image_gen_model: engine.default_image_gen_model,
         plugin_config,
         base_url_override: engine.base_url_override,
@@ -188,19 +188,32 @@ pub async fn test_engine_connection(
     state: &SharedState,
     engine: ai_engines::Model,
 ) -> Result<AIEngineConnectionTest, AuthError> {
-    let provider =
-        match build_provider(&state.settings.auth.app_key, &state.req_client, &engine).await {
-            Ok(provider) => provider,
-            Err(error) => {
-                update_validation(state, engine, false).await?;
-                return Ok(AIEngineConnectionTest {
-                    valid: false,
-                    mode: "configuration".to_string(),
-                    models_available: None,
-                    error_class: Some(load_error_class(&error).to_string()),
-                });
-            }
+    if is_catalog_grengin(&engine) {
+        let result = match super::grengin_grant::GrenginGrant::configured() {
+            Ok(grant) => grant.status().await,
+            Err(error) => Err(error),
         };
+        return Ok(AIEngineConnectionTest {
+            valid: result.is_ok(),
+            mode: "workspace_connection".to_string(),
+            models_available: None,
+            error_class: result
+                .err()
+                .map(|error| provider_error_class(&error).to_string()),
+        });
+    }
+    let provider = match build_provider(state, &engine).await {
+        Ok(provider) => provider,
+        Err(error) => {
+            update_validation(state, engine, false).await?;
+            return Ok(AIEngineConnectionTest {
+                valid: false,
+                mode: "configuration".to_string(),
+                models_available: None,
+                error_class: Some(load_error_class(&error).to_string()),
+            });
+        }
+    };
     // A provider with no model-listing operation cannot be probed, so a compiled
     // manifest is the strongest signal available for it.
     let (valid, mode, models_available, error_class) = match provider.models() {
@@ -224,6 +237,87 @@ pub async fn test_engine_connection(
     })
 }
 
+pub fn is_catalog_grengin(engine: &ai_engines::Model) -> bool {
+    engine.engine_key == "grengin" && engine.plugin_config.is_none() && engine.api_key.is_none()
+}
+
+/// Existing unavailable selections may be retained or removed. Removed defaults
+/// are cleared, never substituted. Additions/default changes require the catalog.
+pub fn grengin_model_policy(
+    models: &[llm_plugin::ProviderModel],
+    previous: Option<&ai_engines::Model>,
+    selected: Option<Vec<String>>,
+    text: Option<String>,
+    image: Option<String>,
+) -> Result<(Vec<String>, String, Option<String>), AuthError> {
+    use llm_plugin::ProviderModelType::{ImageGenerator, TextGenerator};
+    let mut models = models.iter().collect::<Vec<_>>();
+    models.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+    let selected = selected.unwrap_or_else(|| {
+        if let Some(previous) = previous {
+            return previous.whitelist_models.clone();
+        }
+        let image = models.iter().find(|m| m.model_type == ImageGenerator);
+        let mut selected = models
+            .iter()
+            .filter(|m| m.model_type == TextGenerator)
+            .take(if image.is_some() { 2 } else { 3 })
+            .map(|m| m.id.to_string())
+            .collect::<Vec<_>>();
+        if let Some(image) = image {
+            selected.push(image.id.to_string());
+        }
+        selected
+    });
+    let mut seen = std::collections::HashSet::new();
+    for id in &selected {
+        if !seen.insert(id)
+            || (!previous.is_some_and(|p| p.whitelist_models.contains(id))
+                && !models.iter().any(|m| m.id.as_str() == id))
+        {
+            return Err(AuthError::InvalidRequest {
+                field: "whitelisted_models",
+            });
+        }
+    }
+    let default = |requested: Option<String>, old: Option<&str>, kind, field| {
+        let value = requested
+            .or_else(|| match previous {
+                Some(_) => old
+                    .filter(|id| selected.iter().any(|s| s == id))
+                    .map(str::to_owned),
+                None => models
+                    .iter()
+                    .find(|m| m.model_type == kind && selected.iter().any(|s| s == m.id.as_str()))
+                    .map(|m| m.id.to_string()),
+            })
+            .filter(|value| !value.is_empty());
+        if let Some(id) = value.as_deref() {
+            let current = models.iter().find(|m| m.id.as_str() == id);
+            if !selected.iter().any(|s| s == id)
+                || !current.map_or(old == Some(id), |m| m.model_type == kind)
+            {
+                return Err(AuthError::InvalidRequest { field });
+            }
+        }
+        Ok(value)
+    };
+    let text = default(
+        text,
+        previous.map(|p| p.default_model.as_str()),
+        TextGenerator,
+        "default_model",
+    )?
+    .unwrap_or_default();
+    let image = default(
+        image,
+        previous.and_then(|p| p.default_image_gen_model.as_deref()),
+        ImageGenerator,
+        "default_image_gen_model",
+    )?;
+    Ok((selected, text, image))
+}
+
 pub async fn create_engine(
     state: &SharedState,
     request: AIEngineCreate,
@@ -240,21 +334,14 @@ pub async fn create_engine(
                     }
                     _ => AuthError::ServiceTemporarilyUnavailable,
                 })?;
-            (
-                PluginConfig {
-                    manifest: package.plugin,
-                    configuration: serde_json::json!({}),
-                    base_url_override: request
-                        .base_url_override
-                        .as_deref()
-                        .map(catalog_base_url_override)
-                        .transpose()?
-                        .flatten(),
-                    allow_insecure_http: false,
-                    allow_private_network: false,
-                },
-                true,
-            )
+            let mut config = super::provider_runtime::catalog_config(package.plugin);
+            config.base_url_override = request
+                .base_url_override
+                .as_deref()
+                .map(|raw| catalog_base_url_override(key, raw))
+                .transpose()?
+                .flatten();
+            (config, true)
         }
         (None, Some(_)) if request.base_url_override.is_some() => {
             return Err(BASE_URL_OVERRIDE_FIELD);
@@ -291,7 +378,7 @@ pub async fn create_engine(
         Some(value) => Some(value.trim().to_string()),
         None => None,
     };
-    let is_enabled = enabled_after_key(false, api_key.is_some(), request.is_enabled);
+    let mut is_enabled = enabled_after_key(false, api_key.is_some(), request.is_enabled);
     if manifest.credentials.is_empty() && api_key.is_some() {
         return Err(AuthError::InvalidRequest { field: "api_key" });
     }
@@ -310,20 +397,54 @@ pub async fn create_engine(
             .first()
             .map(|_| "validation-placeholder".to_string())
     });
-    let provider = compile_provider(config.clone(), &manifest.id, compile_key).map_err(|_| {
-        AuthError::InvalidRequest {
-            field: "plugin_config",
-        }
+    let provider = compile_engine(
+        config.clone(),
+        &manifest.id,
+        compile_key,
+        catalog_install.then_some(&state.discovery_catalog),
+    )
+    .map_err(|_| AuthError::InvalidRequest {
+        field: "plugin_config",
     })?;
 
     let now = Utc::now();
-    let whitelist_models = request
-        .whitelisted_models
-        .unwrap_or_else(|| starter_models(&manifest));
-    let default_model = request
-        .default_model
-        .or_else(|| whitelist_models.first().cloned())
-        .unwrap_or_else(|| "<empty>".to_string());
+    let (whitelist_models, default_model, default_image_gen_model) =
+        if catalog_install && manifest.id == "grengin" {
+            let identity_ready = super::grengin_grant::GrenginGrant::configured().is_ok();
+            let models = if identity_ready
+                && request
+                    .whitelisted_models
+                    .as_ref()
+                    .is_none_or(|m| !m.is_empty())
+            {
+                match provider.models() {
+                    Some(models) => models.list_models().await.unwrap_or_default(),
+                    None => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+            let policy = grengin_model_policy(
+                &models,
+                None,
+                request.whitelisted_models,
+                request.default_model,
+                request.default_image_gen_model,
+            )?;
+            if !identity_ready || policy.0.is_empty() {
+                is_enabled = false;
+            }
+            policy
+        } else {
+            let models = request
+                .whitelisted_models
+                .unwrap_or_else(|| starter_models(&manifest));
+            let default = request
+                .default_model
+                .or_else(|| models.first().cloned())
+                .unwrap_or_else(|| "<empty>".to_string());
+            (models, default, request.default_image_gen_model)
+        };
     let encrypted_api_key = api_key
         .as_ref()
         .map(|value| encrypt_key(&state.settings.auth.app_key, value.as_bytes()))
@@ -378,7 +499,7 @@ pub async fn create_engine(
         api_key: Set(encrypted_api_key),
         whitelist_models: Set(whitelist_models.clone()),
         default_model: Set(default_model),
-        default_image_gen_model: Set(request.default_image_gen_model),
+        default_image_gen_model: Set(default_image_gen_model),
         plugin_config: Set(plugin_config),
         base_url_override: Set(base_url_override),
         api_key_validated_at: Set(None),
@@ -401,7 +522,7 @@ pub async fn create_engine(
         .await
         .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
     if engine.is_enabled {
-        state.provider_registry.register(Arc::new(provider)).await;
+        state.provider_registry.register(provider).await;
     }
     Ok(engine_detail(state, engine))
 }
@@ -433,18 +554,29 @@ mod tests {
     #[test]
     fn customer_azure_resource_and_bedrock_region_are_accepted() {
         assert_eq!(
-            catalog_base_url_override(" https://contoso.services.ai.azure.com/openai/v1/ ")
-                .unwrap()
-                .as_deref(),
+            catalog_base_url_override(
+                "azure-openai",
+                " https://contoso.services.ai.azure.com/openai/v1/ "
+            )
+            .unwrap()
+            .as_deref(),
             Some("https://contoso.services.ai.azure.com/openai/v1/")
         );
         assert_eq!(
-            catalog_base_url_override("https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1/")
-                .unwrap()
-                .as_deref(),
+            catalog_base_url_override(
+                "bedrock",
+                "https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1/"
+            )
+            .unwrap()
+            .as_deref(),
             Some("https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1/")
         );
-        assert_eq!(catalog_base_url_override("  ").unwrap(), None);
+        assert_eq!(catalog_base_url_override("bedrock", "  ").unwrap(), None);
+    }
+
+    #[test]
+    fn grengin_only_uses_its_registered_service_origin() {
+        assert!(catalog_base_url_override("grengin", "https://example.com/").is_err());
     }
 
     #[test]
@@ -458,7 +590,10 @@ mod tests {
             "https://contoso.services.ai.azure.com/openai/v1/?api-key=x",
             "not a url",
         ] {
-            assert!(catalog_base_url_override(raw).is_err(), "{raw}");
+            assert!(
+                catalog_base_url_override("azure-openai", raw).is_err(),
+                "{raw}"
+            );
         }
     }
 
@@ -503,5 +638,75 @@ mod tests {
         let mut active = catalog.clone().into_active_model();
         apply_base_url_override(&mut active, &catalog, None, true).unwrap();
         assert_eq!(active.base_url_override, Set(None));
+    }
+}
+
+#[cfg(test)]
+mod grengin_policy_tests {
+    use super::*;
+    use llm_plugin::{ProviderModel, ProviderModelType};
+
+    fn models() -> Vec<ProviderModel> {
+        [
+            ("z/text", ProviderModelType::TextGenerator),
+            ("a/image", ProviderModelType::ImageGenerator),
+            ("b/text", ProviderModelType::TextGenerator),
+            ("a/text", ProviderModelType::TextGenerator),
+            ("a/embed", ProviderModelType::TextEmbedder),
+        ]
+        .into_iter()
+        .map(|(id, model_type)| ProviderModel {
+            id: id.into(),
+            name: id.into(),
+            model_type,
+            capabilities: Default::default(),
+            metadata: serde_json::Value::Null,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn defaults_are_bounded_sorted_and_capability_specific() {
+        let mut catalog = models();
+        let policy = grengin_model_policy(&catalog, None, None, None, None).unwrap();
+        assert_eq!(policy.0, vec!["a/text", "b/text", "a/image"]);
+        assert_eq!(policy.1, "a/text");
+        assert_eq!(policy.2.as_deref(), Some("a/image"));
+        let empty = grengin_model_policy(&catalog, None, Some(vec![]), None, None).unwrap();
+        assert_eq!(empty, (vec![], "".into(), None));
+        assert!(grengin_model_policy(&catalog, None, None, Some("a/image".into()), None).is_err());
+        assert!(grengin_model_policy(&catalog, None, None, None, Some("a/text".into())).is_err());
+        catalog.retain(|model| model.model_type != ProviderModelType::ImageGenerator);
+        assert_eq!(
+            grengin_model_policy(&catalog, None, None, None, None)
+                .unwrap()
+                .0,
+            vec!["a/text", "b/text", "z/text"]
+        );
+    }
+
+    #[test]
+    fn unavailable_selections_can_be_removed_but_not_added_or_promoted() {
+        let old: ai_engines::Model = serde_json::from_value(serde_json::json!({
+            "id":Uuid::new_v4(), "displayName":"Grengin", "engineKey":"grengin", "isEnabled":false,
+            "apiKeyStatus":"not_configured", "apiKey":null, "apiKeyValidatedAt":null, "pluginConfig":null,
+            "whitelistModels":["retired/text","retired/image"], "defaultModel":"retired/text",
+            "defaultImageGenModel":"retired/image", "createdAt":Utc::now(), "updatedAt":Utc::now()
+        })).unwrap();
+        let retained = grengin_model_policy(&[], Some(&old), None, None, None).unwrap();
+        assert_eq!(retained.0, old.whitelist_models);
+        assert_eq!(retained.1, old.default_model);
+        assert_eq!(
+            grengin_model_policy(&[], Some(&old), Some(vec![]), None, None).unwrap(),
+            (vec![], "".into(), None)
+        );
+        assert!(
+            grengin_model_policy(&[], None, Some(old.whitelist_models.clone()), None, None)
+                .is_err()
+        );
+        assert!(
+            grengin_model_policy(&[], Some(&old), None, Some("retired/image".into()), None)
+                .is_err()
+        );
     }
 }
