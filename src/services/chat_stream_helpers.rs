@@ -6,18 +6,22 @@ use chrono::Utc;
 use futures_util::{Stream, StreamExt};
 use llm_plugin::ProviderError;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, UpdateMany, prelude::Decimal,
-    sea_query::Expr,
+    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, UpdateMany,
+    prelude::Decimal, sea_query::Expr,
 };
 use serde_json::Value;
-use std::{convert::Infallible, sync::Arc, time::Duration};
+use std::{collections::HashSet, convert::Infallible, sync::Arc, time::Duration};
 use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::{
     dto::{chat_stream::ResponseStopped, models::ModelInfo},
     error::{AppError, ErrorDetailVariant, ErrorResponse},
-    models::{departments::ActionOnExceed, messages, messages::StopReason},
+    models::{
+        departments::ActionOnExceed,
+        messages,
+        messages::{ChatRole, StopReason},
+    },
     services::budget_allocation::{BudgetHealth, get_department_budget_status},
     state::{SharedState, StreamCancel, StreamCancellations},
 };
@@ -197,6 +201,40 @@ pub fn persistence_error_event_data() -> String {
         detail: ErrorDetailVariant::Rich(detail),
     })
     .unwrap_or_else(|_| "{}".to_string())
+}
+
+const GENERATING_READ_ATTEMPTS: usize = 3;
+
+/// The conversation's messages, oldest first, with the replies still generating among them.
+pub async fn messages_with_generating(
+    state: &SharedState,
+    conversation_id: Uuid,
+) -> Result<(Vec<messages::Model>, HashSet<Uuid>), AppError> {
+    for attempt in 1..=GENERATING_READ_ATTEMPTS {
+        let before = state.generating_replies(conversation_id).await;
+        let rows = messages::Entity::find()
+            .filter(messages::Column::ConversationId.eq(conversation_id))
+            .filter(messages::Column::Deleted.eq(false))
+            .order_by_asc(messages::Column::CreatedAt)
+            .all(&state.database)
+            .await
+            .map_err(|error| {
+                eprintln!("{error}");
+                AppError::DbTimeout
+            })?;
+        let after = state.generating_replies(conversation_id).await;
+        let newest_reply = rows
+            .iter()
+            .rev()
+            .find(|row| row.role == ChatRole::Assistant)
+            .map(|row| row.id);
+        if let Some(generating) =
+            before.settle(after, newest_reply, attempt == GENERATING_READ_ATTEMPTS)
+        {
+            return Ok((rows, generating));
+        }
+    }
+    unreachable!("the last attempt always settles")
 }
 
 pub struct ContentCheckpoint {

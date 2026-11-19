@@ -36,7 +36,78 @@ use std::{
 use tokio::sync::{Notify, RwLock, broadcast};
 use uuid::Uuid;
 
-pub type StreamCancellations = Arc<RwLock<HashMap<Uuid, Arc<StreamCancel>>>>;
+pub type StreamCancellations = Arc<RwLock<StreamRegistry>>;
+
+#[derive(Default)]
+pub struct StreamRegistry {
+    streams: HashMap<Uuid, Arc<StreamCancel>>,
+    // Counts every reply that started or stopped generating, so a reader can tell whether the
+    // set changed while it read the messages.
+    changes: u64,
+}
+
+impl StreamRegistry {
+    pub fn insert(&mut self, message_id: Uuid, handle: Arc<StreamCancel>) {
+        self.changes += 1;
+        self.streams.insert(message_id, handle);
+    }
+
+    pub fn remove(&mut self, message_id: &Uuid) {
+        if self.streams.remove(message_id).is_some() {
+            self.changes += 1;
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.streams.is_empty()
+    }
+
+    fn register(
+        &mut self,
+        message_id: Uuid,
+        conversation_id: Uuid,
+        edit_request: Option<i32>,
+    ) -> Arc<StreamCancel> {
+        self.changes += 1;
+        register_stream(&mut self.streams, message_id, conversation_id, edit_request)
+    }
+
+    fn generating(&self, conversation_id: Uuid) -> GeneratingSnapshot {
+        GeneratingSnapshot {
+            changes: self.changes,
+            replies: generating_in(&self.streams, conversation_id),
+        }
+    }
+}
+
+pub struct GeneratingSnapshot {
+    changes: u64,
+    pub replies: HashSet<Uuid>,
+}
+
+impl GeneratingSnapshot {
+    /// Messages read between `self` and `after` match `self.replies` when no reply started or
+    /// stopped in between: a reply registers before its row exists and leaves only after its
+    /// final text is saved. Otherwise `None`, unless this is the last attempt: a reply that
+    /// started and finished in between is the newest one and may have been read half-written,
+    /// so it is reported as generating too and the next read settles it.
+    pub fn settle(
+        self,
+        after: GeneratingSnapshot,
+        newest_reply: Option<Uuid>,
+        last_attempt: bool,
+    ) -> Option<HashSet<Uuid>> {
+        if self.changes == after.changes {
+            return Some(self.replies);
+        }
+        last_attempt.then(|| {
+            let mut replies = self.replies;
+            replies.extend(after.replies);
+            replies.extend(newest_reply);
+            replies
+        })
+    }
+}
 
 pub struct AppState {
     pub database: DatabaseConnection,
@@ -193,7 +264,7 @@ impl AppState {
             share_index_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             mcp_refresh_locks: Default::default(),
             notification_hub,
-            stream_cancellations: Arc::new(RwLock::new(HashMap::new())),
+            stream_cancellations: StreamCancellations::default(),
             provider_registry: ProviderRegistry::new(),
             live_models_cache: LiveModelsCache::new(),
             discovery_catalog,
@@ -237,8 +308,10 @@ impl AppState {
         conversation_id: Uuid,
         edit_request: Option<i32>,
     ) -> Arc<StreamCancel> {
-        let mut guard = self.stream_cancellations.write().await;
-        register_stream(&mut guard, message_id, conversation_id, edit_request)
+        self.stream_cancellations
+            .write()
+            .await
+            .register(message_id, conversation_id, edit_request)
     }
 
     pub async fn release_stream_cancel(&self, message_id: Uuid) {
@@ -247,7 +320,7 @@ impl AppState {
 
     pub async fn cancel_stream(&self, message_id: Uuid) -> bool {
         let guard = self.stream_cancellations.read().await;
-        if let Some(handle) = guard.get(&message_id) {
+        if let Some(handle) = guard.streams.get(&message_id) {
             handle.cancel(StopReason::UserCancelled);
             true
         } else {
@@ -255,16 +328,16 @@ impl AppState {
         }
     }
 
-    // A reply stays registered until its final text is saved, so a page that polls while this
-    // holds its reply always ends on the complete message.
-    pub async fn generating_replies(&self, conversation_id: Uuid) -> HashSet<Uuid> {
-        let guard = self.stream_cancellations.read().await;
-        generating_in(&guard, conversation_id)
+    pub async fn generating_replies(&self, conversation_id: Uuid) -> GeneratingSnapshot {
+        self.stream_cancellations
+            .read()
+            .await
+            .generating(conversation_id)
     }
 
     pub async fn interrupt_older_streams(&self, conversation_id: Uuid, edit_request: i32) {
         let guard = self.stream_cancellations.read().await;
-        interrupt_older_streams(&guard, conversation_id, edit_request);
+        interrupt_older_streams(&guard.streams, conversation_id, edit_request);
     }
 
     pub async fn get_oidc_provider_runtime(
@@ -683,7 +756,9 @@ fn interrupt_older_streams(
 
 #[cfg(test)]
 mod tests {
-    use super::{StreamCancel, generating_in, interrupt_older_streams, register_stream};
+    use super::{
+        StreamCancel, StreamRegistry, generating_in, interrupt_older_streams, register_stream,
+    };
     use crate::models::messages::StopReason;
     use std::{collections::HashMap, sync::Arc};
     use uuid::Uuid;
@@ -702,6 +777,78 @@ mod tests {
         assert!(generating_in(&streams, conversation).contains(&reply));
         streams.remove(&reply);
         assert!(generating_in(&streams, conversation).is_empty());
+    }
+
+    #[test]
+    fn a_reply_that_starts_while_messages_are_read_is_never_reported_final() {
+        let mut registry = StreamRegistry::default();
+        let conversation = Uuid::new_v4();
+        let reply = Uuid::new_v4();
+        let before = registry.generating(conversation);
+        // The reply registers and its row is written after the first snapshot, before the read.
+        registry.register(reply, conversation, None);
+        let after = registry.generating(conversation);
+        let retried = registry.generating(conversation);
+        assert!(!before.replies.contains(&reply));
+        assert_eq!(before.settle(after, Some(reply), false), None);
+        // The retry sees no change while it reads, and finds the reply generating.
+        let settled = retried.settle(registry.generating(conversation), Some(reply), false);
+        assert_eq!(settled, Some([reply].into()));
+    }
+
+    #[test]
+    fn a_reply_that_starts_and_finishes_while_messages_are_read_stays_generating() {
+        let mut registry = StreamRegistry::default();
+        let conversation = Uuid::new_v4();
+        let reply = Uuid::new_v4();
+        let before = registry.generating(conversation);
+        registry.register(reply, conversation, None);
+        registry.remove(&reply);
+        let after = registry.generating(conversation);
+        assert!(before.replies.is_empty() && after.replies.is_empty());
+        // Out of attempts, the half-read newest reply is reported generating; the next poll settles it.
+        assert_eq!(
+            before.settle(after, Some(reply), true),
+            Some([reply].into())
+        );
+    }
+
+    #[test]
+    fn a_reply_that_finishes_while_messages_are_read_is_read_again() {
+        let mut registry = StreamRegistry::default();
+        let conversation = Uuid::new_v4();
+        let reply = Uuid::new_v4();
+        registry.register(reply, conversation, None);
+        let before = registry.generating(conversation);
+        registry.remove(&reply);
+        let after = registry.generating(conversation);
+        assert!(before.replies.contains(&reply));
+        assert_eq!(before.settle(after, Some(reply), false), None);
+        let settled = registry
+            .generating(conversation)
+            .settle(registry.generating(conversation), Some(reply), false);
+        assert_eq!(settled, Some([].into()));
+    }
+
+    #[test]
+    fn other_conversations_and_unknown_releases_do_not_hide_changes() {
+        let mut registry = StreamRegistry::default();
+        let conversation = Uuid::new_v4();
+        let before = registry.generating(conversation);
+        registry.remove(&Uuid::new_v4());
+        assert!(
+            before
+                .settle(registry.generating(conversation), None, false)
+                .is_some()
+        );
+        let before = registry.generating(conversation);
+        registry.register(Uuid::new_v4(), Uuid::new_v4(), None);
+        // A change anywhere forces a re-read: cheap, and it never reports a partial reply as final.
+        assert!(
+            before
+                .settle(registry.generating(conversation), None, false)
+                .is_none()
+        );
     }
 
     #[test]
