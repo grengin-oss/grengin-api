@@ -5,8 +5,8 @@ use crate::{
     auth::{
         azure::{AzureMultitenantValidation, build_azure_client},
         encryption::decrypt_key,
-        github::GitHubOAuthAdapter,
         google::build_google_client,
+        oauth2_identity::OAuth2IdentityAdapter,
         provider_config::{
             OidcProviderConfiguration, build_discovered_oidc_client,
             validate_issuer_url_for_provider, validate_redirect_url_for_provider,
@@ -79,7 +79,7 @@ pub struct AzurePublicClientConfig {
 #[derive(Clone)]
 pub enum AuthProtocolClient {
     Oidc(OidcClient),
-    GitHub(GitHubOAuthAdapter),
+    OAuth2(OAuth2IdentityAdapter),
 }
 
 pub type SharedState = Arc<AppState>;
@@ -475,8 +475,25 @@ impl AppState {
         } else {
             let client_secret = decrypt_key(&self.settings.auth.app_key, &model.client_secret)
                 .map_err(|error| anyhow::anyhow!("OIDC client secret decrypt failed: {error:?}"))?;
-            match model.provider.as_str() {
-                "azure" => {
+            match (configuration.oauth2.clone(), model.provider.as_str()) {
+                (Some(profile), _) => {
+                    if !profile.supports_issuer(&model.issuer_url) {
+                        return Err(anyhow::anyhow!(
+                            "OAuth2 issuer must be the origin of its authorization URL"
+                        ));
+                    }
+                    (
+                        Some(AuthProtocolClient::OAuth2(OAuth2IdentityAdapter::new(
+                            profile,
+                            model.client_id.clone(),
+                            client_secret,
+                            model.redirect_url.clone(),
+                        )?)),
+                        None,
+                        None,
+                    )
+                }
+                (None, "azure") => {
                     let tenant_id = model
                         .tenant_id
                         .clone()
@@ -498,7 +515,7 @@ impl AppState {
                         }),
                     )
                 }
-                "google" => {
+                (None, "google") => {
                     let client = build_google_client(
                         &self.req_client,
                         model.client_id.clone(),
@@ -507,20 +524,6 @@ impl AppState {
                     )
                     .await?;
                     (Some(AuthProtocolClient::Oidc(client)), None, None)
-                }
-                "github" => {
-                    if !GitHubOAuthAdapter::supports_issuer(&model.issuer_url) {
-                        return Err(anyhow::anyhow!("GitHub issuer must be https://github.com"));
-                    }
-                    (
-                        Some(AuthProtocolClient::GitHub(GitHubOAuthAdapter::new(
-                            model.client_id.clone(),
-                            client_secret,
-                            model.redirect_url.clone(),
-                        )?)),
-                        None,
-                        None,
-                    )
                 }
                 _ => {
                     let client = build_discovered_oidc_client(

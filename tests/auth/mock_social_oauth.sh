@@ -34,4 +34,4 @@ curl --fail --silent "${BASE_URL}/isalive" >/dev/null
 echo "Testing LinkedIn and Apple OIDC against ${MOCK_OAUTH2_IMAGE} at ${BASE_URL}"
 MOCK_OAUTH2_BASE_URL="${BASE_URL}" \
   cargo test --locked --manifest-path "${ROOT_DIR}/Cargo.toml" -p grengin-api --jobs 2 \
-  'auth::social_mock_tests::' -- --ignored --nocapture --test-threads=1
+  'auth::tests::social_mock::' -- --ignored --nocapture --test-threads=1

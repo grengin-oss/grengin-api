@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashSet};
 use thiserror::Error;
 use utoipa::ToSchema;
 
+use crate::auth::oauth2_identity::OAuth2IdentityProfile;
 use crate::config::setting::OidcClient;
 
 pub const OIDC_PROVIDER_CONFIG_VERSION: &str = "1.1";
@@ -49,6 +50,9 @@ pub struct OidcProviderConfiguration {
     pub pkce: PkceMode,
     pub email_linking: EmailLinkingMode,
     pub auto_redirect: bool,
+    // Present for providers that speak plain OAuth2 instead of OpenID Connect (see oauth2_identity).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth2: Option<OAuth2IdentityProfile>,
 }
 
 impl Default for OidcProviderConfiguration {
@@ -64,6 +68,7 @@ impl Default for OidcProviderConfiguration {
             pkce: PkceMode::S256,
             email_linking: EmailLinkingMode::VerifiedEmail,
             auto_redirect: false,
+            oauth2: None,
         }
     }
 }
@@ -129,10 +134,8 @@ impl OidcProviderConfiguration {
                 return Err(ProviderConfigError::InvalidScopes);
             }
         }
-        if provider.eq_ignore_ascii_case("github") {
-            if seen.len() != 2 || !seen.contains("read:user") || !seen.contains("user:email") {
-                return Err(ProviderConfigError::InvalidScopes);
-            }
+        if let Some(profile) = &self.oauth2 {
+            profile.validate(&self.scopes)?;
         } else if is_apple {
             if !seen.contains("openid")
                 || !seen.contains("email")
@@ -323,31 +326,40 @@ mod tests {
     }
 
     #[test]
-    fn github_requires_only_identity_scopes() {
-        let valid = OidcProviderConfiguration {
-            scopes: vec!["read:user".to_string(), "user:email".to_string()],
+    fn an_oauth2_profile_requires_exactly_its_scopes() {
+        let profile: OAuth2IdentityProfile = serde_json::from_value(serde_json::json!({
+            "authorizationUrl": "https://github.com/login/oauth/authorize",
+            "tokenUrl": "https://github.com/login/oauth/access_token",
+            "profile": {"url": "https://api.github.com/user", "subject": "/id"},
+            "verifiedEmails": {"url": "https://api.github.com/user/emails", "address": "/email", "verified": "/verified"},
+            "requiredScopes": ["read:user", "user:email"]
+        }))
+        .expect("profile");
+        let with = |scopes: &[&str]| OidcProviderConfiguration {
+            scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
+            oauth2: Some(profile.clone()),
             ..Default::default()
         };
-        assert!(valid.validate_for_provider("github").is_ok());
-
+        assert!(with(&["read:user", "user:email"]).validate().is_ok());
         for scopes in [
-            vec!["read:user".to_string()],
-            vec!["read:user".to_string(), "repo".to_string()],
-            vec![
-                "read:user".to_string(),
-                "user:email".to_string(),
-                "repo".to_string(),
-            ],
+            &["read:user"][..],
+            &["read:user", "repo"],
+            &["read:user", "user:email", "repo"],
         ] {
-            let configuration = OidcProviderConfiguration {
-                scopes,
-                ..Default::default()
-            };
             assert_eq!(
-                configuration.validate_for_provider("github"),
+                with(scopes).validate(),
                 Err(ProviderConfigError::InvalidScopes)
             );
         }
+        let without_profile = OidcProviderConfiguration {
+            scopes: vec!["read:user".to_string(), "user:email".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            without_profile.validate_for_provider("github"),
+            Err(ProviderConfigError::MissingOpenIdScope),
+            "a provider name alone no longer selects the OAuth2 rules"
+        );
     }
 
     #[test]
