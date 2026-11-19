@@ -1728,6 +1728,7 @@ fn manifests_cannot_map_credentials_into_query_parameters() {
 struct TestAuthorization {
     base: reqwest::Url,
     calls: std::sync::atomic::AtomicUsize,
+    rejected: std::sync::Mutex<Vec<String>>,
 }
 
 impl TestAuthorization {
@@ -1735,6 +1736,7 @@ impl TestAuthorization {
         Arc::new(Self {
             base: reqwest::Url::parse(base).unwrap(),
             calls: std::sync::atomic::AtomicUsize::new(0),
+            rejected: std::sync::Mutex::new(Vec::new()),
         })
     }
 }
@@ -1749,6 +1751,10 @@ impl llm_plugin::RequestAuthorization for TestAuthorization {
             ));
         }
         Ok(format!("grant-{}", self.calls.fetch_add(1, SeqCst) + 1))
+    }
+
+    async fn reject(&self, bearer: &str) {
+        self.rejected.lock().unwrap().push(bearer.to_owned());
     }
 }
 
@@ -2060,4 +2066,80 @@ async fn authorized_partial_and_error_streams_are_safe_and_cannot_be_replayed() 
                 .starts_with("POST /v1/chat/completions?alt=sse HTTP/1.1")
         );
     }
+}
+
+fn gateway_rejection(error_type: &str) -> MockResponse {
+    MockResponse::new(
+        "401 Unauthorized",
+        "application/json",
+        format!("{{\"error\":{{\"type\":\"{error_type}\"}}}}"),
+    )
+}
+
+async fn start_authorized_chat(
+    responses: Vec<MockResponse>,
+) -> (Arc<TestAuthorization>, Requests, Result<ProviderEventStream, ProviderError>) {
+    let (base, requests) = serve(responses).await;
+    let authorization = TestAuthorization::new(&base);
+    let provider = DeclarativeProvider::new_authorized(
+        manifest(
+            &base,
+            json!({"chat":{"streaming":true}}),
+            openai_chat_operations(json!({})),
+        ),
+        authorized_runtime(base.clone()),
+        authorization.clone(),
+    )
+    .unwrap();
+    let mut session = provider
+        .chat()
+        .unwrap()
+        .start(chat_request("chat-1"))
+        .await
+        .unwrap();
+    let stream = session.stream().await;
+    (authorization, requests, stream)
+}
+
+#[tokio::test]
+async fn a_grant_the_gateway_rejects_is_replaced_once_before_any_dispatch() {
+    let (authorization, requests, stream) = start_authorized_chat(vec![
+        gateway_rejection("invalid_connection_grant"),
+        MockResponse::new(
+            "200 OK",
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        ),
+    ])
+    .await;
+    let first = stream.unwrap().next().await.unwrap().unwrap();
+    assert!(matches!(first, ProviderEvent::TextDelta { text } if text == "hi"));
+    assert_eq!(*authorization.rejected.lock().unwrap(), ["grant-1"]);
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 2);
+    assert_minimal_headers(&requests[1], "grant-2", true);
+}
+
+#[tokio::test]
+async fn other_rejections_and_a_second_grant_rejection_are_never_retried() {
+    let (authorization, requests, stream) =
+        start_authorized_chat(vec![gateway_rejection("engine_off")]).await;
+    assert!(matches!(
+        stream.err().unwrap(),
+        ProviderError::NonReplayable(error) if matches!(*error, ProviderError::HttpStatus { status: 401, .. })
+    ));
+    assert!(authorization.rejected.lock().unwrap().is_empty());
+    assert_eq!(requests.lock().await.len(), 1);
+
+    let (authorization, requests, stream) = start_authorized_chat(vec![
+        gateway_rejection("invalid_connection_grant"),
+        gateway_rejection("invalid_connection_grant"),
+    ])
+    .await;
+    assert!(stream.is_err());
+    assert_eq!(
+        *authorization.rejected.lock().unwrap(),
+        ["grant-1", "grant-2"]
+    );
+    assert_eq!(requests.lock().await.len(), 2);
 }

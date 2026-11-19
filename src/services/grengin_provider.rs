@@ -250,6 +250,10 @@ impl RequestAuthorization for GatewayAuthorization {
         validate_gateway_url(self.grant.origin(), &self.provider, url)?;
         self.grant.bearer().await
     }
+
+    async fn reject(&self, bearer: &str) {
+        self.grant.reject(bearer).await;
+    }
 }
 
 pub fn split_model(model: &str) -> Result<(&str, &str), ProviderError> {

@@ -19,6 +19,7 @@ pub mod department_prompt_assignments;
 pub mod departments;
 pub mod embedding_configs;
 pub mod files;
+pub mod grengin_service_bindings;
 pub mod mcp_access_policies;
 pub mod mcp_connections;
 pub mod mcp_executions;

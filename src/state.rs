@@ -182,6 +182,7 @@ impl AppState {
             .await
             .map_err(|e| eprintln!("Loading embedding config from db error: {e}"));
         let (notification_hub, _) = broadcast::channel(256);
+        crate::services::grengin_grant::GrenginGrant::attach_database(database.clone());
         let state = Self {
             database,
             oidc_providers: RwLock::new(HashMap::new()),

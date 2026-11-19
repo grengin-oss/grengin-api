@@ -52,6 +52,9 @@ const MAX_AUTHORIZED_BODY_BYTES: usize = 32 * 1024 * 1024;
 #[async_trait]
 pub trait RequestAuthorization: Send + Sync {
     async fn authorize(&self, url: &Url) -> Result<String, ProviderError>;
+
+    /// The destination rejected `bearer` before doing any work with the request.
+    async fn reject(&self, _bearer: &str) {}
 }
 
 /// Percent-encodes everything except the RFC 3986 unreserved set, so a templated value can never
@@ -256,7 +259,7 @@ impl DeclarativeProvider {
         request: &T,
         session: &Value,
         mode: RequestMode,
-    ) -> Result<RequestBuilder, ProviderError> {
+    ) -> Result<(RequestBuilder, Option<String>), ProviderError> {
         let context = MappingContext::for_request(request, &self.runtime.configuration, session)?;
         let path = render_template(&spec.path, &context)?;
         let mut url = self
@@ -278,6 +281,7 @@ impl DeclarativeProvider {
                 query.append_pair(&name, &value);
             }
         }
+        let mut token_used = None;
         let bearer = if let Some(authorization) = &self.authorization {
             if url.query().is_some()
                 && !(mode == RequestMode::Streaming && url.query() == Some("alt=sse"))
@@ -310,6 +314,7 @@ impl DeclarativeProvider {
                 )
             })?;
             header.set_sensitive(true);
+            token_used = Some(token);
             Some(header)
         } else {
             None
@@ -381,7 +386,52 @@ impl DeclarativeProvider {
             ));
         }
         builder = apply_body(builder, spec.body_encoding, body)?;
-        Ok(builder)
+        Ok((builder, token_used))
+    }
+
+    /// Sends the request and checks its status. An authorized request the gateway refuses with
+    /// `invalid_connection_grant` was refused before any upstream dispatch, so it is sent once
+    /// more with a new grant; no other failure is ever replayed.
+    async fn dispatch<T: Serialize>(
+        &self,
+        spec: &RequestSpec,
+        request: &T,
+        session: &Value,
+        mode: RequestMode,
+    ) -> Result<Response, ProviderError> {
+        let authorized = self.authorization.is_some();
+        let mut retried = false;
+        loop {
+            let (builder, token) = self.prepare_request(spec, request, session, mode).await?;
+            let response = builder
+                .send()
+                .await
+                .map_err(|error| dispatch_error(error.into(), authorized))?;
+            if let (Some(authorization), Some(token)) = (&self.authorization, token) {
+                if response.status() == StatusCode::UNAUTHORIZED {
+                    let body = read_limited(response, MAX_ERROR_BODY_BYTES)
+                        .await
+                        .unwrap_or_default();
+                    if gateway_error_type(&body).as_deref() == Some("invalid_connection_grant") {
+                        authorization.reject(&token).await;
+                        if !retried {
+                            retried = true;
+                            continue;
+                        }
+                    }
+                    return Err(dispatch_error(
+                        ProviderError::HttpStatus {
+                            status: StatusCode::UNAUTHORIZED.as_u16(),
+                            message: "Unauthorized".into(),
+                        },
+                        true,
+                    ));
+                }
+            }
+            return ensure_success(response)
+                .await
+                .map_err(|error| dispatch_error(error, authorized));
+        }
     }
 
     fn resolve_header(
@@ -445,14 +495,8 @@ impl DeclarativeProvider {
         session: &Value,
     ) -> Result<(HeaderMap, Vec<u8>), ProviderError> {
         let response = self
-            .prepare_request(spec, request, session, RequestMode::Buffered)
-            .await?
-            .send()
-            .await
-            .map_err(|error| dispatch_error(error.into(), self.authorization.is_some()))?;
-        let response = ensure_success(response)
-            .await
-            .map_err(|error| dispatch_error(error, self.authorization.is_some()))?;
+            .dispatch(spec, request, session, RequestMode::Buffered)
+            .await?;
         let headers = response.headers().clone();
         let bytes = read_limited(response, self.response_limit_for(spec))
             .await
@@ -468,19 +512,13 @@ impl DeclarativeProvider {
         observed: Arc<Mutex<ObservedToolCalls>>,
     ) -> Result<ProviderEventStream, ProviderError> {
         let response = self
-            .prepare_request(
+            .dispatch(
                 &operation.request,
                 &request,
                 &session,
                 RequestMode::Streaming,
             )
-            .await?
-            .send()
-            .await
-            .map_err(|error| dispatch_error(error.into(), self.authorization.is_some()))?;
-        let response = ensure_success(response)
-            .await
-            .map_err(|error| dispatch_error(error, self.authorization.is_some()))?;
+            .await?;
         let content_type = response
             .headers()
             .get(CONTENT_TYPE)
@@ -1049,6 +1087,11 @@ impl DeclarativeProvider {
                 .transpose()?,
         })
     }
+}
+
+fn gateway_error_type(body: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    value.pointer("/error/type")?.as_str().map(str::to_owned)
 }
 
 fn dispatch_error(error: ProviderError, authorized: bool) -> ProviderError {
