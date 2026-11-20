@@ -34,8 +34,10 @@ export async function signIn(page: Page, user: keyof typeof USERS) {
 
 // First sign-in shows a guided tour over the chat screen; skip it like a returning user would.
 export async function dismissOnboarding(page: Page) {
-  for (const name of ['Skip tour', 'Hide setup guide']) {
-    const button = page.getByRole('button', { name });
-    if (await button.isVisible().catch(() => false)) await button.click();
-  }
+  const skip = page.getByRole('button', { name: 'Skip tour' });
+  // The tour opens shortly after the chat screen renders.
+  await skip.waitFor({ state: 'visible', timeout: 5_000 }).catch(() => {});
+  if (await skip.isVisible().catch(() => false)) await skip.click();
+  const guide = page.getByRole('button', { name: 'Hide setup guide' });
+  if (await guide.isVisible().catch(() => false)) await guide.click();
 }

@@ -13,12 +13,13 @@ const port = Number(process.env.LLM_PORT ?? 9402);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export const calls = [];
 
+// Content is a string or a list of parts ({type:"text", text}) depending on the manifest.
+const textOf = (content) =>
+  typeof content === 'string' ? content : (content ?? []).map((part) => part?.text ?? '').join(' ');
+
 function lastUser(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === 'user') {
-      const content = messages[i].content;
-      return typeof content === 'string' ? content : (content ?? []).map((part) => part.text ?? '').join(' ');
-    }
+    if (messages[i].role === 'user') return textOf(messages[i].content);
   }
   return '';
 }
@@ -28,7 +29,7 @@ function plan(body) {
   const text = lastUser(messages);
   // Title generation (system prompt "Write a short conversation title…") answers at once with a
   // title that differs from any reply text, so it neither delays nor shadows the real reply.
-  const system = messages.filter((m) => m.role === 'system').map((m) => String(m.content ?? '')).join(' ');
+  const system = messages.filter((m) => m.role === 'system' || m.role === 'developer').map((m) => textOf(m.content)).join(' ');
   if (/conversation title/i.test(system)) {
     return { chunks: [`Title: ${text.replace(/\[[^\]]*\]/g, '').trim().slice(0, 40) || 'E2E chat'}`] };
   }
