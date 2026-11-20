@@ -50,6 +50,7 @@ use crate::{
         },
         department_policies::check_model_allowed,
         file_storage::{FileWrite, StorageCategory, safe_file_name, store_file_bytes},
+        llm_usage_gate::{ModelRates, TokenCounts, UsageCharge, UsagePurpose, UsageSubject},
         mcp_helpers::{
             McpOauthErrorPayload, McpOauthPrompt, McpOauthRequiredEvent, build_mcp_oauth_prompt,
             build_mcp_server_context, resolve_mcp_oauth_token, resolve_mcp_tool_descriptor,
@@ -519,6 +520,7 @@ pub async fn handle_chat_stream(
             eprintln!("find user error: {e}");
             AppError::DbTimeout
         })?;
+    let user_department = user.as_ref().and_then(|user| user.department_id);
     if let Some(user) = user {
         let allowed = check_model_allowed(
             &app_state.database,
@@ -713,7 +715,13 @@ pub async fn handle_chat_stream(
             let top_k = app_state.settings.rag.retrieval_top_k;
             let retrieval_future = async {
                 if app_state.settings.rag.retrieval_enabled {
-                    embed_retrieval_query(&app_state, &retrieval_query).await
+                    embed_retrieval_query(
+                        &app_state,
+                        claims.user_id,
+                        conversation_id,
+                        &retrieval_query,
+                    )
+                    .await
                 } else {
                     Ok(None)
                 }
@@ -721,7 +729,17 @@ pub async fn handle_chat_stream(
             let (embedding_result, project_retrieval_results) = tokio::join!(
                 retrieval_future,
                 futures_util::future::join_all(linked_projects.iter().map(|project| {
-                    build_project_retrieval_prompt(&app_state, project.id, &retrieval_query, top_k)
+                    build_project_retrieval_prompt(
+                        &app_state,
+                        UsageSubject {
+                            user_id: claims.user_id,
+                            purpose: UsagePurpose::QueryEmbedding,
+                            conversation_id: Some(conversation_id),
+                        },
+                        project.id,
+                        &retrieval_query,
+                        top_k,
+                    )
                 })),
             );
             retrieval_embedding = embedding_result?;
@@ -831,6 +849,20 @@ pub async fn handle_chat_stream(
         }
         let new_conversation_id = Uuid::new_v4();
         let mut new_metadata = metadata.clone();
+        let title_charge = UsageCharge::pre_authorized(
+            UsageSubject {
+                user_id: claims.user_id,
+                purpose: UsagePurpose::TitleGeneration,
+                conversation_id: Some(new_conversation_id),
+            },
+            user_department,
+            &provider_key,
+            &model_name,
+            ModelRates {
+                input: input_rate,
+                output: output_rate,
+            },
+        );
         let title_result = if is_image_gen {
             None
         } else {
@@ -857,6 +889,9 @@ pub async fn handle_chat_stream(
             .as_ref()
             .map(|response| response.title.clone())
             .or_else(|| Some(first_prompt.chars().take(80).collect::<String>()));
+        let title_tokens = title_result
+            .as_ref()
+            .map(|response| TokenCounts::reported(response.input_tokens, response.output_tokens));
         new_metadata["titleGenerationUsage"] = title_result.map_or_else(
             || json!({ "model": Value::Null, "inputTokens": 0, "outputTokens": 0 }),
             |response| {
@@ -893,6 +928,9 @@ pub async fn handle_chat_stream(
                 eprintln!("Db insert one error {:?}", e);
                 AppError::DbTimeout
             })?;
+        if let Some(tokens) = title_tokens {
+            title_charge.record(&app_state, tokens).await;
+        }
         (new_conversation_id, generated_title)
     };
     let mut previous_message_id = thread_parent;
@@ -2925,9 +2963,10 @@ pub async fn handle_chat_stream(
                        let state = app_state.clone();
                        let provider_clone = provider.clone();
                        let model_clone = model_name.clone();
+                       let owner = claims.user_id;
                        tokio::spawn(async move {
-                           if do_embed { let _ = embed_messages(&state, targets).await; }
-                           if do_summary { let _ = update_conversation_summary(&state, conversation_id, &provider_clone, &model_clone).await; }
+                           if do_embed { let _ = embed_messages(&state, owner, targets).await; }
+                           if do_summary { let _ = update_conversation_summary(&state, owner, conversation_id, &provider_clone, &model_clone).await; }
                        });
                    }
                }

@@ -124,9 +124,11 @@ pub fn ensure_budget_pricing(
     }
     let valid_rate =
         |rate: Option<f64>| rate.is_some_and(|value| value.is_finite() && value >= 0.0);
+    // Embedders only bill input tokens, so they carry no output rate.
     let priced = model.is_some_and(|model| {
         valid_rate(model.input_token_rate)
-            && valid_rate(model.output_token_rate)
+            && (model.model_type == crate::dto::models::ModelType::TextEmbedder
+                || valid_rate(model.output_token_rate))
             && (model.model_type != crate::dto::models::ModelType::ImageGenerator
                 || (valid_rate(model.image_input_token_rate)
                     && valid_rate(model.image_output_token_rate)))
@@ -545,6 +547,15 @@ mod tests {
         assert!(ensure_budget_pricing(true, Some(&info)).is_err());
         info.image_input_token_rate = Some(3.0);
         info.image_output_token_rate = Some(4.0);
+        assert!(ensure_budget_pricing(true, Some(&info)).is_ok());
+    }
+
+    #[test]
+    fn embedder_budgets_need_only_the_input_rate() {
+        let mut info = model("custom", "embed", "Embed");
+        info.model_type = ModelType::TextEmbedder;
+        assert!(ensure_budget_pricing(true, Some(&info)).is_err());
+        info.input_token_rate = Some(0.02);
         assert!(ensure_budget_pricing(true, Some(&info)).is_ok());
     }
 

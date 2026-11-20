@@ -279,6 +279,31 @@ impl AppState {
         Ok(Arc::new(state))
     }
 
+    #[cfg(test)]
+    pub fn for_tests(database: DatabaseConnection, settings: Settings) -> SharedState {
+        let req_client = short_call_client().expect("test http client");
+        let (notification_hub, _) = broadcast::channel(16);
+        Arc::new(Self {
+            database,
+            oidc_providers: RwLock::new(HashMap::new()),
+            discovery_catalog: DiscoveryCatalog::new(req_client.clone(), "http://127.0.0.1:9")
+                .expect("test discovery catalog"),
+            req_client,
+            settings,
+            mcp_clients: RwLock::new(HashMap::new()),
+            share_rate_limiter: Default::default(),
+            share_fork_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            share_index_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            mcp_refresh_locks: Default::default(),
+            notification_hub,
+            stream_cancellations: StreamCancellations::default(),
+            provider_registry: ProviderRegistry::new(),
+            live_models_cache: LiveModelsCache::new(),
+            deployment_google: None,
+            deployment_azure: None,
+        })
+    }
+
     pub async fn check_sso_provider_is_enabled(&self, provider: &AuthProvider) -> Option<bool> {
         self.oidc_provider(provider)
             .await
@@ -827,9 +852,11 @@ mod tests {
         let after = registry.generating(conversation);
         assert!(before.replies.contains(&reply));
         assert_eq!(before.settle(after, Some(reply), false), None);
-        let settled = registry
-            .generating(conversation)
-            .settle(registry.generating(conversation), Some(reply), false);
+        let settled = registry.generating(conversation).settle(
+            registry.generating(conversation),
+            Some(reply),
+            false,
+        );
         assert_eq!(settled, Some([].into()));
     }
 

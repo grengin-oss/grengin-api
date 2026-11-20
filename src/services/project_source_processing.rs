@@ -15,10 +15,11 @@ use crate::{
     models::{files, project_source_chunks, project_sources, project_sources::ProcessingStatus},
     services::{
         file_storage::{FileWrite, StorageCategory, store_file_bytes},
-        llm_usage_gate::ensure_user_llm_allowed,
+        llm_usage_gate::{TokenCounts, UsagePurpose, UsageSubject, authorize_usage},
         provider_chat::{generate_provider_response, provider_error_class},
         provider_resolver::resolve_provider,
         rag::{format_pgvector, generate_embeddings},
+        task_models::{TaskCapability, select_task_model},
     },
     state::SharedState,
 };
@@ -156,16 +157,38 @@ fn effective_mime(bytes: &[u8], declared: &str) -> String {
     declared.to_string()
 }
 
-const EXTRACTION_PROVIDER: &str = "anthropic";
-const EXTRACTION_MODEL: &str = "claude-haiku-4-5";
-
 async fn extract_text_via_llm(
     app_state: &SharedState,
     user_id: Uuid,
     bytes: Vec<u8>,
     content_type: &str,
 ) -> Result<String, AppError> {
-    ensure_user_llm_allowed(app_state, user_id, EXTRACTION_PROVIDER, EXTRACTION_MODEL).await?;
+    let capability = TaskCapability::for_content_type(content_type);
+    let Some(choice) = select_task_model(app_state, user_id, capability).await? else {
+        eprintln!(
+            "project source extraction skipped: no enabled model with {capability} input is available"
+        );
+        return Err(AppError::ValidationMissingField {
+            field: "extraction_model",
+        });
+    };
+    let provider = resolve_provider(app_state, &choice.provider_key)
+        .await
+        .map_err(|_| AppError::LlmProviderNotConfigured {
+            provider: choice.provider_key.clone(),
+        })?;
+    let charge = authorize_usage(
+        app_state,
+        UsageSubject {
+            user_id,
+            purpose: UsagePurpose::SourceExtraction,
+            conversation_id: None,
+        },
+        provider.as_ref(),
+        &choice.provider_key,
+        &choice.model,
+    )
+    .await?;
     let data = BASE64_STANDARD.encode(&bytes);
     let prompt_text = if content_type.starts_with("image/") {
         "Describe the content of this image in detail. If it contains text, extract all the text verbatim. If it's a diagram or chart, describe what it shows."
@@ -185,15 +208,10 @@ async fn extract_text_via_llm(
             media_type: content_type.to_string(),
         }
     };
-    let provider = resolve_provider(app_state, EXTRACTION_PROVIDER)
-        .await
-        .map_err(|_| AppError::LlmProviderNotConfigured {
-            provider: EXTRACTION_PROVIDER.to_string(),
-        })?;
     let result = generate_provider_response(
         provider.as_ref(),
         llm_plugin::ChatRequest {
-            model: llm_plugin::ModelId::new(EXTRACTION_MODEL),
+            model: llm_plugin::ModelId::new(choice.model.clone()),
             messages: vec![llm_plugin::ChatMessage {
                 role: llm_plugin::ChatRole::User,
                 content: vec![
@@ -224,9 +242,15 @@ async fn extract_text_via_llm(
             );
         }
         AppError::LlmProviderNotConfigured {
-            provider: EXTRACTION_PROVIDER.to_string(),
+            provider: choice.provider_key.clone(),
         }
     })?;
+    charge
+        .record(
+            app_state,
+            TokenCounts::reported(result.input_tokens, result.output_tokens),
+        )
+        .await;
 
     Ok(result.text)
 }
@@ -374,9 +398,15 @@ pub async fn process_project_source(
             return Ok(());
         }
 
-        let embeddings = generate_embeddings(&app_state, &embedding_config, chunks.clone())
-            .await?
-            .ok_or(AppError::ServiceTemporarilyUnavailable)?;
+        let subject = UsageSubject {
+            user_id,
+            purpose: UsagePurpose::SourceEmbedding,
+            conversation_id: None,
+        };
+        let embeddings =
+            generate_embeddings(&app_state, &embedding_config, subject, chunks.clone())
+                .await?
+                .ok_or(AppError::ServiceTemporarilyUnavailable)?;
 
         store_chunks(
             db,

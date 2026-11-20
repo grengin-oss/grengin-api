@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     config::setting::EmbeddingSettings,
     dto::files::File,
-    dto::prompt::{Prompt, PromptTextResponse},
+    dto::prompt::Prompt,
     error::AppError,
     models::{
         conversation_summaries, conversations, message_embeddings, messages, messages::ChatRole,
@@ -23,8 +23,12 @@ use crate::{
     services::{
         embedders_cache::get_model_dimensions,
         embedding_helpers::storage_embedding_dimensions,
+        llm_usage_gate::{
+            TokenCounts, UsagePurpose, UsageSubject, authorize_usage, is_usage_refusal,
+        },
         provider_chat::{generate_provider_text, provider_error_class},
         provider_resolver::resolve_provider,
+        task_models::select_summary_model,
     },
     state::SharedState,
 };
@@ -162,6 +166,8 @@ pub struct RetrievalQuery {
 // Embedded before the history snapshot opens, so the snapshot never waits on the embedding provider.
 pub async fn embed_retrieval_query(
     app_state: &SharedState,
+    user_id: Uuid,
+    conversation_id: Uuid,
     query_text: &str,
 ) -> Result<Option<RetrievalQuery>, AppError> {
     if query_text.trim().is_empty() {
@@ -177,7 +183,14 @@ pub async fn embed_retrieval_query(
         Some(config) if config.is_enabled => config,
         _ => return Ok(None),
     };
-    let embedding = match generate_embedding(app_state, &embedding_config, query_text).await? {
+    let subject = UsageSubject {
+        user_id,
+        purpose: UsagePurpose::QueryEmbedding,
+        conversation_id: Some(conversation_id),
+    };
+    let embedding = match skip_refused(
+        generate_embedding(app_state, &embedding_config, subject, query_text).await,
+    )? {
         Some(embedding) => embedding,
         None => return Ok(None),
     };
@@ -318,6 +331,7 @@ pub fn assemble_prompts_with_budget(
 
 pub async fn embed_messages(
     app_state: &SharedState,
+    user_id: Uuid,
     targets: Vec<EmbeddingTarget>,
 ) -> Result<(), AppError> {
     if targets.is_empty() {
@@ -344,10 +358,18 @@ pub async fn embed_messages(
         return Ok(());
     }
 
-    let embeddings = match generate_embeddings(app_state, &embedding_config, inputs).await {
-        Err(e) => return Err(e),
-        Ok(None) => return Ok(()),
-        Ok(Some(v)) => v,
+    let subject = UsageSubject {
+        user_id,
+        purpose: UsagePurpose::MessageEmbedding,
+        conversation_id: filtered_targets
+            .first()
+            .map(|target| target.conversation_id),
+    };
+    let embeddings = match skip_refused(
+        generate_embeddings(app_state, &embedding_config, subject, inputs).await,
+    )? {
+        None => return Ok(()),
+        Some(v) => v,
     };
 
     for (target, embedding) in filtered_targets.into_iter().zip(embeddings.into_iter()) {
@@ -359,6 +381,7 @@ pub async fn embed_messages(
 
 pub async fn update_conversation_summary(
     app_state: &SharedState,
+    user_id: Uuid,
     conversation_id: Uuid,
     provider: &str,
     model_name: &str,
@@ -373,23 +396,6 @@ pub async fn update_conversation_summary(
         Some(boundary) => boundary,
         None => return Ok(()),
     };
-
-    let summary_provider = app_state
-        .settings
-        .rag
-        .summary_llm_provider
-        .clone()
-        .unwrap_or_else(|| provider.to_string())
-        .to_lowercase();
-    let summary_model = app_state
-        .settings
-        .rag
-        .summary_llm_model
-        .clone()
-        .unwrap_or_else(|| model_name.to_string());
-    if summary_provider != "openai" && summary_provider != "anthropic" {
-        return Ok(());
-    }
 
     let existing_summary = load_summary(&app_state.database, conversation_id).await?;
     let mut condition = Condition::all()
@@ -437,9 +443,18 @@ pub async fn update_conversation_summary(
         existing_text, new_chunk
     );
 
-    let summary_response =
-        generate_summary_text(app_state, &summary_provider, &summary_model, summary_prompt).await?;
-    let summary_text = summary_response.text.trim().to_string();
+    let Some(summary_text) = generate_summary_text(
+        app_state,
+        user_id,
+        conversation_id,
+        provider,
+        model_name,
+        summary_prompt,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
 
     // Editing or switching versions hides the thread from some message on, under this same lock,
     // and drops a summary covering it. These messages were read before the model call, so the
@@ -550,15 +565,20 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
 async fn generate_embedding(
     app_state: &SharedState,
     config: &EmbeddingSettings,
+    subject: UsageSubject,
     text: &str,
 ) -> Result<Option<Vec<f32>>, AppError> {
-    let embeddings = generate_embeddings(app_state, config, vec![text.to_string()]).await?;
+    let embeddings =
+        generate_embeddings(app_state, config, subject, vec![text.to_string()]).await?;
     Ok(embeddings.and_then(|mut vecs| vecs.pop()))
 }
 
+// Refused when the user's department budget is blocked, or a budgeted department has no price for
+// the embedding model; callers that only enrich a request skip it with `skip_refused`.
 pub async fn generate_embeddings(
     app_state: &SharedState,
     config: &EmbeddingSettings,
+    subject: UsageSubject,
     inputs: Vec<String>,
 ) -> Result<Option<Vec<Vec<f32>>>, AppError> {
     let provider = config.provider.to_lowercase();
@@ -584,6 +604,18 @@ pub async fn generate_embeddings(
     let Some(embedder) = plugin.embeddings() else {
         return Ok(None);
     };
+    let charge = authorize_usage(
+        app_state,
+        subject,
+        plugin.as_ref(),
+        &provider,
+        &config.model,
+    )
+    .await?;
+    let estimated_input = inputs
+        .iter()
+        .map(|input| estimate_tokens_for_text(input))
+        .sum();
     let response = embedder
         .embed(llm_plugin::EmbeddingRequest {
             model: llm_plugin::ModelId::new(config.model.clone()),
@@ -601,6 +633,12 @@ pub async fn generate_embeddings(
                 provider: provider.clone(),
             }
         })?;
+    charge
+        .record(
+            app_state,
+            embedding_tokens(response.usage.as_ref(), estimated_input),
+        )
+        .await;
     if !embedding_dimensions_match(&response.vectors, target_dim) {
         return Err(AppError::ValidationMissingField {
             field: "embedding.dimensions",
@@ -613,26 +651,105 @@ fn embedding_dimensions_match(vectors: &[Vec<f32>], target: Option<usize>) -> bo
     target.is_none_or(|target| vectors.iter().all(|vector| vector.len() == target))
 }
 
+// Providers that report no embedding usage are charged an estimate, so the call still counts.
+fn embedding_tokens(usage: Option<&llm_plugin::TokenUsage>, estimated_input: usize) -> TokenCounts {
+    match usage.and_then(|usage| usage.input_tokens.or(usage.total_tokens)) {
+        Some(input) => TokenCounts::reported(i32::try_from(input).unwrap_or(i32::MAX), 0),
+        None => TokenCounts {
+            input: i32::try_from(estimated_input).unwrap_or(i32::MAX),
+            output: 0,
+            estimated: true,
+        },
+    }
+}
+
+fn skip_refused<T>(result: Result<Option<T>, AppError>) -> Result<Option<T>, AppError> {
+    match result {
+        Err(error) if is_usage_refusal(&error) => {
+            eprintln!("embedding skipped: {error:?}");
+            Ok(None)
+        }
+        other => other,
+    }
+}
+
 async fn generate_summary_text(
     app_state: &SharedState,
-    provider: &str,
-    model: &str,
+    user_id: Uuid,
+    conversation_id: Uuid,
+    conversation_provider: &str,
+    conversation_model: &str,
     prompt: String,
-) -> Result<PromptTextResponse, AppError> {
-    let provider_key = provider.to_lowercase();
-    let plugin = resolve_provider(app_state, &provider_key)
-        .await
-        .map_err(|_| AppError::LlmProviderNotConfigured {
-            provider: provider.to_string(),
-        })?;
-    generate_provider_text(plugin.as_ref(), model, None, prompt, Vec::new(), Some(512))
-        .await
-        .map_err(|error| {
-            eprintln!("summary provider error: {}", provider_error_class(&error));
-            AppError::LlmProviderNotConfigured {
-                provider: provider.to_string(),
-            }
-        })
+) -> Result<Option<String>, AppError> {
+    let choice = match select_summary_model(
+        app_state,
+        user_id,
+        conversation_provider,
+        conversation_model,
+    )
+    .await
+    {
+        Ok(Some(choice)) => choice,
+        Ok(None) => {
+            eprintln!("conversation summary skipped: no enabled text model is available");
+            return Ok(None);
+        }
+        Err(error) if is_usage_refusal(&error) => {
+            eprintln!("conversation summary skipped: {error:?}");
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let Ok(plugin) = resolve_provider(app_state, &choice.provider_key).await else {
+        eprintln!(
+            "conversation summary skipped: provider {} is not available",
+            choice.provider_key
+        );
+        return Ok(None);
+    };
+    let subject = UsageSubject {
+        user_id,
+        purpose: UsagePurpose::ConversationSummary,
+        conversation_id: Some(conversation_id),
+    };
+    let charge = match authorize_usage(
+        app_state,
+        subject,
+        plugin.as_ref(),
+        &choice.provider_key,
+        &choice.model,
+    )
+    .await
+    {
+        Ok(charge) => charge,
+        Err(error) if is_usage_refusal(&error) => {
+            eprintln!("conversation summary skipped: {error:?}");
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let response = generate_provider_text(
+        plugin.as_ref(),
+        &choice.model,
+        None,
+        prompt,
+        Vec::new(),
+        Some(512),
+    )
+    .await
+    .map_err(|error| {
+        eprintln!("summary provider error: {}", provider_error_class(&error));
+        AppError::LlmProviderNotConfigured {
+            provider: choice.provider_key.clone(),
+        }
+    })?;
+    charge
+        .record(
+            app_state,
+            TokenCounts::reported(response.input_tokens, response.output_tokens),
+        )
+        .await;
+    Ok(Some(response.text.trim().to_string()))
 }
 
 async fn insert_message_embedding(
@@ -694,6 +811,7 @@ pub fn format_pgvector(values: &[f32]) -> String {
 
 pub async fn build_project_retrieval_prompt(
     app_state: &SharedState,
+    subject: UsageSubject,
     project_id: uuid::Uuid,
     query: &str,
     top_k: usize,
@@ -706,11 +824,18 @@ pub async fn build_project_retrieval_prompt(
         _ => return Ok(None),
     };
 
-    let embeddings =
-        match generate_embeddings(app_state, &embedding_config, vec![query.to_string()]).await? {
-            Some(v) if !v.is_empty() => v,
-            _ => return Ok(None),
-        };
+    let embeddings = match skip_refused(
+        generate_embeddings(
+            app_state,
+            &embedding_config,
+            subject,
+            vec![query.to_string()],
+        )
+        .await,
+    )? {
+        Some(v) if !v.is_empty() => v,
+        _ => return Ok(None),
+    };
     let query_vector = format_pgvector(&embeddings[0]);
 
     // <=> cosine operator and ::vector cast have no SeaORM integration.
