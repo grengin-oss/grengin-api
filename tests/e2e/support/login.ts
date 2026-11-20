@@ -21,7 +21,10 @@ export async function signIn(page: Page, user: keyof typeof USERS) {
       type: 'known issue',
       description: 'The login page does not list configured sign-in providers (webapp reads slug/enabled; the API sends provider/is_enabled).',
     });
+    // What the provider button's initiateOAuth does: remember the provider for the callback
+    // page, then follow the API's login path for it.
     const redirect = new URL(`/auth/${IDP_SLUG}/callback`, page.url()).toString();
+    await page.evaluate((slug) => sessionStorage.setItem('oauth_provider', slug), IDP_SLUG);
     await page.goto(`/api/auth/${IDP_SLUG}?redirect_uri=${encodeURIComponent(redirect)}`);
   }
   await expect(page.getByRole('heading', { name: 'E2E identity provider' })).toBeVisible();
