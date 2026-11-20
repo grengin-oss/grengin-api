@@ -8,8 +8,8 @@ use crate::{
             get_ai_engines_by_key, update_ai_engines_by_key, validate_ai_engines_by_key,
         },
         admin_ai_plugins::{
-            create_ai_engine, delete_ai_engine, get_ai_engine_plugin_schema, get_grengin_status,
-            test_ai_engine_connection, validate_ai_engine_plugin,
+            create_ai_engine, delete_ai_engine, get_ai_engine_plugin_schema, get_grengin_catalog,
+            get_grengin_status, test_ai_engine_connection, validate_ai_engine_plugin,
         },
         admin_analytics::{
             get_analytics_overview, get_department_analytics, get_timeseries_analytics,
@@ -86,6 +86,10 @@ pub fn admin_routes() -> Router<SharedState> {
             post(validate_ai_engine_plugin),
         )
         .route("/admin/ai-engines/grengin/status", get(get_grengin_status))
+        .route(
+            "/admin/ai-engines/grengin/catalog",
+            get(get_grengin_catalog),
+        )
         .route(
             "/admin/ai-engines/{engine_key}",
             put(update_ai_engines_by_key)

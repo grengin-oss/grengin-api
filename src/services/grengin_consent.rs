@@ -16,14 +16,22 @@ use uuid::Uuid;
 
 use crate::{
     auth::error::AuthError,
-    dto::admin_ai::{GrenginConnectionState, GrenginOperationStatus, GrenginStatus},
+    dto::admin_ai::{
+        GrenginCatalog, GrenginCatalogModel, GrenginConnectionState, GrenginFundingSource,
+        GrenginOperationStatus, GrenginStatus,
+    },
     models::{
         ai_engines, grengin_engine_lifecycle as lifecycle,
         grengin_engine_operations::{self as operations, OperationState},
     },
     services::{
         grengin_grant::{GRENGIN_CONSENT_VERSION, GrenginGrant},
-        provider_runtime::{register_provider, unregister_provider},
+        grengin_provider::split_model,
+        provider_models::model_type,
+        provider_resolver::own_key_covers,
+        provider_runtime::{
+            catalog_config, compile_engine, register_provider, unregister_provider,
+        },
     },
     state::SharedState,
 };
@@ -274,6 +282,78 @@ async fn latest_unapplied(
     Ok(latest
         .filter(|operation| operation.state != OperationState::Applied)
         .map(|operation| operation_status(&operation)))
+}
+
+/// The service catalog with local policy and own-key precedence applied. Fresh on every call.
+pub async fn catalog(state: &SharedState) -> Result<GrenginCatalog, AuthError> {
+    let engine = ai_engines::Entity::find()
+        .filter(ai_engines::Column::EngineKey.eq(ENGINE_KEY))
+        .filter(ai_engines::Column::PluginConfig.is_null())
+        .one(&state.database)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
+    let package = state
+        .discovery_catalog
+        .ai_provider(ENGINE_KEY, None)
+        .await
+        .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
+    let provider = compile_engine(
+        catalog_config(package.plugin),
+        ENGINE_KEY,
+        None,
+        Some(&state.discovery_catalog),
+    )
+    .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
+    let listed = provider
+        .models()
+        .ok_or(AuthError::ServiceTemporarilyUnavailable)?
+        .list_models()
+        .await
+        .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
+    let observed_at = Utc::now();
+    let mut models = Vec::with_capacity(listed.len());
+    for model in listed {
+        let id = model.id.as_str().to_owned();
+        let Ok((provider_id, native_model_id)) = split_model(&id) else {
+            continue;
+        };
+        let own_key = own_key_covers(state, provider_id, native_model_id)
+            .await
+            .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
+        let price = |field: &str| model.metadata.get(field).and_then(|value| value.as_i64());
+        models.push(GrenginCatalogModel {
+            provider_id: provider_id.to_owned(),
+            native_model_id: native_model_id.to_owned(),
+            name: model.name.clone(),
+            capability: model_type(&model),
+            input_per_million_microdollars: price("inputPerMillionMicrodollars"),
+            output_per_million_microdollars: price("outputPerMillionMicrodollars"),
+            processing_region: None,
+            status: "available".into(),
+            is_allowed: engine
+                .as_ref()
+                .is_some_and(|engine| engine.whitelist_models.contains(&id)),
+            is_default: engine.as_ref().is_some_and(|engine| {
+                engine.default_model == id
+                    || engine.default_image_gen_model.as_deref() == Some(id.as_str())
+            }),
+            effective_engine: if own_key {
+                provider_id.to_owned()
+            } else {
+                ENGINE_KEY.into()
+            },
+            funding_source: if own_key {
+                GrenginFundingSource::OwnKey
+            } else {
+                GrenginFundingSource::Grengin
+            },
+            id,
+        });
+    }
+    Ok(GrenginCatalog {
+        observed_at,
+        models,
+    })
 }
 
 /// Safe local and service status, available even when the identity or the local row is missing.

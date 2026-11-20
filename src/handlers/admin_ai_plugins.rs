@@ -16,7 +16,7 @@ use crate::{
     },
     dto::admin_ai::{
         AIEngineConnectionTest, AIEngineCreate, AIEngineDetail, AIEnginePluginValidationRequest,
-        AIEnginePluginValidationResponse, GrenginStatus, PluginModel,
+        AIEnginePluginValidationResponse, GrenginCatalog, GrenginStatus, PluginModel,
     },
     models::ai_engines,
     services::{
@@ -24,7 +24,10 @@ use crate::{
             RESERVED_ENGINE_KEYS, create_engine, ensure_manage, ensure_view, find_engine,
             invalid_validation, is_catalog_grengin, test_engine_connection,
         },
-        grengin_consent::{delete_engine as delete_grengin_engine, status as grengin_status},
+        grengin_consent::{
+            catalog as grengin_catalog, delete_engine as delete_grengin_engine,
+            status as grengin_status,
+        },
         provider_runtime::{compile_provider, parse_manifest, unregister_provider},
     },
     state::SharedState,
@@ -226,5 +229,34 @@ pub async fn get_grengin_status(
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(grengin_status(&state).await?),
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/admin/ai-engines/grengin/catalog",
+    tag = "admin",
+    description = "Models the Grengin service offers now, with this workspace's policy: is_allowed, is_default, and which engine would fund each one (an enabled own-key engine that allows the same model takes precedence). Prices are Grengin tariffs in microdollars per million tokens. No generation is billed.",
+    responses(
+        (status = 200, body = GrenginCatalog),
+        (status = 401, body = Error),
+        (status = 403, body = Error),
+        (status = 503, body = Error)
+    )
+)]
+pub async fn get_grengin_catalog(
+    claims: Claims,
+    State(state): State<SharedState>,
+) -> Result<
+    (
+        [(header::HeaderName, &'static str); 1],
+        Json<GrenginCatalog>,
+    ),
+    AuthError,
+> {
+    ensure_view(&claims, &state).await?;
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(grengin_catalog(&state).await?),
     ))
 }

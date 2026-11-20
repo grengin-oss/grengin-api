@@ -51,6 +51,19 @@ pub async fn model_route(
     let (upstream, native) = split_model(model).map_err(|_| AppError::ValidationInvalidField {
         field: "model_name",
     })?;
+    if own_key_covers(state, upstream, native).await? {
+        return Ok((upstream.into(), native.into(), Some(engine.id)));
+    }
+    Ok(("grengin".into(), model.into(), Some(engine.id)))
+}
+
+/// Whether an enabled direct engine with its own key allows `upstream/native`. Such a model is
+/// funded by that key, never by the workspace balance; an excluded model falls to Grengin.
+pub async fn own_key_covers(
+    state: &SharedState,
+    upstream: &str,
+    native: &str,
+) -> Result<bool, AppError> {
     let direct = ai_engines::Entity::find()
         .filter(ai_engines::Column::EngineKey.eq(upstream))
         .filter(ai_engines::Column::IsEnabled.eq(true))
@@ -58,29 +71,27 @@ pub async fn model_route(
         .one(&state.database)
         .await
         .map_err(|_| AppError::DbTimeout)?;
-    if let Some(direct) = direct {
-        let allowed = &direct.whitelist_models;
-        if allowed.iter().any(|id| id == native) {
-            return Ok((upstream.into(), native.into(), Some(engine.id)));
-        }
-        // Older installations can whitelist a catalog display name.
-        if !allowed.is_empty() {
-            let unavailable = || AppError::LlmProviderNotConfigured {
-                provider: upstream.into(),
-            };
-            let plugin = resolve_provider(state, upstream)
-                .await
-                .map_err(|_| unavailable())?;
-            let matched =
-                find_provider_model(plugin.as_ref(), upstream, &state.live_models_cache, native)
-                    .await
-                    .map_err(|_| unavailable())?;
-            if matched.is_some_and(|m| allowed.contains(&m.name)) {
-                return Ok((upstream.into(), native.into(), Some(engine.id)));
-            }
-        }
+    let Some(direct) = direct else {
+        return Ok(false);
+    };
+    let allowed = &direct.whitelist_models;
+    if allowed.iter().any(|id| id == native) {
+        return Ok(true);
     }
-    Ok(("grengin".into(), model.into(), Some(engine.id)))
+    // Older installations can whitelist a catalog display name.
+    if allowed.is_empty() {
+        return Ok(false);
+    }
+    let unavailable = || AppError::LlmProviderNotConfigured {
+        provider: upstream.into(),
+    };
+    let plugin = resolve_provider(state, upstream)
+        .await
+        .map_err(|_| unavailable())?;
+    let matched = find_provider_model(plugin.as_ref(), upstream, &state.live_models_cache, native)
+        .await
+        .map_err(|_| unavailable())?;
+    Ok(matched.is_some_and(|m| allowed.contains(&m.name)))
 }
 
 #[derive(Debug, Error)]
