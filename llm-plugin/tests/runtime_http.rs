@@ -73,7 +73,10 @@ type Requests = Arc<Mutex<Vec<CapturedRequest>>>;
 
 /// Serves `responses` in order, one per accepted connection, recording every request received.
 async fn serve(responses: Vec<MockResponse>) -> (String, Requests) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    serve_on(TcpListener::bind("127.0.0.1:0").await.unwrap(), responses).await
+}
+
+async fn serve_on(listener: TcpListener, responses: Vec<MockResponse>) -> (String, Requests) {
     let address = listener.local_addr().unwrap();
     let requests: Requests = Arc::new(Mutex::new(Vec::new()));
     let recorded = requests.clone();
@@ -967,6 +970,43 @@ async fn decodes_and_orders_embedding_vectors() {
     assert_eq!(usage.total_tokens, Some(27));
     assert_eq!(usage.cached_input_tokens, Some(5));
     assert_eq!(usage.cache_creation_tokens, Some(3));
+}
+
+#[tokio::test]
+async fn reaches_an_ipv6_literal_provider_only_with_private_network_approval() {
+    let Ok(listener) = TcpListener::bind("[::1]:0").await else {
+        eprintln!("skipped: this host has no IPv6 loopback");
+        return;
+    };
+    let response = json!({"data": [{"embedding": [1.0]}]});
+    let (base_url, _) = serve_on(listener, vec![MockResponse::json("200 OK", &response)]).await;
+    assert!(base_url.starts_with("http://[::1]:"), "{base_url}");
+    let operations = json!({"embeddings": stub_embeddings_operation()});
+
+    let approved = provider(
+        base_url.clone(),
+        json!({"embeddings": true}),
+        operations.clone(),
+    );
+    let result = approved
+        .embeddings()
+        .unwrap()
+        .embed(embedding_request())
+        .await
+        .unwrap();
+    assert_eq!(result.vectors, vec![vec![1.0]]);
+
+    let unapproved = ProviderRuntimeConfig {
+        allow_private_network: false,
+        ..runtime(base_url.clone())
+    };
+    assert!(
+        DeclarativeProvider::new(
+            manifest(&base_url, json!({"embeddings": true}), operations),
+            unapproved
+        )
+        .is_err()
+    );
 }
 
 #[tokio::test]

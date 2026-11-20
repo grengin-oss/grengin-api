@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::auth::provider_config::{
-    OidcProviderConfiguration, PkceMode, build_discovered_oidc_client,
+use crate::{
+    auth::provider_config::{OidcProviderConfiguration, PkceMode, build_discovered_oidc_client},
+    services::sso_egress::SsoHttpClient,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use openidconnect::{
@@ -36,7 +37,7 @@ struct ProviderProfile {
 
 struct PendingAuthorization {
     client: crate::config::setting::OidcClient,
-    http_client: ReqwestClient,
+    sso_client: SsoHttpClient,
     code: String,
     nonce: Nonce,
     pkce_verifier: Option<String>,
@@ -171,9 +172,9 @@ fn parse_form_post(body: &str) -> Result<(String, HashMap<String, String>)> {
 }
 
 async fn begin_authorization(profile: &ProviderProfile) -> Result<PendingAuthorization> {
-    let http_client = http_client();
+    let sso_client = SsoHttpClient::new()?;
     let client = build_discovered_oidc_client(
-        &http_client,
+        &sso_client,
         &mock_issuer(profile.issuer_id),
         CLIENT_ID.to_string(),
         CLIENT_SECRET.to_string(),
@@ -216,7 +217,7 @@ async fn begin_authorization(profile: &ProviderProfile) -> Result<PendingAuthori
         }
     }
 
-    let response = http_client.get(authorization_url.clone()).send().await?;
+    let response = http_client().get(authorization_url.clone()).send().await?;
     let (callback_url, callback_fields) = match profile.callback_mode {
         CallbackMode::Query => {
             if response.status() != StatusCode::FOUND {
@@ -259,7 +260,7 @@ async fn begin_authorization(profile: &ProviderProfile) -> Result<PendingAuthori
 
     Ok(PendingAuthorization {
         client,
-        http_client,
+        sso_client,
         code,
         nonce,
         pkce_verifier,
@@ -278,7 +279,7 @@ async fn run_flow(profile: ProviderProfile) -> Result<()> {
         token_request =
             token_request.set_pkce_verifier(PkceCodeVerifier::new(pkce_verifier.clone()));
     }
-    let token_response = token_request.request_async(&pending.http_client).await?;
+    let token_response = token_request.request_async(&pending.sso_client).await?;
     let id_token = token_response
         .id_token()
         .context("mock token response has no ID token")?;
@@ -301,7 +302,7 @@ async fn run_flow(profile: ProviderProfile) -> Result<()> {
     if let Some(pkce_verifier) = pending.pkce_verifier {
         replay_request = replay_request.set_pkce_verifier(PkceCodeVerifier::new(pkce_verifier));
     }
-    let replay = replay_request.request_async(&pending.http_client).await;
+    let replay = replay_request.request_async(&pending.sso_client).await;
     if replay.is_ok() {
         return Err(anyhow!(
             "{} authorization code was replayable",

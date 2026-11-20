@@ -4,7 +4,7 @@
 use std::net::{IpAddr, Ipv6Addr};
 
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
-use url::Url;
+use url::{Host, Url};
 
 use crate::ProviderError;
 
@@ -87,29 +87,30 @@ pub fn validate_provider_url(
         ));
     }
 
-    let host = url
-        .host_str()
-        .ok_or_else(|| ProviderError::UrlNotAllowed("provider URL has no host".to_string()))?;
-    if is_metadata_hostname(host) {
-        return Err(ProviderError::UrlNotAllowed(format!(
-            "cloud metadata host {host} is never allowed"
-        )));
+    match url.host() {
+        Some(Host::Ipv4(ip)) => validate_destination_ip(ip.into(), allow_private_network),
+        Some(Host::Ipv6(ip)) => validate_destination_ip(ip.into(), allow_private_network),
+        Some(Host::Domain(host)) if is_metadata_hostname(host) => Err(
+            ProviderError::UrlNotAllowed(format!("cloud metadata host {host} is never allowed")),
+        ),
+        Some(Host::Domain(host)) if !allow_private_network && is_local_hostname(host) => {
+            Err(ProviderError::UrlNotAllowed(format!(
+                "local provider host {host} requires private-network approval"
+            )))
+        }
+        Some(Host::Domain(_)) => Ok(()),
+        None => Err(ProviderError::UrlNotAllowed(
+            "provider URL has no host".to_string(),
+        )),
     }
-    if !allow_private_network && is_local_hostname(host) {
-        return Err(ProviderError::UrlNotAllowed(format!(
-            "local provider host {host} requires private-network approval"
-        )));
-    }
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        validate_destination_ip(ip, allow_private_network)?;
-    }
-    Ok(())
 }
 
 pub fn validate_destination_ip(
     ip: IpAddr,
     allow_private_network: bool,
 ) -> Result<(), ProviderError> {
+    // An IPv4-mapped IPv6 address reaches the IPv4 host, so it gets the IPv4 rules.
+    let ip = ip.to_canonical();
     if ip.is_unspecified() || ip.is_multicast() {
         return Err(ProviderError::UrlNotAllowed(format!(
             "destination address {ip} is not routable"
@@ -145,9 +146,6 @@ pub fn validate_destination_ip(
                 || ip.is_unicast_link_local()
                 || ip.is_unspecified()
                 || ip.segments()[0..2] == [0x2001, 0x0db8]
-                || ip
-                    .to_ipv4_mapped()
-                    .is_some_and(|mapped| validate_destination_ip(mapped.into(), false).is_err())
         }
     };
     if blocked {
@@ -163,11 +161,7 @@ const AWS_IPV6_METADATA: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0,
 fn is_link_local_or_metadata(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => ip.is_link_local(),
-        IpAddr::V6(ip) => {
-            ip.is_unicast_link_local()
-                || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_link_local())
-                || ip == AWS_IPV6_METADATA
-        }
+        IpAddr::V6(ip) => ip.is_unicast_link_local() || ip == AWS_IPV6_METADATA,
     }
 }
 
@@ -227,6 +221,7 @@ mod tests {
             IpAddr::V6("fe80::1".parse::<Ipv6Addr>().unwrap()),
             IpAddr::V6("::ffff:169.254.169.254".parse::<Ipv6Addr>().unwrap()),
             IpAddr::V6("fd00:ec2::254".parse::<Ipv6Addr>().unwrap()),
+            IpAddr::V6("::ffff:0.0.0.0".parse::<Ipv6Addr>().unwrap()),
         ] {
             assert!(
                 validate_destination_ip(metadata, true).is_err(),
@@ -253,6 +248,45 @@ mod tests {
             assert!(validate_destination_ip(private, true).is_ok(), "{private}");
         }
         assert!(validate_destination_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), false).is_ok());
+    }
+
+    #[test]
+    fn literal_ipv6_and_metadata_urls_get_the_address_rules() {
+        for never in [
+            "http://[fe80::1]/v1",
+            "http://[fd00:ec2::254]/latest/meta-data",
+            "http://[::ffff:169.254.169.254]/latest/meta-data",
+            "http://169.254.169.254/latest/meta-data",
+            "http://[::]/v1",
+            "http://0.0.0.0/v1",
+        ] {
+            let url = Url::parse(never).unwrap();
+            assert!(validate_provider_url(&url, true, true).is_err(), "{never}");
+        }
+        for private in [
+            "http://[::1]:11434/v1",
+            "http://[::ffff:127.0.0.1]:11434/v1",
+            "http://[fd12:3456::1]/v1",
+            "http://10.0.0.1/v1",
+        ] {
+            let url = Url::parse(private).unwrap();
+            assert!(
+                validate_provider_url(&url, true, false).is_err(),
+                "{private}"
+            );
+            assert!(validate_provider_url(&url, true, true).is_ok(), "{private}");
+        }
+        for public in [
+            "https://api.openai.com/v1",
+            "https://[2606:4700:4700::1111]/v1",
+            "https://8.8.8.8/v1",
+        ] {
+            let url = Url::parse(public).unwrap();
+            assert!(
+                validate_provider_url(&url, false, false).is_ok(),
+                "{public}"
+            );
+        }
     }
 
     #[test]

@@ -2,20 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::config::setting::OidcClient;
+use crate::services::sso_egress::SsoHttpClient;
 use anyhow::Error;
 use openidconnect::core::{CoreClient, CoreProviderMetadata};
 use openidconnect::{ClientId, ClientSecret, IssuerUrl, RedirectUrl};
-use reqwest::Client as ReqwestClient;
 
 pub async fn build_google_client<S: Into<String>>(
-    req_client: &ReqwestClient,
+    sso_client: &SsoHttpClient,
     client_id: S,
     client_secret: S,
     redirect_url: S,
 ) -> Result<OidcClient, Error> {
     let provider_metadata = CoreProviderMetadata::discover_async(
         IssuerUrl::new("https://accounts.google.com".to_string())?,
-        req_client,
+        sso_client,
     )
     .await?;
     let client = CoreClient::from_provider_metadata(

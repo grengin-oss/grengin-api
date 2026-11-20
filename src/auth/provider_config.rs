@@ -2,14 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use openidconnect::{ClientId, ClientSecret, IssuerUrl, RedirectUrl, core::CoreProviderMetadata};
-use reqwest::{Client as ReqwestClient, Url};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use thiserror::Error;
+use url::Host;
 use utoipa::ToSchema;
 
 use crate::auth::oauth2_identity::OAuth2IdentityProfile;
 use crate::config::setting::OidcClient;
+use crate::services::sso_egress::{SsoHttpClient, validate_literal_destination};
 
 pub const OIDC_PROVIDER_CONFIG_VERSION: &str = "1.1";
 const LEGACY_OIDC_PROVIDER_CONFIG_VERSION: &str = "1.0";
@@ -219,18 +221,19 @@ pub fn validate_provider_url(
     allow_loopback_http: bool,
 ) -> Result<Url, ProviderConfigError> {
     let url = Url::parse(value).map_err(|_| ProviderConfigError::InvalidUrl)?;
-    let loopback = url.host_str().is_some_and(|host| {
-        host.eq_ignore_ascii_case("localhost")
-            || host
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|address| address.is_loopback())
-    });
+    let loopback = match url.host() {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.to_canonical().is_loopback(),
+        None => false,
+    };
     if url.scheme() != "https" && !(allow_loopback_http && url.scheme() == "http" && loopback) {
         return Err(ProviderConfigError::InvalidUrl);
     }
     if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
         return Err(ProviderConfigError::InvalidUrl);
     }
+    validate_literal_destination(&url).map_err(|_| ProviderConfigError::InvalidUrl)?;
     Ok(url)
 }
 
@@ -240,10 +243,11 @@ pub fn validate_redirect_url_for_provider(
 ) -> Result<Url, ProviderConfigError> {
     let url = validate_provider_url(value, true)?;
     if provider.eq_ignore_ascii_case("apple") {
-        let host = url.host_str().ok_or(ProviderConfigError::InvalidUrl)?;
+        let Some(Host::Domain(host)) = url.host() else {
+            return Err(ProviderConfigError::InvalidUrl);
+        };
         if url.scheme() != "https"
             || host.eq_ignore_ascii_case("localhost")
-            || host.parse::<std::net::IpAddr>().is_ok()
             || url.path() != "/auth/apple/callback"
             || url.query().is_some()
         {
@@ -265,7 +269,7 @@ pub fn validate_issuer_url_for_provider(
 }
 
 pub async fn build_discovered_oidc_client(
-    req_client: &ReqwestClient,
+    sso_client: &SsoHttpClient,
     issuer_url: &str,
     client_id: String,
     client_secret: String,
@@ -274,7 +278,7 @@ pub async fn build_discovered_oidc_client(
     validate_provider_url(issuer_url, true)?;
     validate_provider_url(&redirect_url, true)?;
     let metadata =
-        CoreProviderMetadata::discover_async(IssuerUrl::new(issuer_url.to_string())?, req_client)
+        CoreProviderMetadata::discover_async(IssuerUrl::new(issuer_url.to_string())?, sso_client)
             .await?;
     Ok(OidcClient::from_provider_metadata(
         metadata,
@@ -431,6 +435,23 @@ mod tests {
         assert!(validate_provider_url("http://id.example.com", true).is_err());
         assert!(validate_provider_url("https://user:pass@id.example.com", true).is_err());
         assert!(validate_provider_url("https://id.example.com/#fragment", true).is_err());
+        assert!(validate_provider_url("http://[::1]:8180/realms/acme", true).is_ok());
+        assert!(validate_provider_url("http://localhost:8180/realms/acme", true).is_ok());
+        assert!(validate_provider_url("https://10.0.0.5/realms/acme", true).is_ok());
+    }
+
+    #[test]
+    fn provider_urls_never_name_metadata_or_link_local_hosts() {
+        for url in [
+            "https://169.254.169.254/latest/meta-data",
+            "https://[fe80::1]/",
+            "https://[fd00:ec2::254]/",
+            "https://[::ffff:169.254.169.254]/",
+            "https://metadata.google.internal./computeMetadata/v1",
+            "https://0.0.0.0/",
+        ] {
+            assert!(validate_provider_url(url, true).is_err(), "{url}");
+        }
     }
 
     #[test]
@@ -445,6 +466,7 @@ mod tests {
         for value in [
             "http://localhost:8080/auth/apple/callback",
             "https://127.0.0.1/auth/apple/callback",
+            "https://[2001:4860::1]/auth/apple/callback",
             "https://app.example.com/auth/apple/callback?next=/admin",
             "https://api.example.com/auth/google/callback",
         ] {
@@ -810,7 +832,7 @@ mod mock_oidc_matrix_tests {
                 return;
             }
         };
-        let req_client = reqwest::Client::new();
+        let req_client = SsoHttpClient::new().expect("SSO client");
 
         for case in provider_cases() {
             let issuer_url = server.issuer_url(case.slug);
