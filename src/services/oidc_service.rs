@@ -10,8 +10,8 @@ use crate::{
         },
         claims::{ACCESS_TOKEN_TTL_SECS, Claiming as _, Claims, RefreshClaims},
         error::AuthError,
-        github::GitHubAdapterError,
         identity::VerifiedIdentity,
+        oauth2_identity::OAuth2AdapterError,
         provider_config::EmailLinkingMode,
     },
     config::setting::OidcClient,
@@ -451,23 +451,15 @@ pub async fn oidc_oauth_callback(
         }
     } else {
         let code = cb.code.ok_or(AuthError::InvalidCallbackParameters)?;
-        if provider.eq_ignore_ascii_case("github") {
-            let adapter = match runtime.client.clone() {
-                Some(AuthProtocolClient::GitHub(adapter)) => adapter,
-                _ => {
-                    return Err(AuthError::SsoProviderNotConfigured {
-                        provider: Some(provider.clone()),
-                    });
-                }
-            };
+        if let Some(AuthProtocolClient::OAuth2(adapter)) = runtime.client.clone() {
             adapter
                 .complete(code, sess.pkce_verifier.clone(), &app_state.req_client)
                 .await
                 .map_err(|error| {
-                    eprintln!("GitHub OAuth completion failed: {error}");
+                    eprintln!("OAuth2 sign-in completion failed: {error}");
                     match error {
-                        GitHubAdapterError::MissingVerifiedEmail
-                        | GitHubAdapterError::InvalidIdentity => AuthError::InvalidToken,
+                        OAuth2AdapterError::MissingVerifiedEmail
+                        | OAuth2AdapterError::InvalidIdentity => AuthError::InvalidToken,
                         _ => AuthError::ServiceTemporarilyUnavailable,
                     }
                 })?

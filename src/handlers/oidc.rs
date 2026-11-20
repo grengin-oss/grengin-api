@@ -197,9 +197,9 @@ pub async fn oidc_login_start(
                 pkce_verifier,
             )
         }
-        AuthProtocolClient::GitHub(adapter) => {
+        AuthProtocolClient::OAuth2(adapter) => {
             let authorization = adapter.begin(&runtime.configuration).map_err(|error| {
-                eprintln!("GitHub authorization start failed: {error}");
+                eprintln!("OAuth2 authorization start failed: {error}");
                 AuthError::ServiceTemporarilyUnavailable
             })?;
             (
