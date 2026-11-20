@@ -65,26 +65,22 @@ pub async fn verify_proxy_assertion(
     }
 
     let jwks_url = sso_proxy_jwks_url();
-    let jwks = app_state
-        .req_client
-        .get(jwks_url)
-        .send()
+    let sso_client = &app_state.sso_client;
+    let response = sso_client
+        .send(sso_client.get(jwks_url))
         .await
         .map_err(|e| {
             eprintln!("proxy jwks fetch error: {e:?}");
             AuthError::ServiceTemporarilyUnavailable
-        })?
-        .error_for_status()
-        .map_err(|e| {
-            eprintln!("proxy jwks http error: {e:?}");
-            AuthError::ServiceTemporarilyUnavailable
-        })?
-        .json::<JwkSet>()
-        .await
-        .map_err(|e| {
-            eprintln!("proxy jwks parse error: {e:?}");
-            AuthError::ServiceTemporarilyUnavailable
         })?;
+    if !response.status.is_success() {
+        eprintln!("proxy jwks http error: {}", response.status);
+        return Err(AuthError::ServiceTemporarilyUnavailable);
+    }
+    let jwks = response.json::<JwkSet>().map_err(|e| {
+        eprintln!("proxy jwks parse error: {e:?}");
+        AuthError::ServiceTemporarilyUnavailable
+    })?;
     let jwk = select_assertion_jwk(&jwks, header.kid.as_deref()).ok_or_else(|| {
         eprintln!("proxy jwks key selection failed for kid={:?}", header.kid);
         AuthError::InvalidToken

@@ -4,6 +4,7 @@
 use crate::{
     auth::provider_config::{OidcProviderConfiguration, build_discovered_oidc_client},
     config::setting::OidcClient,
+    services::sso_egress::SsoHttpClient,
     utils::uri::is_azure_mobile_redirect_uri,
 };
 use anyhow::{Context, Result, anyhow};
@@ -46,7 +47,7 @@ impl FlowProfile {
 
 struct PendingAuthorization {
     client: OidcClient,
-    http_client: ReqwestClient,
+    sso_client: SsoHttpClient,
     code: String,
     nonce: Nonce,
     pkce_verifier: String,
@@ -72,17 +73,17 @@ fn http_client() -> ReqwestClient {
         .expect("mock OAuth HTTP client")
 }
 
-async fn mock_client(profile: &FlowProfile) -> Result<(OidcClient, ReqwestClient)> {
-    let http_client = http_client();
+async fn mock_client(profile: &FlowProfile) -> Result<(OidcClient, SsoHttpClient)> {
+    let sso_client = SsoHttpClient::new()?;
     let issuer = mock_issuer(profile.issuer_id);
     let client = if profile.public_client {
         let metadata =
-            CoreProviderMetadata::discover_async(IssuerUrl::new(issuer)?, &http_client).await?;
+            CoreProviderMetadata::discover_async(IssuerUrl::new(issuer)?, &sso_client).await?;
         CoreClient::from_provider_metadata(metadata, ClientId::new(CLIENT_ID.to_string()), None)
             .set_redirect_uri(RedirectUrl::new(profile.redirect_uri.to_string())?)
     } else {
         build_discovered_oidc_client(
-            &http_client,
+            &sso_client,
             &issuer,
             CLIENT_ID.to_string(),
             CLIENT_SECRET.to_string(),
@@ -90,11 +91,11 @@ async fn mock_client(profile: &FlowProfile) -> Result<(OidcClient, ReqwestClient
         )
         .await?
     };
-    Ok((client, http_client))
+    Ok((client, sso_client))
 }
 
 async fn begin_authorization(profile: &FlowProfile) -> Result<PendingAuthorization> {
-    let (client, http_client) = mock_client(profile).await?;
+    let (client, sso_client) = mock_client(profile).await?;
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     let mut authorization = client
         .authorize_url(
@@ -112,7 +113,7 @@ async fn begin_authorization(profile: &FlowProfile) -> Result<PendingAuthorizati
         authorization = authorization.add_extra_param(key.clone(), value.clone());
     }
     let (authorization_url, csrf_state, nonce) = authorization.url();
-    let response = http_client.get(authorization_url.as_str()).send().await?;
+    let response = http_client().get(authorization_url.as_str()).send().await?;
     if response.status() != StatusCode::FOUND {
         return Err(anyhow!(
             "mock authorization returned {}, expected 302",
@@ -145,7 +146,7 @@ async fn begin_authorization(profile: &FlowProfile) -> Result<PendingAuthorizati
 
     Ok(PendingAuthorization {
         client,
-        http_client,
+        sso_client,
         code,
         nonce,
         pkce_verifier: pkce_verifier.secret().to_string(),
@@ -163,7 +164,7 @@ async fn exchange(
         .exchange_code(AuthorizationCode::new(pending.code.clone()))?
         .set_pkce_verifier(PkceCodeVerifier::new(pkce_verifier.to_string()))
         .set_redirect_uri(Cow::Owned(RedirectUrl::new(pending.redirect_uri.clone())?))
-        .request_async(&pending.http_client)
+        .request_async(&pending.sso_client)
         .await?)
 }
 
