@@ -226,9 +226,10 @@ export function recordApiCalls(page: Page, path: RegExp) {
     const request = response.request();
     const url = new URL(response.url());
     if (request.method() === 'GET' || !url.pathname.startsWith('/api/') || !path.test(url.pathname)) return;
+    const info = test.info();
     const body = await response.text().catch(() => '');
     const description = `${request.method()} ${url.pathname} ${(request.postData() ?? '').slice(0, 200)} -> ${response.status()} ${body.slice(0, 300)}`;
-    test.info().annotations.push({ type: 'api call', description });
+    info.annotations.push({ type: 'api call', description });
     console.log(`[api call] ${description}`);
   });
 }
