@@ -5,10 +5,11 @@
 // API helpers only prepare state the UI cannot reach and read state back for assertions.
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { expect, type Page } from '@playwright/test';
+import { expect, test, type Browser, type Page } from '@playwright/test';
 import { USERS } from '../mocks/users.mjs';
 import { api, sql, tokenFor, waitFor } from './api';
 import { env } from './env';
+import { dismissOnboarding, signIn } from './login';
 
 // mocks/service-projects-llm.mjs: reports the E2EP… markers it finds in the system prompt.
 export const ECHO_ENGINE_KEY = 'e2e-projects-echo';
@@ -187,4 +188,47 @@ export async function setComposerSkill(page: Page, name: string, on: boolean) {
   await expect(toggle).toHaveAttribute('aria-pressed', String(on));
   await chip.click();
   await expect(toggle).toBeHidden();
+}
+
+// Signs the member in from a separate browser context. Their first sign-in only creates the
+// account, which then waits for an administrator's approval; approve it through the admin API and
+// put the previous status back afterwards (other specs may rely on it).
+export async function signInMember(browser: Browser) {
+  const context = await browser.newContext({ baseURL: env.webUrl, storageState: { cookies: [], origins: [] } });
+  const page = await context.newPage();
+  if (!(await userId('member'))) await signIn(page, 'member');
+  const id = await userId('member');
+  if (!id) throw new Error('the member account was not created by signing in');
+  const [{ status }] = await sql<{ status: string }>('SELECT status FROM users WHERE id = $1', [id]);
+  const restore = async () => {
+    await context.close();
+    if (status !== 'active') await sql('UPDATE users SET status = $1 WHERE id = $2', [status, id]);
+  };
+  try {
+    if (status !== 'active') {
+      const approved = await api(await tokenOf('owner'), 'PATCH', `/admin/users/${id}/status`, { status: 'active' });
+      if (approved.status >= 300) throw new Error(`approving the member failed: ${approved.status} ${JSON.stringify(approved.json)}`);
+    }
+    await signIn(page, 'member');
+    await dismissOnboarding(page);
+    await expect(composer(page)).toBeVisible();
+  } catch (error) {
+    await restore();
+    throw error;
+  }
+  return { page, restore };
+}
+
+// Evidence for known bugs: records the API calls the page makes to matching paths (request body,
+// status, response body) as test annotations and in the test's output.
+export function recordApiCalls(page: Page, path: RegExp) {
+  page.on('response', async (response) => {
+    const request = response.request();
+    const url = new URL(response.url());
+    if (request.method() === 'GET' || !url.pathname.startsWith('/api/') || !path.test(url.pathname)) return;
+    const body = await response.text().catch(() => '');
+    const description = `${request.method()} ${url.pathname} ${(request.postData() ?? '').slice(0, 200)} -> ${response.status()} ${body.slice(0, 300)}`;
+    test.info().annotations.push({ type: 'api call', description });
+    console.log(`[api call] ${description}`);
+  });
 }

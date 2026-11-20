@@ -11,6 +11,7 @@ import {
   ensureEchoEngine,
   marker,
   openSkillsSettings,
+  recordApiCalls,
   removeEchoEngine,
   send,
   setComposerSkill,
@@ -62,6 +63,7 @@ test.describe('skills', () => {
     // sends the `conversation` event; by then the API has already assembled the system prompt
     // for the first reply, and the webapp does not send the staged ids as `selected_skills`.
     test.fail();
+    recordApiCalls(page, /^\/api\/(chat|conversations\/[^/]+\/skills)/);
     const skillMarker = marker();
     const name = unique('e2e-skill-first');
     await writeSkill(page, { name, description: 'Adds a marker to answers', instructions: `Always mention ${skillMarker}.` });

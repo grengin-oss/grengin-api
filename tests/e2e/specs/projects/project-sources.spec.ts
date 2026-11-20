@@ -5,7 +5,7 @@
 // sources can be stored but never indexed or retrieved.
 import { expect, test } from '@playwright/test';
 import { sql } from '../../support/api';
-import { createProject, openProject, registerTextSource, unique } from '../../support/projects';
+import { createProject, openProject, recordApiCalls, registerTextSource, unique } from '../../support/projects';
 
 const NOTES = 'Release checklist\n- freeze the branch\n- tag the build\n';
 
@@ -16,6 +16,7 @@ test.describe('project sources', () => {
     // AddSourceRequest (file_name, file_type, file_size, file_id). The API rejects the upload and
     // the page shows "Failed to upload file".
     test.fail();
+    recordApiCalls(page, /\/sources$/);
     const name = unique('E2E Project sources');
     const projectId = await createProject(page, name);
     await openProject(page, projectId, name);

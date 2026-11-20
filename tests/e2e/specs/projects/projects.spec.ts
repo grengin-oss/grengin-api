@@ -3,8 +3,7 @@
 
 import { expect, test } from '@playwright/test';
 import { sql } from '../../support/api';
-import { env } from '../../support/env';
-import { dismissOnboarding, signIn } from '../../support/login';
+import { dismissOnboarding } from '../../support/login';
 import {
   chooseEchoModel,
   composer,
@@ -18,7 +17,9 @@ import {
   openProject,
   removeEchoEngine,
   saveInstructions,
+  recordApiCalls,
   send,
+  signInMember,
   unique,
 } from '../../support/projects';
 
@@ -71,6 +72,7 @@ test.describe('projects', () => {
     // and body {"projectId": …}, while the API's LinkProjectRequest requires `project_id`; the
     // API answers 422 and the webapp only logs it, so the chat never appears in the project.
     test.fail();
+    recordApiCalls(page, /^\/api\/conversations\/[^/]+\/projects/);
     const name = unique('E2E Project chats');
     const projectId = await createProject(page, name);
     await openProject(page, projectId, name);
@@ -89,6 +91,7 @@ test.describe('projects', () => {
     // webapp links only after the API has sent the `conversation` event, which happens after the
     // system prompt for the first reply was assembled, so the first reply misses the instructions.
     test.fail();
+    recordApiCalls(page, /^\/api\/conversations\/[^/]+\/projects/);
     const name = unique('E2E Project first');
     const instructionMarker = marker();
     const projectId = await createProject(page, name);
@@ -121,6 +124,7 @@ test.describe('projects', () => {
     // hardcoded instead of the installation's models, and sends them in the ?model=&provider=
     // of the chat it opens, so the message goes to a model this installation does not offer.
     test.fail();
+    recordApiCalls(page, /^\/api\/chat/);
     const name = unique('E2E Project composer');
     const projectId = await createProject(page, name);
     await openProject(page, projectId, name);
@@ -179,33 +183,31 @@ test.describe('projects', () => {
 
   test('a private project shared with a member is visible to them; unshared ones are not', async ({ page, browser }) => {
     test.setTimeout(120_000);
-    const memberContext = await browser.newContext({ baseURL: env.webUrl, storageState: { cookies: [], origins: [] } });
-    const memberPage = await memberContext.newPage();
-    // Signing in provisions the member, so the owner can find them.
-    await signIn(memberPage, 'member');
-    await dismissOnboarding(memberPage);
+    const member = await signInMember(browser);
+    try {
+      const shared = unique('E2E Project shared');
+      const hidden = unique('E2E Project hidden');
+      const sharedId = await createProject(page, shared);
+      await createProject(page, hidden);
 
-    const shared = unique('E2E Project shared');
-    const hidden = unique('E2E Project hidden');
-    const sharedId = await createProject(page, shared);
-    await createProject(page, hidden);
+      await openProject(page, sharedId, shared);
+      await page.getByRole('button', { name: 'Members', exact: true }).click();
+      const picker = page.getByRole('dialog', { name: 'Add members' });
+      await picker.getByRole('textbox', { name: /Search by name, email, or department/ }).fill('member@e2e');
+      await picker.getByRole('checkbox', { name: 'E2E Member (member@e2e.grengin.test)' }).click();
+      await picker.getByRole('button', { name: 'Add 1 Member' }).click();
+      await expect(page.getByText(`E2E Member added to "${shared}"`)).toBeVisible();
+      await page.getByRole('tab', { name: /^Members/ }).click();
+      await expect(page.getByRole('main').getByText('member@e2e.grengin.test')).toBeVisible();
 
-    await openProject(page, sharedId, shared);
-    await page.getByRole('button', { name: 'Members', exact: true }).click();
-    const picker = page.getByRole('dialog', { name: 'Add members' });
-    await picker.getByRole('textbox', { name: /Search by name, email, or department/ }).fill('member@e2e');
-    await picker.getByRole('checkbox', { name: 'E2E Member (member@e2e.grengin.test)' }).click();
-    await picker.getByRole('button', { name: 'Add 1 Member' }).click();
-    await expect(page.getByText(`E2E Member added to "${shared}"`)).toBeVisible();
-    await page.getByRole('tab', { name: /^Members/ }).click();
-    await expect(page.getByRole('main').getByText('member@e2e.grengin.test')).toBeVisible();
-
-    await memberPage.goto('/projects');
-    const memberMain = memberPage.getByRole('main');
-    await expect(memberMain.getByText(shared, { exact: true }).first()).toBeVisible();
-    await expect(memberMain.getByText(hidden, { exact: true })).toHaveCount(0);
-    await memberMain.getByRole('button', { name: new RegExp(escapeRegExp(shared)) }).first().click();
-    await expect(memberPage.getByRole('heading', { level: 1, name: shared })).toBeVisible();
-    await memberContext.close();
+      await member.page.goto('/projects');
+      const memberMain = member.page.getByRole('main');
+      await expect(memberMain.getByText(shared, { exact: true }).first()).toBeVisible();
+      await expect(memberMain.getByText(hidden, { exact: true })).toHaveCount(0);
+      await memberMain.getByRole('button', { name: new RegExp(escapeRegExp(shared)) }).first().click();
+      await expect(member.page.getByRole('heading', { level: 1, name: shared })).toBeVisible();
+    } finally {
+      await member.restore();
+    }
   });
 });
