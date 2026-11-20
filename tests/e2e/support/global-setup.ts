@@ -69,7 +69,7 @@ export default async function globalSetup() {
       models: [{ ...template, id: MODEL_ID, name: 'E2E Chat', capabilities: { chat: { ...template.capabilities.chat, reasoning: false } } }],
     };
     const created = await api(token, 'POST', '/admin/ai-engines', {
-      plugin_config: { manifest, configuration: {}, allow_insecure_http: true, allow_private_network: true },
+      plugin_config: { manifest, configuration: {}, allowInsecureHttp: true, allowPrivateNetwork: true },
       api_key: 'e2e-key',
       is_enabled: true,
       whitelisted_models: [MODEL_ID],
