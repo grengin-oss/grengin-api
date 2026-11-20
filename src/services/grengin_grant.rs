@@ -318,6 +318,7 @@ pub struct GrenginGrant {
     client: reqwest::Client,
     refresh_url: String,
     introspect_url: String,
+    service_origin: String,
     database: Option<DatabaseConnection>,
     state: Mutex<State>,
 }
@@ -360,11 +361,13 @@ impl GrenginGrant {
             .map_err(|_| "credential client unavailable")?;
         let refresh_url = format!("{}{REFRESH_PATH}", identity.origin);
         let introspect_url = format!("{}{INTROSPECT_PATH}", identity.origin);
+        let service_origin = identity.origin.to_owned();
         Ok(Self {
             identity,
             client,
             refresh_url,
             introspect_url,
+            service_origin,
             database,
             state: Mutex::new(State::default()),
         })
@@ -383,7 +386,7 @@ impl GrenginGrant {
     /// The workspace's service status: model access and balance. Balances the service omits
     /// stay `None`, never zero.
     pub async fn workspace(&self) -> Result<WorkspaceStatus, ProviderError> {
-        self.status_at(&format!("{}/v1/infer/status", self.origin()))
+        self.status_at(&format!("{}/v1/infer/status", self.service_origin))
             .await
     }
 
@@ -395,14 +398,16 @@ impl GrenginGrant {
         } else {
             serde_json::json!({"enabled": false})
         };
+        let url = format!("{}/v1/connect/grengin-models", self.service_origin);
         let response = self
-            .client
-            .put(format!("{}/v1/connect/grengin-models", self.origin()))
-            .bearer_auth(self.bearer().await?)
-            .json(&body)
-            .send()
+            .send_with_grant(|bearer| self.client.put(&url).bearer_auth(bearer).json(&body))
             .await
-            .map_err(|_| ProviderError::Transport("Grengin model access unavailable".into()))?;
+            .map_err(|error| match error {
+                ProviderError::Transport(_) => {
+                    ProviderError::Transport("Grengin model access unavailable".into())
+                }
+                other => other,
+            })?;
         let status = response.status();
         if status.is_success() {
             return Ok(());
@@ -418,12 +423,14 @@ impl GrenginGrant {
 
     async fn status_at(&self, url: &str) -> Result<WorkspaceStatus, ProviderError> {
         let response = self
-            .client
-            .get(url)
-            .bearer_auth(self.bearer().await?)
-            .send()
+            .send_with_grant(|bearer| self.client.get(url).bearer_auth(bearer))
             .await
-            .map_err(|_| ProviderError::Transport("Grengin workspace status unavailable".into()))?;
+            .map_err(|error| match error {
+                ProviderError::Transport(_) => {
+                    ProviderError::Transport("Grengin workspace status unavailable".into())
+                }
+                other => other,
+            })?;
         if !response.status().is_success() {
             return Err(ProviderError::HttpStatus {
                 status: response.status().as_u16(),
@@ -436,20 +443,56 @@ impl GrenginGrant {
         workspace_document(&bytes)
     }
 
+    /// Sends a control request with the current grant. The service refuses an invalid grant
+    /// with `invalid_connection_grant` before doing anything, so that exact grant is dropped
+    /// and the request is sent once more with a new one; a grant refused straight after issue
+    /// backs off instead (see `reject`), which bounds reauthentication.
+    async fn send_with_grant<F>(&self, request: F) -> Result<reqwest::Response, ProviderError>
+    where
+        F: Fn(&str) -> reqwest::RequestBuilder,
+    {
+        let mut retried = false;
+        loop {
+            let bearer = self.bearer().await?;
+            let response = request(&bearer)
+                .send()
+                .await
+                .map_err(|_| ProviderError::Transport("Grengin service unavailable".into()))?;
+            if response.status() != reqwest::StatusCode::UNAUTHORIZED {
+                return Ok(response);
+            }
+            let bytes = read_body_capped(response, MAX_BYTES)
+                .await
+                .unwrap_or_default();
+            let kind = service_error_type(&bytes);
+            if kind.as_deref() == Some("invalid_connection_grant") {
+                self.reject(&bearer).await;
+                if !retried {
+                    retried = true;
+                    continue;
+                }
+            }
+            return Err(ProviderError::HttpStatus {
+                status: 401,
+                message: kind.unwrap_or_else(|| "rejected".into()),
+            });
+        }
+    }
+
     /// Called at every native operation dispatch, including later tool rounds.
     pub async fn bearer(&self) -> Result<String, ProviderError> {
         let mut state = self.state.lock().await;
         let now = Instant::now();
-        if let Some(grant) = &state.grant {
-            if now < grant.refresh_at {
-                return Ok(grant.bearer.clone());
-            }
+        if let Some(grant) = &state.grant
+            && now < grant.refresh_at
+        {
+            return Ok(grant.bearer.clone());
         }
         if state.retry_at.is_some_and(|retry| now < retry) {
-            if let Some(grant) = &state.grant {
-                if now < grant.expires_at {
-                    return Ok(grant.bearer.clone());
-                }
+            if let Some(grant) = &state.grant
+                && now < grant.expires_at
+            {
+                return Ok(grant.bearer.clone());
             }
             return Err(state.failure.unwrap_or(Failure::Transport).error());
         }
@@ -472,12 +515,11 @@ impl GrenginGrant {
             }
             Err((failure, retry_after)) => {
                 Self::back_off(&mut state, failure, retry_after);
-                if failure.transient() {
-                    if let Some(grant) = &state.grant {
-                        if Instant::now() < grant.expires_at {
-                            return Ok(grant.bearer.clone());
-                        }
-                    }
+                if failure.transient()
+                    && let Some(grant) = &state.grant
+                    && Instant::now() < grant.expires_at
+                {
+                    return Ok(grant.bearer.clone());
                 }
                 state.grant = None;
                 Err(failure.error())
@@ -773,6 +815,7 @@ mod tests {
     use axum::{
         Json, Router,
         http::{HeaderMap, StatusCode},
+        response::IntoResponse,
         routing::post,
     };
     use foreign_types::ForeignType;
@@ -907,6 +950,102 @@ mod tests {
         assert!(Identity::load(Path::new("relative.json")).is_err());
         std::fs::remove_file(link).unwrap();
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn control_requests_drop_a_rejected_grant_and_reauthenticate_once() {
+        let bytes = serde_json::to_vec(&document()).unwrap();
+        let issued = Arc::new(AtomicUsize::new(0));
+        let refresh_count = issued.clone();
+        let refresh = post(move || {
+            let issued = refresh_count.clone();
+            async move {
+                let n = issued.fetch_add(1, Ordering::SeqCst) + 1;
+                Json(json!({"connection_grant": format!("token-{n}"), "expires_in": 3600}))
+            }
+        });
+        let introspect = post(|| async {
+            Json(
+                json!({"active":true,"status":"connected","installation_id":"inst_a","organization_id":"org_a"}),
+            )
+        });
+        let reject_all = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let rejecting = reject_all.clone();
+        let rejected = || {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error":{"type":"invalid_connection_grant"}})),
+            )
+        };
+        let status = axum::routing::get(move |headers: HeaderMap| {
+            let rejecting = rejecting.clone();
+            async move {
+                let bearer = headers
+                    .get("authorization")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned();
+                if bearer == "Bearer token-1" || rejecting.load(Ordering::SeqCst) {
+                    return rejected().into_response();
+                }
+                Json(json!({"engine_state":"on"})).into_response()
+            }
+        });
+        let models = axum::routing::put(move |headers: HeaderMap| async move {
+            let bearer = headers
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+            if bearer == "Bearer token-2" {
+                return rejected().into_response();
+            }
+            Json(json!({"enabled":true})).into_response()
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let mut grant = GrenginGrant::new(Identity::parse(&bytes).unwrap(), None).unwrap();
+        grant.refresh_url = format!("{origin}{REFRESH_PATH}");
+        grant.introspect_url = format!("{origin}{INTROSPECT_PATH}");
+        grant.service_origin = origin.clone();
+        let server = tokio::spawn(
+            axum::serve(
+                listener,
+                Router::new()
+                    .route(REFRESH_PATH, refresh)
+                    .route(INTROSPECT_PATH, introspect)
+                    .route("/v1/infer/status", status)
+                    .route("/v1/connect/grengin-models", models),
+            )
+            .into_future(),
+        );
+        async fn make_old(grant: &GrenginGrant) {
+            grant.state.lock().await.grant.as_mut().unwrap().issued_at =
+                Instant::now() - Duration::from_secs(600);
+        }
+
+        // A cached grant the service has invalidated (for example after rotation).
+        assert_eq!(grant.bearer().await.unwrap(), "token-1");
+        make_old(&grant).await;
+        assert_eq!(grant.status().await.unwrap(), "on");
+        assert_eq!(issued.load(Ordering::SeqCst), 2);
+        assert_eq!(grant.bearer().await.unwrap(), "token-2");
+
+        make_old(&grant).await;
+        grant.set_models_enabled(true).await.unwrap();
+        assert_eq!(issued.load(Ordering::SeqCst), 3);
+        assert_eq!(grant.bearer().await.unwrap(), "token-3");
+
+        // Refused again straight after issue: one bounded attempt, then backoff, no loop.
+        reject_all.store(true, Ordering::SeqCst);
+        make_old(&grant).await;
+        assert!(grant.status().await.is_err());
+        assert_eq!(issued.load(Ordering::SeqCst), 4);
+        assert!(grant.status().await.is_err());
+        assert_eq!(issued.load(Ordering::SeqCst), 4);
+        server.abort();
     }
 
     #[tokio::test]
