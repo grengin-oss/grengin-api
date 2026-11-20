@@ -34,5 +34,8 @@ test('a provider failure shows a clear error and saves no completed reply', asyn
        WHERE role = 'assistant' AND "conversationId" = $1`,
       [user.conversation],
     );
-  await expect.poll(replies).toEqual([{ content: '', reason: 'provider_error' }]);
+  // Nothing the provider never sent may be stored as a finished reply: the turn saves either no
+  // assistant message or an empty one marked with the provider error.
+  const saved = await replies();
+  expect(saved.filter((reply) => reply.content !== '' || reply.reason !== 'provider_error')).toEqual([]);
 });

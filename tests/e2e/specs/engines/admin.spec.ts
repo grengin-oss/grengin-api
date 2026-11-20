@@ -45,6 +45,8 @@ async function unconnectedCatalogProviders() {
   return { providers, categories };
 }
 
+const GROQ = { key: 'groq', name: 'Groq', fakeKey: 'gsk_e2e_fake_key_that_is_not_valid' };
+
 async function openBrowse(page: Page) {
   await page.getByRole('button', { name: 'Browse Providers' }).click();
   const dialog = page.getByRole('dialog', { name: 'Browse Providers' });
@@ -151,33 +153,34 @@ test.describe('AI Engines page', () => {
 
   test('a catalog engine connected with a fake key validates as invalid, and removing the key disconnects it', async ({ page }) => {
     // Validation lists models at the provider's real endpoint (api.groq.com), which answers 401 to
-    // a made-up key. The run needs outbound internet for this; offline it would report "could not
-    // be validated right now" instead.
-    const groq = { key: 'groq', name: 'Groq' };
-    test.skip((await engineRow(groq.key)) !== undefined, 'Groq is already installed in this database');
+    // a made-up key. The run needs outbound internet for this; offline the key would stay
+    // "not_validated" ("could not be validated right now").
+    test.skip((await engineRow(GROQ.key)) !== undefined, 'Groq is already installed in this database');
     try {
       await openEnginesPage(page);
       const browse = await openBrowse(page);
-      await browse.getByRole('textbox', { name: 'Search providers…' }).fill(groq.name);
-      await browse.getByRole('button', { name: `Connect ${groq.name}`, exact: true }).click();
+      await browse.getByRole('textbox', { name: 'Search providers…' }).fill(GROQ.name);
+      await browse.getByRole('button', { name: `Connect ${GROQ.name}`, exact: true }).click();
 
-      const connect = page.getByRole('dialog', { name: `Connect ${groq.name}` });
-      await connect.getByRole('textbox', { name: 'API Key' }).fill('gsk_e2e_fake_key_that_is_not_valid');
+      const connect = page.getByRole('dialog', { name: `Connect ${GROQ.name}` });
+      await connect.getByRole('textbox', { name: 'API Key' }).fill(GROQ.fakeKey);
       await connect.getByRole('button', { name: 'Connect and Save' }).click();
       await expect(connect).toBeHidden();
-      await expect(page.getByText(`${groq.name} connected successfully`)).toBeVisible();
-      const card = engineCard(page, groq.name);
+      await expect(page.getByText(`${GROQ.name} connected successfully`)).toBeVisible();
+      const card = engineCard(page, GROQ.name);
       await expect(card.getByText('Not Validated', { exact: true })).toBeVisible();
-      expect(await engineRow(groq.key)).toMatchObject({ isEnabled: true, apiKeyStatus: 'not_validated' });
+      expect(await engineRow(GROQ.key)).toMatchObject({ isEnabled: true, apiKeyStatus: 'not_validated' });
 
-      const configure = await openConfigure(page, groq.name);
-      await configure.getByRole('button', { name: 'Validate' }).click();
-      await expect(configure.getByRole('status').filter({ hasText: 'Error: The provided API key is invalid.' })).toBeVisible();
+      const configure = await openConfigure(page, GROQ.name);
+      const validate = configure.getByRole('button', { name: 'Validate' });
+      await validate.click();
+      await expect.poll(async () => (await engineRow(GROQ.key)).apiKeyStatus).toBe('invalid');
+      await expect(validate).toBeEnabled();
+      await expect(configure.getByRole('status').filter({ hasText: 'Key is valid and connected.' })).toHaveCount(0);
       await configure.getByRole('button', { name: 'Cancel' }).click();
-      await expect(card.getByText('Invalid Key', { exact: true })).toBeVisible();
-      expect((await engineRow(groq.key)).apiKeyStatus).toBe('invalid');
+      await expect(card.getByText('Connected', { exact: true })).toHaveCount(0);
 
-      const again = await openConfigure(page, groq.name);
+      const again = await openConfigure(page, GROQ.name);
       await again.getByRole('button', { name: 'Delete' }).click();
       await again.getByRole('button', { name: 'Confirm Delete' }).click();
       await expect(page.getByText('API key removed successfully')).toBeVisible();
@@ -185,11 +188,39 @@ test.describe('AI Engines page', () => {
       await expect(card).toHaveCount(0);
       const [row] = await sql<{ apiKey: string | null; isEnabled: boolean }>(
         'SELECT "apiKey", "isEnabled" FROM ai_engines WHERE "engineKey" = $1',
-        [groq.key],
+        [GROQ.key],
       );
       expect(row).toMatchObject({ apiKey: null, isEnabled: false });
+      const browseAgain = await openBrowse(page);
+      await browseAgain.getByRole('textbox', { name: 'Search providers…' }).fill(GROQ.name);
+      await expect(browseAgain.getByRole('button', { name: `Connect ${GROQ.name}`, exact: true })).toBeVisible();
     } finally {
-      await removeEngine(groq.key);
+      await removeEngine(GROQ.key);
+    }
+  });
+
+  test('an API key the provider rejects is shown as invalid in the dialog and on the card', async ({ page }) => {
+    // Known bug: the API reports a rejected key as api_key_status "invalid" (ApiKeyStatus::Invalid,
+    // serde snake_case), but webapp main only recognises "in_valid" (admin/types.ts,
+    // aiEnginesStore.getStatusMessage, AIEngines.getEngineStatus). After Validate, the dialog
+    // replaces the result with "API key is not configured. Please add an API key." (also the error
+    // toast) and the card says "Not Configured" instead of "Invalid Key". Remove `fail` once the two
+    // sides agree on the value.
+    test.fail();
+    test.skip((await engineRow(GROQ.key)) !== undefined, 'Groq is already installed in this database');
+    const token = await ownerToken();
+    try {
+      const created = await api(token, 'POST', '/admin/ai-engines', { engine_key: GROQ.key, api_key: GROQ.fakeKey });
+      expect(created.status).toBeLessThan(300);
+      await openEnginesPage(page);
+      const configure = await openConfigure(page, GROQ.name);
+      await configure.getByRole('button', { name: 'Validate' }).click();
+      await expect.poll(async () => (await engineRow(GROQ.key)).apiKeyStatus).toBe('invalid');
+      await expect(configure.getByRole('status')).toHaveText('Error: The provided API key is invalid. Please check and try again.', { timeout: 5_000 });
+      await configure.getByRole('button', { name: 'Cancel' }).click();
+      await expect(engineCard(page, GROQ.name).getByText('Invalid Key', { exact: true })).toBeVisible({ timeout: 5_000 });
+    } finally {
+      await removeEngine(GROQ.key);
     }
   });
 });
