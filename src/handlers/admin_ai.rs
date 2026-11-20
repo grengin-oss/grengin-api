@@ -21,7 +21,10 @@ use crate::{
     },
     services::{
         ai_engine_defaults::{enabled_after_key, starter_models},
-        ai_plugin::apply_base_url_override,
+        ai_plugin::{
+            apply_base_url_override, apply_grengin_update, is_catalog_grengin,
+            validate_grengin_connection,
+        },
         authorization::{AuthorizationService, PermissionScopeMode},
         provider_manifests,
         provider_models::{is_chat_selectable_model, to_model_info},
@@ -347,7 +350,7 @@ pub async fn update_ai_engines_by_key(
         })?
         .ok_or(AuthError::ResourceNotFound)?;
     let mut active_model = ai_engine.clone().into_active_model();
-    let catalog_grengin = crate::services::ai_plugin::is_catalog_grengin(&ai_engine);
+    let catalog_grengin = is_catalog_grengin(&ai_engine);
     let (icon, icon_dark) = if catalog_grengin {
         (None, None)
     } else {
@@ -355,51 +358,8 @@ pub async fn update_ai_engines_by_key(
             .await?
             .get_icons(&ai_engine_key)
     };
-    if catalog_grengin && (req.api_key.is_some() || req.plugin_config.is_some()) {
-        return Err(AuthError::InvalidRequest {
-            field: "api_key/plugin_config",
-        });
-    }
-    if catalog_grengin
-        && (req.whitelisted_models.is_some()
-            || req.default_model.is_some()
-            || req.default_image_gen_model.is_some())
-    {
-        let additions = req.whitelisted_models.as_ref().is_some_and(|models| {
-            models
-                .iter()
-                .any(|id| !ai_engine.whitelist_models.contains(id))
-        });
-        let new_default = req
-            .default_model
-            .as_deref()
-            .is_some_and(|id| !id.is_empty() && id != ai_engine.default_model)
-            || req.default_image_gen_model.as_deref().is_some_and(|id| {
-                !id.is_empty() && Some(id) != ai_engine.default_image_gen_model.as_deref()
-            });
-        let models = if additions || new_default {
-            let provider = build_provider(&app_state, &ai_engine)
-                .await
-                .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
-            provider
-                .models()
-                .ok_or(AuthError::ServiceTemporarilyUnavailable)?
-                .list_models()
-                .await
-                .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?
-        } else {
-            Vec::new()
-        };
-        let (models, text, image) = crate::services::ai_plugin::grengin_model_policy(
-            &models,
-            Some(&ai_engine),
-            req.whitelisted_models.take(),
-            req.default_model.take(),
-            req.default_image_gen_model.take(),
-        )?;
-        active_model.whitelist_models = Set(models);
-        active_model.default_model = Set(text);
-        active_model.default_image_gen_model = Set(image);
+    if catalog_grengin {
+        apply_grengin_update(&app_state, &ai_engine, &mut req, &mut active_model).await?;
     }
     let first_key = ai_engine.api_key.is_none()
         && req
@@ -642,7 +602,7 @@ pub async fn delete_ai_engines_api_key_key(
             AuthError::DbTimeout
         })?
         .ok_or(AuthError::ResourceNotFound)?;
-    if crate::services::ai_plugin::is_catalog_grengin(&ai_engine) {
+    if is_catalog_grengin(&ai_engine) {
         return Err(AuthError::InvalidRequest { field: "api_key" });
     }
     let ai_models = load_models_response(&app_state).await?;
@@ -746,31 +706,8 @@ pub async fn validate_ai_engines_by_key(
             AuthError::DbTimeout
         })?
         .ok_or(AuthError::ResourceNotFound)?;
-    if crate::services::ai_plugin::is_catalog_grengin(&ai_engine) {
-        let result = match crate::services::grengin_grant::GrenginGrant::configured() {
-            Ok(grant) => grant.status().await,
-            Err(error) => Err(error),
-        };
-        let (valid, message) = match result {
-            Ok(access) => (
-                true,
-                format!(
-                    "Workspace connection validated. Grengin model access is {access}; model availability was not tested."
-                ),
-            ),
-            Err(error) => (
-                false,
-                format!("Workspace connection could not be validated: {error}"),
-            ),
-        };
-        return Ok((
-            StatusCode::OK,
-            Json(AIEngineValidation {
-                valid,
-                message,
-                models_available: 0,
-            }),
-        ));
+    if is_catalog_grengin(&ai_engine) {
+        return Ok((StatusCode::OK, Json(validate_grengin_connection().await)));
     }
     let validation = match build_provider(&app_state, &ai_engine).await {
         Ok(provider) => match provider.models() {

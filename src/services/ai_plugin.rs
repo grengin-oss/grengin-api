@@ -17,6 +17,7 @@ use crate::{
     },
     dto::admin_ai::{
         AIEngineConnectionTest, AIEngineCreate, AIEngineDetail, AIEnginePluginValidationResponse,
+        AIEngineUpdate, AIEngineValidation,
     },
     models::ai_engines::{self, ApiKeyStatus},
     services::{
@@ -189,12 +190,11 @@ pub async fn test_engine_connection(
     engine: ai_engines::Model,
 ) -> Result<AIEngineConnectionTest, AuthError> {
     if is_catalog_grengin(&engine) {
-        let result = match super::grengin_grant::GrenginGrant::configured() {
-            Ok(grant) => grant.status().await,
-            Err(error) => Err(error),
-        };
+        let result = grengin_model_access().await;
         return Ok(AIEngineConnectionTest {
-            valid: result.is_ok(),
+            valid: result
+                .as_ref()
+                .is_ok_and(|access| grengin_access_usable(access)),
             mode: "workspace_connection".to_string(),
             models_available: None,
             error_class: result
@@ -235,6 +235,99 @@ pub async fn test_engine_connection(
         models_available,
         error_class: error_class.map(str::to_string),
     })
+}
+
+async fn grengin_model_access() -> Result<&'static str, llm_plugin::ProviderError> {
+    super::grengin_grant::GrenginGrant::configured()?
+        .status()
+        .await
+}
+
+// The connection can be healthy while the workspace has model access switched off or no balance.
+fn grengin_access_usable(access: &str) -> bool {
+    matches!(access, "on" | "low")
+}
+
+pub async fn validate_grengin_connection() -> AIEngineValidation {
+    let (valid, message) = match grengin_model_access().await {
+        Ok(access) if grengin_access_usable(access) => (
+            true,
+            format!(
+                "Workspace connection validated. Grengin model access is {access}; model availability was not tested."
+            ),
+        ),
+        Ok(access) => (
+            false,
+            format!(
+                "Workspace connection validated, but Grengin model access is {access}, so models cannot be used yet."
+            ),
+        ),
+        Err(error) => (
+            false,
+            format!("Workspace connection could not be validated: {error}"),
+        ),
+    };
+    AIEngineValidation {
+        valid,
+        message,
+        models_available: 0,
+    }
+}
+
+/// Applies a model-policy edit to the catalog Grengin engine. Grengin has no API key or plugin
+/// configuration; adding a model or a new default checks it against the live service catalog.
+pub async fn apply_grengin_update(
+    state: &SharedState,
+    engine: &ai_engines::Model,
+    req: &mut AIEngineUpdate,
+    active: &mut ai_engines::ActiveModel,
+) -> Result<(), AuthError> {
+    if req.api_key.is_some() || req.plugin_config.is_some() {
+        return Err(AuthError::InvalidRequest {
+            field: "api_key/plugin_config",
+        });
+    }
+    if req.whitelisted_models.is_none()
+        && req.default_model.is_none()
+        && req.default_image_gen_model.is_none()
+    {
+        return Ok(());
+    }
+    let additions = req.whitelisted_models.as_ref().is_some_and(|models| {
+        models
+            .iter()
+            .any(|id| !engine.whitelist_models.contains(id))
+    });
+    let new_default = req
+        .default_model
+        .as_deref()
+        .is_some_and(|id| !id.is_empty() && id != engine.default_model)
+        || req.default_image_gen_model.as_deref().is_some_and(|id| {
+            !id.is_empty() && Some(id) != engine.default_image_gen_model.as_deref()
+        });
+    let models = if additions || new_default {
+        build_provider(state, engine)
+            .await
+            .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?
+            .models()
+            .ok_or(AuthError::ServiceTemporarilyUnavailable)?
+            .list_models()
+            .await
+            .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?
+    } else {
+        Vec::new()
+    };
+    let (models, text, image) = grengin_model_policy(
+        &models,
+        Some(engine),
+        req.whitelisted_models.take(),
+        req.default_model.take(),
+        req.default_image_gen_model.take(),
+    )?;
+    active.whitelist_models = Set(models);
+    active.default_model = Set(text);
+    active.default_image_gen_model = Set(image);
+    Ok(())
 }
 
 pub fn is_catalog_grengin(engine: &ai_engines::Model) -> bool {

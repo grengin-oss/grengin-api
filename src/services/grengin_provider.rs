@@ -9,7 +9,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::StreamExt;
 use llm_plugin::*;
 use reqwest::Url;
 use serde::Deserialize;
@@ -231,11 +231,27 @@ impl ModelProvider for GrenginProvider {
             .map(|provider| canonical_provider(&provider.id).to_owned())
             .filter(|provider| self.upstreams.contains(provider))
             .collect();
-        let manifests: BTreeMap<_, _> = futures_util::stream::iter(ids)
-            .map(|id| async move { self.manifest(&id).await.map(|manifest| (id, manifest)) })
+        let wanted = ids.len();
+        let loaded: Vec<_> = futures_util::stream::iter(ids)
+            .map(|id| async move { (self.manifest(&id).await, id) })
             .buffer_unordered(4)
-            .try_collect()
-            .await?;
+            .collect()
+            .await;
+        // One unavailable native package hides only that provider's models.
+        let mut manifests = BTreeMap::new();
+        for (manifest, id) in loaded {
+            match manifest {
+                Ok(manifest) => {
+                    manifests.insert(id, manifest);
+                }
+                Err(error) => eprintln!("Grengin native provider {id} unavailable: {error}"),
+            }
+        }
+        if wanted > 0 && manifests.is_empty() {
+            return Err(ProviderError::Configuration(
+                "Grengin native provider catalog unavailable".into(),
+            ));
+        }
         catalog_models(catalog, &manifests, &self.descriptor.capabilities)
     }
 }

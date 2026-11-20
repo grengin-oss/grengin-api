@@ -896,7 +896,12 @@ mod tests {
         let introspect = post(move |headers: HeaderMap, Json(proof): Json<Proof>| {
             let verifier = introspection_verifier.clone();
             async move {
-                let bearer = headers.get("authorization").unwrap().to_str().unwrap().to_owned();
+                let bearer = headers
+                    .get("authorization")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned();
                 let message = format!(
                     "{INTROSPECT_DOMAIN}\n{}\n{}\n{}",
                     proof.instance_uuid, proof.timestamp, proof.nonce
@@ -913,7 +918,11 @@ mod tests {
                         .verify_oneshot(&signature, message.as_bytes())
                         .unwrap()
                 );
-                let installation = if bearer == "Bearer moved.token" { "inst_other" } else { "inst_a" };
+                let installation = if bearer == "Bearer moved.token" {
+                    "inst_other"
+                } else {
+                    "inst_a"
+                };
                 Json(json!({"active":true,"status":"connected",
                     "installation_id":installation,"organization_id":"org_a"}))
             }
@@ -980,7 +989,9 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         {
             let state = grant.state.lock().await;
-            assert!(state.retry_at.unwrap().duration_since(Instant::now()) <= Duration::from_secs(121));
+            assert!(
+                state.retry_at.unwrap().duration_since(Instant::now()) <= Duration::from_secs(121)
+            );
         }
         grant.state.lock().await.retry_at = None;
         assert_eq!(grant.bearer().await.unwrap(), "second.token");
@@ -1011,6 +1022,41 @@ mod tests {
         ));
         assert!(grant.state.lock().await.grant.is_none());
         server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable, migrated database)"]
+    async fn the_first_confirmed_binding_is_persisted_and_never_replaced() {
+        let url = std::env::var("GRENGIN_SECURITY_TEST_DATABASE_URL").expect("test database URL");
+        let database = sea_orm::Database::connect(&url)
+            .await
+            .expect("test database");
+        let grant = GrenginGrant::new(
+            Identity::parse(&serde_json::to_vec(&document()).unwrap()).unwrap(),
+            Some(database.clone()),
+        )
+        .unwrap();
+        let first = ("inst_a".to_owned(), "org_a".to_owned());
+        assert_eq!(
+            grant.persist_binding(&database, &first).await.unwrap(),
+            first
+        );
+        // A later confirmation of another installation keeps the stored one, which confirm() refuses.
+        let other = ("inst_b".to_owned(), "org_a".to_owned());
+        assert_eq!(
+            grant.persist_binding(&database, &other).await.unwrap(),
+            first
+        );
+        // What a restarted process reads back: the first confirmed binding.
+        let stored = grengin_service_bindings::Entity::find_by_id(
+            uuid::Uuid::parse_str(&grant.identity.uuid).unwrap(),
+        )
+        .one(&database)
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!((stored.installation_id, stored.organization_id), first);
+        assert_eq!(stored.service_origin, grant.identity.origin);
     }
 
     #[test]
