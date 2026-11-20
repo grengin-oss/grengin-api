@@ -14,6 +14,7 @@ import {
   deleteGatedEngine,
   deleteMcpServer,
   enableConnector,
+  ensureActive,
   grantUserViaApi,
   mcpCalls,
   openAdvanced,
@@ -22,6 +23,7 @@ import {
   releaseHeldCall,
   removeOnlyRule,
   resetMcpCalls,
+  restoreStatus,
   selectModel,
   sendMessage,
   setDefaultAccess,
@@ -30,7 +32,6 @@ import {
   syncTools,
   toolMarker,
   uniqueName,
-  userId,
   visibleServerNames,
 } from '../../support/mcp';
 
@@ -38,20 +39,19 @@ const MEMBER = USERS.member.email;
 
 test.describe('MCP access control', () => {
   let serverId: string;
+  let memberStatus: string | undefined;
   const name = uniqueName('access');
 
   test.beforeAll(async ({ browser }) => {
     serverId = (await createMcpServer(name, 'all_users')).id;
     await syncTools(serverId);
-    // Rules name the member, so make sure the member exists (first sign-in provisions it).
-    if (!(await userId('member'))) {
-      const { context } = await signedInPage(browser, 'member');
-      await context.close();
-    }
+    // Rules name the member, who must exist and be approved to sign in.
+    memberStatus = await ensureActive(browser, 'member');
   });
   test.afterAll(async () => {
-    // Deleting the server drops its access rules; the member's account is left as it was.
+    // Deleting the server drops its access rules; the member gets its previous status back.
     await deleteMcpServer(serverId);
+    await restoreStatus('member', memberStatus);
   });
   test.beforeEach(async () => {
     await resetMcpCalls();

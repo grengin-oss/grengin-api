@@ -176,6 +176,29 @@ export async function deleteGatedEngine() {
   await api(await tokenOf('owner'), 'DELETE', `/admin/ai-engines/${GATED_ENGINE}`);
 }
 
+// Accounts created by IdP sign-in (JIT) wait for admin approval. The access specs need a usable
+// member, so they approve it and afterwards put back whatever status it had (see restoreStatus).
+export async function ensureActive(browser: Browser, user: keyof typeof USERS): Promise<string> {
+  if (!(await userId(user))) {
+    const context = await browser.newContext({ storageState: { cookies: [], origins: [] }, baseURL: env.webUrl });
+    await signIn(await context.newPage(), user);
+    await context.close();
+    await expect.poll(() => userId(user)).not.toBeNull();
+  }
+  const id = (await userId(user))!;
+  const [{ status }] = await sql<{ status: string }>('SELECT status FROM users WHERE id = $1', [id]);
+  if (status !== 'active') {
+    await ok(api(await tokenOf('owner'), 'PATCH', `/admin/users/${id}/status`, { status: 'active' }), `approving ${user}`);
+  }
+  return status;
+}
+
+// The status API cannot set "pending" (it is only ever set by sign-in), so this restores it directly.
+export async function restoreStatus(user: keyof typeof USERS, status: string | undefined) {
+  const id = await userId(user);
+  if (id && status && status !== 'active') await sql('UPDATE users SET status = $1 WHERE id = $2', [status, id]);
+}
+
 // ---- UI ----
 
 export async function openChat(page: Page) {

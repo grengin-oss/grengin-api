@@ -31,7 +31,13 @@ test.describe('admin: remote MCP servers', () => {
       await dialog.getByLabel('Description').fill('Mock remote MCP server added through the dialog');
       await expect(dialog.getByRole('button', { name: /Transport/ })).toContainText('HTTP');
       await dialog.getByLabel('URL', { exact: true }).fill(MCP_ENDPOINT);
+      const response = page.waitForResponse((r) => r.url().endsWith('/admin/mcp-servers') && r.request().method() === 'POST');
       await dialog.getByRole('button', { name: 'Create Server' }).click();
+      const created = await response;
+      test.info().annotations.push({
+        type: 'POST /admin/mcp-servers',
+        description: `sent default_access=${JSON.stringify(created.request().postDataJSON()?.default_access)} -> ${created.status()} ${(await created.text()).slice(0, 300)}`,
+      });
 
       await expect(page.getByText('MCP server created').first()).toBeVisible({ timeout: 10_000 });
       await expect(dialog).toBeHidden();
