@@ -15,6 +15,7 @@ use crate::{
     dto::files::File as FileAttachment,
     dto::prompt::{Prompt, PromptTextResponse, PromptTitleResponse},
     models::messages::ChatRole,
+    services::llm_usage_gate::{AttachmentKind, estimate_text_tokens},
     services::mcp_tools::McpToolDescriptor,
     services::provider_stream::{
         StreamErrorKind, StreamParseResult, StreamParser, StreamWebSearchResult, ToolCall,
@@ -144,6 +145,7 @@ pub async fn generate_provider_title(
         title,
         input_tokens: response.input_tokens,
         output_tokens: response.output_tokens,
+        estimated_input_tokens: response.estimated_input_tokens,
     })
 }
 
@@ -193,17 +195,18 @@ pub async fn generate_provider_response(
     let chat = provider
         .chat()
         .ok_or(ProviderError::UnsupportedCapability("chat"))?;
+    let estimated_input_tokens = estimate_request_tokens(&request);
     let mut session = chat.start(request).await?;
     let mut stream = session.stream().await?;
     let mut text = String::new();
-    let mut input_tokens = 0;
-    let mut output_tokens = 0;
+    let mut input_tokens = None;
+    let mut output_tokens = None;
     while let Some(event) = stream.next().await {
         match event {
             Ok(ProviderEvent::TextDelta { text: delta }) => text.push_str(&delta),
             Ok(ProviderEvent::Usage { usage }) => {
-                input_tokens = usage.input_tokens.unwrap_or(input_tokens);
-                output_tokens = usage.output_tokens.unwrap_or(output_tokens);
+                input_tokens = usage.input_tokens.or(input_tokens);
+                output_tokens = usage.output_tokens.or(output_tokens);
             }
             Ok(ProviderEvent::Error { kind, message }) => {
                 return Err(match kind {
@@ -225,9 +228,33 @@ pub async fn generate_provider_response(
     }
     Ok(PromptTextResponse {
         text,
-        input_tokens: i32::try_from(input_tokens).unwrap_or(i32::MAX),
-        output_tokens: i32::try_from(output_tokens).unwrap_or(i32::MAX),
+        input_tokens: input_tokens.map(|tokens| i32::try_from(tokens).unwrap_or(i32::MAX)),
+        output_tokens: output_tokens.map(|tokens| i32::try_from(tokens).unwrap_or(i32::MAX)),
+        estimated_input_tokens,
     })
+}
+
+fn estimate_request_tokens(request: &ChatRequest) -> i32 {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .map(|part| match part {
+            ContentPart::Text { text } => estimate_text_tokens(text),
+            ContentPart::ImageBase64 { data, .. } => {
+                AttachmentKind::Image.estimated_tokens(base64_decoded_len(data))
+            }
+            ContentPart::ImageUrl { .. } => AttachmentKind::Image.estimated_tokens(0),
+            ContentPart::File { data, .. } => {
+                AttachmentKind::Document.estimated_tokens(base64_decoded_len(data))
+            }
+            ContentPart::FileReference { .. } => AttachmentKind::Document.estimated_tokens(0),
+        })
+        .fold(0i32, i32::saturating_add)
+}
+
+fn base64_decoded_len(data: &str) -> usize {
+    data.len() / 4 * 3
 }
 
 fn file_to_content_part(file: FileAttachment) -> ContentPart {
@@ -671,8 +698,42 @@ mod tests {
                 .await
                 .expect("title response");
         assert_eq!(response.title, "Provider-neutral title");
-        assert_eq!(response.input_tokens, 9);
-        assert_eq!(response.output_tokens, 3);
+        assert_eq!(response.input_tokens, Some(9));
+        assert_eq!(response.output_tokens, Some(3));
+        assert!(response.estimated_input_tokens > 0);
+    }
+
+    #[test]
+    fn request_estimates_count_text_and_attachments() {
+        let request = ChatRequest {
+            model: ModelId::new("model"),
+            messages: vec![ChatMessage {
+                role: PluginChatRole::User,
+                content: vec![
+                    ContentPart::Text {
+                        text: "x".repeat(400),
+                    },
+                    ContentPart::ImageBase64 {
+                        data: "AAAA".to_string(),
+                        media_type: "image/png".to_string(),
+                    },
+                    ContentPart::File {
+                        name: "doc.pdf".to_string(),
+                        data: "A".repeat(400_000),
+                        media_type: "application/pdf".to_string(),
+                    },
+                ],
+                tool_calls: Vec::new(),
+                tool_result: None,
+            }],
+            temperature: None,
+            max_tokens: None,
+            tools: Vec::new(),
+            tool_choice: None,
+            web_search: false,
+            options: Value::Null,
+        };
+        assert_eq!(estimate_request_tokens(&request), 100 + 1_600 + 3_000);
     }
 
     #[test]

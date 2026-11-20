@@ -13,6 +13,8 @@ pub mod audit_logs;
 pub mod auth_audit;
 pub mod auth_session;
 pub mod authorization;
+#[cfg(test)]
+mod background_spend_tests;
 pub mod branding_helpers;
 pub mod budget_allocation;
 pub mod catalog_download;
@@ -81,3 +83,4 @@ pub mod sso_validation;
 pub mod startup_migrations;
 pub mod system_metrics;
 pub mod system_prompts;
+pub mod task_models;

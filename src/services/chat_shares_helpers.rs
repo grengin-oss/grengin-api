@@ -941,8 +941,8 @@ async fn rebuild_copy_index(
         .unwrap_or(&source.model_name);
     ensure_user_llm_allowed(state, viewer, &provider, model).await?;
     ensure_model_whitelisted(state, &provider, &provider, model, &[model]).await?;
-    crate::services::rag::embed_messages(state, targets).await?;
-    crate::services::rag::update_conversation_summary(state, chat, &provider, model).await
+    crate::services::rag::embed_messages(state, viewer, targets).await?;
+    crate::services::rag::update_conversation_summary(state, viewer, chat, &provider, model).await
 }
 
 async fn cleanup_fork_files(state: &SharedState, files: &HashMap<Uuid, files::Model>) {

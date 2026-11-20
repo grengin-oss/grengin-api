@@ -5,6 +5,18 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
+// The message-cost trigger (m20261118_000001) writes the same 'charged' value.
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[sea_orm(
+    rs_type = "String",
+    db_type = "String(StringLen::None)",
+    rename_all = "lowercase"
+)]
+#[serde(rename_all = "lowercase")]
+pub enum UsageLogStatus {
+    Charged,
+}
+
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "usage_logs", rename_all = "camelCase")]
 #[serde(rename_all = "camelCase")]
@@ -29,7 +41,7 @@ pub struct Model {
     #[sea_orm(indexed)]
     pub department: Option<String>,
     #[sea_orm(indexed)]
-    pub status: String,
+    pub status: UsageLogStatus,
     #[sea_orm(column_type = "Text", nullable)]
     pub error_message: Option<String>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
