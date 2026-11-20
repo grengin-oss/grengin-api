@@ -170,6 +170,19 @@ async fn complete(
 ) -> Result<operations::Model, AuthError> {
     let txn = db.begin().await.map_err(|_| AuthError::DbTimeout)?;
     let life = lock_lifecycle(&txn).await?;
+    let stored = operations::Entity::find_by_id(operation.id)
+        .one(&txn)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?
+        .ok_or(AuthError::DbTimeout)?;
+    // A request and the reconciler can both finish one operation; the first decision stands.
+    if matches!(
+        stored.state,
+        OperationState::Applied | OperationState::Failed
+    ) {
+        return Ok(stored);
+    }
+    let operation = stored;
     let current = life.generation == operation.generation && life.revision == operation.revision;
     let (state, error_code) = match outcome {
         _ if !current => (OperationState::Failed, Some("superseded".to_owned())),
@@ -193,6 +206,64 @@ async fn complete(
         .map_err(|_| AuthError::DbTimeout)?;
     txn.commit().await.map_err(|_| AuthError::DbTimeout)?;
     Ok(finished)
+}
+
+// An operation still Applying after this long lost its request (timeout, crash or restart).
+const ABANDONED_AFTER: chrono::Duration = chrono::Duration::seconds(60);
+const RECONCILE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Finishes the latest intent if it is still open: reads the service state first and repeats
+/// the idempotent SET only when the service disagrees. Completion stays generation/revision
+/// fenced, so a superseded intent can never open routing.
+pub async fn reconcile(state: &SharedState) -> Result<(), AuthError> {
+    let Some(operation) = open_intent(&state.database, Utc::now()).await? else {
+        return Ok(());
+    };
+    let enabled = operation.desired_enabled;
+    let outcome = remote_reconcile(enabled).await;
+    complete(&state.database, operation, enabled, outcome).await?;
+    refresh_local_engine(state).await.map(|_| ())
+}
+
+async fn open_intent(
+    db: &DatabaseConnection,
+    now: chrono::DateTime<Utc>,
+) -> Result<Option<operations::Model>, AuthError> {
+    let latest = operations::Entity::find()
+        .order_by_desc(operations::Column::Revision)
+        .one(db)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
+    Ok(latest.filter(|operation| match operation.state {
+        OperationState::Pending => true,
+        OperationState::Applying => operation.updated_at <= now - ABANDONED_AFTER,
+        OperationState::Applied | OperationState::Failed => false,
+    }))
+}
+
+async fn remote_reconcile(enabled: bool) -> Result<(), (OperationState, String)> {
+    let grant = GrenginGrant::configured()
+        .map_err(|_| (OperationState::Failed, "setup_needed".to_owned()))?;
+    let engine_state = grant
+        .status()
+        .await
+        .map_err(|_| (OperationState::Pending, "status_unavailable".to_owned()))?;
+    if (engine_state != "off") == enabled {
+        return Ok(());
+    }
+    remote_set(enabled).await
+}
+
+/// Retries open intents after restarts and temporary service failures.
+pub fn spawn_reconciler(state: SharedState) {
+    tokio::spawn(async move {
+        loop {
+            if let Err(error) = reconcile(&state).await {
+                eprintln!("Grengin intent reconciliation failed: {error:?}");
+            }
+            tokio::time::sleep(RECONCILE_EVERY).await;
+        }
+    });
 }
 
 /// Deletes the local engine and starts a new generation: no outstanding or late operation
@@ -313,42 +384,13 @@ pub async fn catalog(state: &SharedState) -> Result<GrenginCatalog, AuthError> {
     let observed_at = Utc::now();
     let mut models = Vec::with_capacity(listed.len());
     for model in listed {
-        let id = model.id.as_str().to_owned();
-        let Ok((provider_id, native_model_id)) = split_model(&id) else {
+        let Ok((provider_id, native_model_id)) = split_model(model.id.as_str()) else {
             continue;
         };
         let own_key = own_key_covers(state, provider_id, native_model_id)
             .await
             .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
-        let price = |field: &str| model.metadata.get(field).and_then(|value| value.as_i64());
-        models.push(GrenginCatalogModel {
-            provider_id: provider_id.to_owned(),
-            native_model_id: native_model_id.to_owned(),
-            name: model.name.clone(),
-            capability: model_type(&model),
-            input_per_million_microdollars: price("inputPerMillionMicrodollars"),
-            output_per_million_microdollars: price("outputPerMillionMicrodollars"),
-            processing_region: None,
-            status: "available".into(),
-            is_allowed: engine
-                .as_ref()
-                .is_some_and(|engine| engine.whitelist_models.contains(&id)),
-            is_default: engine.as_ref().is_some_and(|engine| {
-                engine.default_model == id
-                    || engine.default_image_gen_model.as_deref() == Some(id.as_str())
-            }),
-            effective_engine: if own_key {
-                provider_id.to_owned()
-            } else {
-                ENGINE_KEY.into()
-            },
-            funding_source: if own_key {
-                GrenginFundingSource::OwnKey
-            } else {
-                GrenginFundingSource::Grengin
-            },
-            id,
-        });
+        models.extend(catalog_entry(&model, engine.as_ref(), own_key));
     }
     Ok(GrenginCatalog {
         observed_at,
@@ -356,8 +398,47 @@ pub async fn catalog(state: &SharedState) -> Result<GrenginCatalog, AuthError> {
     })
 }
 
+fn catalog_entry(
+    model: &llm_plugin::ProviderModel,
+    engine: Option<&ai_engines::Model>,
+    own_key: bool,
+) -> Option<GrenginCatalogModel> {
+    let id = model.id.as_str().to_owned();
+    let (provider_id, native_model_id) = split_model(&id).ok()?;
+    let price = |field: &str| model.metadata.get(field).and_then(|value| value.as_i64());
+    Some(GrenginCatalogModel {
+        provider_id: provider_id.to_owned(),
+        native_model_id: native_model_id.to_owned(),
+        name: model.name.clone(),
+        capability: model_type(model),
+        input_per_million_microdollars: price("inputPerMillionMicrodollars"),
+        output_per_million_microdollars: price("outputPerMillionMicrodollars"),
+        processing_region: None,
+        status: "available".into(),
+        is_allowed: engine.is_some_and(|engine| engine.whitelist_models.contains(&id)),
+        is_default: engine.is_some_and(|engine| {
+            engine.default_model == id
+                || engine.default_image_gen_model.as_deref() == Some(id.as_str())
+        }),
+        effective_engine: if own_key {
+            provider_id.to_owned()
+        } else {
+            ENGINE_KEY.into()
+        },
+        funding_source: if own_key {
+            GrenginFundingSource::OwnKey
+        } else {
+            GrenginFundingSource::Grengin
+        },
+        id,
+    })
+}
+
 /// Safe local and service status, available even when the identity or the local row is missing.
 pub async fn status(state: &SharedState) -> Result<GrenginStatus, AuthError> {
+    if let Err(error) = reconcile(state).await {
+        eprintln!("Grengin intent reconciliation failed: {error:?}");
+    }
     let engine = ai_engines::Entity::find()
         .filter(ai_engines::Column::EngineKey.eq(ENGINE_KEY))
         .filter(ai_engines::Column::PluginConfig.is_null())
@@ -576,6 +657,136 @@ mod tests {
                 .unwrap()
                 .is_some_and(|op| op.state == OperationState::Failed)
         );
+    }
+
+    #[test]
+    fn catalog_entries_show_tariffs_policy_and_who_pays() {
+        let model = llm_plugin::ProviderModel {
+            id: "openai/gpt-5".into(),
+            name: "GPT-5".into(),
+            model_type: llm_plugin::ProviderModelType::TextGenerator,
+            capabilities: Default::default(),
+            metadata: serde_json::json!({
+                "inputPerMillionMicrodollars": 1_250_000,
+                "outputPerMillionMicrodollars": 10_000_000,
+            }),
+        };
+        let mut engine: ai_engines::Model = serde_json::from_value(serde_json::json!({
+            "id": Uuid::new_v4(), "displayName": "Grengin", "engineKey": "grengin",
+            "isEnabled": true, "apiKeyStatus": "not_configured", "apiKey": null,
+            "apiKeyValidatedAt": null, "pluginConfig": null,
+            "whitelistModels": ["openai/gpt-5"], "defaultModel": "openai/gpt-5",
+            "defaultImageGenModel": null, "createdAt": Utc::now(), "updatedAt": Utc::now()
+        }))
+        .unwrap();
+        let entry = catalog_entry(&model, Some(&engine), false).unwrap();
+        assert_eq!(
+            (entry.provider_id.as_str(), entry.native_model_id.as_str()),
+            ("openai", "gpt-5")
+        );
+        assert_eq!(entry.input_per_million_microdollars, Some(1_250_000));
+        assert_eq!(entry.output_per_million_microdollars, Some(10_000_000));
+        assert!(entry.is_allowed && entry.is_default);
+        assert_eq!(entry.effective_engine, "grengin");
+        assert!(matches!(
+            entry.funding_source,
+            GrenginFundingSource::Grengin
+        ));
+
+        // An own-key engine that allows the model pays for it; the prices stay Grengin tariffs.
+        let own = catalog_entry(&model, Some(&engine), true).unwrap();
+        assert_eq!(own.effective_engine, "openai");
+        assert!(matches!(own.funding_source, GrenginFundingSource::OwnKey));
+        assert_eq!(own.input_per_million_microdollars, Some(1_250_000));
+
+        engine.whitelist_models.clear();
+        engine.default_model.clear();
+        let excluded = catalog_entry(&model, Some(&engine), false).unwrap();
+        assert!(!excluded.is_allowed && !excluded.is_default);
+        let uninstalled = catalog_entry(&model, None, false).unwrap();
+        assert!(!uninstalled.is_allowed);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable, migrated database)"]
+    async fn a_disable_supersedes_a_pending_enable_and_finished_operations_stay_finished() {
+        let db = database().await;
+        install(&db).await;
+        // The enable could not be confirmed: it stays pending and routing stays closed.
+        let enable = record(&db, true).await.unwrap();
+        let pending = complete(
+            &db,
+            enable,
+            true,
+            Err((OperationState::Pending, "service_unavailable".into())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pending.state, OperationState::Pending);
+        assert_eq!(enabled(&db).await, Some(false));
+        // A disable while the stored flag is already false is still recorded and supersedes it.
+        let disable = record(&db, false).await.unwrap();
+        let reconciled = complete(&db, pending.clone(), true, Ok(())).await.unwrap();
+        assert_eq!(reconciled.error_code.as_deref(), Some("superseded"));
+        assert_eq!(enabled(&db).await, Some(false));
+        let applied = complete(&db, disable, false, Ok(())).await.unwrap();
+        assert_eq!(applied.state, OperationState::Applied);
+        // A second finisher (request and reconciler) cannot overwrite the first decision.
+        let again = complete(
+            &db,
+            applied.clone(),
+            false,
+            Err((OperationState::Pending, "late".into())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(again.state, OperationState::Applied);
+        assert_eq!(again.error_code, None);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable, migrated database)"]
+    async fn only_pending_or_abandoned_latest_intents_are_reconciled() {
+        let db = database().await;
+        install(&db).await;
+        let now = Utc::now();
+        let applying = record(&db, true).await.unwrap();
+        // Still in flight: its request may yet finish it.
+        assert!(open_intent(&db, now).await.unwrap().is_none());
+        // Lost after a crash or timeout: picked up once abandoned.
+        let later = now + ABANDONED_AFTER + chrono::Duration::seconds(1);
+        assert_eq!(
+            open_intent(&db, later).await.unwrap().map(|op| op.id),
+            Some(applying.id)
+        );
+        let pending = complete(
+            &db,
+            applying,
+            true,
+            Err((OperationState::Pending, "status_unavailable".into())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            open_intent(&db, now).await.unwrap().map(|op| op.id),
+            Some(pending.id)
+        );
+        // Reconciled successfully: routing opens because it is still the latest intent.
+        let done = complete(&db, pending, true, Ok(())).await.unwrap();
+        assert_eq!(done.state, OperationState::Applied);
+        assert_eq!(enabled(&db).await, Some(true));
+        assert!(open_intent(&db, later).await.unwrap().is_none());
+        // A definite failure is not retried.
+        let refused = record(&db, true).await.unwrap();
+        complete(
+            &db,
+            refused,
+            true,
+            Err((OperationState::Failed, "consent_required".into())),
+        )
+        .await
+        .unwrap();
+        assert!(open_intent(&db, later).await.unwrap().is_none());
     }
 
     #[tokio::test]
