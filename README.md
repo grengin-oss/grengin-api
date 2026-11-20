@@ -257,6 +257,19 @@ presented as durable.
 Review migration files before running `down`, `reset`, `refresh`, or `fresh` in
 an environment that contains data.
 
+## MCP tool execution
+
+Each tool call has a 30-second deadline, including connection setup and waiting
+for a session lease. Set `transport_config.tool_timeout_ms` in the server's
+connection configuration to override it (1–300000 milliseconds). Native plugins
+retain their own stricter runtime limits. Long-lived MCP connections do not need
+to close between calls.
+
+Stopping a chat drops its pending tool call and releases the local session lease.
+The MCP SDK sends a best-effort cancellation notification; this cannot guarantee
+that an external server stopped work already dispatched. Timed-out calls are not
+automatically replayed.
+
 ## Stdio MCP Servers
 
 Stdio MCP servers run on the API host, so the API starts only commands an operator lists in

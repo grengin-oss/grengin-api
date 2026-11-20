@@ -43,6 +43,7 @@ pub mod llm_usage_gate;
 pub mod mcp_access;
 pub mod mcp_catalog_helpers;
 pub mod mcp_client;
+pub mod mcp_execution;
 pub mod mcp_helpers;
 pub mod mcp_oauth;
 pub mod mcp_plugin_config;

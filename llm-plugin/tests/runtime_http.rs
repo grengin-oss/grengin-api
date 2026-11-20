@@ -35,6 +35,7 @@ struct MockResponse {
     content_type: String,
     chunks: Vec<Vec<u8>>,
     gap: Duration,
+    keep_open: bool,
 }
 
 impl MockResponse {
@@ -65,7 +66,13 @@ impl MockResponse {
             content_type: content_type.to_string(),
             chunks,
             gap,
+            keep_open: false,
         }
+    }
+
+    fn keep_open(mut self) -> Self {
+        self.keep_open = true;
+        self
     }
 }
 
@@ -111,8 +118,13 @@ async fn serve(responses: Vec<MockResponse>) -> (String, Requests) {
             });
 
             let length = response.chunks.iter().map(Vec::len).sum::<usize>();
+            let framing = if response.keep_open {
+                "Transfer-Encoding: chunked".to_string()
+            } else {
+                format!("Content-Length: {length}")
+            };
             let response_head = format!(
-                "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 {}\r\nContent-Type: {}\r\n{framing}\r\nConnection: close\r\n\r\n",
                 response.status, response.content_type
             );
             socket.write_all(response_head.as_bytes()).await.unwrap();
@@ -120,9 +132,26 @@ async fn serve(responses: Vec<MockResponse>) -> (String, Requests) {
                 if index > 0 && !response.gap.is_zero() {
                     tokio::time::sleep(response.gap).await;
                 }
+                if response.keep_open {
+                    socket
+                        .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                        .await
+                        .unwrap();
+                }
                 socket.write_all(chunk).await.unwrap();
+                if response.keep_open {
+                    socket.write_all(b"\r\n").await.unwrap();
+                }
                 socket.flush().await.unwrap();
                 tokio::task::yield_now().await;
+            }
+            if response.keep_open {
+                for _ in 0..200 {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    if socket.write_all(b"3\r\n:\n\n\r\n").await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
@@ -460,6 +489,169 @@ async fn emits_one_completion_for_a_finish_reason_followed_by_done() {
         1,
         "expected exactly one completion in {events:?}"
     );
+}
+
+#[tokio::test]
+async fn final_marker_ends_an_open_http_body_without_reading_trailing_events() {
+    let (base_url, _) = serve(vec![
+        MockResponse::new(
+            "200 OK",
+            "text/event-stream",
+            b"data: [DONE]\n\ndata: not-json\n\n".to_vec(),
+        )
+        .keep_open(),
+    ])
+    .await;
+    let provider = provider(
+        base_url,
+        json!({"chat": {"streaming": true}}),
+        openai_chat_operations(Value::Null),
+    );
+    let events = tokio::time::timeout(
+        Duration::from_millis(750),
+        collect_chat(&provider, "chat-1"),
+    )
+    .await
+    .expect("a final protocol marker must not wait for EOF");
+    assert!(matches!(
+        events.as_slice(),
+        [ProviderEvent::Completed { .. }]
+    ));
+}
+
+#[tokio::test]
+async fn bytes_after_the_final_marker_in_the_same_chunk_are_never_decoded() {
+    let mut wire = b"data: [DONE]\n\ndata: ".to_vec();
+    wire.extend_from_slice(b"\xff\n\n");
+    let (base_url, _) = serve(vec![MockResponse::chunked(
+        "200 OK",
+        "text/event-stream",
+        vec![wire],
+        Duration::ZERO,
+    )])
+    .await;
+    let provider = provider(
+        base_url,
+        json!({"chat":{"streaming":true}}),
+        openai_chat_operations(Value::Null),
+    );
+    let events = collect_chat(&provider, "chat-1").await;
+    assert!(matches!(
+        events.as_slice(),
+        [ProviderEvent::Completed { .. }]
+    ));
+}
+
+#[tokio::test]
+async fn late_usage_before_the_final_marker_is_preserved_once() {
+    let (base_url, _) = serve(vec![
+        MockResponse::chunked(
+            "200 OK",
+            "text/event-stream",
+            vec![
+                b"data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n".to_vec(),
+                b"data: {\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":3}}\n\n".to_vec(),
+                b"data: [DONE]\n\n".to_vec(),
+            ],
+            Duration::from_millis(2200),
+        )
+        .keep_open(),
+    ])
+    .await;
+    let mut operations = openai_chat_operations(json!({"timeoutMs": 6000}));
+    operations["chatStream"]["response"]["rules"].as_array_mut().unwrap().push(json!({
+        "id":"usage", "when":{"pointer":"/usage","exists":true}, "emit":"usage",
+        "fields":{"inputTokens":"/usage/prompt_tokens","outputTokens":"/usage/completion_tokens"}
+    }));
+    let provider = provider(base_url, json!({"chat":{"streaming":true}}), operations);
+    let events = tokio::time::timeout(Duration::from_secs(7), collect_chat(&provider, "chat-1"))
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, ProviderEvent::Completed { .. }))
+            .count(),
+        1
+    );
+    let usage: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            ProviderEvent::Usage { usage } => Some(usage),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].input_tokens, Some(11));
+    assert_eq!(usage[0].output_tokens, Some(3));
+}
+
+#[tokio::test]
+async fn heartbeat_traffic_cannot_extend_the_post_completion_window() {
+    for declared_marker in [false, true] {
+        let (base_url, _) = serve(vec![
+            MockResponse::new(
+                "200 OK",
+                "text/event-stream",
+                b"data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n".to_vec(),
+            )
+            .keep_open(),
+        ])
+        .await;
+        let mut operations = openai_chat_operations(json!({"timeoutMs": 2000}));
+        if !declared_marker {
+            operations["chatStream"]["response"]
+                .as_object_mut()
+                .unwrap()
+                .remove("doneData");
+        }
+        let provider = provider(base_url, json!({"chat":{"streaming":true}}), operations);
+        let started = tokio::time::Instant::now();
+        let events =
+            tokio::time::timeout(Duration::from_secs(4), collect_chat(&provider, "chat-1"))
+                .await
+                .expect("heartbeats reset the trailing-usage deadline");
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert!(matches!(
+            events.as_slice(),
+            [ProviderEvent::Completed { .. }]
+        ));
+    }
+}
+
+#[tokio::test]
+async fn malformed_trailing_usage_is_not_silently_accepted() {
+    let (base_url, _) = serve_once(
+        "200 OK",
+        "text/event-stream",
+        concat!(
+            "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+            "data: not-json\n\n",
+        )
+        .as_bytes()
+        .to_vec(),
+    )
+    .await;
+    let provider = provider(
+        base_url,
+        json!({"chat":{"streaming":true}}),
+        openai_chat_operations(Value::Null),
+    );
+    let mut session = provider
+        .chat()
+        .unwrap()
+        .start(chat_request("chat-1"))
+        .await
+        .unwrap();
+    let mut stream = session.stream().await.unwrap();
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ProviderEvent::Completed { .. }))
+    ));
+    assert!(matches!(
+        stream.next().await,
+        Some(Err(ProviderError::ResponseMapping(_)))
+    ));
 }
 
 #[tokio::test]
