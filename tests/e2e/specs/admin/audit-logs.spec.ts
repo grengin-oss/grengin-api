@@ -70,8 +70,6 @@ test.describe('audit logs', () => {
     const payload = page.locator('pre').filter({ hasText: '"/admin/departments/{department_id}"' });
     await expect(payload).toContainText('"method": "PUT"');
     await expect(payload).toContainText('"status_code": 200');
-    await expect(payload).toContainText(`"name": "${before}"`);
-    await expect(payload).toContainText(`"name": "${after}"`);
 
     // A start date after today leaves nothing; clearing the filters brings the rows back.
     const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
@@ -105,9 +103,35 @@ test.describe('audit logs', () => {
     test.fail();
     await page.goto('/admin/audit-logs');
     await expect(page.getByRole('button', { name: SHOW_DETAILS }).first()).toBeVisible();
+    const search = page.waitForResponse((r) => r.url().includes('/admin/audit-logs?') && r.url().includes(`userId=${owner.slice(0, 8)}`));
     await page.getByLabel('Search Event', { exact: true }).fill(owner.slice(0, 8));
-    await expect(page.getByRole('alert')).toHaveCount(0, { timeout: 3_000 });
-    await expect(page.locator(`button[aria-label="Filter by user ${owner}"]`).first()).toBeVisible();
+    expect((await search).status(), 'GET /admin/audit-logs with the short user id').toBe(200);
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    const users = page.locator('button[aria-label^="Filter by user "]');
+    await expect(users.first()).toHaveAttribute('title', owner);
+  });
+
+  test('the audit entry of a department change records what changed', async ({ page }) => {
+    // Known bug: the audit middleware snapshots a department with departments::Entity::find_by_id,
+    // whose `path` column is a Postgres ltree that does not decode into the model's String; the
+    // error is swallowed (`.ok().flatten()`), so every department entry is stored with
+    // before/after null and changed_fields [] and the log cannot tell what an admin changed.
+    // Remove `fail` once department snapshots are recorded.
+    test.fail();
+    const before = unique('E2E Snapshot Dept');
+    department = await createDepartment(before);
+    const after = `${before} renamed`;
+    await renameDepartmentInUi(page, before, after);
+    await page.goto('/admin/audit-logs?action=admin_department_updated');
+    const row = page.getByRole('button', { name: SHOW_DETAILS }).filter({ hasText: department.id.slice(0, 8) });
+    await refreshUntilVisible(page, row);
+    await row.click();
+    await page.getByRole('button', { name: 'JSON view' }).click();
+    const payload = page.locator('pre').filter({ hasText: '"/admin/departments/{department_id}"' });
+    await expect(payload).toContainText('"route": "/admin/departments/{department_id}"');
+    await expect(payload).toContainText(`"name": "${before}"`, { timeout: 5_000 });
+    await expect(payload).toContainText(`"name": "${after}"`, { timeout: 5_000 });
+    await expect(payload).not.toContainText('"changed_fields": []');
   });
 
   test('CSV and JSON exports download the filtered events', async ({ page }) => {

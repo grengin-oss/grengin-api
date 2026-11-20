@@ -3,6 +3,7 @@
 
 import { expect, test, type Page } from '@playwright/test';
 import { USERS } from '../../mocks/users.mjs';
+import { sql } from '../../support/api';
 import { env } from '../../support/env';
 import { dismissOnboarding, signIn } from '../../support/login';
 
@@ -19,8 +20,11 @@ test.describe('account', () => {
     await page.getByRole('textbox').first().waitFor();
     await dismissOnboarding(page);
     const trigger = page.getByRole('button', { name: 'User menu' });
-    await expect(trigger).toContainText(USERS.owner.name);
+    // The row shows the signed-in user's display name and email as stored for the account.
+    const [me] = await sql<{ name: string | null }>('SELECT name FROM users WHERE lower(email) = lower($1)', [USERS.owner.email]);
+    await expect(trigger).toContainText(me.name || USERS.owner.email);
     await expect(trigger).toContainText(USERS.owner.email);
+    await expect(trigger).toHaveAttribute('title', me.name || USERS.owner.email);
 
     const menu = await openUserMenu(page);
     await expect(menu.getByRole('menuitem', { name: 'Settings' })).toBeVisible();

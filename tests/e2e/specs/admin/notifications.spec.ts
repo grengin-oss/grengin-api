@@ -63,6 +63,9 @@ test.describe('notifications', () => {
       })
       .toBe(true);
 
+    // The open page keeps the lists it loaded; after a reload the read alert is no longer unread.
+    await page.reload();
+    await expect(page.getByLabel(new RegExp(`^${title}:`))).toBeVisible();
     await page.getByRole('button', { name: 'Unread', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Unread', exact: true })).toHaveAttribute('aria-pressed', 'true');
     await expect(page.getByLabel(new RegExp(`^${title}:`))).toHaveCount(0);

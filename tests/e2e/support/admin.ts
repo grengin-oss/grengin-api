@@ -81,12 +81,16 @@ export async function createOidcProvider(slug: string, name: string): Promise<st
   return created.id;
 }
 
-export async function deleteProvider(id: string) {
+// Removes a provider a spec created. The API's DELETE only resets a provider (the row stays),
+// so after disabling it through the API the row itself is dropped to leave the table as it was.
+export async function removeProvider(id: string) {
   const [row] = await sql<ProviderRow>('SELECT id, provider, "isEnabled" FROM sso_providers WHERE id = $1', [id]);
   if (!row) return;
-  const token = await ownerToken();
-  if (row.isEnabled) await ok(api(token, 'PUT', `/admin/sso-providers/${id}`, { is_enabled: false }), `disabling ${row.provider}`);
-  await ok(api(token, 'DELETE', `/admin/sso-providers/${id}`), `deleting ${row.provider}`);
+  if (row.isEnabled) {
+    const token = await ownerToken();
+    await ok(api(token, 'PUT', `/admin/sso-providers/${id}`, { is_enabled: false }), `disabling ${row.provider}`);
+  }
+  await sql('DELETE FROM sso_providers WHERE id = $1', [id]);
 }
 
 // Puts the suite's sign-in provider back: present and enabled. Every other spec signs in with it.
