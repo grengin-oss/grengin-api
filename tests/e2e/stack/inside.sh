@@ -33,10 +33,13 @@ start api env \
 
 echo "== building the webapp"
 cd /webapp
-corepack enable --install-directory /home/e2e/bin >/dev/null 2>&1 || true
+mkdir -p /home/e2e/bin
 export PATH=/home/e2e/bin:$PATH COREPACK_ENABLE_DOWNLOAD_PROMPT=0
-pnpm install --frozen-lockfile > /logs/webapp-install.log 2>&1
-env -u VITE_API_BASE pnpm run build > /logs/webapp-build.log 2>&1
+corepack enable --install-directory /home/e2e/bin
+# The webapp pins no packageManager; its lockfile (v9) matches the pnpm its developers use.
+corepack prepare "pnpm@${E2E_PNPM_VERSION:-10.17.0}" --activate > /logs/corepack.log 2>&1
+pnpm install --frozen-lockfile > /logs/webapp-install.log 2>&1 || { tail -30 /logs/webapp-install.log; exit 1; }
+env -u VITE_API_BASE pnpm run build > /logs/webapp-build.log 2>&1 || { tail -30 /logs/webapp-build.log; exit 1; }
 start web env VITE_API_BASE=$E2E_API_URL pnpm exec vite preview --host 127.0.0.1 --port $WEB_PORT --strictPort
 
 cd /repo/tests/e2e
