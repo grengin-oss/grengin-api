@@ -69,6 +69,8 @@ export const sidebarChat = (page: Page, title: string) =>
 
 export async function openChatOptions(page: Page, title: string): Promise<Locator> {
   const row = sidebarChat(page, title);
+  // The options button only takes pointer events while its row is hovered.
+  await row.hover();
   await row.getByRole('button', { name: 'Chat options' }).click();
   return row.getByRole('menu');
 }

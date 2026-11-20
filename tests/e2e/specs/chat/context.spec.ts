@@ -131,13 +131,17 @@ test.describe('chat context and artifacts', () => {
     const answer = shown.json.messages.find((m: any) => m.role === 'assistant');
     expect(answer.id).toBe(saved[0].message);
     expect(answer.parts.artifacts).toEqual([expect.objectContaining({ id: saved[0].id, title, content_type: 'text/markdown' })]);
-    expect(answer.parts.text).not.toContain('<artifact');
+    // The saved text keeps the delimited block (the webapp strips it for display).
+    expect(answer.parts.text).toContain(`# Heading ${title}`);
 
     await close.click();
     await expect(close).toHaveCount(0);
     await page.reload();
     await expect(card).toBeVisible();
     await expect(close).toHaveCount(0);
+    await expect(assistantMessage(page, 'Here is the requested note.')).toBeVisible();
+    await expect(transcript(page).getByText('<artifact')).toHaveCount(0);
+    await expect(transcript(page).getByText(`Heading ${title}`)).toHaveCount(0);
     await card.click();
     await expect(page.getByRole('heading', { name: `Heading ${title}` })).toBeVisible();
   });
