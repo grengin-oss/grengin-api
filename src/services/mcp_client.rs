@@ -919,9 +919,8 @@ fn mcp_http_client(connection_config: &Value) -> Result<reqwest_mcp::Client, Mcp
             .map_err(|_| McpClientError::Config(format!("invalid HTTP header value for {name}")))?;
         headers.insert(header, value);
     }
-    reqwest_mcp::Client::builder()
+    crate::services::safe_egress::mcp_client_builder()
         .connect_timeout(HttpTimeouts::LONG_LIVED_STREAM.connect)
-        .redirect(reqwest_mcp::redirect::Policy::none())
         .default_headers(headers)
         .build()
         .map_err(|e| McpClientError::Config(format!("http client build failed: {e}")))

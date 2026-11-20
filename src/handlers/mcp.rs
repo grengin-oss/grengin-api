@@ -44,8 +44,9 @@ use crate::{
     services::authorization::{AuthorizationService, PermissionScopeMode},
     services::connector_console_helpers::*,
     services::mcp_access::{
-        build_access_context, ensure_rule_types_allowed, load_server_rules, load_tool_rules,
-        resolve_role_reference, resolve_server_access_with_rules, resolve_tool_access_with_rules,
+        ToolAccessChange, build_access_context, ensure_rule_types_allowed, load_server_rules,
+        load_tool_rules, replace_tool_access, resolve_role_reference,
+        resolve_server_access_with_rules, resolve_tool_access_with_rules,
     },
     services::mcp_catalog_helpers::*,
     services::mcp_helpers::{
@@ -870,79 +871,35 @@ pub async fn update_mcp_server_tools_access(
         .flat_map(|item| item.rules.iter().flatten().map(|rule| rule.access_type))
         .collect();
     ensure_rule_types_allowed(&state.database, claims.user_id, &access_types).await?;
+    let changes = req
+        .tools
+        .into_iter()
+        .map(|item| ToolAccessChange {
+            tool_id: item.tool_id,
+            inherit_from_server: item.inherit_from_server,
+            rules: item.rules.unwrap_or_default(),
+        })
+        .collect();
+    let applied =
+        replace_tool_access(&state.database, claims.user_id, Some(server_id), changes).await?;
     let mut updated = Vec::new();
-    for item in req.tools {
-        if let Some(tool) = mcp_tools::Entity::find_by_id(item.tool_id)
-            .filter(mcp_tools::Column::ServerId.eq(server_id))
-            .one(&state.database)
+    for (tool, inherit_flag) in applied {
+        let rules = mcp_access_policies::Entity::find()
+            .filter(mcp_access_policies::Column::TargetType.eq(McpAccessTarget::Tool))
+            .filter(mcp_access_policies::Column::ToolId.eq(tool.id))
+            .all(&state.database)
             .await
-            .map_err(|_| AuthError::DbUnavailable)?
-        {
-            let inherit_flag = item
-                .inherit_from_server
-                .unwrap_or(tool.inherit_access_from_server);
-            let mut active: mcp_tools::ActiveModel = tool.clone().into();
-            active.inherit_access_from_server = Set(inherit_flag);
-            let _ = active.update(&state.database).await;
-
-            let _ = mcp_access_policies::Entity::delete_many()
-                .filter(mcp_access_policies::Column::TargetType.eq(McpAccessTarget::Tool))
-                .filter(mcp_access_policies::Column::ToolId.eq(item.tool_id))
-                .exec(&state.database)
-                .await
-                .map_err(|e| {
-                    eprintln!("Db get error {}", e);
-                    AuthError::DbTimeout
-                })?;
-            if let Some(rules) = item.rules {
-                for r in rules {
-                    let (role_id, _) = resolve_role_reference(
-                        &state.database,
-                        r.access_type,
-                        r.role_id,
-                        r.role_name.clone(),
-                    )
-                    .await?;
-                    let model = mcp_access_policies::ActiveModel {
-                        id: Set(Uuid::new_v4()),
-                        target_type: Set(McpAccessTarget::Tool),
-                        server_id: Set(Some(server_id)),
-                        tool_id: Set(Some(item.tool_id)),
-                        access_type: Set(r.access_type),
-                        permission: Set(r.permission),
-                        role_id: Set(role_id),
-                        role_name: Set(None),
-                        department_id: Set(r.department_id),
-                        user_id: Set(r.user_id),
-                        inherit_departments: Set(r.inherit_departments.unwrap_or(true)),
-                        inherit_from_server: Set(None),
-                        created_at: Set(Utc::now()),
-                        created_by: Set(None),
-                    };
-                    model
-                        .insert(&state.database)
-                        .await
-                        .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
-                }
-            }
-
-            let rules = mcp_access_policies::Entity::find()
-                .filter(mcp_access_policies::Column::TargetType.eq(McpAccessTarget::Tool))
-                .filter(mcp_access_policies::Column::ToolId.eq(item.tool_id))
-                .all(&state.database)
-                .await
-                .map_err(|_| AuthError::DbUnavailable)?;
-            let rule_dtos = build_access_rule_dtos(&state.database, rules)
-                .await
-                .map_err(|_| AuthError::DbTimeout)?;
-            updated.push(McpToolAccess {
-                tool_id: tool.id,
-                tool_name: tool.name,
-                server_id: tool.server_id,
-                inherit_from_server: inherit_flag,
-                rules: rule_dtos,
-            });
-        }
+            .map_err(|_| AuthError::DbUnavailable)?;
+        let rule_dtos = build_access_rule_dtos(&state.database, rules)
+            .await
+            .map_err(|_| AuthError::DbTimeout)?;
+        updated.push(McpToolAccess {
+            tool_id: tool.id,
+            tool_name: tool.name,
+            server_id: tool.server_id,
+            inherit_from_server: inherit_flag,
+            rules: rule_dtos,
+        });
     }
     Ok(Json(BulkToolAccessUpdateResponse {
         updated_count: updated.len(),
@@ -1037,58 +994,17 @@ pub async fn update_mcp_tool_access(
         .map(|rule| rule.access_type)
         .collect();
     ensure_rule_types_allowed(&state.database, claims.user_id, &access_types).await?;
-    if let Some(tool) = mcp_tools::Entity::find_by_id(tool_id)
-        .one(&state.database)
-        .await
-        .map_err(|_| AuthError::DbUnavailable)?
-    {
-        let mut active: mcp_tools::ActiveModel = tool.clone().into();
-        if let Some(inherit) = req.inherit_from_server {
-            active.inherit_access_from_server = Set(inherit);
-        }
-        let _ = active.update(&state.database).await;
-    }
-
-    let _ = mcp_access_policies::Entity::delete_many()
-        .filter(mcp_access_policies::Column::TargetType.eq(McpAccessTarget::Tool))
-        .filter(mcp_access_policies::Column::ToolId.eq(tool_id))
-        .exec(&state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("Db delete error {}", e);
-            AuthError::DbTimeout
-        })?;
-    if let Some(rules) = req.rules {
-        for r in rules {
-            let (role_id, _) = resolve_role_reference(
-                &state.database,
-                r.access_type,
-                r.role_id,
-                r.role_name.clone(),
-            )
-            .await?;
-            let model = mcp_access_policies::ActiveModel {
-                id: Set(Uuid::new_v4()),
-                target_type: Set(McpAccessTarget::Tool),
-                server_id: Set(None),
-                tool_id: Set(Some(tool_id)),
-                access_type: Set(r.access_type),
-                permission: Set(r.permission),
-                role_id: Set(role_id),
-                role_name: Set(None),
-                department_id: Set(r.department_id),
-                user_id: Set(r.user_id),
-                inherit_departments: Set(r.inherit_departments.unwrap_or(true)),
-                inherit_from_server: Set(None),
-                created_at: Set(Utc::now()),
-                created_by: Set(None),
-            };
-            model
-                .insert(&state.database)
-                .await
-                .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
-        }
-    }
+    replace_tool_access(
+        &state.database,
+        claims.user_id,
+        None,
+        vec![ToolAccessChange {
+            tool_id,
+            inherit_from_server: req.inherit_from_server,
+            rules: req.rules.unwrap_or_default(),
+        }],
+    )
+    .await?;
     get_mcp_tool_access(claims, State(state), Path(tool_id)).await
 }
 

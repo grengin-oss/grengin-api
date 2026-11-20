@@ -382,7 +382,7 @@ pub async fn resolve_mcp_oauth_token(
     let refreshed = refresh_token(
         &oauth_config,
         refresh_token_value.secret(),
-        &state.req_client,
+        crate::services::safe_egress::oauth_token_client(),
     )
     .await
     .map_err(|e| {
@@ -960,7 +960,7 @@ pub async fn complete_oauth_authorization(
         &oauth_config,
         &code,
         &oauth_state.pkce_verifier,
-        &state.req_client,
+        crate::services::safe_egress::oauth_token_client(),
     )
     .await;
     let outcome = OAuthCallbackOutcome::from_exchange(&exchange);
