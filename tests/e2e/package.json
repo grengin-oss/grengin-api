@@ -1,0 +1,13 @@
+{
+  "name": "grengin-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.0",
+    "pg": "8.16.3"
+  }
+}

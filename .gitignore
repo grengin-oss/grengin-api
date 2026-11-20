@@ -15,6 +15,7 @@ CLAUDE.md
 !/tests/security/
 !/tests/security/*.sh
 !/tests/security/*.mjs
+!/tests/e2e/
 !/tests/share-chat/
 !/tests/share-chat/*.sh
 !/tests/share-chat/*.mjs
