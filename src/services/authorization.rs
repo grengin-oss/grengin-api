@@ -4,8 +4,8 @@
 use chrono::Utc;
 use sea_orm::sea_query::{Alias, BinOper, Expr};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, FromQueryResult,
-    JoinType, PaginatorTrait, QueryFilter, QuerySelect, RelationTrait, Set,
+    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, EntityTrait,
+    FromQueryResult, JoinType, PaginatorTrait, QueryFilter, QuerySelect, RelationTrait, Set,
 };
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -42,8 +42,8 @@ pub enum PermissionScopeMode {
 pub type McpAccessDecision = McpPermission;
 
 #[derive(Debug, Clone)]
-pub struct AuthorizationService<'a> {
-    db: &'a DatabaseConnection,
+pub struct AuthorizationService<'a, C: ConnectionTrait = DatabaseConnection> {
+    db: &'a C,
 }
 
 #[derive(Serialize)]
@@ -76,8 +76,8 @@ fn audit_payload<T: Serialize>(value: T) -> Option<serde_json::Value> {
         .ok()
 }
 
-impl<'a> AuthorizationService<'a> {
-    pub fn new(db: &'a DatabaseConnection) -> Self {
+impl<'a, C: ConnectionTrait> AuthorizationService<'a, C> {
+    pub fn new(db: &'a C) -> Self {
         Self { db }
     }
 

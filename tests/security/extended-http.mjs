@@ -66,6 +66,14 @@ const provider = createServer(async (req,res) => {
   if (input.model==='staging-slow') {
     const timer = setTimeout(finish,10000);
     res.on('close',()=>clearTimeout(timer));
+  } else if (input.model==='staging-steady') {
+    // Twenty numbered chunks 200 ms apart, so saved text visibly grows while the reply generates.
+    let sent=0;
+    const timer=setInterval(()=>{
+      if(++sent>20){clearInterval(timer);finish();return;}
+      res.write(`data: ${JSON.stringify({choices:[{delta:{content:` part${sent}`}}]})}\n\n`);
+    },200);
+    res.on('close',()=>clearInterval(timer));
   } else finish();
 });
 await new Promise(resolve=>provider.listen(0,'127.0.0.1',resolve));
@@ -141,7 +149,7 @@ try {
 
   const manifest = JSON.parse(await readFile('llm-plugin/examples/openai-compatible.provider.json','utf8'));
   manifest.id='staging-fixture';manifest.name='Staging fixture';manifest.capabilities.modelListing=true;delete manifest.operations.listModels;
-  manifest.models=['staging-fast','staging-failure','staging-slow'].map(id=>({id,name:id,modelType:'text_generator',capabilities:{chat:manifest.capabilities.chat},metadata:{inputTokenRate:0,outputTokenRate:0}}));
+  manifest.models=['staging-fast','staging-failure','staging-slow','staging-steady'].map(id=>({id,name:id,modelType:'text_generator',capabilities:{chat:manifest.capabilities.chat},metadata:{inputTokenRate:0,outputTokenRate:0}}));
   await expect('POST','/admin/ai-engines',{is_enabled:true,api_key:'local-only',whitelisted_models:manifest.models.map(m=>m.id),default_model:'staging-fast',plugin_config:{manifest,configuration:{},baseUrlOverride:`http://127.0.0.1:${provider.address().port}/`,allowInsecureHttp:true,allowPrivateNetwork:true}},201);
   async function createChat(bearer,text) {
     const response = await expect('POST','/chat/stream',payload(text),200,bearer);
@@ -212,6 +220,53 @@ try {
   await expect('POST',`/chat/stream/${disconnectedId}/cancel`,undefined,202,owner);
   await waitFor(()=>sql(`SELECT metadata->>'stopReason' FROM messages WHERE id=${q(disconnectedId)}`)==='user_cancelled','Stop after disconnect');
   check('Stop after disconnect persists as cancellation, not network error',true);
+
+  // A delegator cannot use tool-level rules to exceed its own server access or to wipe others' rules.
+  const delegatorId=await newUser(), delegator=token(delegatorId);
+  const delegateRole=(await expect('POST','/admin/roles',{name:`Staging delegate ${randomUUID()}`,permissions:['mcp_servers:delegate']},201)).json();
+  await expect('POST',`/admin/users/${delegatorId}/roles`,{role_id:delegateRole.id},201);
+  const guardedServer=randomUUID(), guardedTool=randomUUID();
+  sql(`INSERT INTO mcp_servers (id,name,"transportType","connectionConfig",enabled,"toolCount","defaultAccess","createdAt","updatedAt") VALUES (${q(guardedServer)},'Staging guarded','http','{}'::jsonb,true,1,'admin_only',now(),now())`);
+  sql(`INSERT INTO mcp_tools (id,"serverId","serverName",name,"originalName","inputSchema",parameters,enabled,"isReadOnly","inheritAccessFromServer","createdAt","updatedAt") VALUES (${q(guardedTool)},${q(guardedServer)},'Staging guarded','guarded_tool','guarded_tool','{}'::jsonb,'{}'::jsonb,true,false,true,now(),now())`);
+  const selfGrant={inherit_from_server:false,rules:[{access_type:'user',user_id:delegatorId,permission:'full'}]};
+  await expect('PUT',`/admin/mcp-tools/${guardedTool}/access`,selfGrant,403,delegator);
+  await expect('PUT',`/admin/mcp-servers/${guardedServer}/tools/access`,{tools:[{tool_id:guardedTool,...selfGrant}]},403,delegator);
+  check('a delegator cannot grant itself a tool on a server it is denied',
+    [sql(`SELECT count(*) FROM mcp_access_policies WHERE "toolId"=${q(guardedTool)}`),sql(`SELECT "inheritAccessFromServer" FROM mcp_tools WHERE id=${q(guardedTool)}`)],['0','t']);
+  await expect('PUT',`/admin/mcp-tools/${guardedTool}/access`,{inherit_from_server:false,rules:[{access_type:'user',user_id:viewerId,permission:'read_only'}]},200);
+  check('an admin tool rule records its creator',sql(`SELECT "createdBy" FROM mcp_access_policies WHERE "toolId"=${q(guardedTool)}`),adminId);
+  await expect('PUT',`/admin/mcp-tools/${guardedTool}/access`,{inherit_from_server:false,rules:[{access_type:'user',user_id:delegatorId,permission:'denied'}]},403,delegator);
+  check('a delegator cannot replace rules it did not create',
+    sql(`SELECT "userId" || ':' || permission FROM mcp_access_policies WHERE "toolId"=${q(guardedTool)}`),`${viewerId}:read_only`);
+  await expect('PUT',`/admin/mcp-tools/${randomUUID()}/access`,{rules:[]},404);
+  check('an unknown tool is not found instead of silently changing policies',true);
+  await expect('PUT',`/admin/mcp-servers/${guardedServer}/tools/access`,{tools:[{tool_id:guardedTool,inherit_from_server:true,rules:[]},{tool_id:randomUUID(),rules:[]}]},404);
+  check('a bulk update with an unknown tool changes nothing',
+    [sql(`SELECT count(*) FROM mcp_access_policies WHERE "toolId"=${q(guardedTool)}`),sql(`SELECT "inheritAccessFromServer" FROM mcp_tools WHERE id=${q(guardedTool)}`)],['1','f']);
+  // A page refreshed mid-reply loses its stream; GET /chat must show the reply growing, then complete.
+  const refreshed=await request('POST',`/chat/stream/${chat}`,payload('refresh while generating','staging-steady'),owner);
+  const refreshedReader=refreshed.body.getReader();let refreshedText='',refreshedId;
+  while(!refreshedId) {
+    const {done,value}=await refreshedReader.read();assert(!done,'steady stream ended before message_start');
+    refreshedText+=decoder.decode(value,{stream:true});
+    refreshedId=events(refreshedText).find(event=>event.message_id&&event.user_message_id)?.message_id;
+  }
+  await refreshedReader.cancel();
+  const reply=async()=>(await expect('GET',`/chat/${chat}`,undefined,200,owner)).json().messages.find(message=>message.id===refreshedId);
+  const seen=[];
+  for (let attempt=0;attempt<100;attempt++) {
+    const current=await reply();
+    seen.push({generating:current?.generating,text:current?.parts?.text??''});
+    if(current && !current.generating)break;
+    await delay(250);
+  }
+  const live=seen.filter(state=>state.generating===true);
+  const last=seen.at(-1);
+  check('a reply still generating after its page closed is marked generating',live.length>=2);
+  check('its saved text grows while it generates',new Set(live.map(state=>state.text)).size>=2&&live.at(-1).text.length>live[0].text.length);
+  check('generating clears only with the complete reply',[last.generating,last.text.trim().endsWith('part20')],[false,true]);
+  check('a reply completed after disconnect has no stop reason',(await reply()).stop_reason??null,null);
+  check('a finished reply in another chat view is not generating',(await expect('GET',`/chat/${chat}`,undefined,200,owner)).json().messages.every(message=>message.generating===false));
 
   const serverId=randomUUID();
   const oauth={auth_url:`http://127.0.0.1:${provider.address().port}/authorize`,token_url:`http://127.0.0.1:${provider.address().port}/token`,redirect_url:'http://localhost:5173/mcp/oauth/callback',scopes:[],flow:'oauth2',use_pkce:true};

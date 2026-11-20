@@ -13,13 +13,12 @@ pub fn effective_native_web_search(requested: bool, model_supports_web_search: b
 }
 
 pub fn supports_native_web_search(
-    provider_key: &str,
-    plugin_model_support: bool,
-    catalog_model_support: bool,
+    plugin_model_support: Option<bool>,
+    catalog_model_support: Option<bool>,
 ) -> bool {
-    matches!(provider_key, "openai" | "anthropic" | "mistral" | "gemini")
-        || plugin_model_support
-        || catalog_model_support
+    plugin_model_support
+        .or(catalog_model_support)
+        .unwrap_or(false)
 }
 
 pub fn effective_max_tokens(requested: Option<u32>, model_max: Option<u32>) -> Option<u32> {
@@ -31,17 +30,22 @@ mod tests {
     use super::{effective_max_tokens, effective_native_web_search, supports_native_web_search};
 
     #[test]
-    fn embedded_providers_keep_native_web_search_without_live_model_metadata() {
-        for provider in ["openai", "anthropic", "mistral", "gemini"] {
-            assert!(supports_native_web_search(provider, false, false));
-        }
+    fn unknown_models_never_gain_search_from_the_provider_name() {
+        assert!(!supports_native_web_search(None, None));
     }
 
     #[test]
-    fn unsupported_provider_remains_disabled() {
-        assert!(!supports_native_web_search("tinker", false, false));
-        assert!(supports_native_web_search("custom", true, false));
-        assert!(supports_native_web_search("custom", false, true));
+    fn explicit_runtime_model_support_wins_over_the_global_catalog() {
+        assert!(!supports_native_web_search(Some(false), Some(true)));
+        assert!(supports_native_web_search(Some(true), Some(false)));
+        assert!(!supports_native_web_search(Some(false), None));
+        assert!(supports_native_web_search(Some(true), None));
+    }
+
+    #[test]
+    fn catalog_support_is_used_only_when_the_runtime_has_no_model_flag() {
+        assert!(supports_native_web_search(None, Some(true)));
+        assert!(!supports_native_web_search(None, Some(false)));
     }
 
     #[test]

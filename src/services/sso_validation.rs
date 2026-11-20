@@ -6,7 +6,7 @@ use crate::{
         claims::Claiming,
         encryption::decrypt_key,
         error::AuthError,
-        github::{GitHubAdapterError, GitHubOAuthAdapter},
+        oauth2_identity::{OAuth2AdapterError, OAuth2IdentityAdapter},
         provider_config::{
             OidcProviderConfiguration, build_discovered_oidc_client, normalize_provider_slug,
             validate_issuer_url_for_provider, validate_redirect_url_for_provider,
@@ -455,41 +455,47 @@ pub async fn validate_sso_draft(
         .map_err(|_| AuthError::InvalidProvider {
             provider: Some(draft.provider.clone()),
         })?;
+    if let Some(profile) = draft.configuration.oauth2.clone() {
+        if !profile.supports_issuer(&draft.issuer_url) {
+            return Ok((
+                false,
+                "The issuer must be the origin of the OAuth2 authorization URL".to_string(),
+            ));
+        }
+        let adapter = OAuth2IdentityAdapter::new(
+            profile,
+            draft.client_id.clone(),
+            draft.client_secret.clone(),
+            draft.redirect_url.clone(),
+        )
+        .map_err(|_| AuthError::InvalidProvider {
+            provider: Some(draft.provider.clone()),
+        })?;
+        return match adapter.validate_remote(&app_state.req_client).await {
+            Ok(true) => Ok((
+                true,
+                "OAuth2 client credentials and callback configuration validated".to_string(),
+            )),
+            Ok(false) => Ok((
+                true,
+                "OAuth2 configuration is valid; credentials are checked on the first sign-in"
+                    .to_string(),
+            )),
+            Err(OAuth2AdapterError::InvalidCredentials) => {
+                Ok((false, "OAuth2 client credentials are invalid".to_string()))
+            }
+            Err(OAuth2AdapterError::InvalidConfiguration) => {
+                Ok((false, "OAuth2 configuration is invalid".to_string()))
+            }
+            Err(error) => {
+                eprintln!("OAuth2 validation request failed: {error}");
+                Err(AuthError::ServiceTemporarilyUnavailable)
+            }
+        };
+    }
     match draft.provider.as_str() {
         "google" => probe_google_config(app_state, draft).await,
         "azure" => probe_azure_config(app_state, draft).await,
-        "github" => {
-            if !GitHubOAuthAdapter::supports_issuer(&draft.issuer_url) {
-                return Ok((
-                    false,
-                    "GitHub issuer must be https://github.com".to_string(),
-                ));
-            }
-            let adapter = GitHubOAuthAdapter::new(
-                draft.client_id.clone(),
-                draft.client_secret.clone(),
-                draft.redirect_url.clone(),
-            )
-            .map_err(|_| AuthError::InvalidProvider {
-                provider: Some(draft.provider.clone()),
-            })?;
-            match adapter.validate_remote(&app_state.req_client).await {
-                Ok(()) => Ok((
-                    true,
-                    "GitHub OAuth credentials and callback configuration validated".to_string(),
-                )),
-                Err(GitHubAdapterError::InvalidCredentials) => {
-                    Ok((false, "GitHub client credentials are invalid".to_string()))
-                }
-                Err(GitHubAdapterError::InvalidConfiguration) => {
-                    Ok((false, "GitHub OAuth configuration is invalid".to_string()))
-                }
-                Err(error) => {
-                    eprintln!("GitHub validation request failed: {error}");
-                    Err(AuthError::ServiceTemporarilyUnavailable)
-                }
-            }
-        }
         _ => {
             build_discovered_oidc_client(
                 &app_state.req_client,
