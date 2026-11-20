@@ -7,7 +7,8 @@ use crate::docs::{app_error_catlog::AppErrorCatalogItem, security::ApiSecurityAd
 use crate::dto::admin_ai::{
     AIEngineConnectionTest, AIEngineCreate, AIEngineDetail, AIEngineModels,
     AIEnginePluginValidationRequest, AIEnginePluginValidationResponse, AIEngineUpdate,
-    AIEngineValidation, AiModel, AiModelCapabilities, PluginModel,
+    AIEngineValidation, AiModel, AiModelCapabilities, GrenginConnectionState,
+    GrenginOperationStatus, GrenginStatus, PluginModel,
 };
 use crate::dto::admin_department::{
     Department, DepartmentCreate, DepartmentListQuery, DepartmentMembersResponse, DepartmentMove,
@@ -104,6 +105,7 @@ use crate::handlers::{
 };
 use crate::models::chat_shares::ShareAccess;
 use crate::models::departments::{ActionOnExceed, BudgetPeriod};
+use crate::models::grengin_engine_operations::OperationState as GrenginOperationState;
 use crate::models::mcp_access_policies::{McpAccessType, McpPermission};
 use crate::models::mcp_servers::{McpDefaultAccess, McpTransportType};
 use crate::models::messages::ChatRole;
@@ -177,6 +179,7 @@ use utoipa::OpenApi;
         admin_ai_plugins::get_ai_engine_plugin_schema,
         admin_ai_plugins::validate_ai_engine_plugin,
         admin_ai_plugins::create_ai_engine,
+        admin_ai_plugins::get_grengin_status,
         admin_ai_plugins::delete_ai_engine,
         admin_ai_plugins::test_ai_engine_connection,
         admin_sso_provider::get_sso_providers,
@@ -354,6 +357,10 @@ use utoipa::OpenApi;
             UserPatchRequest,
             AIEngineDetail,
             AIEngineUpdate,
+            GrenginStatus,
+            GrenginOperationStatus,
+            GrenginConnectionState,
+            GrenginOperationState,
             EmbeddingConfigResponse,
             EmbeddingConfigUpdateRequest,
             FileResponse,

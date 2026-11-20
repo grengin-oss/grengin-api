@@ -6,6 +6,7 @@ mod m20261028_000001_create_connectors;
 mod m20261113_000001_grant_it_admin_ai_platform_view;
 mod m20261113_000002_add_base_url_override_to_ai_engines;
 mod m20261119_000001_create_grengin_service_bindings;
+mod m20261119_000002_grengin_engine_consent;
 
 mod m20250102_000001_add_redirect_url_to_sso_providers;
 mod m20250107_000001_create_usage_logs;
@@ -188,6 +189,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261113_000001_grant_it_admin_ai_platform_view::Migration),
             Box::new(m20261113_000002_add_base_url_override_to_ai_engines::Migration),
             Box::new(m20261119_000001_create_grengin_service_bindings::Migration),
+            Box::new(m20261119_000002_grengin_engine_consent::Migration),
         ]
     }
 }

@@ -26,6 +26,7 @@ use crate::{
             validate_grengin_connection,
         },
         authorization::{AuthorizationService, PermissionScopeMode},
+        grengin_consent::set_enabled as set_grengin_enabled,
         provider_manifests,
         provider_models::{is_chat_selectable_model, to_model_info},
         provider_runtime::{
@@ -113,6 +114,7 @@ pub async fn get_ai_engines(
                 default_image_gen_model: model.default_image_gen_model,
                 plugin_config,
                 base_url_override: model.base_url_override,
+                pending_operation: None,
                 created_at: model.created_at,
                 updated_at: model.updated_at,
             }
@@ -181,6 +183,7 @@ pub async fn get_ai_engines_by_key(
         default_image_gen_model: model.default_image_gen_model,
         plugin_config,
         base_url_override: model.base_url_override,
+        pending_operation: None,
         created_at: model.created_at,
         updated_at: model.updated_at,
     };
@@ -358,9 +361,11 @@ pub async fn update_ai_engines_by_key(
             .await?
             .get_icons(&ai_engine_key)
     };
-    if catalog_grengin {
-        apply_grengin_update(&app_state, &ai_engine, &mut req, &mut active_model).await?;
-    }
+    let grengin_toggle = if catalog_grengin {
+        apply_grengin_update(&app_state, &ai_engine, &mut req, &mut active_model).await?
+    } else {
+        None
+    };
     let first_key = ai_engine.api_key.is_none()
         && req
             .api_key
@@ -541,7 +546,7 @@ pub async fn update_ai_engines_by_key(
         .plugin_config
         .as_ref()
         .and_then(|value| serde_json::from_value(value.clone()).ok());
-    let response = AIEngineDetail {
+    let mut response = AIEngineDetail {
         icon,
         icon_dark,
         plugin_version: provider_plugin_version(&model),
@@ -557,10 +562,21 @@ pub async fn update_ai_engines_by_key(
         default_image_gen_model: model.default_image_gen_model,
         plugin_config,
         base_url_override: model.base_url_override,
+        pending_operation: None,
         created_at: model.created_at,
         updated_at: model.updated_at,
     };
-    Ok((StatusCode::OK, Json(response)))
+    if let Some(enabled) = grengin_toggle {
+        let (pending, local_enabled) = set_grengin_enabled(&app_state, enabled).await?;
+        response.pending_operation = pending;
+        response.is_enabled = local_enabled;
+    }
+    let status = if response.pending_operation.is_some() {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(response)))
 }
 
 #[utoipa::path(
@@ -663,6 +679,7 @@ pub async fn delete_ai_engines_api_key_key(
         default_image_gen_model: model.default_image_gen_model,
         plugin_config,
         base_url_override: model.base_url_override,
+        pending_operation: None,
         created_at: model.created_at,
         updated_at: model.updated_at,
     };

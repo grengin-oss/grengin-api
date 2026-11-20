@@ -133,6 +133,7 @@ fn engine_detail(state: &SharedState, engine: ai_engines::Model) -> AIEngineDeta
         default_image_gen_model: engine.default_image_gen_model,
         plugin_config,
         base_url_override: engine.base_url_override,
+        pending_operation: None,
         created_at: engine.created_at,
         updated_at: engine.updated_at,
     }
@@ -276,22 +277,31 @@ pub async fn validate_grengin_connection() -> AIEngineValidation {
 
 /// Applies a model-policy edit to the catalog Grengin engine. Grengin has no API key or plugin
 /// configuration; adding a model or a new default checks it against the live service catalog.
+/// Returns the requested enable/disable, which the caller runs through `grengin_consent` after
+/// saving: an enable never opens routing in this write.
 pub async fn apply_grengin_update(
     state: &SharedState,
     engine: &ai_engines::Model,
     req: &mut AIEngineUpdate,
     active: &mut ai_engines::ActiveModel,
-) -> Result<(), AuthError> {
-    if req.api_key.is_some() || req.plugin_config.is_some() {
+) -> Result<Option<bool>, AuthError> {
+    if req.api_key.is_some() || req.plugin_config.is_some() || req.base_url_override.is_some() {
         return Err(AuthError::InvalidRequest {
             field: "api_key/plugin_config",
         });
+    }
+    let toggle = req
+        .is_enabled
+        .filter(|enabled| *enabled != engine.is_enabled);
+    super::grengin_consent::require_consent(toggle == Some(true), req.consent_version.as_deref())?;
+    if toggle == Some(true) {
+        req.is_enabled = None;
     }
     if req.whitelisted_models.is_none()
         && req.default_model.is_none()
         && req.default_image_gen_model.is_none()
     {
-        return Ok(());
+        return Ok(toggle);
     }
     let additions = req.whitelisted_models.as_ref().is_some_and(|models| {
         models
@@ -327,7 +337,7 @@ pub async fn apply_grengin_update(
     active.whitelist_models = Set(models);
     active.default_model = Set(text);
     active.default_image_gen_model = Set(image);
-    Ok(())
+    Ok(toggle)
 }
 
 pub fn is_catalog_grengin(engine: &ai_engines::Model) -> bool {
@@ -501,6 +511,7 @@ pub async fn create_engine(
     })?;
 
     let now = Utc::now();
+    let mut grengin_enable = false;
     let (whitelist_models, default_model, default_image_gen_model) =
         if catalog_install && manifest.id == "grengin" {
             let identity_ready = super::grengin_grant::GrenginGrant::configured().is_ok();
@@ -524,9 +535,13 @@ pub async fn create_engine(
                 request.default_model,
                 request.default_image_gen_model,
             )?;
-            if !identity_ready || policy.0.is_empty() {
-                is_enabled = false;
-            }
+            // Installed disabled; an explicit enable runs the consent flow after the insert.
+            super::grengin_consent::require_consent(
+                request.is_enabled == Some(true),
+                request.consent_version.as_deref(),
+            )?;
+            grengin_enable = request.is_enabled == Some(true);
+            is_enabled = false;
             policy
         } else {
             let models = request
@@ -617,7 +632,13 @@ pub async fn create_engine(
     if engine.is_enabled {
         state.provider_registry.register(provider).await;
     }
-    Ok(engine_detail(state, engine))
+    let mut detail = engine_detail(state, engine);
+    if grengin_enable {
+        let (pending, enabled) = super::grengin_consent::set_enabled(state, true).await?;
+        detail.pending_operation = pending;
+        detail.is_enabled = enabled;
+    }
+    Ok(detail)
 }
 
 #[cfg(test)]

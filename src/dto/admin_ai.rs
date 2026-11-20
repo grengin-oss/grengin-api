@@ -3,7 +3,10 @@
 
 use crate::{
     dto::models::ModelType,
-    models::ai_engines::{ApiKeyStatus, PluginConfig},
+    models::{
+        ai_engines::{ApiKeyStatus, PluginConfig},
+        grengin_engine_operations::OperationState,
+    },
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -21,6 +24,8 @@ pub struct AIEngineCreate {
     pub default_image_gen_model: Option<String>,
     pub plugin_config: Option<PluginConfig>,
     pub base_url_override: Option<String>,
+    /// Grengin only: `grengin-models-v1`, required to install with `is_enabled: true`.
+    pub consent_version: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -34,6 +39,8 @@ pub struct AIEngineUpdate {
     pub default_image_gen_model: Option<String>,
     pub plugin_config: Option<PluginConfig>,
     pub base_url_override: Option<String>,
+    /// Grengin only: `grengin-models-v1`, required to switch `is_enabled` on.
+    pub consent_version: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -56,8 +63,52 @@ pub struct AIEngineDetail {
     pub plugin_config: Option<PluginConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url_override: Option<String>,
+    /// Grengin only: an enable/disable still waiting for service confirmation (HTTP 202).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_operation: Option<GrenginOperationStatus>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Serialize, ToSchema)]
+pub struct GrenginOperationStatus {
+    pub id: uuid::Uuid,
+    pub revision: i64,
+    pub desired_enabled: bool,
+    pub state: OperationState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+
+#[derive(Clone, Copy, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GrenginConnectionState {
+    SetupNeeded,
+    Connected,
+    Disconnected,
+    Unavailable,
+}
+
+/// Local and service status of the Grengin engine. Unknown values are null, never zero.
+#[derive(Serialize, ToSchema)]
+pub struct GrenginStatus {
+    pub installed: bool,
+    pub local_enabled: bool,
+    pub connection_state: GrenginConnectionState,
+    pub engine_state: Option<String>,
+    pub remote_enabled: Option<bool>,
+    pub installation_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub balance_microdollars: Option<i64>,
+    pub available_microdollars: Option<i64>,
+    pub low_balance_microdollars: Option<i64>,
+    pub minimum_version: Option<String>,
+    pub balance_url: Option<String>,
+    pub top_up_url: Option<String>,
+    pub observed_at: Option<DateTime<Utc>>,
+    pub stale: bool,
+    pub error_code: Option<String>,
+    pub pending_operation: Option<GrenginOperationStatus>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

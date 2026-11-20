@@ -36,6 +36,7 @@ pub mod embedders_cache;
 pub mod embedding_helpers;
 pub mod file_download;
 pub mod file_storage;
+pub mod grengin_consent;
 pub mod grengin_grant;
 pub mod grengin_provider;
 pub mod http_client;

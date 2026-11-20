@@ -377,11 +377,46 @@ impl GrenginGrant {
     /// Authenticated, non-billable connection check. The result describes remote model
     /// access; an accepted workspace identity can still have access switched off.
     pub async fn status(&self) -> Result<&'static str, ProviderError> {
+        Ok(self.workspace().await?.engine_state)
+    }
+
+    /// The workspace's service status: model access and balance. Balances the service omits
+    /// stay `None`, never zero.
+    pub async fn workspace(&self) -> Result<WorkspaceStatus, ProviderError> {
         self.status_at(&format!("{}/v1/infer/status", self.origin()))
             .await
     }
 
-    async fn status_at(&self, url: &str) -> Result<&'static str, ProviderError> {
+    /// Switches workspace model access on the service (`PUT /v1/connect/grengin-models`).
+    /// Enabling records the administrator's consent version.
+    pub async fn set_models_enabled(&self, enabled: bool) -> Result<(), ProviderError> {
+        let body = if enabled {
+            serde_json::json!({"enabled": true, "consent_version": GRENGIN_CONSENT_VERSION})
+        } else {
+            serde_json::json!({"enabled": false})
+        };
+        let response = self
+            .client
+            .put(format!("{}/v1/connect/grengin-models", self.origin()))
+            .bearer_auth(self.bearer().await?)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| ProviderError::Transport("Grengin model access unavailable".into()))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let bytes = read_body_capped(response, MAX_BYTES)
+            .await
+            .unwrap_or_default();
+        Err(ProviderError::HttpStatus {
+            status: status.as_u16(),
+            message: service_error_type(&bytes).unwrap_or_else(|| "rejected".into()),
+        })
+    }
+
+    async fn status_at(&self, url: &str) -> Result<WorkspaceStatus, ProviderError> {
         let response = self
             .client
             .get(url)
@@ -398,7 +433,7 @@ impl GrenginGrant {
         let bytes = read_body_capped(response, MAX_BYTES).await.map_err(|_| {
             ProviderError::ResponseMapping("invalid Grengin workspace status".into())
         })?;
-        workspace_status(&bytes)
+        workspace_document(&bytes)
     }
 
     /// Called at every native operation dispatch, including later tool rounds.
@@ -664,6 +699,53 @@ fn parse_retry_after(value: &str) -> Duration {
         })
         .unwrap_or(0);
     Duration::from_secs(seconds.min(86_400))
+}
+
+pub const GRENGIN_CONSENT_VERSION: &str = "grengin-models-v1";
+
+pub struct WorkspaceStatus {
+    pub engine_state: &'static str,
+    pub installation_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub balance_microdollars: Option<i64>,
+    pub available_microdollars: Option<i64>,
+    pub low_balance_microdollars: Option<i64>,
+    pub balance_url: Option<String>,
+    pub top_up_url: Option<String>,
+}
+
+fn service_error_type(bytes: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let kind = value.pointer("/error/type")?.as_str()?;
+    (kind.len() <= 64 && kind.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+        .then(|| kind.to_owned())
+}
+
+fn workspace_document(bytes: &[u8]) -> Result<WorkspaceStatus, ProviderError> {
+    #[derive(Deserialize)]
+    struct Document {
+        installation_id: Option<String>,
+        workspace_id: Option<String>,
+        balance_microdollars: Option<i64>,
+        available_microdollars: Option<i64>,
+        low_balance_microdollars: Option<i64>,
+        balance_url: Option<String>,
+        top_up_url: Option<String>,
+    }
+    let document: Document = serde_json::from_slice(bytes)
+        .map_err(|_| ProviderError::ResponseMapping("invalid Grengin workspace status".into()))?;
+    let https =
+        |url: Option<String>| url.filter(|url| url.starts_with("https://") && url.len() <= 2048);
+    Ok(WorkspaceStatus {
+        engine_state: workspace_status(bytes)?,
+        installation_id: document.installation_id,
+        workspace_id: document.workspace_id,
+        balance_microdollars: document.balance_microdollars,
+        available_microdollars: document.available_microdollars,
+        low_balance_microdollars: document.low_balance_microdollars,
+        balance_url: https(document.balance_url),
+        top_up_url: https(document.top_up_url),
+    })
 }
 
 fn workspace_status(bytes: &[u8]) -> Result<&'static str, ProviderError> {
@@ -951,7 +1033,10 @@ mod tests {
         let grant = Arc::new(grant);
         let results = futures_util::future::join_all((0..20).map(|_| grant.bearer())).await;
         assert!(results.into_iter().all(|r| r.unwrap() == "opaque.token"));
-        assert_eq!(grant.status_at(&status_url).await.unwrap(), "off");
+        assert_eq!(
+            grant.status_at(&status_url).await.unwrap().engine_state,
+            "off"
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         {
             let mut state = grant.state.lock().await;
