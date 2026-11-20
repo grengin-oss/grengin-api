@@ -122,7 +122,7 @@ function gatedPlan(body) {
 
 async function llm(req, res, path) {
   if (path.endsWith('/models')) {
-    return json(res, 200, { object: 'list', data: [{ id: 'e2e-gated', object: 'model' }] });
+    return json(res, 200, { object: 'list', data: [{ id: 'e2e-mcp-gated-chat', object: 'model' }] });
   }
   if (!path.endsWith('/chat/completions') || req.method !== 'POST') {
     res.writeHead(404);

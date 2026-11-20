@@ -4,7 +4,7 @@
 import { expect, test } from '@playwright/test';
 import { USERS } from '../../mocks/users.mjs';
 import {
-  GATED_MODEL_NAME,
+  GATED_MODEL,
   addUserRule,
   clearRulesViaApi,
   connectorToggle,
@@ -143,7 +143,7 @@ test.describe('MCP access control', () => {
     await createGatedEngine();
     const member = await signedInPage(browser, 'member');
     try {
-      await selectModel(member.page, GATED_MODEL_NAME);
+      await selectModel(member.page, GATED_MODEL);
       await enableConnector(member.page, name);
       await sendMessage(member.page, `run it twice [twice:${toolMarker(serverId, 'echo')}]`);
       await expect.poll(async () => (await mcpCalls()).held, { timeout: 30_000 }).toBe(1);

@@ -244,12 +244,13 @@ export async function enableConnector(page: Page, serverName: string) {
   await closeComposerMenus(page);
 }
 
-export async function selectModel(page: Page, modelName: string) {
+// The picker lists the engine's live model listing (/v1/models), so it shows the model id.
+export async function selectModel(page: Page, modelId: string) {
   await page.getByRole('button', { name: 'Select model' }).click();
   const picker = page.getByRole('dialog', { name: 'Select model' });
-  await picker.getByRole('textbox', { name: 'Search models…' }).fill(modelName);
-  await picker.getByRole('button', { name: new RegExp(modelName) }).first().click();
-  await expect(page.getByRole('button', { name: 'Select model' })).toContainText(GATED_MODEL);
+  await picker.getByRole('textbox', { name: 'Search models…' }).fill(modelId);
+  await picker.getByRole('button', { name: new RegExp(modelId) }).first().click();
+  await expect(page.getByRole('button', { name: 'Select model' })).toContainText(modelId);
 }
 
 // Admin → Connectors, list view, then the server's connector page.
