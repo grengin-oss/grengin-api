@@ -1,16 +1,30 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-import { expect, type Page } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { USERS } from '../mocks/users.mjs';
 
+export const IDP_SLUG = 'e2e-idp';
 export const IDP_NAME = 'E2E IdP';
 
-// Signs in through the real flow: login page -> provider button -> mock IdP -> callback.
+// Signs in through the real flow: login page -> provider button -> mock IdP -> webapp callback
+// -> API callback. If the login page does not list the provider (a webapp bug tracked by
+// auth.spec.ts), it starts the same flow the button starts, so the rest of the suite still runs.
 export async function signIn(page: Page, user: keyof typeof USERS) {
   await page.goto('/');
-  await page.getByRole('button', { name: new RegExp(IDP_NAME) }).click();
+  const button = page.getByRole('button', { name: new RegExp(IDP_NAME) });
+  await page.getByRole('heading', { level: 1 }).first().waitFor();
+  if (await button.isVisible().catch(() => false)) {
+    await button.click();
+  } else {
+    test.info().annotations.push({
+      type: 'known issue',
+      description: 'The login page does not list configured sign-in providers (webapp reads slug/enabled; the API sends provider/is_enabled).',
+    });
+    const redirect = new URL(`/auth/${IDP_SLUG}/callback`, page.url()).toString();
+    await page.goto(`/api/auth/${IDP_SLUG}?redirect_uri=${encodeURIComponent(redirect)}`);
+  }
   await expect(page.getByRole('heading', { name: 'E2E identity provider' })).toBeVisible();
   await page.getByTestId(`login-${user}`).click();
-  await page.waitForURL((url) => !url.pathname.includes('/callback') && !url.host.includes(':9401'), { timeout: 30_000 });
+  await page.waitForURL((url) => !url.pathname.includes('/callback') && !url.host.endsWith(':9401'), { timeout: 30_000 });
 }
