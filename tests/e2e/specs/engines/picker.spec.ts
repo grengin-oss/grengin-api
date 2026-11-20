@@ -146,7 +146,7 @@ test.describe('chat model picker', () => {
       await toggle.click();
       await expect(page.getByText(`${PICKER_ENGINE.name} disabled`)).toBeVisible();
       await expect(toggle).toHaveAttribute('aria-checked', 'false');
-      expect((await engineRow(PICKER_ENGINE.key)).isEnabled).toBe(false);
+      await expect.poll(async () => (await engineRow(PICKER_ENGINE.key)).isEnabled).toBe(false);
 
       await openNewChat(page);
       let picker = await searchModels(page, 'E2E');

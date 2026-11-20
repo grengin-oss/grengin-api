@@ -137,7 +137,7 @@ test.describe('AI Engines page', () => {
       await dialog.getByLabel('Display Name').fill('E2E Custom Plain HTTP');
       await dialog.getByLabel('Base URL Override').fill(`${PICKER_LLM_URL}/v1/`);
       await dialog.getByLabel('Plugin JSON').fill(JSON.stringify(manifest, null, 2));
-      await dialog.getByLabel('API Key').fill('e2e-custom-key');
+      await dialog.getByRole('textbox', { name: 'API Key' }).fill('e2e-custom-key');
       await dialog.getByRole('button', { name: 'Add Engine' }).click();
       await expect(dialog.getByRole('alert')).toContainText('plugin_config');
       await expect(dialog).toBeVisible();
@@ -162,7 +162,7 @@ test.describe('AI Engines page', () => {
       await browse.getByRole('button', { name: `Connect ${groq.name}`, exact: true }).click();
 
       const connect = page.getByRole('dialog', { name: `Connect ${groq.name}` });
-      await connect.getByLabel('API Key').fill('gsk_e2e_fake_key_that_is_not_valid');
+      await connect.getByRole('textbox', { name: 'API Key' }).fill('gsk_e2e_fake_key_that_is_not_valid');
       await connect.getByRole('button', { name: 'Connect and Save' }).click();
       await expect(connect).toBeHidden();
       await expect(page.getByText(`${groq.name} connected successfully`)).toBeVisible();

@@ -14,8 +14,11 @@ test('a provider failure shows a clear error and saves no completed reply', asyn
 
   const log = page.getByRole('log');
   await expect(log.getByText(prompt)).toBeVisible();
-  // The API's error names the provider (ChatStreamError::ProviderError description).
-  await expect(log.getByText(new RegExp(`Error from ${MOCK_ENGINE.key}`))).toBeVisible();
+  // The API's error names the provider (ChatStreamError::ProviderError description); it shows on
+  // the failed reply and in the conversation's error banner.
+  const error = new RegExp(`Error from ${MOCK_ENGINE.key}: provider plugin request failed`);
+  await expect(log.getByRole('alert').filter({ hasText: error })).toBeVisible();
+  await expect(log.getByText(error)).toHaveCount(2);
   await expect(page.getByRole('button', { name: /stop generating/i })).toHaveCount(0);
   await expect(log.getByText(/Mock reply:/)).toHaveCount(0);
   await expect(page.getByRole('textbox', { name: 'Message input' })).toBeEditable();
