@@ -836,3 +836,98 @@ async fn a_committed_write_whose_acknowledgement_is_lost_is_not_charged_twice() 
     assert_eq!(ledger.len(), 1, "the retry must not add a second charge");
     assert_eq!(ledger[0].cost_usd, chat_cost());
 }
+
+async fn start_new_chat(fixture: &Fixture) -> bool {
+    use axum::{Json, extract::State};
+    let input = serde_json::from_value(json!({
+        "provider": fixture.engine_key,
+        "model_name": TEXT_MODEL,
+        "messages": [{ "role": "user", "content": "Plan a budget", "files": [] }]
+    }))
+    .expect("chat input");
+    let result = crate::handlers::chat_stream::handle_chat_stream(
+        crate::auth::claims::Claims {
+            sub: "spend@example.invalid".into(),
+            name: None,
+            user_id: fixture.user,
+            exp: usize::MAX,
+        },
+        None,
+        State(fixture.state.clone()),
+        None,
+        Json(input),
+    )
+    .await;
+    match result {
+        Ok(_) => true,
+        Err(crate::error::AppError::DbTimeout) => false,
+        Err(error) => panic!("unexpected chat error: {error:?}"),
+    }
+}
+
+async fn user_conversations(fixture: &Fixture) -> Vec<crate::models::conversations::Model> {
+    crate::models::conversations::Entity::find()
+        .filter(crate::models::conversations::Column::UserId.eq(fixture.user))
+        .all(&fixture.db)
+        .await
+        .expect("conversations")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn a_generated_title_is_published_once_charged() {
+    let fixture = Fixture::new(false).await;
+
+    let started = start_new_chat(&fixture).await;
+    let conversations = user_conversations(&fixture).await;
+    let ledger = fixture.ledger().await;
+    let owner = fixture.owner();
+    fixture.cleanup().await;
+    assert!(started);
+    assert_eq!(conversations.len(), 1);
+    assert_eq!(
+        conversations[0].title.as_deref(),
+        Some("Fixture notes about quarterly budgets and owners.")
+    );
+    let titles = charges_for(&ledger, "title_generation");
+    assert_one_charge(&titles, &owner, TEXT_MODEL, chat_cost());
+    assert_eq!(titles[0].conversation_id, Some(conversations[0].id));
+}
+
+// Every ledger write for this user fails, so the title's charge cannot be recorded.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn an_unbilled_title_is_never_readable() {
+    let fixture = Fixture::new(false).await;
+    let trigger = format!("reject_ledger_{}", fixture.user.simple());
+    fixture
+        .db
+        .execute_unprepared(&format!(
+            r#"CREATE FUNCTION {trigger}() RETURNS trigger LANGUAGE plpgsql AS $$
+                 BEGIN IF NEW."userId" = '{}' THEN RAISE EXCEPTION 'ledger unavailable'; END IF; RETURN NEW; END $$;
+               CREATE TRIGGER {trigger} BEFORE INSERT ON usage_logs FOR EACH ROW EXECUTE FUNCTION {trigger}();"#,
+            fixture.user
+        ))
+        .await
+        .expect("failing ledger");
+
+    let started = start_new_chat(&fixture).await;
+    let conversations = user_conversations(&fixture).await;
+    let ledger = fixture.ledger().await;
+    let calls = fixture.calls.chat.load(Ordering::SeqCst);
+    fixture
+        .db
+        .execute_unprepared(&format!(
+            "DROP TRIGGER {trigger} ON usage_logs; DROP FUNCTION {trigger}();"
+        ))
+        .await
+        .expect("restore ledger");
+    fixture.cleanup().await;
+    assert!(!started, "the request fails with DbTimeout");
+    assert_eq!(calls, 1);
+    assert!(ledger.is_empty());
+    assert!(
+        conversations.is_empty(),
+        "the failed request leaves no conversation: {conversations:?}"
+    );
+}

@@ -41,8 +41,9 @@ use crate::{
         chat_stream_helpers::{
             ContentCheckpoint, DepartmentBudgetGate, ToolRoundOutcome, deliver_reply,
             department_budget_status, ensure_budget_pricing, ensure_model_whitelisted,
-            model_identifiers, next_tool_round, persistence_error_event_data, record_stop_reason,
-            response_stopped_event_data, stop_reason_for_provider_error, with_stop_reason,
+            model_identifiers, next_tool_round, persistence_error_event_data,
+            publish_charged_title, record_stop_reason, response_stopped_event_data,
+            stop_reason_for_provider_error, with_stop_reason,
         },
         conversation_access::{
             can_access_conversation, find_active_conversation_for_user,
@@ -910,7 +911,12 @@ pub async fn handle_chat_stream(
         let new_conversation = conversations::ActiveModel {
             id: Set(new_conversation_id.clone()),
             user_id: Set(claims.user_id),
-            title: Set(generated_title.clone()),
+            // A generated title is shown only once its charge is recorded (publish_charged_title).
+            title: Set(if title_result.is_some() {
+                None
+            } else {
+                generated_title.clone()
+            }),
             model_provider: Set(provider.clone()),
             model_name: Set(model_name.clone()),
             created_at: Set(Utc::now()),
@@ -933,8 +939,15 @@ pub async fn handle_chat_stream(
                 eprintln!("Db insert one error {:?}", e);
                 AppError::DbTimeout
             })?;
-        if let Some(tokens) = title_tokens {
-            title_charge.record(&app_state, tokens).await?;
+        if let (Some(response), Some(tokens)) = (title_result.as_ref(), title_tokens) {
+            publish_charged_title(
+                &app_state,
+                new_conversation_id,
+                &response.title,
+                &title_charge,
+                tokens,
+            )
+            .await?;
         }
         (new_conversation_id, generated_title)
     };
