@@ -404,21 +404,38 @@ impl DeclarativeProvider {
                 } else {
                     body.next().await
                 };
-                let events = match next {
+                let at_end = next.is_none();
+                match next {
                     Some(chunk) => {
                         let chunk = chunk.map_err(ProviderError::from)?;
                         total = total.saturating_add(chunk.len());
                         if total > response_limit {
                             Err(ProviderError::ResponseTooLarge)?;
                         }
-                        decoder.push(&chunk)?
+                        decoder.feed(&chunk);
                     }
-                    None => {
-                        drained = true;
-                        decoder.finish()?
-                    }
-                };
-                for event in events {
+                    None => drained = true,
+                }
+                // Events are decoded one at a time, so a done marker ends the stream before any
+                // bytes after it in the same chunk are read.
+                let mut tail = std::collections::VecDeque::new();
+                let mut tail_loaded = false;
+                loop {
+                    let event = match decoder.next_event()? {
+                        Some(event) => event,
+                        None if at_end && !tail_loaded => {
+                            tail_loaded = true;
+                            tail.extend(decoder.finish()?);
+                            match tail.pop_front() {
+                                Some(event) => event,
+                                None => break,
+                            }
+                        }
+                        None => match tail.pop_front() {
+                            Some(event) => event,
+                            None => break,
+                        },
+                    };
                     let final_marker = operation.response.done_data.as_deref() == Some(event.data.trim());
                     if !final_marker {
                         let data = mapper.decode_data(&event)?;

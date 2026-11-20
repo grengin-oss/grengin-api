@@ -520,6 +520,29 @@ async fn final_marker_ends_an_open_http_body_without_reading_trailing_events() {
 }
 
 #[tokio::test]
+async fn bytes_after_the_final_marker_in_the_same_chunk_are_never_decoded() {
+    let mut wire = b"data: [DONE]\n\ndata: ".to_vec();
+    wire.extend_from_slice(b"\xff\n\n");
+    let (base_url, _) = serve(vec![MockResponse::chunked(
+        "200 OK",
+        "text/event-stream",
+        vec![wire],
+        Duration::ZERO,
+    )])
+    .await;
+    let provider = provider(
+        base_url,
+        json!({"chat":{"streaming":true}}),
+        openai_chat_operations(Value::Null),
+    );
+    let events = collect_chat(&provider, "chat-1").await;
+    assert!(matches!(
+        events.as_slice(),
+        [ProviderEvent::Completed { .. }]
+    ));
+}
+
+#[tokio::test]
 async fn late_usage_before_the_final_marker_is_preserved_once() {
     let (base_url, _) = serve(vec![
         MockResponse::chunked(

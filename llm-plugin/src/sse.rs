@@ -44,21 +44,37 @@ impl SseDecoder {
         }
     }
 
+    /// Decodes every complete event in `bytes`. A caller that may stop at an event (a done
+    /// marker) uses `feed` and `next_event` instead, so bytes after that event are never read.
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<DecodedSseEvent>, ProviderError> {
-        self.buffer.extend_from_slice(bytes);
+        self.feed(bytes);
         let mut events = Vec::new();
+        while let Some(event) = self.next_event()? {
+            events.push(event);
+        }
+        Ok(events)
+    }
+
+    pub fn feed(&mut self, bytes: &[u8]) {
+        self.buffer.extend_from_slice(bytes);
+    }
+
+    /// The next complete event among the bytes fed so far, decoding only as far as needed.
+    pub fn next_event(&mut self) -> Result<Option<DecodedSseEvent>, ProviderError> {
         while let Some(newline) = self.buffer.iter().position(|byte| *byte == b'\n') {
             let mut line = self.buffer.drain(..=newline).collect::<Vec<_>>();
             line.pop();
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
-            self.process_line(&line, &mut events)?;
+            if let Some(event) = self.process_line(&line)? {
+                return Ok(Some(event));
+            }
         }
         if self.buffer.len().saturating_add(self.current_event_bytes) > self.max_event_bytes {
             return Err(ProviderError::ResponseTooLarge);
         }
-        Ok(events)
+        Ok(None)
     }
 
     pub fn finish(&mut self) -> Result<Vec<DecodedSseEvent>, ProviderError> {
@@ -68,7 +84,7 @@ impl SseDecoder {
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
-            self.process_line(&line, &mut events)?;
+            events.extend(self.process_line(&line)?);
         }
         if let Some(event) = self.dispatch() {
             events.push(event);
@@ -76,11 +92,7 @@ impl SseDecoder {
         Ok(events)
     }
 
-    fn process_line(
-        &mut self,
-        line: &[u8],
-        events: &mut Vec<DecodedSseEvent>,
-    ) -> Result<(), ProviderError> {
+    fn process_line(&mut self, line: &[u8]) -> Result<Option<DecodedSseEvent>, ProviderError> {
         self.current_event_bytes = self.current_event_bytes.saturating_add(line.len() + 1);
         if self.current_event_bytes > self.max_event_bytes {
             return Err(ProviderError::ResponseTooLarge);
@@ -89,13 +101,10 @@ impl SseDecoder {
             ProviderError::ResponseMapping(format!("SSE event is not valid UTF-8: {error}"))
         })?;
         if line.is_empty() {
-            if let Some(event) = self.dispatch() {
-                events.push(event);
-            }
-            return Ok(());
+            return Ok(self.dispatch());
         }
         if line.starts_with(':') {
-            return Ok(());
+            return Ok(None);
         }
         let (field, value) = line.split_once(':').unwrap_or((line, ""));
         let value = value.strip_prefix(' ').unwrap_or(value);
@@ -106,7 +115,7 @@ impl SseDecoder {
             "retry" => {}
             _ => {}
         }
-        Ok(())
+        Ok(None)
     }
 
     fn dispatch(&mut self) -> Option<DecodedSseEvent> {
@@ -967,6 +976,17 @@ mod tests {
             .unwrap();
         assert_eq!(events[0].id.as_deref(), Some("1"));
         assert_eq!(events[1].id.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn next_event_decodes_only_as_far_as_the_caller_reads() {
+        let mut decoder = SseDecoder::new(4096);
+        let mut wire = b"data: [DONE]\n\ndata: ".to_vec();
+        wire.extend_from_slice(b"\xff\n\n");
+        decoder.feed(&wire);
+        assert_eq!(decoder.next_event().unwrap().unwrap().data, "[DONE]");
+        assert!(decoder.next_event().is_err());
+        assert!(SseDecoder::new(4096).push(&wire).is_err());
     }
 
     #[test]
