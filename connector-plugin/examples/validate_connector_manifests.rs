@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use connector_server_plugin::{CompiledConnector, ConnectorPluginConfig};
+use connector_plugin::{CompiledConnector, ConnectorPluginConfig};
 use std::{fs, path::Path, process::ExitCode};
 
 fn validate(path: &Path) -> Result<usize, Box<dyn std::error::Error>> {

@@ -12,9 +12,7 @@ use axum::{
     extract::OriginalUri,
     http::{HeaderMap, Method},
 };
-use connector_server_plugin::{
-    CallContext, CompiledConnector, ConnectorError, ConnectorPluginConfig,
-};
+use connector_plugin::{CallContext, CompiledConnector, ConnectorError, ConnectorPluginConfig};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use url::Url;
@@ -190,14 +188,14 @@ async fn every_business_tool_obeys_its_http_contract_and_preserves_page_cursors(
                 assert_eq!(response["method"], case.method.as_deref().unwrap_or("GET"));
                 let mut expected_body = case.body.clone().unwrap_or(Value::Null);
                 match &plugin.manifest().credential_delivery {
-                    Some(connector_server_plugin::CredentialDelivery::JsonBody { field }) => {
+                    Some(connector_plugin::CredentialDelivery::JsonBody { field }) => {
                         if expected_body.is_null() {
                             expected_body = json!({});
                         }
                         expected_body[field] = json!(token);
                         assert!(response["authorization"].is_null());
                     }
-                    Some(connector_server_plugin::CredentialDelivery::Header { name, prefix }) => {
+                    Some(connector_plugin::CredentialDelivery::Header { name, prefix }) => {
                         assert_eq!(
                             response["headers"][name.to_ascii_lowercase()],
                             format!("{}{token}", prefix.as_deref().unwrap_or_default())

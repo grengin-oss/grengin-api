@@ -17,7 +17,7 @@ async fn resolve_checked(host: &str) -> std::io::Result<Vec<SocketAddr>> {
         return Err(std::io::Error::other("empty DNS answer"));
     }
     for address in &addresses {
-        connector_server_plugin::validate_destination_ip(address.ip(), true)
+        connector_plugin::validate_destination_ip(address.ip(), true)
             .map_err(|_| std::io::Error::other("destination address is not allowed"))?;
     }
     Ok(addresses)

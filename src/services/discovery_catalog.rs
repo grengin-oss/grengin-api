@@ -334,7 +334,7 @@ impl DiscoveryCatalog {
                 id: provider.id,
                 version: version.version,
                 manifest_version: version.manifest_version.unwrap_or_default(),
-                runtime_version: connector_server_plugin::runtime_version().into(),
+                runtime_version: connector_plugin::runtime_version().into(),
                 sha256: version.sha256,
                 tool_groups: serde_json::to_value(compiled.manifest().tool_groups())
                     .map_err(|error| DiscoveryError::InvalidCatalog(error.to_string()))?,
@@ -1028,14 +1028,13 @@ fn validate_connector_plugin(
     expected_id: &str,
     version: &CatalogArtifactVersion,
     manifest: &Value,
-) -> Result<connector_server_plugin::CompiledConnector, DiscoveryError> {
-    let compiled = connector_server_plugin::CompiledConnector::compile(
-        connector_server_plugin::ConnectorPluginConfig {
+) -> Result<connector_plugin::CompiledConnector, DiscoveryError> {
+    let compiled =
+        connector_plugin::CompiledConnector::compile(connector_plugin::ConnectorPluginConfig {
             manifest: manifest.clone(),
             ..Default::default()
-        },
-    )
-    .map_err(|error| DiscoveryError::InvalidCatalog(error.to_string()))?;
+        })
+        .map_err(|error| DiscoveryError::InvalidCatalog(error.to_string()))?;
     let schema = ReleaseVersion([u64::from(compiled.manifest().schema_version), 0, 0]);
     if compiled.manifest().id != expected_id
         || compiled.manifest().version != version.version
@@ -1202,8 +1201,7 @@ mod tests {
 
     fn connector_manifest(release: &str) -> Vec<u8> {
         let mut manifest: Value =
-            serde_json::from_str(include_str!("../../connector-server-plugin/example.json"))
-                .unwrap();
+            serde_json::from_str(include_str!("../../connector-plugin/example.json")).unwrap();
         manifest["id"] = serde_json::json!("test-connector");
         manifest["version"] = serde_json::json!(release);
         serde_json::to_vec(&manifest).unwrap()
@@ -1265,10 +1263,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(latest.version, "1.1.0");
-        assert_eq!(
-            latest.runtime_version,
-            connector_server_plugin::runtime_version()
-        );
+        assert_eq!(latest.runtime_version, connector_plugin::runtime_version());
         assert_eq!(latest.sha256, sha256_hex(&new));
         assert_eq!(
             latest.tool_groups["read_write"],

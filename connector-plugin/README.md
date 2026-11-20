@@ -391,7 +391,7 @@ of newer source. `console.sh` supports explicit `GRENGIN_CONSOLE_MEMORY_MAX=2G|3
 See
 `docs/connector-session-cache-audit-2026-11-05.md` for current results and gaps.
 
-Generate the JSON Schema with `cargo run -p connector-server-plugin --example schema`.
+Generate the JSON Schema with `cargo run -p connector-plugin --example schema`.
 
 `--broker` also runs the existing connector OAuth regression suite against a
 read-only archive of the website's `feat/connector-open-access` service branch.

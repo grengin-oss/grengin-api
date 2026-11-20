@@ -8,7 +8,7 @@ scenario=${1:-http}
 export GRENGIN_BACKEND_ROOT="$root"
 export GRENGIN_BACKEND_BINARY="${GRENGIN_BACKEND_BINARY:-${CARGO_TARGET_DIR:-$root/target}/debug/grengin-api}"
 [[ -x "$GRENGIN_BACKEND_BINARY" ]] || { printf 'Build the backend first with tests/connector-plugin/run.sh\n' >&2; exit 1; }
-sources=$(cd "$root" && rg --files src connector-server-plugin/src -g '*.rs') || exit 1
+sources=$(cd "$root" && rg --files src connector-plugin/src -g '*.rs') || exit 1
 while IFS= read -r source; do
   if [[ "$root/$source" -nt "$GRENGIN_BACKEND_BINARY" ]]; then
     printf 'Backend binary is older than source; HTTP/OAuth testing refused\n' >&2

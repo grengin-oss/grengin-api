@@ -13,9 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use connector_server_plugin::{
-    CallContext, CompiledConnector, ConnectorError, ConnectorPluginConfig,
-};
+use connector_plugin::{CallContext, CompiledConnector, ConnectorError, ConnectorPluginConfig};
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, task::JoinHandle};
 
@@ -70,7 +68,7 @@ fn context() -> CallContext<'static> {
 
 #[test]
 fn explicit_token_mode_cannot_remove_authentication_or_invent_oauth() {
-    use connector_server_plugin::ConnectorAuth;
+    use connector_plugin::ConnectorAuth;
     for (primary, mode, allowed) in [
         ("oauth2", ConnectorAuth::ApiKey, true),
         ("oauth2", ConnectorAuth::None, false),
@@ -428,10 +426,7 @@ fn generated_schema_is_current_and_accepts_the_reference_manifest() {
         serde_json::from_str(include_str!("../schema/connector-plugin-v1.schema.json")).unwrap();
     assert_eq!(
         schema,
-        serde_json::to_value(schemars::schema_for!(
-            connector_server_plugin::ConnectorManifest
-        ))
-        .unwrap()
+        serde_json::to_value(schemars::schema_for!(connector_plugin::ConnectorManifest)).unwrap()
     );
     let manifest: Value = serde_json::from_str(include_str!("../example.json")).unwrap();
     assert!(jsonschema::is_valid(&schema, &manifest));

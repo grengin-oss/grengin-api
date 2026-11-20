@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::models::mcp_servers::McpTransportType;
-use connector_server_plugin::{
-    CompiledConnector, ConnectorAuth, ConnectorError, ConnectorPluginConfig,
-};
+use connector_plugin::{CompiledConnector, ConnectorAuth, ConnectorError, ConnectorPluginConfig};
 use rmcp::model::{Tool, ToolAnnotations};
 use serde::Deserialize;
 use serde_json::Value;
@@ -50,7 +48,7 @@ pub fn compile_plugin(
         {
             let url = url::Url::parse(raw)
                 .map_err(|_| ConnectorError::Manifest("invalid OAuth endpoint"))?;
-            connector_server_plugin::validate_endpoint_url(
+            connector_plugin::validate_endpoint_url(
                 &url,
                 plugin_config.allow_insecure_http,
                 plugin_config.allow_private_network,
@@ -129,8 +127,7 @@ mod tests {
     #[test]
     fn oauth_scopes_and_destinations_fail_closed_before_installation() {
         let manifest: Value =
-            serde_json::from_str(include_str!("../../connector-server-plugin/example.json"))
-                .unwrap();
+            serde_json::from_str(include_str!("../../connector-plugin/example.json")).unwrap();
         let config = json!({"connector_plugin":{"manifest":manifest},"oauth":{"auth_url":"https://identity.example/authorize","token_url":"https://identity.example/token","redirect_url":"http://localhost:5173/mcp/oauth/callback","scopes":["Mail.Read"]}});
         assert!(
             compile_plugin(

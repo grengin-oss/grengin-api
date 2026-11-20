@@ -6,9 +6,7 @@ use axum::{
     body::Body,
     http::{Response, StatusCode, header},
 };
-use connector_server_plugin::{
-    CallContext, CompiledConnector, ConnectorError, ConnectorPluginConfig,
-};
+use connector_plugin::{CallContext, CompiledConnector, ConnectorError, ConnectorPluginConfig};
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
 

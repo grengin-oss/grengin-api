@@ -3,7 +3,7 @@
 
 use std::io::Read;
 
-use connector_server_plugin::{CallContext, CompiledConnector, ConnectorPluginConfig};
+use connector_plugin::{CallContext, CompiledConnector, ConnectorPluginConfig};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
