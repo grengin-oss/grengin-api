@@ -2441,8 +2441,8 @@ pub async fn handle_chat_stream(
                                                }
                                                Err("mcp oauth connection required".to_string())
                                            } else {
-                                               crate::services::mcp_plugin_helpers::call_with_current_access(
-                                                       &app_state,
+                                               crate::services::mcp_tools::call_with_current_access(
+                                                       &app_state.database,
                                                        &client,
                                                        &tool_ref.original_name,
                                                        args_for_call.clone(),

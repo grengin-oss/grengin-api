@@ -20,13 +20,10 @@ use crate::{
     models::{
         connectors, mcp_access_policies, mcp_connections, mcp_oauth_states, mcp_server_tools,
         mcp_servers::{self, McpTransportType},
-        mcp_tools, project_mcp_servers, users,
+        mcp_tools, project_mcp_servers,
     },
     services::{
-        auth_audit::record_auth_event,
-        mcp_client::{McpClientError, McpServerClient},
-        mcp_oauth::OAuthRefreshLocks,
-        mcp_tools::sanitize_tool_name,
+        auth_audit::record_auth_event, mcp_oauth::OAuthRefreshLocks, mcp_tools::sanitize_tool_name,
     },
     state::SharedState,
 };
@@ -113,59 +110,6 @@ pub async fn save_credential(
         expires_at: request.expires_at,
         scopes: None,
     })
-}
-
-pub async fn call_with_current_access(
-    state: &SharedState,
-    client: &McpServerClient,
-    tool_name: &str,
-    arguments: Value,
-    token: Option<String>,
-    user: Uuid,
-) -> Result<rmcp::model::CallToolResult, McpClientError> {
-    if client.connection_config.get("connector_plugin").is_some() {
-        let database_error =
-            |_| McpClientError::Config("connector authorization unavailable".into());
-        let denied =
-            || McpClientError::Config("connector access denied or configuration changed".into());
-        let owner = users::Entity::find_by_id(user)
-            .one(&state.database)
-            .await
-            .map_err(database_error)?
-            .ok_or_else(denied)?;
-        if owner.status != users::UserStatus::Active {
-            return Err(denied());
-        }
-        let server = mcp_servers::Entity::find_by_id(client.server_id)
-            .one(&state.database)
-            .await
-            .map_err(database_error)?
-            .ok_or_else(denied)?;
-        if !server.enabled
-            || server.url != client.url
-            || server.connection_config != client.connection_config
-        {
-            return Err(denied());
-        }
-        let tool = mcp_tools::Entity::find()
-            .filter(mcp_tools::Column::ServerId.eq(client.server_id))
-            .filter(mcp_tools::Column::OriginalName.eq(tool_name))
-            .filter(mcp_tools::Column::Enabled.eq(true))
-            .one(&state.database)
-            .await
-            .map_err(database_error)?
-            .ok_or_else(denied)?;
-        if crate::services::mcp_tools::filter_tools_for_user(&state.database, user, vec![tool])
-            .await
-            .map_err(|_| denied())?
-            .is_empty()
-        {
-            return Err(denied());
-        }
-    }
-    client
-        .call_tool(tool_name, arguments, token, Some(user))
-        .await
 }
 
 pub async fn sync_installed_plugin(
