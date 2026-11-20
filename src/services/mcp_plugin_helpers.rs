@@ -5,7 +5,7 @@ use std::{collections::HashMap, sync::LazyLock, time::Duration};
 
 pub use crate::services::mcp_plugin_config::{compile_plugin, plugin_tools};
 use chrono::Utc;
-use connector_server_plugin::{CompiledConnector, ConnectorAuth};
+use connector_plugin::{CompiledConnector, ConnectorAuth};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, Iterable, QueryFilter, QuerySelect, Set,
     TransactionTrait, TryIntoModel,
@@ -228,7 +228,7 @@ fn endpoint_is_safe(raw: &str) -> bool {
         return false;
     };
     url.set_query(None);
-    connector_server_plugin::validate_endpoint_url(&url, true, true).is_ok()
+    connector_plugin::validate_endpoint_url(&url, true, true).is_ok()
 }
 
 fn ensure_server_destination(server: &mcp_servers::Model, plugin: bool) -> Result<(), AuthError> {
@@ -650,8 +650,7 @@ mod tests {
 
     fn config(base: &str, auth: &str) -> Value {
         let mut manifest: Value =
-            serde_json::from_str(include_str!("../../connector-server-plugin/example.json"))
-                .unwrap();
+            serde_json::from_str(include_str!("../../connector-plugin/example.json")).unwrap();
         manifest["base_url"] = json!(base);
         manifest["auth"] = json!(auth);
         let mut config = json!({"connector_plugin":{"manifest":manifest}});
@@ -664,13 +663,9 @@ mod tests {
     #[test]
     fn existing_mcp_servers_are_not_reinterpreted_as_plugins() {
         assert!(
-            compile_plugin(
-                &json!({"command":"sqlx-mcp"}),
-                McpTransportType::Stdio,
-                None
-            )
-            .unwrap()
-            .is_none()
+            compile_plugin(&json!({"command":"db-mcp"}), McpTransportType::Stdio, None)
+                .unwrap()
+                .is_none()
         );
         assert!(
             compile_plugin(

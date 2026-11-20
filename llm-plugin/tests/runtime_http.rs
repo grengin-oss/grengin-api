@@ -7,7 +7,8 @@ use futures_util::StreamExt;
 use llm_plugin::{
     ChatMessage, ChatRequest, ChatRole, ContentPart, DeclarativeProvider, EmbeddingRequest,
     ImageRequest, ModelId, ProviderError, ProviderEvent, ProviderEventStream, ProviderManifestV1,
-    ProviderModelType, ProviderPlugin, ProviderRuntimeConfig, ToolCallId, ToolResult,
+    ProviderModelType, ProviderPlugin, ProviderRuntimeConfig, ToolCallId, ToolChoice,
+    ToolDefinition, ToolResult,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -554,6 +555,69 @@ async fn replays_tool_calls_and_results_on_continuation() {
     assert_eq!(messages[1]["toolCalls"][0]["arguments"]["q"], "rust");
     assert_eq!(messages[2]["role"], "tool");
     assert_eq!(messages[2]["toolResult"]["callId"], "call-1");
+}
+
+#[tokio::test]
+async fn a_forced_tool_is_not_forced_again_after_it_ran() {
+    let call = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let answer =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n";
+    let (base_url, requests) = serve(vec![
+        MockResponse::new("200 OK", "text/event-stream", call.as_bytes().to_vec()),
+        MockResponse::new("200 OK", "text/event-stream", answer.as_bytes().to_vec()),
+    ])
+    .await;
+    let provider = provider(
+        base_url,
+        json!({"chat": {"streaming": true, "tools": true}}),
+        openai_chat_operations(json!({
+            "continuation": {"maxToolRounds": 3},
+            "body": {
+                "model": {"$get": "request.model"},
+                "messages": {"$get": "request.messages"},
+                "toolChoice": {"$get": "request.toolChoice"}
+            }
+        })),
+    );
+    let mut request = chat_request("chat-1");
+    request.tools = vec![ToolDefinition {
+        name: "lookup".to_string(),
+        description: None,
+        parameters: json!({"type": "object", "properties": {}}),
+    }];
+    request.tool_choice = Some(ToolChoice::Named("lookup".to_string()));
+    let mut session = provider.chat().unwrap().start(request).await.unwrap();
+    let mut stream = session.stream().await.unwrap();
+    while let Some(event) = stream.next().await {
+        event.unwrap();
+    }
+    drop(stream);
+    let mut stream = session
+        .continue_with_tools(vec![ToolResult {
+            call_id: ToolCallId::new("call-1"),
+            name: "lookup".to_string(),
+            output: json!({"answer": 42}),
+            is_error: false,
+        }])
+        .await
+        .unwrap();
+    let mut text = String::new();
+    while let Some(event) = stream.next().await {
+        if let ProviderEvent::TextDelta { text: delta } = event.unwrap() {
+            text.push_str(&delta);
+        }
+    }
+    assert_eq!(text, "done");
+    let requests = requests.lock().await;
+    assert_eq!(
+        requests[0].json()["toolChoice"],
+        json!({"type": "named", "name": "lookup"})
+    );
+    assert_eq!(requests[1].json()["toolChoice"], json!({"type": "auto"}));
 }
 
 #[tokio::test]

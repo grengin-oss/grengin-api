@@ -72,6 +72,8 @@ pub struct ModelInfo {
     pub max_input_tokens: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<i32>,
+    // Every chat model streams; the flag stays internal (admin capabilities) and is not sent to clients.
+    #[serde(skip)]
     pub supports_streaming: bool,
     pub supports_tools: bool,
     pub supports_reasoning: bool,

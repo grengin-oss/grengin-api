@@ -714,7 +714,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "connector-server-plugin"
+name = "connector-plugin"
 version = "0.6.0"
 dependencies = [
  "axum",
@@ -1568,7 +1568,7 @@ dependencies = [
  "base64 0.22.1",
  "calamine",
  "chrono",
- "connector-server-plugin",
+ "connector-plugin",
  "flate2",
  "foreign-types",
  "futures-util",
@@ -4398,21 +4398,6 @@ dependencies = [
  "syn 2.0.111",
  "tokio",
  "url",
-]
-
-[[package]]
-name = "sqlx-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "rmcp",
- "serde",
- "serde_json",
- "sqlx",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

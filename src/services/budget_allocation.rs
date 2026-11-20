@@ -4,7 +4,7 @@
 use crate::{
     auth::error::AuthError,
     handlers::admin_department_budgets::departments_budget_select,
-    models::{conversations, departments, messages, users},
+    models::{departments, usage_logs, users},
 };
 use chrono::{DateTime, Datelike, TimeZone, Utc, Weekday};
 use rust_decimal::Decimal;
@@ -227,15 +227,14 @@ async fn sum_spending_cost(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
 ) -> Result<Decimal, sea_orm::DbErr> {
-    let sum: Option<Decimal> = messages::Entity::find()
-        .join(JoinType::InnerJoin, messages::Relation::Conversations.def()) // messages -> conversations
-        .join(JoinType::InnerJoin, conversations::Relation::Users.def()) // conversations -> users
+    // Spend is the append-only usage_logs ledger, so deleting or editing chats cannot lower it.
+    let sum: Option<Decimal> = usage_logs::Entity::find()
+        .join(JoinType::InnerJoin, usage_logs::Relation::Users.def())
         .filter(users::Column::DepartmentId.is_in(members))
-        .filter(messages::Column::Deleted.eq(false))
-        .filter(messages::Column::CreatedAt.gte(start))
-        .filter(messages::Column::CreatedAt.lt(end))
+        .filter(usage_logs::Column::Timestamp.gte(start))
+        .filter(usage_logs::Column::Timestamp.lt(end))
         .select_only()
-        .column_as(Expr::col(messages::Column::Cost).sum(), "sum_cost")
+        .column_as(Expr::col(usage_logs::Column::CostUsd).sum(), "sum_cost")
         .into_tuple::<Option<Decimal>>()
         .one(db)
         .await?
@@ -248,13 +247,11 @@ pub async fn sum_department_cost_total(
     db: &DatabaseConnection,
     dept_id: Uuid,
 ) -> Result<Decimal, sea_orm::DbErr> {
-    let sum: Option<Decimal> = messages::Entity::find()
-        .join(JoinType::InnerJoin, messages::Relation::Conversations.def())
-        .join(JoinType::InnerJoin, conversations::Relation::Users.def())
+    let sum: Option<Decimal> = usage_logs::Entity::find()
+        .join(JoinType::InnerJoin, usage_logs::Relation::Users.def())
         .filter(users::Column::DepartmentId.eq(dept_id))
-        .filter(messages::Column::Deleted.eq(false))
         .select_only()
-        .column_as(Expr::col(messages::Column::Cost).sum(), "sum_cost")
+        .column_as(Expr::col(usage_logs::Column::CostUsd).sum(), "sum_cost")
         .into_tuple::<Option<Decimal>>()
         .one(db)
         .await?

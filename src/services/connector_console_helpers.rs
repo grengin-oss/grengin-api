@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Utc};
-use connector_server_plugin::{
+use connector_plugin::{
     ConnectorAuth, ConnectorManifest, ConnectorTopicGroup as ManifestTopicGroup,
 };
 use sea_orm::{

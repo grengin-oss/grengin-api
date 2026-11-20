@@ -39,9 +39,9 @@ use crate::{
             effective_max_tokens, effective_native_web_search, supports_native_web_search,
         },
         chat_stream_helpers::{
-            ContentCheckpoint, DepartmentBudgetGate, ToolRoundOutcome, department_budget_status,
-            detach_from_client, ensure_budget_pricing, ensure_model_whitelisted, model_identifiers,
-            next_tool_round, persistence_error_event_data, record_stop_reason,
+            ContentCheckpoint, DepartmentBudgetGate, ToolRoundOutcome, deliver_reply,
+            department_budget_status, ensure_budget_pricing, ensure_model_whitelisted,
+            model_identifiers, next_tool_round, persistence_error_event_data, record_stop_reason,
             response_stopped_event_data, stop_reason_for_provider_error, with_stop_reason,
         },
         conversation_access::{
@@ -483,6 +483,7 @@ pub async fn handle_chat_stream(
     Json(req): Json<ChatInput>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, AppError> {
     let start = Instant::now();
+    let is_edit = pending_edit.is_some();
     let (provider, model_name, gateway_installation) =
         model_route(&app_state, &req.provider, &req.model_name).await?;
     let via_gateway = gateway_installation.is_some() && provider == "grengin";
@@ -561,7 +562,7 @@ pub async fn handle_chat_stream(
         }
     }
 
-    let plugin_model_info = match crate::services::provider_models::find_provider_model(
+    let plugin_model = match crate::services::provider_models::find_provider_model(
         provider_config.as_ref(),
         &provider_key,
         &app_state.live_models_cache,
@@ -569,10 +570,7 @@ pub async fn handle_chat_stream(
     )
     .await
     {
-        Ok(Some(model)) => Some(crate::services::provider_models::to_model_info(
-            &provider_key,
-            model,
-        )),
+        Ok(Some(model)) => Some(model),
         Ok(None) => None,
         Err(error) => {
             eprintln!(
@@ -583,9 +581,9 @@ pub async fn handle_chat_stream(
         }
     };
     if via_gateway
-        && plugin_model_info
+        && plugin_model
             .as_ref()
-            .is_none_or(|model| model.key != model_name)
+            .is_none_or(|model| model.id.as_str() != model_name)
     {
         return Err(AppError::ValidationInvalidField {
             field: "model_name",
@@ -593,9 +591,11 @@ pub async fn handle_chat_stream(
     }
     let plugin_is_image_only =
         provider_config.images().is_some() && provider_config.chat().is_none();
-    let plugin_model_supports_web_search = plugin_model_info
+    let plugin_model_supports_web_search = plugin_model
         .as_ref()
-        .is_some_and(|model| model.supports_web_search);
+        .and_then(crate::services::provider_models::native_web_search_support);
+    let plugin_model_info = plugin_model
+        .map(|model| crate::services::provider_models::to_model_info(&provider_key, model));
     let catalog_model =
         match get_model_info_cached(&app_state.req_client, &provider_key, &model_name).await {
             Ok(model) => model,
@@ -606,7 +606,7 @@ pub async fn handle_chat_stream(
         };
     let catalog_model_supports_web_search = catalog_model
         .as_ref()
-        .is_some_and(|model| model.supports_web_search);
+        .map(|model| model.supports_web_search);
     let (
         input_rate,
         output_rate,
@@ -664,7 +664,6 @@ pub async fn handle_chat_stream(
         });
     }
     let model_supports_web_search = supports_native_web_search(
-        &provider_key,
         plugin_model_supports_web_search,
         catalog_model_supports_web_search,
     );
@@ -1572,6 +1571,13 @@ pub async fn handle_chat_stream(
            cost: Set(Decimal::from(0)),
            metadata: Set(Some(json!({"webSearch":req.web_search}))),
          };
+        // A plain reply is registered before its row exists, so a page reading the conversation never
+        // sees it without generating. An edit's rows stay hidden until it commits, so it registers later.
+        let early_cancel = if edit_in_progress.is_none() {
+            Some(app_state.register_stream_cancel(new_message_id, conversation_id, None).await)
+        } else {
+            None
+        };
         let inserted = if edit_in_progress.is_some() {
             new_llm_message.clone().insert(&app_state.database).await.map(|_| ()).map_err(|e| {
                 eprintln!("assistant message insert error: {e}");
@@ -1584,6 +1590,7 @@ pub async fn handle_chat_stream(
         };
         if let Err(error) = inserted {
             eprintln!("assistant message insert error: {error:?}");
+            app_state.release_stream_cancel(new_message_id).await;
             yield Event::default()
                 .event(ChatStreamEvents::AiError.to_string())
                 .data(persistence_error_event_data());
@@ -1618,13 +1625,18 @@ pub async fn handle_chat_stream(
                 }
             }
         }
-        let cancel_handle = app_state
-            .register_stream_cancel(
-                new_message_id,
-                conversation_id,
-                edit_in_progress.as_ref().map(EditInProgress::request),
-            )
-            .await;
+        let cancel_handle = match early_cancel {
+            Some(handle) => handle,
+            None => {
+                app_state
+                    .register_stream_cancel(
+                        new_message_id,
+                        conversation_id,
+                        edit_in_progress.as_ref().map(EditInProgress::request),
+                    )
+                    .await
+            }
+        };
         // A switch can only stop replies registered above; one that landed earlier has hidden
         // this reply with its version, so it stops the same way.
         if edit_in_progress.is_none()
@@ -2989,6 +3001,6 @@ pub async fn handle_chat_stream(
            }
        }
     };
-    let sse_response = Sse::new(detach_from_client(sse_stream)).keep_alive(KeepAlive::new());
+    let sse_response = Sse::new(deliver_reply(sse_stream, is_edit)).keep_alive(KeepAlive::new());
     Ok(sse_response)
 }

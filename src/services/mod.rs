@@ -74,6 +74,7 @@ pub mod provider_stream;
 pub mod rag;
 pub mod reconfigure;
 pub mod role_assignment;
+pub mod safe_egress;
 pub mod search;
 pub mod share_access;
 pub mod skill_access;

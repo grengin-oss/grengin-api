@@ -1,5 +1,5 @@
 [package]
-name = "connector-server-plugin"
+name = "connector-plugin"
 version = "0.6.0"
 edition = "2024"
 license = "Apache-2.0"

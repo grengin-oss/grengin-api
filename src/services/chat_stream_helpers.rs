@@ -6,18 +6,22 @@ use chrono::Utc;
 use futures_util::{Stream, StreamExt};
 use llm_plugin::ProviderError;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, UpdateMany, prelude::Decimal,
-    sea_query::Expr,
+    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, UpdateMany,
+    prelude::Decimal, sea_query::Expr,
 };
 use serde_json::Value;
-use std::{convert::Infallible, sync::Arc, time::Duration};
+use std::{collections::HashSet, convert::Infallible, sync::Arc, time::Duration};
 use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::{
     dto::{chat_stream::ResponseStopped, models::ModelInfo},
     error::{AppError, ErrorDetailVariant, ErrorResponse},
-    models::{departments::ActionOnExceed, messages, messages::StopReason},
+    models::{
+        departments::ActionOnExceed,
+        messages,
+        messages::{ChatRole, StopReason},
+    },
     services::budget_allocation::{BudgetHealth, get_department_budget_status},
     state::{SharedState, StreamCancel, StreamCancellations},
 };
@@ -159,6 +163,22 @@ pub fn next_tool_round(
 
 // A reply keeps generating and is saved when its client goes away (a page refresh), instead
 // of being stopped as a network error; the reloaded chat reads it back. Stop still cancels it.
+// An edit becomes a version only for the client that asked for it, so it stops with its stream (the
+// documented "no version is added" on disconnect); any other reply keeps generating and is saved.
+pub fn deliver_reply<S>(
+    events: S,
+    is_edit: bool,
+) -> std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>
+where
+    S: Stream<Item = Result<Event, Infallible>> + Send + 'static,
+{
+    if is_edit {
+        Box::pin(events)
+    } else {
+        Box::pin(detach_from_client(events))
+    }
+}
+
 pub fn detach_from_client<S>(events: S) -> impl Stream<Item = Result<Event, Infallible>> + Send
 where
     S: Stream<Item = Result<Event, Infallible>> + Send + 'static,
@@ -181,6 +201,40 @@ pub fn persistence_error_event_data() -> String {
         detail: ErrorDetailVariant::Rich(detail),
     })
     .unwrap_or_else(|_| "{}".to_string())
+}
+
+const GENERATING_READ_ATTEMPTS: usize = 3;
+
+/// The conversation's messages, oldest first, with the replies still generating among them.
+pub async fn messages_with_generating(
+    state: &SharedState,
+    conversation_id: Uuid,
+) -> Result<(Vec<messages::Model>, HashSet<Uuid>), AppError> {
+    for attempt in 1..=GENERATING_READ_ATTEMPTS {
+        let before = state.generating_replies(conversation_id).await;
+        let rows = messages::Entity::find()
+            .filter(messages::Column::ConversationId.eq(conversation_id))
+            .filter(messages::Column::Deleted.eq(false))
+            .order_by_asc(messages::Column::CreatedAt)
+            .all(&state.database)
+            .await
+            .map_err(|error| {
+                eprintln!("{error}");
+                AppError::DbTimeout
+            })?;
+        let after = state.generating_replies(conversation_id).await;
+        let newest_reply = rows
+            .iter()
+            .rev()
+            .find(|row| row.role == ChatRole::Assistant)
+            .map(|row| row.id);
+        if let Some(generating) =
+            before.settle(after, newest_reply, attempt == GENERATING_READ_ATTEMPTS)
+        {
+            return Ok((rows, generating));
+        }
+    }
+    unreachable!("the last attempt always settles")
 }
 
 pub struct ContentCheckpoint {
@@ -393,6 +447,29 @@ mod tests {
             tokio::task::yield_now().await;
         }
         panic!("reply stopped after the client disconnected");
+    }
+
+    #[tokio::test]
+    async fn an_edit_stops_with_its_client_but_a_reply_keeps_generating() {
+        for (is_edit, expect_finished) in [(true, false), (false, true)] {
+            let produced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counter = produced.clone();
+            let reply = async_stream::stream! {
+                for chunk in 0..100 {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                    yield Ok::<_, Infallible>(Event::default().data(chunk.to_string()));
+                }
+            };
+            let mut client = deliver_reply(reply, is_edit);
+            assert!(client.next().await.is_some());
+            drop(client);
+            for _ in 0..1000 {
+                tokio::task::yield_now().await;
+            }
+            let finished = produced.load(std::sync::atomic::Ordering::SeqCst) == 100;
+            assert_eq!(finished, expect_finished, "is_edit={is_edit}");
+        }
     }
 
     fn model(engine: &str, key: &str, name: &str) -> ModelInfo {

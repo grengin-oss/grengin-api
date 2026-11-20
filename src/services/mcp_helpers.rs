@@ -382,7 +382,7 @@ pub async fn resolve_mcp_oauth_token(
     let refreshed = refresh_token(
         &oauth_config,
         refresh_token_value.secret(),
-        &state.req_client,
+        crate::services::safe_egress::oauth_token_client(),
     )
     .await
     .map_err(|e| {
@@ -821,9 +821,9 @@ async fn start_server_oauth_authorization(
             server.url.as_deref(),
         )
         .map_err(|_| AppError::ResourceNotFound)?;
-        if plugin.is_some_and(|plugin| {
-            plugin.manifest().auth != connector_server_plugin::ConnectorAuth::Oauth2
-        }) {
+        if plugin
+            .is_some_and(|plugin| plugin.manifest().auth != connector_plugin::ConnectorAuth::Oauth2)
+        {
             return Err(AppError::ResourceNotFound);
         }
     }
@@ -960,7 +960,7 @@ pub async fn complete_oauth_authorization(
         &oauth_config,
         &code,
         &oauth_state.pkce_verifier,
-        &state.req_client,
+        crate::services::safe_egress::oauth_token_client(),
     )
     .await;
     let outcome = OAuthCallbackOutcome::from_exchange(&exchange);
