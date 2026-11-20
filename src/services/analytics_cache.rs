@@ -267,10 +267,7 @@ pub async fn get_department_analytics_cached(
     db: &DatabaseConnection,
     query: DepartmentAnalyticsQuery,
 ) -> Result<DepartmentAnalytics, DbErr> {
-    let mut limit = query.limit.unwrap_or(20);
-    if limit == 0 {
-        limit = 20;
-    }
+    let limit = super::pagination::page_limit(query.limit, 20);
     let offset = query.offset.unwrap_or(0);
     let live = query.live.unwrap_or(false);
 

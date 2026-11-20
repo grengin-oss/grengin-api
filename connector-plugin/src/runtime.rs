@@ -3,6 +3,7 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
+    sync::OnceLock,
     time::Duration,
 };
 
@@ -25,7 +26,28 @@ const MAX_ARGUMENT_BYTES: usize = 128 * 1024;
 const MAX_RESULT_BYTES: usize = 1024 * 1024;
 const MAX_URL_BYTES: usize = 16 * 1024;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
-static CONTENT_CALLS: Semaphore = Semaphore::const_new(2);
+// Content calls buffer whole downloads, so the process admits a bounded number at once
+// (CONNECTOR_CONTENT_CALLS, default 2). A call briefly queues for a slot instead of failing
+// as soon as every slot is taken; tokio's semaphore is FIFO, so waiters are served in order.
+static CONTENT_CALLS: OnceLock<Semaphore> = OnceLock::new();
+const DEFAULT_CONTENT_CALLS: usize = 2;
+const MAX_CONTENT_CALLS: usize = 64;
+const CONTENT_CALL_ADMISSION_WAIT: Duration = Duration::from_secs(2);
+
+fn content_calls() -> &'static Semaphore {
+    CONTENT_CALLS.get_or_init(|| {
+        Semaphore::new(content_call_limit(
+            std::env::var("CONNECTOR_CONTENT_CALLS").ok().as_deref(),
+        ))
+    })
+}
+
+fn content_call_limit(configured: Option<&str>) -> usize {
+    configured
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|limit| *limit > 0)
+        .map_or(DEFAULT_CONTENT_CALLS, |limit| limit.min(MAX_CONTENT_CALLS))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectorError {
@@ -517,8 +539,9 @@ impl CompiledConnector {
         let _permit = self.calls.try_acquire().map_err(|_| ConnectorError::Busy)?;
         let _content_permit = if tool.definition.response.is_content() {
             Some(
-                CONTENT_CALLS
-                    .try_acquire()
+                tokio::time::timeout(CONTENT_CALL_ADMISSION_WAIT, content_calls().acquire())
+                    .await
+                    .map_err(|_| ConnectorError::Busy)?
                     .map_err(|_| ConnectorError::Busy)?,
             )
         } else {
@@ -1007,4 +1030,28 @@ fn validate_schema(value: &Value, depth: usize) -> Result<(), ConnectorError> {
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod content_call_tests {
+    #[test]
+    fn content_call_limit_defaults_and_is_bounded() {
+        assert_eq!(
+            super::content_call_limit(None),
+            super::DEFAULT_CONTENT_CALLS
+        );
+        assert_eq!(super::content_call_limit(Some("8")), 8);
+        assert_eq!(
+            super::content_call_limit(Some("0")),
+            super::DEFAULT_CONTENT_CALLS
+        );
+        assert_eq!(
+            super::content_call_limit(Some("lots")),
+            super::DEFAULT_CONTENT_CALLS
+        );
+        assert_eq!(
+            super::content_call_limit(Some("1000")),
+            super::MAX_CONTENT_CALLS
+        );
+    }
 }

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::services::pagination::page_limit;
 use crate::{
     auth::{
         claims::Claims,
@@ -138,7 +139,7 @@ pub async fn get_users(
             None,
         )
         .await?;
-    let limit = query.limit.unwrap_or(30);
+    let limit = page_limit(query.limit, 30);
     let offset = query.offset.unwrap_or(0);
     let page = offset / limit;
     let mut response = PaginatedUsers {
