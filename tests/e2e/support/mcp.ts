@@ -244,12 +244,16 @@ export async function enableConnector(page: Page, serverName: string) {
   await closeComposerMenus(page);
 }
 
-// The picker lists the engine's live model listing (/v1/models), so it shows the model id.
-export async function selectModel(page: Page, modelId: string) {
+// The picker searches by model id and labels rows with the manifest's model name.
+export async function selectModel(page: Page, modelId: string, modelName: string) {
   await page.getByRole('button', { name: 'Select model' }).click();
   const picker = page.getByRole('dialog', { name: 'Select model' });
   await picker.getByRole('textbox', { name: 'Search models…' }).fill(modelId);
-  await picker.getByRole('button', { name: new RegExp(modelId) }).first().click();
+  const row = picker.getByRole('button', { name: modelName });
+  await expect(row).toBeVisible();
+  await row.click();
+  if (await picker.isVisible()) await page.keyboard.press('Escape');
+  await expect(picker).toBeHidden();
   await expect(page.getByRole('button', { name: 'Select model' })).toContainText(modelId);
 }
 

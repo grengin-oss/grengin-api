@@ -5,6 +5,7 @@ import { expect, test } from '@playwright/test';
 import { USERS } from '../../mocks/users.mjs';
 import {
   GATED_MODEL,
+  GATED_MODEL_NAME,
   addUserRule,
   clearRulesViaApi,
   connectorToggle,
@@ -52,6 +53,11 @@ test.describe('MCP access control', () => {
     // Deleting the server drops its access rules; the member gets its previous status back.
     await deleteMcpServer(serverId);
     await restoreStatus('member', memberStatus);
+  });
+  test.afterEach(async () => {
+    // Also runs after a timeout; a leftover engine would change other specs' default model.
+    await releaseHeldCall();
+    await deleteGatedEngine();
   });
   test.beforeEach(async () => {
     await resetMcpCalls();
@@ -143,7 +149,7 @@ test.describe('MCP access control', () => {
     await createGatedEngine();
     const member = await signedInPage(browser, 'member');
     try {
-      await selectModel(member.page, GATED_MODEL);
+      await selectModel(member.page, GATED_MODEL, GATED_MODEL_NAME);
       await enableConnector(member.page, name);
       await sendMessage(member.page, `run it twice [twice:${toolMarker(serverId, 'echo')}]`);
       await expect.poll(async () => (await mcpCalls()).held, { timeout: 30_000 }).toBe(1);
@@ -159,7 +165,6 @@ test.describe('MCP access control', () => {
     } finally {
       await releaseHeldCall();
       await member.context.close();
-      await deleteGatedEngine();
     }
   });
 });
