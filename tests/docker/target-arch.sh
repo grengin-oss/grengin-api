@@ -37,13 +37,13 @@ $block"
   printf 'PASS: %s\n' "$label"
 }
 
-run_case 'legacy unset on x86_64' unset x86_64 x86_64-unknown-linux-musl
-run_case 'legacy empty on x86_64' '' x86_64 x86_64-unknown-linux-musl
-run_case 'legacy unset on aarch64' unset aarch64 aarch64-unknown-linux-musl
-run_case 'BuildKit amd64 overrides host detection' amd64 aarch64 x86_64-unknown-linux-musl
-run_case 'BuildKit arm64 overrides host detection' arm64 x86_64 aarch64-unknown-linux-musl
-run_case 'explicit x86_64 alias' x86_64 aarch64 x86_64-unknown-linux-musl
-run_case 'explicit aarch64 alias' aarch64 x86_64 aarch64-unknown-linux-musl
+run_case 'legacy unset on x86_64' unset x86_64 x86_64-unknown-linux-gnu
+run_case 'legacy empty on x86_64' '' x86_64 x86_64-unknown-linux-gnu
+run_case 'legacy unset on aarch64' unset aarch64 aarch64-unknown-linux-gnu
+run_case 'BuildKit amd64 overrides host detection' amd64 aarch64 x86_64-unknown-linux-gnu
+run_case 'BuildKit arm64 overrides host detection' arm64 x86_64 aarch64-unknown-linux-gnu
+run_case 'explicit x86_64 alias' x86_64 aarch64 x86_64-unknown-linux-gnu
+run_case 'explicit aarch64 alias' aarch64 x86_64 aarch64-unknown-linux-gnu
 run_case 'unsupported explicit target is not silently replaced' ppc64le x86_64 rejected
 run_case 'unsupported native architecture is rejected' unset s390x rejected
 
