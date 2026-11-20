@@ -29,7 +29,7 @@ export async function signIn(page: Page, user: keyof typeof USERS) {
   }
   await expect(page.getByRole('heading', { name: 'E2E identity provider' })).toBeVisible();
   await page.getByTestId(`login-${user}`).click();
-  await page.waitForURL((url) => !url.pathname.includes('/callback') && !url.host.endsWith(':9401'), { timeout: 30_000 });
+  await page.waitForURL((url) => !url.pathname.includes('/callback') && !url.host.endsWith(`:${process.env.OIDC_PORT ?? 9401}`), { timeout: 30_000 });
 }
 
 // First sign-in shows a guided tour over the chat screen; skip it like a returning user would.

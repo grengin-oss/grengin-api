@@ -16,9 +16,11 @@ repo=$(cd "$(dirname "$0")/../../.." && pwd)
 work=${E2E_WORK:-$HOME/grengin-verify/e2e}
 playwright_image=mcr.microsoft.com/playwright:v1.64.0-noble
 db_name=grengin_e2e
-db_port=${E2E_DB_PORT:-55600}
-db_container=grengin-e2e-db-$$
-mkdir -p "$work"/{logs,report,cargo,target,home}
+offset=${E2E_PORT_OFFSET:-0}
+db_port=${E2E_DB_PORT:-$((55600 + offset))}
+db_container=grengin-e2e-db-$offset-$$
+target=${E2E_TARGET_DIR:-$work/target}
+mkdir -p "$work"/{logs,report,cargo,home} "$target"
 
 checkout() {
   local dir=$1 url=$2 ref=$3
@@ -35,12 +37,16 @@ if [[ -z "${CATALOG_DIR:-}" ]]; then
   checkout "$CATALOG_DIR" "${CATALOG_REPO:-git@github.com:perter-tech/grengin-list.git}" "${CATALOG_REF:-main}"
 fi
 
+if [[ ${E2E_SKIP_BUILD:-0} == 1 && -x $target/debug/grengin-api ]]; then
+  echo "== reusing the grengin-api build in $target"
+else
 echo "== building grengin-api ($(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo archive))"
 docker run --rm --user "$(id -u):$(id -g)" --cpus "${E2E_BUILD_CPUS:-8}" \
   -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target -e HOME=/tmp \
-  -v "$repo":/src -v "$work/cargo":/cargo -v "$work/target":/target -w /src rust:1.91 \
+  -v "$repo":/src -v "$work/cargo":/cargo -v "$target":/target -w /src rust:1.91 \
   cargo build --locked -p grengin-api -p migration -j "${E2E_BUILD_CPUS:-8}" > "$work/logs/build.log" 2>&1 \
   || { tail -40 "$work/logs/build.log"; exit 1; }
+fi
 
 echo "== starting PostgreSQL on 127.0.0.1:$db_port"
 docker run -d --rm --name "$db_container" --network host -e POSTGRES_USER=e2e \
@@ -53,8 +59,8 @@ set +e
 docker run --rm --init --network host --ipc host --user "$(id -u):$(id -g)" \
   -e HOME=/home/e2e -e CI=1 \
   -e DATABASE_URL="postgres://e2e:e2e-only@127.0.0.1:$db_port/$db_name" \
-  -e E2E_GREP="${E2E_GREP:-}" \
-  -v "$work/home":/home/e2e -v "$repo":/repo -v "$work/target":/target:ro \
+  -e E2E_GREP="${E2E_GREP:-}" -e E2E_PORT_OFFSET="$offset" -e E2E_WEBAPP_PREBUILT="${E2E_WEBAPP_PREBUILT:-0}" \
+  -v "$work/home":/home/e2e -v "$repo":/repo -v "$target":/target:ro \
   -v "$WEBAPP_DIR":/webapp -v "$CATALOG_DIR":/catalog:ro -v "$work/logs":/logs -v "$work/report":/report \
   -w /repo/tests/e2e "$playwright_image" bash stack/inside.sh
 status=$?
