@@ -214,6 +214,13 @@ serverToolResult   usage              providerEvent
 error              completed
 ```
 
+A matching `doneData` marker ends the HTTP stream immediately, even if the
+provider keeps the connection open. While waiting for a declared final marker,
+semantic completion starts an absolute deadline using the operation's configured
+timeout, preserving delayed usage before that marker. Without a declared marker,
+the trailing-usage window is two seconds. EOF ends either window earlier, and
+heartbeats never reset it. Malformed trailing events still fail validation.
+
 A basic text and completion mapping looks like this:
 
 ```json

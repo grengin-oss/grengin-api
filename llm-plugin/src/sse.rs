@@ -115,9 +115,11 @@ impl SseDecoder {
             self.event_name = None;
             return None;
         }
+        let data = self.data_lines.join("\n");
+        self.data_lines.clear();
         Some(DecodedSseEvent {
             event: self.event_name.take(),
-            data: self.data_lines.drain(..).collect::<Vec<_>>().join("\n"),
+            data,
             id: self.event_id.clone(),
         })
     }
@@ -522,7 +524,7 @@ fn rule_matches(rule: &ResponseRule, value: &Value) -> bool {
         let Some(selected) = selected else {
             return false;
         };
-        if !selected.is_null() != not_null {
+        if selected.is_null() == not_null {
             return false;
         }
     }
