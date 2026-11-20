@@ -26,6 +26,12 @@ function lastUser(messages) {
 function plan(body) {
   const messages = body.messages ?? [];
   const text = lastUser(messages);
+  // Title generation (system prompt "Write a short conversation title…") answers at once with a
+  // title that differs from any reply text, so it neither delays nor shadows the real reply.
+  const system = messages.filter((m) => m.role === 'system').map((m) => String(m.content ?? '')).join(' ');
+  if (/conversation title/i.test(system)) {
+    return { chunks: [`Title: ${text.replace(/\[[^\]]*\]/g, '').trim().slice(0, 40) || 'E2E chat'}`] };
+  }
   const toolResult = messages.at(-1)?.role === 'tool' ? String(messages.at(-1).content) : null;
   if (/\[fail\]/.test(text)) return { fail: true };
   if (toolResult !== null) return { chunks: [`Tool said: ${toolResult}`] };

@@ -31,3 +31,11 @@ export async function signIn(page: Page, user: keyof typeof USERS) {
   await page.getByTestId(`login-${user}`).click();
   await page.waitForURL((url) => !url.pathname.includes('/callback') && !url.host.endsWith(':9401'), { timeout: 30_000 });
 }
+
+// First sign-in shows a guided tour over the chat screen; skip it like a returning user would.
+export async function dismissOnboarding(page: Page) {
+  for (const name of ['Skip tour', 'Hide setup guide']) {
+    const button = page.getByRole('button', { name });
+    if (await button.isVisible().catch(() => false)) await button.click();
+  }
+}
