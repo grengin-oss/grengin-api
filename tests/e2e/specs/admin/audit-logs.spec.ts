@@ -187,6 +187,11 @@ test.describe('audit logs', () => {
       // GET /auth/{provider}/callback has none, so every login row is stored with userId NULL
       // and the table shows "—" instead of who signed in. Remove `fail` once logins carry the user.
       test.fail();
+      const [stored] = await sql<{ userId: string | null }>(
+        `SELECT "userId" FROM audit_logs WHERE action = 'login' AND "createdAt" >= $1 ORDER BY "createdAt" DESC LIMIT 1`,
+        [since],
+      );
+      test.info().annotations.push({ type: 'stored login actor', description: String(stored?.userId) });
       await expect(newest.getByRole('button', { name: `Filter by user ${await ownerId()}` })).toBeVisible({ timeout: 5_000 });
     } finally {
       await context.close();

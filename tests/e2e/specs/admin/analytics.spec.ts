@@ -103,7 +103,7 @@ test.describe('usage analytics', () => {
     await page.getByRole('tab', { name: 'Usage breakdown by user' }).click();
     await page.getByPlaceholder('Search by name, email, or department...').fill(USERS.owner.email);
     const table = page.getByRole('table', { name: 'User usage for the selected date range' });
-    const row = table.getByRole('row').filter({ hasText: USERS.owner.email });
+    const row = table.getByRole('row').filter({ has: page.getByRole('cell', { name: USERS.owner.email, exact: true }) });
     await expect(row).toHaveCount(1, { timeout: 5_000 });
     const mine = await usage(owner);
     const cells = row.getByRole('cell');
@@ -119,7 +119,7 @@ test.describe('usage analytics', () => {
     await page.getByRole('tab', { name: 'Usage breakdown by department' }).click();
     await page.getByPlaceholder('Search by department name...').fill(department.name);
     const table = page.getByRole('table', { name: 'Department usage for the selected date range' });
-    const row = table.getByRole('row').filter({ hasText: department.name });
+    const row = table.getByRole('row').filter({ has: page.getByRole('cell', { name: department.name, exact: true }) });
     await expect(row).toHaveCount(1);
     const cells = row.getByRole('cell');
     // A new department has no members and no usage yet.
