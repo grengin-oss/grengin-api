@@ -84,20 +84,61 @@ async fn set_local_enabled<C: ConnectionTrait>(db: &C, enabled: bool) -> Result<
         .map_err(|_| AuthError::DbTimeout)
 }
 
-/// Records the intent, closes routing at once for a disable, asks the service, and opens
-/// routing for an enable only once confirmed. Returns the operation while it is not applied.
+/// The service calls this module makes. Abstracted so tests can use a slow or lossy service.
+#[async_trait::async_trait]
+trait ModelAccess: Send + Sync {
+    async fn engine_state(&self) -> Result<String, ProviderError>;
+    async fn set_enabled(&self, enabled: bool) -> Result<(), ProviderError>;
+}
+
+struct ServiceModelAccess(&'static GrenginGrant);
+
+#[async_trait::async_trait]
+impl ModelAccess for ServiceModelAccess {
+    async fn engine_state(&self) -> Result<String, ProviderError> {
+        self.0.status().await.map(str::to_owned)
+    }
+
+    async fn set_enabled(&self, enabled: bool) -> Result<(), ProviderError> {
+        self.0.set_models_enabled(enabled).await
+    }
+}
+
+fn service_access() -> Option<ServiceModelAccess> {
+    GrenginGrant::configured().ok().map(ServiceModelAccess)
+}
+
+// After a superseded intent, the service is re-checked against the newest one for this long: a
+// call whose reply was lost may still land after a newer intent was applied.
+const VERIFY_AFTER_SUPERSEDED: chrono::Duration = chrono::Duration::minutes(10);
+const RECONCILE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Records the intent, closes routing at once for a disable, then converges the service and
+/// local routing to the newest intent. Returns this operation while it is not applied.
 pub async fn set_enabled(
     state: &SharedState,
     enabled: bool,
 ) -> Result<(Option<GrenginOperationStatus>, bool), AuthError> {
     let db = &state.database;
-    let operation = record(db, enabled).await?;
     if !enabled {
+        // Before waiting for the lifecycle lock, which a service call may hold for seconds.
+        set_local_enabled(db, false).await?;
         refresh_local_engine(state).await?;
     }
-
-    let outcome = remote_set(enabled).await;
-    let finished = complete(db, operation, enabled, outcome).await?;
+    let operation = record(db, enabled).await?;
+    let access = service_access();
+    converge_with(
+        db,
+        access.as_ref().map(|access| access as &dyn ModelAccess),
+        Utc::now(),
+        LockWait::Wait,
+    )
+    .await?;
+    let finished = operations::Entity::find_by_id(operation.id)
+        .one(db)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?
+        .ok_or(AuthError::DbTimeout)?;
     let local_enabled = refresh_local_engine(state).await?;
     Ok((
         (finished.state != OperationState::Applied).then(|| operation_status(&finished)),
@@ -105,6 +146,7 @@ pub async fn set_enabled(
     ))
 }
 
+/// Takes the next revision. Older open intents are superseded and will never be sent again.
 async fn record(db: &DatabaseConnection, enabled: bool) -> Result<operations::Model, AuthError> {
     let txn = db.begin().await.map_err(|_| AuthError::DbTimeout)?;
     let current = lock_lifecycle(&txn).await?;
@@ -113,6 +155,7 @@ async fn record(db: &DatabaseConnection, enabled: bool) -> Result<operations::Mo
     life.revision = Set(revision);
     life.updated_at = Set(Utc::now());
     life.update(&txn).await.map_err(|_| AuthError::DbTimeout)?;
+    supersede_open(&txn).await?;
     if !enabled {
         set_local_enabled(&txn, false).await?;
     }
@@ -134,15 +177,124 @@ async fn record(db: &DatabaseConnection, enabled: bool) -> Result<operations::Mo
     Ok(operation)
 }
 
-async fn remote_set(enabled: bool) -> Result<(), (OperationState, String)> {
-    let grant = GrenginGrant::configured()
-        .map_err(|_| (OperationState::Failed, "setup_needed".to_owned()))?;
-    grant.set_models_enabled(enabled).await.map_err(classify)?;
+async fn supersede_open(txn: &DatabaseTransaction) -> Result<(), AuthError> {
+    operations::Entity::update_many()
+        .col_expr(
+            operations::Column::State,
+            Expr::value(OperationState::Failed),
+        )
+        .col_expr(operations::Column::ErrorCode, Expr::value("superseded"))
+        .col_expr(operations::Column::UpdatedAt, Expr::value(Utc::now()))
+        .filter(
+            operations::Column::State.is_in([OperationState::Applying, OperationState::Pending]),
+        )
+        .exec(txn)
+        .await
+        .map(|_| ())
+        .map_err(|_| AuthError::DbTimeout)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum LockWait {
+    Wait,
+    // The background reconciler and status reads skip when another process is converging.
+    Skip,
+}
+
+/// The only place that calls the service. It holds the lifecycle row lock for the whole
+/// exchange, so calls are serialized across processes and always carry the newest intent: a
+/// new intent cannot be recorded mid-call, and a superseded one is never sent again.
+async fn converge_with(
+    db: &DatabaseConnection,
+    access: Option<&dyn ModelAccess>,
+    now: chrono::DateTime<Utc>,
+    wait: LockWait,
+) -> Result<(), AuthError> {
+    let txn = db.begin().await.map_err(|_| AuthError::DbTimeout)?;
+    let life = match wait {
+        LockWait::Wait => lock_lifecycle(&txn).await?,
+        LockWait::Skip => match try_lock_lifecycle(&txn).await? {
+            Some(life) => life,
+            None => return Ok(()),
+        },
+    };
+    let latest = operations::Entity::find()
+        .filter(operations::Column::Generation.eq(life.generation))
+        .order_by_desc(operations::Column::Revision)
+        .one(&txn)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
+    let Some(latest) = latest else {
+        return txn.commit().await.map_err(|_| AuthError::DbTimeout);
+    };
+    match latest.state {
+        OperationState::Applying | OperationState::Pending => {
+            let enabled = latest.desired_enabled;
+            let outcome = match access {
+                Some(access) => remote_converge(access, enabled).await,
+                None => Err((OperationState::Failed, "setup_needed".to_owned())),
+            };
+            finish(&txn, &life, latest, enabled, outcome).await?;
+        }
+        OperationState::Applied if verification_due(&txn, &life, &latest, now).await? => {
+            if let Some(access) = access {
+                // A disagreement left by a late call is corrected; a failure is retried next tick.
+                let _ = remote_converge(access, latest.desired_enabled).await;
+            }
+        }
+        OperationState::Applied | OperationState::Failed => {}
+    }
+    txn.commit().await.map_err(|_| AuthError::DbTimeout)
+}
+
+async fn try_lock_lifecycle(
+    txn: &DatabaseTransaction,
+) -> Result<Option<lifecycle::Model>, AuthError> {
+    lifecycle::Entity::find_by_id(LIFECYCLE_ROW)
+        .lock_with_behavior(
+            sea_orm::sea_query::LockType::Update,
+            sea_orm::sea_query::LockBehavior::SkipLocked,
+        )
+        .one(txn)
+        .await
+        .map_err(|_| AuthError::DbTimeout)
+}
+
+async fn verification_due(
+    txn: &DatabaseTransaction,
+    life: &lifecycle::Model,
+    latest: &operations::Model,
+    now: chrono::DateTime<Utc>,
+) -> Result<bool, AuthError> {
+    operations::Entity::find()
+        .filter(operations::Column::Generation.eq(life.generation))
+        .filter(operations::Column::Revision.lt(latest.revision))
+        .filter(operations::Column::ErrorCode.eq("superseded"))
+        .filter(operations::Column::UpdatedAt.gte(now - VERIFY_AFTER_SUPERSEDED))
+        .one(txn)
+        .await
+        .map(|found| found.is_some())
+        .map_err(|_| AuthError::DbTimeout)
+}
+
+/// Reads the service first and sends the idempotent SET only when it disagrees.
+async fn remote_converge(
+    access: &dyn ModelAccess,
+    enabled: bool,
+) -> Result<(), (OperationState, String)> {
+    let engine_state = access
+        .engine_state()
+        .await
+        .map_err(|_| (OperationState::Pending, "status_unavailable".to_owned()))?;
+    if (engine_state != "off") == enabled {
+        return Ok(());
+    }
+    access.set_enabled(enabled).await.map_err(classify)?;
     if enabled {
         // Enabled service states include on, low, empty and pending: an empty balance is not
         // a failed enable. Only a status that cannot be read leaves confirmation pending.
-        let engine_state = grant
-            .status()
+        let engine_state = access
+            .engine_state()
             .await
             .map_err(|_| (OperationState::Pending, "status_unavailable".to_owned()))?;
         if engine_state == "off" {
@@ -162,6 +314,36 @@ fn classify(error: ProviderError) -> (OperationState, String) {
     }
 }
 
+async fn finish(
+    txn: &DatabaseTransaction,
+    life: &lifecycle::Model,
+    operation: operations::Model,
+    enabled: bool,
+    outcome: Result<(), (OperationState, String)>,
+) -> Result<operations::Model, AuthError> {
+    let current = life.generation == operation.generation && life.revision == operation.revision;
+    let (state, error_code) = match outcome {
+        _ if !current => (OperationState::Failed, Some("superseded".to_owned())),
+        Ok(()) if enabled => {
+            if set_local_enabled(txn, true).await? == 1 {
+                (OperationState::Applied, None)
+            } else {
+                (OperationState::Failed, Some("not_installed".to_owned()))
+            }
+        }
+        Ok(()) => (OperationState::Applied, None),
+        Err((state, code)) => (state, Some(code)),
+    };
+    let mut active: operations::ActiveModel = operation.into();
+    active.state = Set(state);
+    active.error_code = Set(error_code);
+    active.updated_at = Set(Utc::now());
+    active.update(txn).await.map_err(|_| AuthError::DbTimeout)
+}
+
+/// Finishes an operation outside convergence; the first decision stands and completion stays
+/// generation/revision fenced.
+#[cfg(test)]
 async fn complete(
     db: &DatabaseConnection,
     operation: operations::Model,
@@ -175,86 +357,31 @@ async fn complete(
         .await
         .map_err(|_| AuthError::DbTimeout)?
         .ok_or(AuthError::DbTimeout)?;
-    // A request and the reconciler can both finish one operation; the first decision stands.
     if matches!(
         stored.state,
         OperationState::Applied | OperationState::Failed
     ) {
         return Ok(stored);
     }
-    let operation = stored;
-    let current = life.generation == operation.generation && life.revision == operation.revision;
-    let (state, error_code) = match outcome {
-        _ if !current => (OperationState::Failed, Some("superseded".to_owned())),
-        Ok(()) if enabled => {
-            if set_local_enabled(&txn, true).await? == 1 {
-                (OperationState::Applied, None)
-            } else {
-                (OperationState::Failed, Some("not_installed".to_owned()))
-            }
-        }
-        Ok(()) => (OperationState::Applied, None),
-        Err((state, code)) => (state, Some(code)),
-    };
-    let mut active: operations::ActiveModel = operation.into();
-    active.state = Set(state);
-    active.error_code = Set(error_code);
-    active.updated_at = Set(Utc::now());
-    let finished = active
-        .update(&txn)
-        .await
-        .map_err(|_| AuthError::DbTimeout)?;
+    let finished = finish(&txn, &life, stored, enabled, outcome).await?;
     txn.commit().await.map_err(|_| AuthError::DbTimeout)?;
     Ok(finished)
 }
 
-// An operation still Applying after this long lost its request (timeout, crash or restart).
-const ABANDONED_AFTER: chrono::Duration = chrono::Duration::seconds(60);
-const RECONCILE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Finishes the latest intent if it is still open: reads the service state first and repeats
-/// the idempotent SET only when the service disagrees. Completion stays generation/revision
-/// fenced, so a superseded intent can never open routing.
+/// Converges after restarts and temporary failures, and re-checks the service after a
+/// superseded intent. Skips when another process holds the lifecycle.
 pub async fn reconcile(state: &SharedState) -> Result<(), AuthError> {
-    let Some(operation) = open_intent(&state.database, Utc::now()).await? else {
-        return Ok(());
-    };
-    let enabled = operation.desired_enabled;
-    let outcome = remote_reconcile(enabled).await;
-    complete(&state.database, operation, enabled, outcome).await?;
+    let access = service_access();
+    converge_with(
+        &state.database,
+        access.as_ref().map(|access| access as &dyn ModelAccess),
+        Utc::now(),
+        LockWait::Skip,
+    )
+    .await?;
     refresh_local_engine(state).await.map(|_| ())
 }
 
-async fn open_intent(
-    db: &DatabaseConnection,
-    now: chrono::DateTime<Utc>,
-) -> Result<Option<operations::Model>, AuthError> {
-    let latest = operations::Entity::find()
-        .order_by_desc(operations::Column::Revision)
-        .one(db)
-        .await
-        .map_err(|_| AuthError::DbTimeout)?;
-    Ok(latest.filter(|operation| match operation.state {
-        OperationState::Pending => true,
-        OperationState::Applying => operation.updated_at <= now - ABANDONED_AFTER,
-        OperationState::Applied | OperationState::Failed => false,
-    }))
-}
-
-async fn remote_reconcile(enabled: bool) -> Result<(), (OperationState, String)> {
-    let grant = GrenginGrant::configured()
-        .map_err(|_| (OperationState::Failed, "setup_needed".to_owned()))?;
-    let engine_state = grant
-        .status()
-        .await
-        .map_err(|_| (OperationState::Pending, "status_unavailable".to_owned()))?;
-    if (engine_state != "off") == enabled {
-        return Ok(());
-    }
-    remote_set(enabled).await
-}
-
-/// Retries open intents after restarts and temporary service failures.
 pub fn spawn_reconciler(state: SharedState) {
     tokio::spawn(async move {
         loop {
@@ -280,19 +407,7 @@ async fn close_installation(db: &DatabaseConnection, engine_id: Uuid) -> Result<
     life.revision = Set(current.revision + 1);
     life.updated_at = Set(Utc::now());
     life.update(&txn).await.map_err(|_| AuthError::DbTimeout)?;
-    operations::Entity::update_many()
-        .col_expr(
-            operations::Column::State,
-            Expr::value(OperationState::Failed),
-        )
-        .col_expr(operations::Column::ErrorCode, Expr::value("superseded"))
-        .col_expr(operations::Column::UpdatedAt, Expr::value(Utc::now()))
-        .filter(
-            operations::Column::State.is_in([OperationState::Applying, OperationState::Pending]),
-        )
-        .exec(&txn)
-        .await
-        .map_err(|_| AuthError::DbTimeout)?;
+    supersede_open(&txn).await?;
     ai_engines::Entity::delete_by_id(engine_id)
         .exec(&txn)
         .await
@@ -744,49 +859,180 @@ mod tests {
         assert_eq!(again.error_code, None);
     }
 
-    #[tokio::test]
-    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable, migrated database)"]
-    async fn only_pending_or_abandoned_latest_intents_are_reconciled() {
+    /// A service whose calls take `delay`; with `lose_next_reply`, the next SET reply is lost
+    /// (the caller sees a transport error) while the change still lands `late` afterwards.
+    struct FakeService {
+        enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        delay: std::time::Duration,
+        lose_next_reply: std::sync::atomic::AtomicBool,
+        late: std::time::Duration,
+        sets: std::sync::Mutex<Vec<bool>>,
+    }
+
+    impl FakeService {
+        fn new(enabled: bool, delay_ms: u64) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(enabled)),
+                delay: std::time::Duration::from_millis(delay_ms),
+                lose_next_reply: false.into(),
+                late: std::time::Duration::from_millis(300),
+                sets: Default::default(),
+            })
+        }
+        fn remote(&self) -> bool {
+            self.enabled.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ModelAccess for FakeService {
+        async fn engine_state(&self) -> Result<String, ProviderError> {
+            Ok(if self.remote() { "on" } else { "off" }.into())
+        }
+        async fn set_enabled(&self, enabled: bool) -> Result<(), ProviderError> {
+            tokio::time::sleep(self.delay).await;
+            self.sets.lock().unwrap().push(enabled);
+            if self
+                .lose_next_reply
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                let remote = self.enabled.clone();
+                let late = self.late;
+                tokio::spawn(async move {
+                    tokio::time::sleep(late).await;
+                    remote.store(enabled, std::sync::atomic::Ordering::SeqCst);
+                });
+                return Err(ProviderError::Transport("reply lost".into()));
+            }
+            self.enabled
+                .store(enabled, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    async fn converge(db: &DatabaseConnection, service: &FakeService, wait: LockWait) {
+        converge_with(db, Some(service), Utc::now(), wait)
+            .await
+            .unwrap();
+    }
+
+    // Intent A starts converging with a slow service; intent B is requested during that call.
+    async fn concurrent_intents(first: bool, second: bool) {
         let db = database().await;
         install(&db).await;
-        let now = Utc::now();
-        let applying = record(&db, true).await.unwrap();
-        // Still in flight: its request may yet finish it.
-        assert!(open_intent(&db, now).await.unwrap().is_none());
-        // Lost after a crash or timeout: picked up once abandoned.
-        let later = now + ABANDONED_AFTER + chrono::Duration::seconds(1);
-        assert_eq!(
-            open_intent(&db, later).await.unwrap().map(|op| op.id),
-            Some(applying.id)
-        );
-        let pending = complete(
-            &db,
-            applying,
-            true,
-            Err((OperationState::Pending, "status_unavailable".into())),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            open_intent(&db, now).await.unwrap().map(|op| op.id),
-            Some(pending.id)
-        );
-        // Reconciled successfully: routing opens because it is still the latest intent.
-        let done = complete(&db, pending, true, Ok(())).await.unwrap();
-        assert_eq!(done.state, OperationState::Applied);
+        let service = FakeService::new(!first, 400);
+        let (db_a, service_a) = (db.clone(), service.clone());
+        let a = tokio::spawn(async move {
+            record(&db_a, first).await.unwrap();
+            converge(&db_a, &service_a, LockWait::Wait).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let (db_b, service_b) = (db.clone(), service.clone());
+        let b = tokio::spawn(async move {
+            record(&db_b, second).await.unwrap();
+            converge(&db_b, &service_b, LockWait::Wait).await;
+        });
+        a.await.unwrap();
+        b.await.unwrap();
+        // The service and local routing both end on the newest intent.
+        assert_eq!(service.remote(), second);
+        assert_eq!(enabled(&db).await, Some(second));
+        assert_eq!(*service.sets.lock().unwrap(), vec![first, second]);
+        // A background pass while another process converges skips instead of waiting.
+        converge(&db, &service, LockWait::Skip).await;
+        assert_eq!(service.remote(), second);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable, migrated database)"]
+    async fn a_newer_enable_during_a_slow_disable_call_wins_at_the_service_and_locally() {
+        concurrent_intents(false, true).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable, migrated database)"]
+    async fn a_newer_disable_during_a_slow_enable_call_wins_at_the_service_and_locally() {
+        concurrent_intents(true, false).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable, migrated database)"]
+    async fn a_lost_call_that_lands_after_a_newer_intent_is_corrected() {
+        for (stale, newest) in [(false, true), (true, false)] {
+            let db = database().await;
+            install(&db).await;
+            let service = FakeService::new(newest, 10);
+            // The stale intent's reply is lost; its change reaches the service later.
+            service
+                .lose_next_reply
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            record(&db, stale).await.unwrap();
+            converge(&db, &service, LockWait::Wait).await;
+            // The newest intent sees the service still matching and is applied at once.
+            record(&db, newest).await.unwrap();
+            converge(&db, &service, LockWait::Wait).await;
+            assert_eq!(enabled(&db).await, Some(newest));
+            // Then the stale change lands and contradicts the newest intent.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            assert_eq!(service.remote(), stale);
+            // The next reconciliation pass re-checks and converges the service to it.
+            converge(&db, &service, LockWait::Skip).await;
+            assert_eq!(service.remote(), newest);
+            assert_eq!(enabled(&db).await, Some(newest));
+            // Outside the re-check window an applied intent is left alone.
+            converge_with(
+                &db,
+                Some(service.as_ref()),
+                Utc::now() + VERIFY_AFTER_SUPERSEDED + chrono::Duration::minutes(1),
+                LockWait::Skip,
+            )
+            .await
+            .unwrap();
+            let sets = service.sets.lock().unwrap().len();
+            service
+                .enabled
+                .store(stale, std::sync::atomic::Ordering::SeqCst);
+            converge_with(
+                &db,
+                Some(service.as_ref()),
+                Utc::now() + VERIFY_AFTER_SUPERSEDED + chrono::Duration::minutes(1),
+                LockWait::Skip,
+            )
+            .await
+            .unwrap();
+            assert_eq!(service.sets.lock().unwrap().len(), sets);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable, migrated database)"]
+    async fn an_open_intent_is_finished_by_the_next_pass_after_a_failed_call() {
+        let db = database().await;
+        install(&db).await;
+        let service = FakeService::new(false, 10);
+        service
+            .lose_next_reply
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let operation = record(&db, true).await.unwrap();
+        converge(&db, &service, LockWait::Wait).await;
+        let stored = operations::Entity::find_by_id(operation.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, OperationState::Pending);
+        assert_eq!(enabled(&db).await, Some(false));
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Restart or timer: the service already has it, so no second SET is sent.
+        converge(&db, &service, LockWait::Skip).await;
+        let stored = operations::Entity::find_by_id(operation.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, OperationState::Applied);
         assert_eq!(enabled(&db).await, Some(true));
-        assert!(open_intent(&db, later).await.unwrap().is_none());
-        // A definite failure is not retried.
-        let refused = record(&db, true).await.unwrap();
-        complete(
-            &db,
-            refused,
-            true,
-            Err((OperationState::Failed, "consent_required".into())),
-        )
-        .await
-        .unwrap();
-        assert!(open_intent(&db, later).await.unwrap().is_none());
+        assert_eq!(service.sets.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
