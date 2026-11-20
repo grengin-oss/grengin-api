@@ -9,7 +9,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -40,6 +40,7 @@ use crate::{
     services::{
         client_ip::TrustedProxies,
         file_storage::{FileWrite, StorageCategory, store_file_bytes},
+        llm_usage_gate::{ModelRates, UsageCharge, UsagePurpose, UsageSubject},
         project_source_processing::process_project_source,
         rag::{EmbeddingTarget, embed_messages, update_conversation_summary},
     },
@@ -64,6 +65,7 @@ fn embedding_cost() -> Decimal {
 struct Calls {
     chat: AtomicUsize,
     embed: AtomicUsize,
+    omit_usage: AtomicBool,
 }
 
 struct FakeProvider {
@@ -98,16 +100,20 @@ impl ChatProvider for FakeProvider {
     async fn start(&self, request: ChatRequest) -> Result<Box<dyn ChatSession>, ProviderError> {
         assert_eq!(request.model.as_str(), TEXT_MODEL);
         self.calls.chat.fetch_add(1, Ordering::SeqCst);
-        Ok(Box::new(FakeSession))
+        Ok(Box::new(FakeSession {
+            omit_usage: self.calls.omit_usage.load(Ordering::SeqCst),
+        }))
     }
 }
 
-struct FakeSession;
+struct FakeSession {
+    omit_usage: bool,
+}
 
 #[async_trait]
 impl ChatSession for FakeSession {
     async fn stream(&mut self) -> Result<ProviderEventStream, ProviderError> {
-        Ok(Box::pin(stream::iter(vec![
+        let mut events = vec![
             Ok(ProviderEvent::TextDelta {
                 text: "Fixture notes about quarterly budgets and owners.".to_string(),
             }),
@@ -121,7 +127,11 @@ impl ChatSession for FakeSession {
             Ok(ProviderEvent::Completed {
                 finish_reason: None,
             }),
-        ])))
+        ];
+        if self.omit_usage {
+            events.retain(|event| !matches!(event, Ok(ProviderEvent::Usage { .. })));
+        }
+        Ok(Box::pin(stream::iter(events)))
     }
 
     async fn continue_with_tools(
@@ -655,4 +665,138 @@ async fn a_blocked_department_skips_summaries_and_embeddings_quietly() {
     assert!(summary_row.is_none());
     assert_eq!(calls, (0, 0));
     assert_eq!(after, before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn an_extraction_without_reported_usage_is_charged_an_estimate_not_zero() {
+    let fixture = Fixture::new(false).await;
+    fixture.calls.omit_usage.store(true, Ordering::SeqCst);
+    let source = fixture.project_source().await;
+
+    let status = fixture.source_status(source).await;
+    let ledger = fixture.ledger().await;
+    let calls = fixture.calls.chat.load(Ordering::SeqCst);
+    fixture.cleanup().await;
+    assert_eq!(
+        status.processing_status, "ready",
+        "{:?}",
+        status.processing_error
+    );
+    assert_eq!(calls, 1);
+    let extraction = charges_for(&ledger, "source_extraction");
+    assert_eq!(extraction.len(), 1);
+    assert!(
+        extraction[0].cost_usd > Decimal::ZERO,
+        "{:?}",
+        extraction[0]
+    );
+    assert!(
+        extraction[0].request_tokens >= 1_600,
+        "the image is estimated"
+    );
+    assert!(extraction[0].response_tokens > 0, "the reply is estimated");
+    assert_eq!(
+        extraction[0]
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("estimatedTokens")),
+        Some(&json!(true))
+    );
+}
+
+fn summary_charge(fixture: &Fixture, user: Uuid, conversation: Option<Uuid>) -> UsageCharge {
+    UsageCharge::pre_authorized(
+        UsageSubject {
+            user_id: user,
+            purpose: UsagePurpose::ConversationSummary,
+            conversation_id: conversation,
+        },
+        Some(fixture.department),
+        &fixture.engine_key,
+        TEXT_MODEL,
+        ModelRates {
+            input: Some(2.0),
+            output: Some(8.0),
+        },
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn deleting_the_conversation_first_does_not_lose_its_charge() {
+    let fixture = Fixture::new(false).await;
+    let conversation = fixture.conversation().await;
+    let charge = summary_charge(&fixture, fixture.user, Some(conversation));
+    fixture
+        .db
+        .execute_unprepared(&format!(
+            "DELETE FROM conversations WHERE id = '{conversation}'"
+        ))
+        .await
+        .expect("delete conversation");
+
+    let recorded = charge
+        .record(
+            &fixture.state,
+            crate::services::llm_usage_gate::TokenCounts::reported(100, 20),
+        )
+        .await;
+    let ledger = fixture.ledger().await;
+    fixture.cleanup().await;
+    assert!(recorded.is_ok(), "{recorded:?}");
+    assert_eq!(ledger.len(), 1, "the charge must survive the deletion");
+    assert_eq!(ledger[0].conversation_id, None);
+    assert_eq!(ledger[0].cost_usd, chat_cost());
+    assert_eq!(
+        ledger[0]
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("conversationId")),
+        Some(&json!(conversation))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn recording_one_charge_twice_writes_one_row() {
+    let fixture = Fixture::new(false).await;
+    let conversation = fixture.conversation().await;
+    let charge = summary_charge(&fixture, fixture.user, Some(conversation));
+    let tokens = crate::services::llm_usage_gate::TokenCounts::reported(100, 20);
+
+    let first = charge.record(&fixture.state, tokens).await;
+    let second = charge.record(&fixture.state, tokens).await;
+    let ledger = fixture.ledger().await;
+    fixture.cleanup().await;
+    assert!(first.is_ok() && second.is_ok(), "{first:?} {second:?}");
+    assert_eq!(ledger.len(), 1);
+    assert_eq!(ledger[0].conversation_id, Some(conversation));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn a_charge_that_cannot_be_written_is_reported_to_the_caller() {
+    let fixture = Fixture::new(false).await;
+    let missing_user = Uuid::new_v4();
+    let charge = summary_charge(&fixture, missing_user, None);
+
+    let recorded = charge
+        .record(
+            &fixture.state,
+            crate::services::llm_usage_gate::TokenCounts::reported(100, 20),
+        )
+        .await;
+    let rows = usage_logs::Entity::find()
+        .filter(usage_logs::Column::UserId.eq(missing_user))
+        .all(&fixture.db)
+        .await
+        .expect("ledger rows")
+        .len();
+    fixture.cleanup().await;
+    assert!(
+        matches!(recorded, Err(crate::error::AppError::DbTimeout)),
+        "{recorded:?}"
+    );
+    assert_eq!(rows, 0);
 }

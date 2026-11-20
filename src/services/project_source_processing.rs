@@ -245,12 +245,18 @@ async fn extract_text_via_llm(
             provider: choice.provider_key.clone(),
         }
     })?;
+    // Text from a call whose spend could not be recorded is not indexed.
     charge
         .record(
             app_state,
-            TokenCounts::reported(result.input_tokens, result.output_tokens),
+            TokenCounts::for_text_reply(
+                result.input_tokens,
+                result.output_tokens,
+                result.estimated_input_tokens,
+                &result.text,
+            ),
         )
-        .await;
+        .await?;
 
     Ok(result.text)
 }

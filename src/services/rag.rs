@@ -24,7 +24,8 @@ use crate::{
         embedders_cache::get_model_dimensions,
         embedding_helpers::storage_embedding_dimensions,
         llm_usage_gate::{
-            TokenCounts, UsagePurpose, UsageSubject, authorize_usage, is_usage_refusal,
+            TokenCounts, TokenEstimate, UsagePurpose, UsageSubject, authorize_usage,
+            estimate_text_tokens, is_usage_refusal,
         },
         provider_chat::{generate_provider_text, provider_error_class},
         provider_resolver::resolve_provider,
@@ -545,13 +546,8 @@ fn message_to_prompt(message: messages::Model) -> Prompt {
 fn estimate_tokens(prompts: &[Prompt]) -> usize {
     prompts
         .iter()
-        .map(|prompt| estimate_tokens_for_text(&prompt.text))
+        .map(|prompt| usize::try_from(estimate_text_tokens(&prompt.text)).unwrap_or_default())
         .sum()
-}
-
-fn estimate_tokens_for_text(text: &str) -> usize {
-    let chars = text.chars().count();
-    (chars + 3) / 4
 }
 
 fn truncate_text(text: &str, max_chars: usize) -> String {
@@ -614,8 +610,8 @@ pub async fn generate_embeddings(
     .await?;
     let estimated_input = inputs
         .iter()
-        .map(|input| estimate_tokens_for_text(input))
-        .sum();
+        .map(|input| estimate_text_tokens(input))
+        .fold(0i32, i32::saturating_add);
     let response = embedder
         .embed(llm_plugin::EmbeddingRequest {
             model: llm_plugin::ModelId::new(config.model.clone()),
@@ -638,7 +634,7 @@ pub async fn generate_embeddings(
             app_state,
             embedding_tokens(response.usage.as_ref(), estimated_input),
         )
-        .await;
+        .await?;
     if !embedding_dimensions_match(&response.vectors, target_dim) {
         return Err(AppError::ValidationMissingField {
             field: "embedding.dimensions",
@@ -652,15 +648,18 @@ fn embedding_dimensions_match(vectors: &[Vec<f32>], target: Option<usize>) -> bo
 }
 
 // Providers that report no embedding usage are charged an estimate, so the call still counts.
-fn embedding_tokens(usage: Option<&llm_plugin::TokenUsage>, estimated_input: usize) -> TokenCounts {
-    match usage.and_then(|usage| usage.input_tokens.or(usage.total_tokens)) {
-        Some(input) => TokenCounts::reported(i32::try_from(input).unwrap_or(i32::MAX), 0),
-        None => TokenCounts {
-            input: i32::try_from(estimated_input).unwrap_or(i32::MAX),
+fn embedding_tokens(usage: Option<&llm_plugin::TokenUsage>, estimated_input: i32) -> TokenCounts {
+    let reported = usage
+        .and_then(|usage| usage.input_tokens.or(usage.total_tokens))
+        .map(|tokens| i32::try_from(tokens).unwrap_or(i32::MAX));
+    TokenCounts::with_fallback(
+        reported,
+        Some(0),
+        TokenEstimate {
+            input: estimated_input,
             output: 0,
-            estimated: true,
         },
-    }
+    )
 }
 
 fn skip_refused<T>(result: Result<Option<T>, AppError>) -> Result<Option<T>, AppError> {
@@ -743,12 +742,18 @@ async fn generate_summary_text(
             provider: choice.provider_key.clone(),
         }
     })?;
+    // A summary whose spend could not be recorded is not saved.
     charge
         .record(
             app_state,
-            TokenCounts::reported(response.input_tokens, response.output_tokens),
+            TokenCounts::for_text_reply(
+                response.input_tokens,
+                response.output_tokens,
+                response.estimated_input_tokens,
+                &response.text,
+            ),
         )
-        .await;
+        .await?;
     Ok(Some(response.text.trim().to_string()))
 }
 

@@ -889,16 +889,21 @@ pub async fn handle_chat_stream(
             .as_ref()
             .map(|response| response.title.clone())
             .or_else(|| Some(first_prompt.chars().take(80).collect::<String>()));
-        let title_tokens = title_result
-            .as_ref()
-            .map(|response| TokenCounts::reported(response.input_tokens, response.output_tokens));
-        new_metadata["titleGenerationUsage"] = title_result.map_or_else(
+        let title_tokens = title_result.as_ref().map(|response| {
+            TokenCounts::for_text_reply(
+                response.input_tokens,
+                response.output_tokens,
+                response.estimated_input_tokens,
+                &response.title,
+            )
+        });
+        new_metadata["titleGenerationUsage"] = title_tokens.map_or_else(
             || json!({ "model": Value::Null, "inputTokens": 0, "outputTokens": 0 }),
-            |response| {
+            |tokens| {
                 json!({
                     "model": model_name,
-                    "inputTokens": response.input_tokens,
-                    "outputTokens": response.output_tokens,
+                    "inputTokens": tokens.input,
+                    "outputTokens": tokens.output,
                 })
             },
         );
@@ -929,7 +934,7 @@ pub async fn handle_chat_stream(
                 AppError::DbTimeout
             })?;
         if let Some(tokens) = title_tokens {
-            title_charge.record(&app_state, tokens).await;
+            title_charge.record(&app_state, tokens).await?;
         }
         (new_conversation_id, generated_title)
     };
@@ -2965,8 +2970,8 @@ pub async fn handle_chat_stream(
                        let model_clone = model_name.clone();
                        let owner = claims.user_id;
                        tokio::spawn(async move {
-                           if do_embed { let _ = embed_messages(&state, owner, targets).await; }
-                           if do_summary { let _ = update_conversation_summary(&state, owner, conversation_id, &provider_clone, &model_clone).await; }
+                           if do_embed && let Err(error) = embed_messages(&state, owner, targets).await { eprintln!("message indexing failed: {error:?}"); }
+                           if do_summary && let Err(error) = update_conversation_summary(&state, owner, conversation_id, &provider_clone, &model_clone).await { eprintln!("conversation summary failed: {error:?}"); }
                        });
                    }
                }
