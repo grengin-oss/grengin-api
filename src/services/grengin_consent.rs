@@ -236,7 +236,7 @@ async fn converge_with(
             };
             finish(&txn, &life, latest, enabled, outcome).await?;
         }
-        OperationState::Applied if verification_due(&txn, &life, &latest, now).await? => {
+        OperationState::Applied if verification_due(&txn, &latest, now).await? => {
             if let Some(access) = access {
                 // A disagreement left by a late call is corrected; a failure is retried next tick.
                 let _ = remote_converge(access, latest.desired_enabled).await;
@@ -262,12 +262,13 @@ async fn try_lock_lifecycle(
 
 async fn verification_due(
     txn: &DatabaseTransaction,
-    life: &lifecycle::Model,
     latest: &operations::Model,
     now: chrono::DateTime<Utc>,
 ) -> Result<bool, AuthError> {
+    // Any generation: deleting and reinstalling the local engine keeps the same service
+    // installation, so a call from before the deletion can still land. Revisions keep
+    // increasing across generations, so "older" is well defined.
     operations::Entity::find()
-        .filter(operations::Column::Generation.eq(life.generation))
         .filter(operations::Column::Revision.lt(latest.revision))
         .filter(operations::Column::ErrorCode.eq("superseded"))
         .filter(operations::Column::UpdatedAt.gte(now - VERIFY_AFTER_SUPERSEDED))
@@ -1002,6 +1003,32 @@ mod tests {
             .unwrap();
             assert_eq!(service.sets.lock().unwrap().len(), sets);
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable, migrated database)"]
+    async fn a_lost_call_from_before_a_reinstall_is_corrected_for_the_new_installation() {
+        let db = database().await;
+        let engine = install(&db).await;
+        let service = FakeService::new(true, 10);
+        // A disable whose reply is lost; its change reaches the service later.
+        service
+            .lose_next_reply
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        record(&db, false).await.unwrap();
+        converge(&db, &service, LockWait::Wait).await;
+        // The engine is deleted and installed again: a new local generation, same service.
+        close_installation(&db, engine).await.unwrap();
+        install(&db).await;
+        record(&db, true).await.unwrap();
+        converge(&db, &service, LockWait::Wait).await;
+        assert_eq!(enabled(&db).await, Some(true));
+        // The old disable lands and turns the service off behind the new installation.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(!service.remote());
+        converge(&db, &service, LockWait::Skip).await;
+        assert!(service.remote());
+        assert_eq!(enabled(&db).await, Some(true));
     }
 
     #[tokio::test]
