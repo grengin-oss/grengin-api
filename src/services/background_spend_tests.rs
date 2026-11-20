@@ -800,3 +800,39 @@ async fn a_charge_that_cannot_be_written_is_reported_to_the_caller() {
     );
     assert_eq!(rows, 0);
 }
+
+// The first insert commits, then the caller is told the connection dropped, as when a commit's
+// acknowledgement is lost. Retrying must not charge twice.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn a_committed_write_whose_acknowledgement_is_lost_is_not_charged_twice() {
+    use sea_orm::{DbErr, RuntimeErr};
+    let fixture = Fixture::new(false).await;
+    let conversation = fixture.conversation().await;
+    let charge = summary_charge(&fixture, fixture.user, Some(conversation));
+    let tokens = crate::services::llm_usage_gate::TokenCounts::reported(100, 20);
+    let attempts = AtomicUsize::new(0);
+    let (db, charge_ref, attempts_ref) = (&fixture.state.database, &charge, &attempts);
+
+    let written = charge
+        .write_with_retries(move |conversation_id| {
+            let attempt = attempts_ref.fetch_add(1, Ordering::SeqCst);
+            async move {
+                charge_ref.insert_row(db, tokens, conversation_id).await?;
+                if attempt == 0 {
+                    return Err(DbErr::Conn(RuntimeErr::Internal(
+                        "connection closed after commit".to_string(),
+                    )));
+                }
+                Ok(())
+            }
+        })
+        .await;
+    let ledger = fixture.ledger().await;
+    let attempts = attempts.load(Ordering::SeqCst);
+    fixture.cleanup().await;
+    assert!(written.is_ok(), "{written:?}");
+    assert_eq!(attempts, 2, "the lost acknowledgement is retried");
+    assert_eq!(ledger.len(), 1, "the retry must not add a second charge");
+    assert_eq!(ledger[0].cost_usd, chat_cost());
+}

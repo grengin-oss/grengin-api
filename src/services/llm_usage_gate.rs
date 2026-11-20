@@ -211,14 +211,41 @@ impl UsageCharge {
     // The row id is fixed when the charge is authorized, so a write retried after an unknown
     // outcome (or recording the same charge twice) leaves exactly one row.
     pub async fn record(&self, state: &SharedState, tokens: TokenCounts) -> Result<(), AppError> {
+        let db = &state.database;
+        self.write_with_retries(move |conversation_id| {
+            self.insert_row(db, tokens, conversation_id)
+        })
+        .await
+        .map_err(|error| {
+            eprintln!(
+                "usage ledger write failed for {} charge {}: {error}",
+                self.subject.purpose, self.id
+            );
+            AppError::DbTimeout
+        })?;
+        let Some(department_id) = self.department_id else {
+            return Ok(());
+        };
+        if let Err(error) = refresh_department_budget_available(db, department_id).await {
+            eprintln!("refresh budget available error: {error}");
+        } else if let Err(error) = emit_budget_alerts(state, department_id).await {
+            eprintln!("emit budget alert error: {error:?}");
+        }
+        Ok(())
+    }
+
+    // A transient error can arrive after the insert committed (a lost acknowledgement); the retry
+    // reuses this charge's id, so ON CONFLICT turns it into a no-op instead of a second charge.
+    pub(super) async fn write_with_retries<W, F>(&self, mut write: W) -> Result<(), DbErr>
+    where
+        W: FnMut(Option<Uuid>) -> F,
+        F: Future<Output = Result<(), DbErr>>,
+    {
         let mut conversation_id = self.subject.conversation_id;
         let mut attempt = 1;
         loop {
-            match self
-                .insert_row(&state.database, tokens, conversation_id)
-                .await
-            {
-                Ok(()) => break,
+            match write(conversation_id).await {
+                Ok(()) => return Ok(()),
                 // The conversation was deleted after the call; its id stays in the metadata, as the
                 // foreign key's ON DELETE SET NULL would have left a row written earlier.
                 Err(error) if conversation_id.is_some() && violates_conversation_key(&error) => {
@@ -232,29 +259,12 @@ impl UsageCharge {
                     tokio::time::sleep(Duration::from_millis(100 * u64::from(attempt))).await;
                     attempt += 1;
                 }
-                Err(error) => {
-                    eprintln!(
-                        "usage ledger write failed for {} charge {}: {error}",
-                        self.subject.purpose, self.id
-                    );
-                    return Err(AppError::DbTimeout);
-                }
+                Err(error) => return Err(error),
             }
         }
-        let Some(department_id) = self.department_id else {
-            return Ok(());
-        };
-        if let Err(error) =
-            refresh_department_budget_available(&state.database, department_id).await
-        {
-            eprintln!("refresh budget available error: {error}");
-        } else if let Err(error) = emit_budget_alerts(state, department_id).await {
-            eprintln!("emit budget alert error: {error:?}");
-        }
-        Ok(())
     }
 
-    async fn insert_row(
+    pub(super) async fn insert_row(
         &self,
         db: &DatabaseConnection,
         tokens: TokenCounts,
