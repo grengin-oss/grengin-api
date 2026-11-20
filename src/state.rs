@@ -827,9 +827,11 @@ mod tests {
         let after = registry.generating(conversation);
         assert!(before.replies.contains(&reply));
         assert_eq!(before.settle(after, Some(reply), false), None);
-        let settled = registry
-            .generating(conversation)
-            .settle(registry.generating(conversation), Some(reply), false);
+        let settled = registry.generating(conversation).settle(
+            registry.generating(conversation),
+            Some(reply),
+            false,
+        );
         assert_eq!(settled, Some([].into()));
     }
 

@@ -16,6 +16,7 @@ use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+use crate::services::pagination::page_limit;
 use crate::{
     auth::{
         claims::Claims,
@@ -714,7 +715,7 @@ pub async fn get_my_administered_department_members(
 ) -> Result<(StatusCode, Json<MeDepartmentUsersResponse>), AuthError> {
     let include_sub_department = query.include_sub_department.unwrap_or(false);
     let department_id = query.department_id;
-    let limit = query.limit.unwrap_or(30).max(1);
+    let limit = page_limit(query.limit, 30);
     let offset = query.offset.unwrap_or(0);
     let page = offset / limit;
     let mut response = MeDepartmentUsersResponse {
