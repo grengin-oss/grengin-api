@@ -24,7 +24,7 @@ pub fn validate_url(url: &Url, insecure: bool, private: bool) -> Result<(), Conn
     }
 }
 
-pub(crate) fn validate_ip(ip: IpAddr, private: bool) -> Result<(), ConnectorError> {
+pub fn validate_ip(ip: IpAddr, private: bool) -> Result<(), ConnectorError> {
     // Even private-network approval must not expose cloud metadata credentials.
     let link_local = match ip {
         IpAddr::V4(ip) => ip.is_link_local(),

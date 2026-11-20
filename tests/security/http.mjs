@@ -164,7 +164,8 @@ try {
   sql(`UPDATE messages m SET cost=60 FROM conversations c WHERE m."conversationId"=c.id AND c."userId"=${quote(otherId)} AND m.role='assistant'`);
   await expect('PUT',`/admin/departments/${child.id}`,{budget_allocated:80},200);
   check('funding a child does not double-count its historical spend',sql(`SELECT "budgetAllocated"::int FROM departments WHERE id=${quote(child.id)}`),'80');
-  sql(`UPDATE departments SET "budgetAllocated"=0 WHERE id=${quote(child.id)}; UPDATE messages m SET cost=0 FROM conversations c WHERE m."conversationId"=c.id AND c."userId"=${quote(otherId)}`);
+  // Spend is an append-only ledger, so a test resets it there rather than by lowering message costs.
+  sql(`UPDATE departments SET "budgetAllocated"=0 WHERE id=${quote(child.id)}; UPDATE messages m SET cost=0 FROM conversations c WHERE m."conversationId"=c.id AND c."userId"=${quote(otherId)}; DELETE FROM usage_logs WHERE "userId"=${quote(otherId)}`);
   const alertRoot = (await expect('POST','/admin/departments',{name:`Alert root ${randomUUID()}`,description:'test'},201)).json();
   const alertChild = (await expect('POST','/admin/departments',{name:`Alert child ${randomUUID()}`,description:'test',parent_id:alertRoot.id},201)).json();
   sql(`UPDATE departments SET "budgetAllocated"=15 WHERE id=${quote(alertRoot.id)}; UPDATE users SET "departmentId"=${quote(alertChild.id)} WHERE id=${quote(otherId)}`);
@@ -176,6 +177,9 @@ try {
   sql(`UPDATE users SET "departmentId"=${quote(department.id)} WHERE id=${quote(ownerId)}; UPDATE messages SET cost=100 WHERE "conversationId"=${quote(chatId)} AND role='assistant'`);
   await expect('POST','/chat/stream',payload([]),403,other);
   check('exhausted parent cannot be escaped through a zero-budget child',true,true);
+  await expect('DELETE',`/chat/${chatId}`,undefined,204);
+  await expect('POST','/chat/stream',payload([]),403,other);
+  check('deleting the chat that spent the budget does not restore it',sql(`SELECT count(*) FROM messages WHERE "conversationId"=${quote(chatId)}`),'0');
 
   const audited = (await expect('POST','/admin/departments',{name:`Audited ${randomUUID()}`,description:'test',admin_ids:[otherId]},201)).json();
   sql(`CREATE FUNCTION security_audit_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced test audit failure'; END $$; CREATE TRIGGER security_audit_failure BEFORE INSERT ON auth_audit_events FOR EACH ROW EXECUTE FUNCTION security_audit_failure()`);

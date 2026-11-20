@@ -577,6 +577,19 @@ mod tests {
     }
 
     #[test]
+    fn model_listing_does_not_send_the_streaming_flag() {
+        let model =
+            parse_text_model(&json!({"key": "m", "name": "M", "engine": "openai"})).unwrap();
+        assert!(
+            model.supports_streaming,
+            "the flag stays available inside the server"
+        );
+        let sent = serde_json::to_value(&model).unwrap();
+        assert!(sent.get("supports_streaming").is_none());
+        assert_eq!(sent["supports_tools"], json!(true));
+    }
+
+    #[test]
     fn parses_text_catalog_capabilities_limits_and_pricing() {
         let model = parse_text_model(&json!({
             "key": "chat-1",

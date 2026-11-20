@@ -5,6 +5,7 @@ pub use sea_orm_migration::prelude::*;
 mod m20261028_000001_create_connectors;
 mod m20261113_000001_grant_it_admin_ai_platform_view;
 mod m20261113_000002_add_base_url_override_to_ai_engines;
+mod m20261118_000001_record_llm_spend_in_usage_logs;
 mod m20261118_000002_oauth2_profile_for_github_sign_in;
 
 mod m20250102_000001_add_redirect_url_to_sso_providers;
@@ -187,6 +188,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261028_000001_create_connectors::Migration),
             Box::new(m20261113_000001_grant_it_admin_ai_platform_view::Migration),
             Box::new(m20261113_000002_add_base_url_override_to_ai_engines::Migration),
+            Box::new(m20261118_000001_record_llm_spend_in_usage_logs::Migration),
             Box::new(m20261118_000002_oauth2_profile_for_github_sign_in::Migration),
         ]
     }

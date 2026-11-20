@@ -89,6 +89,8 @@ pub struct MessageResponse {
     pub usage: TokenUsage,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<StopReason>,
+    /// True while this reply is still being generated on the server, for example after the page that started it was refreshed or closed. parts.text holds the text saved so far (saved about every half second); fetch the conversation again until this is false, when the message is complete or carries stop_reason.
+    pub generating: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub versions: Option<MessageVersions>,
 }

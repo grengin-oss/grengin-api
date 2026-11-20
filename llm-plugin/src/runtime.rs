@@ -551,6 +551,14 @@ impl ChatSession for DeclarativeChatSession {
                 tool_result: Some(result),
             });
         }
+        // A forced tool is satisfied once it has run; forcing it again on every round would call it
+        // until the round limit and never let the model answer.
+        if matches!(
+            self.request.tool_choice,
+            Some(crate::ToolChoice::Named(_) | crate::ToolChoice::Required)
+        ) {
+            self.request.tool_choice = Some(crate::ToolChoice::Auto);
+        }
         self.tool_round += 1;
         self.send_stream().await
     }

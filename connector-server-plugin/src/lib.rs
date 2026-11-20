@@ -11,7 +11,7 @@ mod session_cache;
 pub use manifest::*;
 pub use oauth::{InvalidOAuthExpiry, OAuthExpirySource};
 pub use runtime::{CallContext, CompiledConnector, ConnectorError};
-pub use security::validate_url as validate_endpoint_url;
+pub use security::{validate_ip as validate_destination_ip, validate_url as validate_endpoint_url};
 pub use session_cache::{SessionCache, SessionCacheError, SessionCachePolicy, SessionLease};
 
 pub fn runtime_version() -> &'static str {
