@@ -89,6 +89,38 @@ pub enum GrenginConnectionState {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GrenginFundingSource {
+    Grengin,
+    OwnKey,
+}
+
+/// One model the Grengin service offers, with this workspace's local policy applied.
+/// Prices are Grengin tariffs even when an own-key engine would fund the model.
+#[derive(Serialize, ToSchema)]
+pub struct GrenginCatalogModel {
+    pub id: String,
+    pub name: String,
+    pub provider_id: String,
+    pub native_model_id: String,
+    pub capability: ModelType,
+    pub input_per_million_microdollars: Option<i64>,
+    pub output_per_million_microdollars: Option<i64>,
+    pub processing_region: Option<String>,
+    pub status: String,
+    pub is_allowed: bool,
+    pub is_default: bool,
+    pub effective_engine: String,
+    pub funding_source: GrenginFundingSource,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct GrenginCatalog {
+    pub observed_at: DateTime<Utc>,
+    pub models: Vec<GrenginCatalogModel>,
+}
+
 /// Local and service status of the Grengin engine. Unknown values are null, never zero.
 #[derive(Serialize, ToSchema)]
 pub struct GrenginStatus {

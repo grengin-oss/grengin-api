@@ -285,18 +285,7 @@ pub async fn apply_grengin_update(
     req: &mut AIEngineUpdate,
     active: &mut ai_engines::ActiveModel,
 ) -> Result<Option<bool>, AuthError> {
-    if req.api_key.is_some() || req.plugin_config.is_some() || req.base_url_override.is_some() {
-        return Err(AuthError::InvalidRequest {
-            field: "api_key/plugin_config",
-        });
-    }
-    let toggle = req
-        .is_enabled
-        .filter(|enabled| *enabled != engine.is_enabled);
-    super::grengin_consent::require_consent(toggle == Some(true), req.consent_version.as_deref())?;
-    if toggle == Some(true) {
-        req.is_enabled = None;
-    }
+    let toggle = grengin_intent(req)?;
     if req.whitelisted_models.is_none()
         && req.default_model.is_none()
         && req.default_image_gen_model.is_none()
@@ -337,6 +326,20 @@ pub async fn apply_grengin_update(
     active.whitelist_models = Set(models);
     active.default_model = Set(text);
     active.default_image_gen_model = Set(image);
+    Ok(toggle)
+}
+
+/// Every explicit enable/disable goes through the lifecycle, even one that matches the stored
+/// flag: a disable while an enable is still pending must supersede it, and the generic update
+/// never writes is_enabled for this engine.
+fn grengin_intent(req: &mut AIEngineUpdate) -> Result<Option<bool>, AuthError> {
+    if req.api_key.is_some() || req.plugin_config.is_some() || req.base_url_override.is_some() {
+        return Err(AuthError::InvalidRequest {
+            field: "api_key/plugin_config",
+        });
+    }
+    let toggle = req.is_enabled.take();
+    super::grengin_consent::require_consent(toggle == Some(true), req.consent_version.as_deref())?;
     Ok(toggle)
 }
 
@@ -822,5 +825,39 @@ mod grengin_policy_tests {
             grengin_model_policy(&[], Some(&old), None, Some("retired/image".into()), None)
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod grengin_intent_tests {
+    use super::*;
+
+    fn update(is_enabled: Option<bool>, consent: Option<&str>) -> AIEngineUpdate {
+        serde_json::from_value(serde_json::json!({
+            "is_enabled": is_enabled,
+            "consent_version": consent,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn every_explicit_intent_is_kept_and_never_reaches_the_generic_update() {
+        // A disable is honoured even when the stored flag is already false (an enable may be
+        // pending), and an enable even when it is already true.
+        for (requested, consent) in [(false, None), (true, Some("grengin-models-v1"))] {
+            let mut req = update(Some(requested), consent);
+            assert_eq!(grengin_intent(&mut req).unwrap(), Some(requested));
+            assert!(req.is_enabled.is_none());
+        }
+        let mut req = update(None, None);
+        assert_eq!(grengin_intent(&mut req).unwrap(), None);
+    }
+
+    #[test]
+    fn enabling_without_consent_and_credential_fields_are_refused() {
+        assert!(grengin_intent(&mut update(Some(true), None)).is_err());
+        let mut keyed: AIEngineUpdate =
+            serde_json::from_value(serde_json::json!({"api_key": "sk-x"})).unwrap();
+        assert!(grengin_intent(&mut keyed).is_err());
     }
 }
