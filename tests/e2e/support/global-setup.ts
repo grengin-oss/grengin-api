@@ -43,7 +43,15 @@ export default async function globalSetup() {
     if (created.status >= 300) throw new Error(`creating the E2E IdP failed: ${created.status} ${JSON.stringify(created.json)}`);
     const id = created.json?.id;
     if (id && created.json?.is_enabled === false) {
-      const enabled = await api(token, 'PUT', `/admin/sso-providers/${id}`, { is_enabled: true });
+      // Enabling requires a successful validation of the stored configuration, as in the admin UI.
+      const validated = await api(token, 'POST', `/admin/sso-providers/${id}/validate`, {});
+      if (validated.status >= 300 || !validated.json?.valid || !validated.json?.validation_token) {
+        throw new Error(`validating the E2E IdP failed: ${validated.status} ${JSON.stringify(validated.json)}`);
+      }
+      const enabled = await api(token, 'PUT', `/admin/sso-providers/${id}`, {
+        is_enabled: true,
+        validation_token: validated.json.validation_token,
+      });
       if (enabled.status >= 300) throw new Error(`enabling the E2E IdP failed: ${enabled.status} ${JSON.stringify(enabled.json)}`);
     }
   }
