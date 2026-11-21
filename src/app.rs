@@ -68,6 +68,7 @@ pub async fn init_app() -> Result<(), Error> {
 
     let app_state = AppState::from_settings(settings).await?;
     spawn_deleted_connector_cleanup(app_state.clone());
+    crate::services::grengin_consent::spawn_reconciler(app_state.clone());
     spawn_analytics_cache_refresh(app_state.database.clone());
     spawn_audit_log_retention_worker(app_state.database.clone());
     let configured_origins = std::env::var("CORS_ALLOWED_ORIGINS")

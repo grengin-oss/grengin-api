@@ -49,8 +49,13 @@ calamine = "0.36"
 flate2 = "1"
 pdf-extract = "0.12"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 quick-xml = "0.41"
+foreign-types = "0.3"
+openssl-sys = "0.9"
 
 [profile.release]
 opt-level = 3

@@ -391,6 +391,7 @@ fn error_class(error: &llm_plugin::ProviderError) -> &'static str {
         llm_plugin::ProviderError::StreamEnded => "stream_ended",
         llm_plugin::ProviderError::Cancelled => "cancelled",
         llm_plugin::ProviderError::ResponseTooLarge => "response_too_large",
+        llm_plugin::ProviderError::NonReplayable(error) => error_class(error),
     }
 }
 

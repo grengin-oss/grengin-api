@@ -75,6 +75,9 @@ fn collect_manifests(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), std::i
 fn validate_manifest(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     let bytes = fs::read(path)?;
     let manifest = ProviderManifestV1::from_json(&bytes)?;
+    if !manifest.native_providers.is_empty() {
+        return Ok(manifest.id);
+    }
     probe_chat_payloads(&manifest)?;
     let credentials = manifest
         .credentials

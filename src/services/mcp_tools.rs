@@ -70,6 +70,52 @@ pub struct McpToolDescriptor {
     pub permission: mcp_access_policies::McpPermission,
 }
 
+/// Expose a request-local tool name without disclosing the workspace's server IDs.
+pub fn request_local_tool_names(
+    tools: HashMap<String, McpToolDescriptor>,
+) -> HashMap<String, McpToolDescriptor> {
+    let mut tools: Vec<_> = tools.into_values().collect();
+    tools.sort_by_key(|tool| tool.tool_id);
+    tools
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut tool)| {
+            let mut name = format!("tool_{index}_{}", sanitize_tool_name(&tool.original_name));
+            name.truncate(64);
+            tool.openai_name = name.clone();
+            (name, tool)
+        })
+        .collect()
+}
+
+/// MCP transport metadata and user-facing diagnostics stay in the workspace.
+pub fn gateway_tool_output(result: &Value, is_error: bool) -> Value {
+    if is_error {
+        return json!({"error": "Tool execution failed"});
+    }
+    if let Some(output) = result.get("structuredContent") {
+        return output.clone();
+    }
+    let text: Vec<&str> = result
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|block| {
+            block
+                .pointer("/annotations/audience")
+                .and_then(Value::as_array)
+                .is_none_or(|roles| roles.iter().any(|role| role == "assistant"))
+        })
+        .filter_map(|block| match block["type"].as_str()? {
+            "text" => block["text"].as_str(),
+            "resource" => block.pointer("/resource/text").and_then(Value::as_str),
+            _ => None,
+        })
+        .collect();
+    json!(text)
+}
+
 #[derive(Debug, Clone)]
 pub struct McpServerSummary {
     pub server_id: Uuid,
@@ -517,6 +563,29 @@ pub async fn load_mcp_tools(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gateway_continuations_only_receive_model_facing_tool_results() {
+        use super::gateway_tool_output;
+        use serde_json::json;
+        let mut result = json!({
+            "_meta": {"session":"private"},
+            "content": [
+                {"type":"text", "text":"answer", "_meta":{"account":"private"}},
+                {"type":"text", "text":"browser only", "annotations":{"audience":["user"]}},
+                {"type":"resource", "resource":{"uri":"private://file", "text":"excerpt"}}
+            ]
+        });
+        assert_eq!(
+            gateway_tool_output(&result, false),
+            json!(["answer", "excerpt"])
+        );
+        result["structuredContent"] = json!({"rows":5});
+        assert_eq!(gateway_tool_output(&result, false), json!({"rows":5}));
+        assert_eq!(
+            gateway_tool_output(&result, true),
+            json!({"error":"Tool execution failed"})
+        );
+    }
     use super::tool_is_usable;
     use crate::models::mcp_access_policies::McpPermission;
 

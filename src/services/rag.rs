@@ -24,7 +24,7 @@ use crate::{
         embedders_cache::get_model_dimensions,
         embedding_helpers::storage_embedding_dimensions,
         provider_chat::{generate_provider_text, provider_error_class},
-        provider_resolver::resolve_provider,
+        provider_resolver::{model_route, resolve_provider},
     },
     state::SharedState,
 };
@@ -561,7 +561,8 @@ pub async fn generate_embeddings(
     config: &EmbeddingSettings,
     inputs: Vec<String>,
 ) -> Result<Option<Vec<Vec<f32>>>, AppError> {
-    let provider = config.provider.to_lowercase();
+    let (provider, model, _) =
+        model_route(app_state, &config.provider.to_lowercase(), &config.model).await?;
     let dimensions = storage_embedding_dimensions(&app_state.database, config.dimensions)
         .await
         .map_err(|error| match error {
@@ -574,7 +575,7 @@ pub async fn generate_embeddings(
         })?;
     let target_dim = match dimensions {
         Some(d) => Some(d as usize),
-        None => get_model_dimensions(&app_state.req_client, &provider, &config.model).await,
+        None => get_model_dimensions(&app_state.req_client, &provider, &model).await,
     };
 
     let plugin = match resolve_provider(app_state, &provider).await {
@@ -586,7 +587,7 @@ pub async fn generate_embeddings(
     };
     let response = embedder
         .embed(llm_plugin::EmbeddingRequest {
-            model: llm_plugin::ModelId::new(config.model.clone()),
+            model: llm_plugin::ModelId::new(model),
             inputs,
             dimensions: dimensions.and_then(|value| u32::try_from(value).ok()),
             options: serde_json::Value::Null,
@@ -697,6 +698,7 @@ pub async fn build_project_retrieval_prompt(
     project_id: uuid::Uuid,
     query: &str,
     top_k: usize,
+    include_source_names: bool,
 ) -> Result<Option<String>, AppError> {
     if !app_state.settings.rag.enabled {
         return Ok(None);
@@ -760,7 +762,11 @@ pub async fn build_project_retrieval_prompt(
 
     let mut context = String::from("Relevant project documents:\n\n");
     for row in rows {
-        context.push_str(&format!("— {}\n{}\n\n", row.file_name, row.content));
+        if include_source_names {
+            context.push_str(&format!("— {}\n", row.file_name));
+        }
+        context.push_str(&row.content);
+        context.push_str("\n\n");
     }
 
     Ok(Some(context.trim_end().to_string()))

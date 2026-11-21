@@ -3,16 +3,18 @@
 
 use axum::{Json, extract::State};
 use reqwest::StatusCode;
-use sea_orm::EntityTrait;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 use std::collections::HashSet;
 
 use crate::{
     auth::claims::Claims,
     dto::models::{ModelInfo, ModelsResponse, ProviderInfo},
-    models::users,
+    models::{ai_engines, users},
     services::{
-        chat_stream_helpers::is_model_whitelisted, department_policies::effective_allowed_models,
-        models_cache::load_providers_cached, provider_models::is_chat_selectable_model,
+        chat_stream_helpers::is_model_whitelisted,
+        department_policies::{effective_allowed_models, model_policy_key},
+        models_cache::load_providers_cached,
+        provider_models::is_chat_selectable_model,
     },
     state::SharedState,
 };
@@ -50,7 +52,7 @@ pub async fn get_list_models(
     let allowed_set = allowed_models.map(|models| {
         models
             .into_iter()
-            .map(|m| (m.provider.to_lowercase(), m.model.to_lowercase()))
+            .map(|m| model_policy_key(&m.provider, &m.model))
             .collect::<HashSet<(String, String)>>()
     });
 
@@ -146,7 +148,7 @@ pub async fn get_list_models(
             .collect::<Vec<_>>();
         if let Some(allowed) = &allowed_set {
             models.retain(|model| {
-                allowed.contains(&(provider_key.clone(), model.key.to_lowercase()))
+                allowed.contains(&model_policy_key(&provider_key, &model.key))
                     || allowed.contains(&(provider_key.clone(), model.name.to_lowercase()))
             });
         }
@@ -163,6 +165,39 @@ pub async fn get_list_models(
         });
     }
 
+    if filtered_providers
+        .iter()
+        .any(|provider| provider.key == "grengin")
+    {
+        let direct_keys = ai_engines::Entity::find()
+            .select_only()
+            .column(ai_engines::Column::EngineKey)
+            .filter(ai_engines::Column::IsEnabled.eq(true))
+            .filter(ai_engines::Column::ApiKey.is_not_null())
+            .into_tuple::<String>()
+            .all(&app_state.database)
+            .await
+            .unwrap_or_default();
+        let mut owned = HashSet::new();
+        for direct in filtered_providers
+            .iter()
+            .filter(|provider| direct_keys.contains(&provider.key))
+        {
+            owned.extend(
+                direct
+                    .models
+                    .iter()
+                    .map(|model| format!("{}/{}", direct.key, model.key)),
+            );
+        }
+        for gateway in filtered_providers
+            .iter_mut()
+            .filter(|provider| provider.key == "grengin")
+        {
+            gateway.models.retain(|model| !owned.contains(&model.key));
+        }
+        filtered_providers.retain(|provider| !provider.models.is_empty());
+    }
     (
         status,
         Json(ModelsResponse {

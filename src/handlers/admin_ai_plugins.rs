@@ -4,7 +4,7 @@
 use axum::{
     Json,
     extract::{Path, State},
-    http::StatusCode,
+    http::{StatusCode, header},
 };
 use llm_plugin::ProviderPlugin;
 use sea_orm::EntityTrait;
@@ -16,13 +16,17 @@ use crate::{
     },
     dto::admin_ai::{
         AIEngineConnectionTest, AIEngineCreate, AIEngineDetail, AIEnginePluginValidationRequest,
-        AIEnginePluginValidationResponse, PluginModel,
+        AIEnginePluginValidationResponse, GrenginCatalog, GrenginStatus, PluginModel,
     },
     models::ai_engines,
     services::{
         ai_plugin::{
             RESERVED_ENGINE_KEYS, create_engine, ensure_manage, ensure_view, find_engine,
-            invalid_validation, test_engine_connection,
+            invalid_validation, is_catalog_grengin, test_engine_connection,
+        },
+        grengin_consent::{
+            catalog as grengin_catalog, delete_engine as delete_grengin_engine,
+            status as grengin_status,
         },
         provider_runtime::{compile_provider, parse_manifest, unregister_provider},
     },
@@ -125,6 +129,7 @@ pub async fn validate_ai_engine_plugin(
     request_body = AIEngineCreate,
     responses(
         (status = 201, body = AIEngineDetail),
+        (status = 202, body = AIEngineDetail, description = "Grengin installed; enabling waits for service confirmation (pending_operation)"),
         (status = 400, body = Error),
         (status = 401, body = Error),
         (status = 403, body = Error),
@@ -138,7 +143,12 @@ pub async fn create_ai_engine(
 ) -> Result<(StatusCode, Json<AIEngineDetail>), AuthError> {
     ensure_manage(&claims, &state).await?;
     let engine = create_engine(&state, request).await?;
-    Ok((StatusCode::CREATED, Json(engine)))
+    let status = if engine.pending_operation.is_some() {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(engine)))
 }
 
 #[utoipa::path(
@@ -161,10 +171,14 @@ pub async fn delete_ai_engine(
 ) -> Result<StatusCode, AuthError> {
     ensure_manage(&claims, &state).await?;
     let engine = find_engine(&state, &engine_key).await?;
-    ai_engines::Entity::delete_by_id(engine.id)
-        .exec(&state.database)
-        .await
-        .map_err(|_| AuthError::DbTimeout)?;
+    if is_catalog_grengin(&engine) {
+        delete_grengin_engine(&state, engine.id).await?;
+    } else {
+        ai_engines::Entity::delete_by_id(engine.id)
+            .exec(&state.database)
+            .await
+            .map_err(|_| AuthError::DbTimeout)?;
+    }
     unregister_provider(&state, &engine_key).await;
     state.live_models_cache.invalidate(&engine_key).await;
     state
@@ -194,4 +208,55 @@ pub async fn test_ai_engine_connection(
     ensure_manage(&claims, &state).await?;
     let engine = find_engine(&state, &engine_key).await?;
     Ok(Json(test_engine_connection(&state, engine).await?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/admin/ai-engines/grengin/status",
+    tag = "admin",
+    description = "Local and service status of the Grengin engine: whether it is installed and locally enabled, the workspace connection, model access and balance, and any enable/disable still waiting for service confirmation. Works without an identity or local engine; unknown values are null, never zero.",
+    responses(
+        (status = 200, body = GrenginStatus),
+        (status = 401, body = Error),
+        (status = 403, body = Error)
+    )
+)]
+pub async fn get_grengin_status(
+    claims: Claims,
+    State(state): State<SharedState>,
+) -> Result<([(header::HeaderName, &'static str); 1], Json<GrenginStatus>), AuthError> {
+    ensure_view(&claims, &state).await?;
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(grengin_status(&state).await?),
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/admin/ai-engines/grengin/catalog",
+    tag = "admin",
+    description = "Models the Grengin service offers now, with this workspace's policy: is_allowed, is_default, and which engine would fund each one (an enabled own-key engine that allows the same model takes precedence). Prices are Grengin tariffs in microdollars per million tokens. No generation is billed.",
+    responses(
+        (status = 200, body = GrenginCatalog),
+        (status = 401, body = Error),
+        (status = 403, body = Error),
+        (status = 503, body = Error)
+    )
+)]
+pub async fn get_grengin_catalog(
+    claims: Claims,
+    State(state): State<SharedState>,
+) -> Result<
+    (
+        [(header::HeaderName, &'static str); 1],
+        Json<GrenginCatalog>,
+    ),
+    AuthError,
+> {
+    ensure_view(&claims, &state).await?;
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(grengin_catalog(&state).await?),
+    ))
 }

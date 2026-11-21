@@ -166,6 +166,7 @@ pub async fn load_skills_for_stream(
 pub async fn load_skill_knowledge_for_stream(
     db: &DatabaseConnection,
     skill_ids: &[Uuid],
+    include_source_names: bool,
 ) -> HashMap<Uuid, String> {
     if skill_ids.is_empty() {
         return HashMap::new();
@@ -184,7 +185,10 @@ pub async fn load_skill_knowledge_for_stream(
         if !entry.is_empty() {
             entry.push_str("\n\n");
         }
-        entry.push_str(&format!("### {}\n{}", row.file_name, row.content));
+        if include_source_names {
+            entry.push_str(&format!("### {}\n", row.file_name));
+        }
+        entry.push_str(&row.content);
     }
     map
 }

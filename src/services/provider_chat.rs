@@ -64,6 +64,7 @@ pub fn plugin_event_stream(mut source: ProviderEventStream) -> LlmEventStream {
 
 pub fn provider_error_class(error: &ProviderError) -> &'static str {
     match error {
+        ProviderError::NonReplayable(inner) => provider_error_class(inner),
         ProviderError::InvalidManifest(_) => "invalid_manifest",
         ProviderError::Configuration(_) => "configuration",
         ProviderError::MissingCredential(_) => "missing_credential",

@@ -102,10 +102,10 @@ pub async fn validate_allowed_models_subset(
     };
     let parent_set: HashSet<(String, String)> = parent_allowed
         .into_iter()
-        .map(|m| (m.provider.to_lowercase(), m.model.to_lowercase()))
+        .map(|m| model_policy_key(&m.provider, &m.model))
         .collect();
     for model in requested {
-        let key = (model.provider.to_lowercase(), model.model.to_lowercase());
+        let key = model_policy_key(&model.provider, &model.model);
         if !parent_set.contains(&key) {
             return Err(format!(
                 "model {}:{} is not allowed by parent policy",
@@ -135,6 +135,16 @@ pub async fn validate_retention_days(
     Ok(())
 }
 
+/// Department limits follow the model across direct and workspace funding.
+pub fn model_policy_key(provider: &str, model: &str) -> (String, String) {
+    let (provider, model) = if provider.eq_ignore_ascii_case("grengin") {
+        super::grengin_provider::split_model(model).unwrap_or((provider, model))
+    } else {
+        (provider, model)
+    };
+    (provider.to_lowercase(), model.to_lowercase())
+}
+
 pub async fn check_model_allowed(
     db: &sea_orm::DatabaseConnection,
     department_id: Option<Uuid>,
@@ -148,11 +158,10 @@ pub async fn check_model_allowed(
     let Some(allowed) = effective else {
         return Ok(true);
     };
-    let provider = provider.to_lowercase();
-    let model = model.to_lowercase();
+    let key = model_policy_key(provider, model);
     Ok(allowed
         .iter()
-        .any(|m| m.provider.to_lowercase() == provider && m.model.to_lowercase() == model))
+        .any(|m| model_policy_key(&m.provider, &m.model) == key))
 }
 
 async fn load_parent_row(

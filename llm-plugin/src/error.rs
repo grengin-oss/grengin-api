@@ -49,9 +49,22 @@ pub enum ProviderError {
 
     #[error("provider response exceeded the configured size limit")]
     ResponseTooLarge,
+
+    #[error("{0}")]
+    NonReplayable(Box<ProviderError>),
 }
 
 impl ProviderError {
+    /// The underlying failure for classification. Retry decisions must still use
+    /// `is_retryable()` on the original error to preserve dispatch guarantees.
+    pub fn underlying(&self) -> &Self {
+        let mut error = self;
+        while let Self::NonReplayable(inner) = error {
+            error = inner;
+        }
+        error
+    }
+
     /// Whether retrying the same request could plausibly succeed.
     ///
     /// Manifest, mapping, credential and URL failures are deterministic properties of the provider
@@ -74,7 +87,8 @@ impl ProviderError {
             | Self::HeaderNotAllowed(_)
             | Self::PaymentRequired
             | Self::Cancelled
-            | Self::ResponseTooLarge => false,
+            | Self::ResponseTooLarge
+            | Self::NonReplayable(_) => false,
         }
     }
 
@@ -82,7 +96,7 @@ impl ProviderError {
     /// or network misbehaving. Useful for deciding whether to surface a config-fix hint.
     pub fn is_configuration_fault(&self) -> bool {
         matches!(
-            self,
+            self.underlying(),
             Self::InvalidManifest(_)
                 | Self::Configuration(_)
                 | Self::MissingCredential(_)
@@ -109,6 +123,21 @@ impl From<serde_json::Error> for ProviderError {
 #[cfg(test)]
 mod tests {
     use super::ProviderError;
+
+    #[test]
+    fn non_replayable_errors_keep_their_cause_without_enabling_retries() {
+        let quota = ProviderError::NonReplayable(Box::new(ProviderError::QuotaExhausted));
+        assert!(matches!(quota.underlying(), ProviderError::QuotaExhausted));
+        assert!(!quota.is_retryable());
+        let nested = ProviderError::NonReplayable(Box::new(quota));
+        assert!(matches!(nested.underlying(), ProviderError::QuotaExhausted));
+        assert!(!nested.is_retryable());
+        let configuration = ProviderError::NonReplayable(Box::new(
+            ProviderError::MissingCredential("api_key".into()),
+        ));
+        assert!(configuration.is_configuration_fault());
+        assert!(!configuration.is_retryable());
+    }
 
     #[test]
     fn separates_configuration_faults_from_worth_retrying() {

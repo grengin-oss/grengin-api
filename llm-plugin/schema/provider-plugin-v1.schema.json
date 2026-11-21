@@ -56,6 +56,13 @@
     "name": {
       "type": "string"
     },
+    "nativeProviders": {
+      "description": "Gateway packages delegate operations to the named providers' native protocols.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "operations": {
       "$ref": "#/$defs/ProviderOperations"
     },

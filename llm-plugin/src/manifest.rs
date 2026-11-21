@@ -37,6 +37,9 @@ pub struct ProviderManifestV1 {
     pub mappings: BTreeMap<String, MappingExpression>,
     #[serde(default)]
     pub models: Vec<ManifestModel>,
+    /// Gateway packages delegate operations to the named providers' native protocols.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_providers: Vec<String>,
     pub operations: ProviderOperations,
 }
 
@@ -518,6 +521,29 @@ impl ProviderManifestV1 {
             return Err(ProviderError::InvalidManifest(
                 "baseUrl must not contain embedded credentials".to_string(),
             ));
+        }
+
+        if !self.native_providers.is_empty() {
+            let mut providers = BTreeSet::new();
+            for provider in &self.native_providers {
+                validate_identifier("native provider", provider)?;
+                if !providers.insert(provider) {
+                    return Err(ProviderError::InvalidManifest(
+                        "duplicate native provider".into(),
+                    ));
+                }
+            }
+            if !self.request_specs().is_empty()
+                || !self.credentials.is_empty()
+                || !self.models.is_empty()
+                || !self.mappings.is_empty()
+                || self.configuration_schema.is_some()
+            {
+                return Err(ProviderError::InvalidManifest(
+                    "native provider packages cannot override credentials, operations or model data".into(),
+                ));
+            }
+            return Ok(());
         }
 
         let mut credential_ids = BTreeSet::new();

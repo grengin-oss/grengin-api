@@ -15,7 +15,7 @@ use futures_util::StreamExt;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{
     Client, Method, RequestBuilder, Response, StatusCode,
-    header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
+    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
     multipart::{Form, Part},
 };
 use serde::Serialize;
@@ -32,7 +32,7 @@ use crate::{
     ProviderDescriptor, ProviderError, ProviderEvent, ProviderEventStream, ProviderManifestV1,
     ProviderModel, ProviderPlugin, RequestSpec, SseDecoder, SseEventMapper, StructuredBodyEncoding,
     TokenUsage, ToolCall, ToolCallId, ToolResult, UsageMapping, capture_values, evaluate_mapping,
-    resolve_path,
+    evaluate_mapping_bounded, resolve_path,
     security::{
         SafeResolver, validate_destination_ip, validate_header_name, validate_provider_url,
     },
@@ -44,6 +44,18 @@ const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 const MAX_SSE_EVENT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CONFIGURATION_BYTES: usize = 1024 * 1024;
 const MAX_IMAGE_COUNT: u8 = 16;
+const MAX_AUTHORIZED_BODY_BYTES: usize = 32 * 1024 * 1024;
+
+/// API-owned authorization for a trusted destination. Implementations must reject every URL
+/// outside their exact origin and operation allowlist before returning a bearer token.
+/// Called for every dispatch, including cloned providers and tool continuations.
+#[async_trait]
+pub trait RequestAuthorization: Send + Sync {
+    async fn authorize(&self, url: &Url) -> Result<String, ProviderError>;
+
+    /// The destination rejected `bearer` before doing any work with the request.
+    async fn reject(&self, _bearer: &str) {}
+}
 
 /// Percent-encodes everything except the RFC 3986 unreserved set, so a templated value can never
 /// introduce URL structure while ordinary model ids such as `gpt-4.1-mini` survive intact.
@@ -110,6 +122,7 @@ pub struct DeclarativeProvider {
     client: Client,
     stream_client: Client,
     runtime: Arc<ProviderRuntimeConfig>,
+    authorization: Option<Arc<dyn RequestAuthorization>>,
 }
 
 /// Chooses how an operation's `timeoutMs` is enforced.
@@ -126,8 +139,38 @@ impl DeclarativeProvider {
         manifest: ProviderManifestV1,
         runtime: ProviderRuntimeConfig,
     ) -> Result<Self, ProviderError> {
+        Self::construct(manifest, runtime, None)
+    }
+
+    /// Reuse native serialization/parsing with API-owned destination authorization. Manifest
+    /// headers and native credentials are never used, and secondary downloads are forbidden.
+    pub fn new_authorized(
+        manifest: ProviderManifestV1,
+        runtime: ProviderRuntimeConfig,
+        authorization: Arc<dyn RequestAuthorization>,
+    ) -> Result<Self, ProviderError> {
+        if !runtime.credentials.is_empty() {
+            return Err(ProviderError::Configuration(
+                "authorized providers must not receive native credentials".into(),
+            ));
+        }
+        Self::construct(manifest, runtime, Some(authorization))
+    }
+
+    fn construct(
+        manifest: ProviderManifestV1,
+        runtime: ProviderRuntimeConfig,
+        authorization: Option<Arc<dyn RequestAuthorization>>,
+    ) -> Result<Self, ProviderError> {
+        if !manifest.native_providers.is_empty() {
+            return Err(ProviderError::Configuration(
+                "provider packages must delegate to native operation manifests".into(),
+            ));
+        }
         manifest.validate()?;
-        validate_credentials(&manifest, &runtime)?;
+        if authorization.is_none() {
+            validate_credentials(&manifest, &runtime)?;
+        }
         validate_configuration(&manifest, &runtime.configuration)?;
 
         let base_url = runtime
@@ -146,14 +189,20 @@ impl DeclarativeProvider {
             base_url.set_path(&path);
         }
 
-        let client = Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .dns_resolver(Arc::new(SafeResolver {
-                allow_private_network: runtime.allow_private_network,
-            }))
-            .build()
-            .map_err(ProviderError::from)?;
+        let client_builder = || {
+            let builder = Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .dns_resolver(Arc::new(SafeResolver {
+                    allow_private_network: runtime.allow_private_network,
+                }));
+            if authorization.is_some() {
+                builder.retry(reqwest::retry::never())
+            } else {
+                builder
+            }
+        };
+        let client = client_builder().build().map_err(ProviderError::from)?;
         // A chat stream stays open for as long as the model keeps talking, so its timeout has to
         // bound silence between chunks instead of the total exchange.
         let stream_timeout = Duration::from_millis(clamp_timeout(
@@ -164,12 +213,7 @@ impl DeclarativeProvider {
                 .and_then(|operation| operation.request.timeout_ms),
             runtime.default_timeout_ms,
         ));
-        let stream_client = Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .dns_resolver(Arc::new(SafeResolver {
-                allow_private_network: runtime.allow_private_network,
-            }))
+        let stream_client = client_builder()
             .connect_timeout(stream_timeout)
             .read_timeout(stream_timeout)
             .build()
@@ -183,6 +227,7 @@ impl DeclarativeProvider {
             client,
             stream_client,
             runtime: Arc::new(runtime),
+            authorization,
         })
     }
 
@@ -214,7 +259,7 @@ impl DeclarativeProvider {
         request: &T,
         session: &Value,
         mode: RequestMode,
-    ) -> Result<RequestBuilder, ProviderError> {
+    ) -> Result<(RequestBuilder, Option<String>), ProviderError> {
         let context = MappingContext::for_request(request, &self.runtime.configuration, session)?;
         let path = render_template(&spec.path, &context)?;
         let mut url = self
@@ -236,7 +281,47 @@ impl DeclarativeProvider {
                 query.append_pair(&name, &value);
             }
         }
-        self.validate_destination(&url).await?;
+        let mut token_used = None;
+        let bearer = if let Some(authorization) = &self.authorization {
+            if url.query().is_some()
+                && !(mode == RequestMode::Streaming && url.query() == Some("alt=sse"))
+            {
+                return Err(ProviderError::UrlNotAllowed(
+                    "authorized requests permit only the streaming alt=sse query".into(),
+                ));
+            }
+            if !matches!(
+                (spec.method, spec.body_encoding),
+                (HttpMethod::Get, BodyEncoding::None)
+                    | (
+                        HttpMethod::Post,
+                        BodyEncoding::Json | BodyEncoding::Multipart
+                    )
+            ) {
+                return Err(ProviderError::Configuration(
+                    "authorized requests require GET without a body or JSON/multipart POST".into(),
+                ));
+            }
+            let token = authorization.authorize(&url).await?;
+            if token.trim().is_empty() {
+                return Err(ProviderError::Configuration(
+                    "authorization returned an empty bearer token".into(),
+                ));
+            }
+            let mut header = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
+                ProviderError::Configuration(
+                    "authorization returned an invalid bearer token".into(),
+                )
+            })?;
+            header.set_sensitive(true);
+            token_used = Some(token);
+            Some(header)
+        } else {
+            None
+        };
+        self.validate_destination(&url)
+            .await
+            .map_err(|error| dispatch_error(error, self.authorization.is_some()))?;
 
         let method = match spec.method {
             HttpMethod::Get => Method::GET,
@@ -252,26 +337,101 @@ impl DeclarativeProvider {
             RequestMode::Streaming => self.stream_client.request(method, url),
         };
 
-        for (name, value) in &spec.headers {
-            validate_header_name(name)?;
-            let name = HeaderName::from_bytes(name.as_bytes())
-                .map_err(|_| ProviderError::HeaderNotAllowed(name.clone()))?;
-            let value = self.resolve_header(value, &context)?;
-            let value = HeaderValue::from_str(&value).map_err(|_| {
-                ProviderError::HeaderNotAllowed(
-                    "provider header contains invalid bytes".to_string(),
-                )
-            })?;
-            builder = builder.header(name, value);
+        if let Some(bearer) = bearer {
+            builder = builder.header(AUTHORIZATION, bearer).header(
+                ACCEPT,
+                if mode == RequestMode::Streaming {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                },
+            );
+        } else {
+            for (name, value) in &spec.headers {
+                validate_header_name(name)?;
+                let name = HeaderName::from_bytes(name.as_bytes())
+                    .map_err(|_| ProviderError::HeaderNotAllowed(name.clone()))?;
+                let value = self.resolve_header(value, &context)?;
+                let value = HeaderValue::from_str(&value).map_err(|_| {
+                    ProviderError::HeaderNotAllowed(
+                        "provider header contains invalid bytes".to_string(),
+                    )
+                })?;
+                builder = builder.header(name, value);
+            }
         }
 
         let body = spec
             .body
             .as_ref()
-            .map(|mapping| evaluate_mapping(mapping, &context, &self.manifest.mappings))
+            .map(|mapping| {
+                if self.authorization.is_some() {
+                    evaluate_mapping_bounded(
+                        mapping,
+                        &context,
+                        &self.manifest.mappings,
+                        1_000_000,
+                        MAX_AUTHORIZED_BODY_BYTES,
+                    )
+                } else {
+                    evaluate_mapping(mapping, &context, &self.manifest.mappings)
+                }
+            })
             .transpose()?;
+        if self.authorization.is_some()
+            && serde_json::to_vec(&body)?.len() > MAX_AUTHORIZED_BODY_BYTES
+        {
+            return Err(ProviderError::PayloadMapping(
+                "authorized request body is too large".into(),
+            ));
+        }
         builder = apply_body(builder, spec.body_encoding, body)?;
-        Ok(builder)
+        Ok((builder, token_used))
+    }
+
+    /// Sends the request and checks its status. An authorized request the gateway refuses with
+    /// `invalid_connection_grant` was refused before any upstream dispatch, so it is sent once
+    /// more with a new grant; no other failure is ever replayed.
+    async fn dispatch<T: Serialize>(
+        &self,
+        spec: &RequestSpec,
+        request: &T,
+        session: &Value,
+        mode: RequestMode,
+    ) -> Result<Response, ProviderError> {
+        let authorized = self.authorization.is_some();
+        let mut retried = false;
+        loop {
+            let (builder, token) = self.prepare_request(spec, request, session, mode).await?;
+            let response = builder
+                .send()
+                .await
+                .map_err(|error| dispatch_error(error.into(), authorized))?;
+            if let (Some(authorization), Some(token)) = (&self.authorization, token) {
+                if response.status() == StatusCode::UNAUTHORIZED {
+                    let body = read_limited(response, MAX_ERROR_BODY_BYTES)
+                        .await
+                        .unwrap_or_default();
+                    if gateway_error_type(&body).as_deref() == Some("invalid_connection_grant") {
+                        authorization.reject(&token).await;
+                        if !retried {
+                            retried = true;
+                            continue;
+                        }
+                    }
+                    return Err(dispatch_error(
+                        ProviderError::HttpStatus {
+                            status: StatusCode::UNAUTHORIZED.as_u16(),
+                            message: "Unauthorized".into(),
+                        },
+                        true,
+                    ));
+                }
+            }
+            return ensure_success(response)
+                .await
+                .map_err(|error| dispatch_error(error, authorized));
+        }
     }
 
     fn resolve_header(
@@ -335,13 +495,12 @@ impl DeclarativeProvider {
         session: &Value,
     ) -> Result<(HeaderMap, Vec<u8>), ProviderError> {
         let response = self
-            .prepare_request(spec, request, session, RequestMode::Buffered)
-            .await?
-            .send()
+            .dispatch(spec, request, session, RequestMode::Buffered)
             .await?;
-        let response = ensure_success(response).await?;
         let headers = response.headers().clone();
-        let bytes = read_limited(response, self.response_limit_for(spec)).await?;
+        let bytes = read_limited(response, self.response_limit_for(spec))
+            .await
+            .map_err(|error| dispatch_error(error, self.authorization.is_some()))?;
         Ok((headers, bytes))
     }
 
@@ -353,16 +512,13 @@ impl DeclarativeProvider {
         observed: Arc<Mutex<ObservedToolCalls>>,
     ) -> Result<ProviderEventStream, ProviderError> {
         let response = self
-            .prepare_request(
+            .dispatch(
                 &operation.request,
                 &request,
                 &session,
                 RequestMode::Streaming,
             )
-            .await?
-            .send()
             .await?;
-        let response = ensure_success(response).await?;
         let content_type = response
             .headers()
             .get(CONTENT_TYPE)
@@ -383,6 +539,7 @@ impl DeclarativeProvider {
         let response_limit = self.response_limit_for(&operation.request);
         let mut mapper = SseEventMapper::new(operation.response.clone());
         let captures = operation.continuation.captures.clone();
+        let authorized = self.authorization.is_some();
         let stream = async_stream::try_stream! {
             let mut body = response.bytes_stream();
             let mut decoder = SseDecoder::new(MAX_SSE_EVENT_BYTES.min(response_limit));
@@ -412,6 +569,9 @@ impl DeclarativeProvider {
                         observed.lock().await.captures.extend(capture_values(&captures, &data));
                     }
                     for mapped in mapper.map(&event)? {
+                        if authorized && matches!(mapped, ProviderEvent::Error { .. }) {
+                            Err(ProviderError::ResponseMapping("authorized provider stream failed".into()))?;
+                        }
                         observed.lock().await.record(&mapped)?;
                         yield mapped;
                     }
@@ -421,7 +581,9 @@ impl DeclarativeProvider {
                 Err(ProviderError::StreamEnded)?;
             }
         };
-        Ok(Box::pin(stream))
+        Ok(Box::pin(stream.map(move |result| {
+            result.map_err(|error| dispatch_error(error, authorized))
+        })))
     }
 }
 
@@ -871,6 +1033,11 @@ impl DeclarativeProvider {
             if let Some(pointer) = operation.response.url_pointer.as_deref()
                 && let Some(value) = select(item, pointer).and_then(Value::as_str)
             {
+                if self.authorization.is_some() {
+                    return Err(ProviderError::UrlNotAllowed(
+                        "authorized providers require inline image responses".into(),
+                    ));
+                }
                 let url = Url::parse(value).map_err(|error| {
                     ProviderError::ResponseMapping(format!("invalid image URL: {error}"))
                 })?;
@@ -928,6 +1095,26 @@ impl DeclarativeProvider {
                 .transpose()?,
         })
     }
+}
+
+fn gateway_error_type(body: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    value.pointer("/error/type")?.as_str().map(str::to_owned)
+}
+
+fn dispatch_error(error: ProviderError, authorized: bool) -> ProviderError {
+    if !authorized {
+        return error;
+    }
+    // Transport errors may include the URL. The caller must not replay a request whose
+    // acceptance by the provider is unknown, even when no response bytes arrived.
+    let safe = match error {
+        ProviderError::Transport(_) => {
+            ProviderError::Transport("authorized transport failed".into())
+        }
+        error => error,
+    };
+    ProviderError::NonReplayable(Box::new(safe))
 }
 
 #[async_trait]

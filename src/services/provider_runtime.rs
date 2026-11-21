@@ -4,7 +4,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use llm_plugin::{
-    DeclarativeProvider, ProviderError, ProviderId, ProviderManifestV1, ProviderRuntimeConfig,
+    DeclarativeProvider, ProviderError, ProviderId, ProviderManifestV1, ProviderPlugin,
+    ProviderRuntimeConfig,
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use thiserror::Error;
@@ -12,7 +13,7 @@ use thiserror::Error;
 use crate::{
     auth::encryption::decrypt_key,
     models::ai_engines::{self, PluginConfig},
-    services::provider_manifests,
+    services::{discovery_catalog::DiscoveryCatalog, provider_manifests},
     state::AppState,
 };
 
@@ -212,20 +213,69 @@ pub fn compile_provider(
 }
 
 pub async fn build_provider(
-    app_key: &[u8; 32],
-    req_client: &reqwest::Client,
+    state: &AppState,
     engine: &ai_engines::Model,
-) -> Result<DeclarativeProvider, ProviderLoadError> {
-    let config = plugin_config_for(req_client, engine).await?;
+) -> Result<Arc<dyn ProviderPlugin>, ProviderLoadError> {
+    let config = if engine.engine_key == "grengin" && engine.plugin_config.is_none() {
+        let package = state
+            .discovery_catalog
+            .ai_provider("grengin", None)
+            .await
+            .map_err(|_| ProviderLoadError::ManifestUnavailable)?;
+        catalog_config(package.plugin)
+    } else {
+        plugin_config_for(&state.req_client, engine).await?
+    };
     let api_key = engine
         .api_key
         .as_ref()
         .map(|encrypted_value| {
-            decrypt_key(app_key, encrypted_value)
+            decrypt_key(&state.settings.auth.app_key, encrypted_value)
                 .map_err(|_| ProviderLoadError::CredentialDecryption)
         })
         .transpose()?;
-    compile_provider(config, &engine.engine_key, api_key)
+    compile_engine(
+        config,
+        &engine.engine_key,
+        api_key,
+        engine
+            .plugin_config
+            .is_none()
+            .then_some(&state.discovery_catalog),
+    )
+}
+
+pub fn catalog_config(manifest: serde_json::Value) -> PluginConfig {
+    PluginConfig {
+        manifest,
+        configuration: serde_json::json!({}),
+        base_url_override: None,
+        allow_insecure_http: false,
+        allow_private_network: false,
+    }
+}
+
+pub fn compile_engine(
+    config: PluginConfig,
+    engine_key: &str,
+    api_key: Option<String>,
+    catalog: Option<&DiscoveryCatalog>,
+) -> Result<Arc<dyn ProviderPlugin>, ProviderLoadError> {
+    if let Some(catalog) = catalog
+        && engine_key == "grengin"
+    {
+        let manifest = parse_manifest(&config)?;
+        if manifest.id != engine_key || api_key.is_some() {
+            return Err(
+                ProviderError::Configuration("Grengin requires workspace identity".into()).into(),
+            );
+        }
+        return Ok(Arc::new(super::grengin_provider::GrenginProvider::new(
+            &manifest,
+            catalog.clone(),
+        )?));
+    }
+    Ok(Arc::new(compile_provider(config, engine_key, api_key)?))
 }
 
 pub fn provider_plugin_version(engine: &ai_engines::Model) -> Option<String> {
@@ -245,8 +295,8 @@ pub async fn register_provider(
     state: &AppState,
     engine: &ai_engines::Model,
 ) -> Result<(), ProviderLoadError> {
-    let provider = build_provider(&state.settings.auth.app_key, &state.req_client, engine).await?;
-    state.provider_registry.register(Arc::new(provider)).await;
+    let provider = build_provider(state, engine).await?;
+    state.provider_registry.register(provider).await;
     Ok(())
 }
 
@@ -265,7 +315,7 @@ pub async fn load_enabled_providers(state: &AppState) -> Result<(), ProviderLoad
         .map_err(|_| ProviderLoadError::Database)?;
     let catalog_keys: Vec<String> = engines
         .iter()
-        .filter(|engine| engine.plugin_config.is_none())
+        .filter(|engine| engine.plugin_config.is_none() && engine.engine_key != "grengin")
         .map(|engine| engine.engine_key.clone())
         .collect();
     provider_manifests::prefetch(&state.req_client, &catalog_keys).await;
