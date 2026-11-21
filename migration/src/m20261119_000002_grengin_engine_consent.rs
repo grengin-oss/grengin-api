@@ -36,9 +36,24 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Lifecycle::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(Lifecycle::Id).small_integer().not_null().primary_key())
-                    .col(ColumnDef::new(Lifecycle::Generation).big_integer().not_null().default(0))
-                    .col(ColumnDef::new(Lifecycle::Revision).big_integer().not_null().default(0))
+                    .col(
+                        ColumnDef::new(Lifecycle::Id)
+                            .small_integer()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(Lifecycle::Generation)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(Lifecycle::Revision)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
                     .col(
                         ColumnDef::new(Lifecycle::UpdatedAt)
                             .timestamp_with_time_zone()
@@ -53,10 +68,27 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Operations::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(Operations::Id).uuid().not_null().primary_key())
-                    .col(ColumnDef::new(Operations::Generation).big_integer().not_null())
-                    .col(ColumnDef::new(Operations::Revision).big_integer().not_null())
-                    .col(ColumnDef::new(Operations::DesiredEnabled).boolean().not_null())
+                    .col(
+                        ColumnDef::new(Operations::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(Operations::Generation)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Operations::Revision)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Operations::DesiredEnabled)
+                            .boolean()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(Operations::State).text().not_null())
                     .col(ColumnDef::new(Operations::ErrorCode).text().null())
                     .col(
@@ -78,7 +110,12 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .drop_table(Table::drop().table(Operations::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(Operations::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await?;
         manager
             .drop_table(Table::drop().table(Lifecycle::Table).if_exists().to_owned())

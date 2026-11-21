@@ -2142,7 +2142,11 @@ fn gateway_rejection(error_type: &str) -> MockResponse {
 
 async fn start_authorized_chat(
     responses: Vec<MockResponse>,
-) -> (Arc<TestAuthorization>, Requests, Result<ProviderEventStream, ProviderError>) {
+) -> (
+    Arc<TestAuthorization>,
+    Requests,
+    Result<ProviderEventStream, ProviderError>,
+) {
     let (base, requests) = serve(responses).await;
     let authorization = TestAuthorization::new(&base);
     let provider = DeclarativeProvider::new_authorized(
