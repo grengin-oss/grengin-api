@@ -71,6 +71,7 @@ struct Calls {
 struct FakeProvider {
     descriptor: ProviderDescriptor,
     calls: Arc<Calls>,
+    text_model: String,
 }
 
 impl ProviderPlugin for FakeProvider {
@@ -98,7 +99,7 @@ impl ProviderPlugin for FakeProvider {
 #[async_trait]
 impl ChatProvider for FakeProvider {
     async fn start(&self, request: ChatRequest) -> Result<Box<dyn ChatSession>, ProviderError> {
-        assert_eq!(request.model.as_str(), TEXT_MODEL);
+        assert_eq!(request.model.as_str(), self.text_model);
         self.calls.chat.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(FakeSession {
             omit_usage: self.calls.omit_usage.load(Ordering::SeqCst),
@@ -171,7 +172,7 @@ impl ModelProvider for FakeProvider {
     fn static_models(&self) -> Vec<ProviderModel> {
         vec![
             ProviderModel {
-                id: ModelId::new(TEXT_MODEL),
+                id: ModelId::new(self.text_model.clone()),
                 name: "Seer".to_string(),
                 model_type: ProviderModelType::TextGenerator,
                 capabilities: ProviderCapabilities {
@@ -338,6 +339,7 @@ impl Fixture {
                     },
                 },
                 calls: calls.clone(),
+                text_model: TEXT_MODEL.to_string(),
             }))
             .await;
         let fixture = Self {
@@ -838,10 +840,14 @@ async fn a_committed_write_whose_acknowledgement_is_lost_is_not_charged_twice() 
 }
 
 async fn start_new_chat(fixture: &Fixture) -> bool {
+    start_new_chat_for(fixture, &fixture.engine_key, TEXT_MODEL).await
+}
+
+async fn start_new_chat_for(fixture: &Fixture, provider: &str, model: &str) -> bool {
     use axum::{Json, extract::State};
     let input = serde_json::from_value(json!({
-        "provider": fixture.engine_key,
-        "model_name": TEXT_MODEL,
+        "provider": provider,
+        "model_name": model,
         "messages": [{ "role": "user", "content": "Plan a budget", "files": [] }]
     }))
     .expect("chat input");
@@ -863,6 +869,172 @@ async fn start_new_chat(fixture: &Fixture) -> bool {
         Err(crate::error::AppError::DbTimeout) => false,
         Err(error) => panic!("unexpected chat error: {error:?}"),
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn gateway_chats_do_not_generate_or_charge_a_background_title() {
+    let fixture = Fixture::new(false).await;
+    let model = "openai/seer";
+    fixture.db.execute_unprepared(&format!(
+        r#"UPDATE ai_engines SET "engineKey" = 'grengin', "defaultModel" = '{model}', "whitelistModels" = ARRAY['{model}'] WHERE id = '{}';
+           UPDATE department_allowed_models SET provider = 'grengin', model = '{model}' WHERE "departmentId" = '{}';"#,
+        fixture.engine_id, fixture.department
+    )).await.expect("gateway engine");
+    fixture
+        .state
+        .settings
+        .set_ai_engine_cache("grengin".into(), None, true, vec![model.to_string()])
+        .await;
+    let mut descriptor = fixture
+        .state
+        .provider_registry
+        .get_by_str(&fixture.engine_key)
+        .await
+        .unwrap()
+        .descriptor()
+        .clone();
+    descriptor.id = ProviderId::new("grengin");
+    fixture
+        .state
+        .provider_registry
+        .register(Arc::new(FakeProvider {
+            descriptor,
+            calls: fixture.calls.clone(),
+            text_model: model.to_string(),
+        }))
+        .await;
+
+    let started = start_new_chat_for(&fixture, "grengin", model).await;
+    let conversations = user_conversations(&fixture).await;
+    let ledger = fixture.ledger().await;
+    let calls = fixture.calls.chat.load(Ordering::SeqCst);
+    fixture.cleanup().await;
+    assert!(started);
+    assert_eq!(
+        calls, 0,
+        "the lazy response body has not dispatched inference, so no title call is permitted either"
+    );
+    assert!(
+        ledger.is_empty(),
+        "a gateway title must not create a local charge"
+    );
+    assert_eq!(conversations.len(), 1);
+    assert_eq!(conversations[0].title.as_deref(), Some("Plan a budget"));
+    assert_eq!(
+        conversations[0].metadata.as_ref().unwrap()["fundingSource"],
+        "grengin"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn project_retrieval_keeps_source_names_private_and_charges_both_queries() {
+    use crate::services::{llm_usage_gate::UsagePurpose, rag::build_project_retrieval_prompt};
+
+    let fixture = Fixture::new(false).await;
+    let source_id = fixture.project_source().await;
+    let source = fixture.source_status(source_id).await;
+    assert_eq!(source.processing_status, "ready");
+    let subject = UsageSubject {
+        user_id: fixture.user,
+        purpose: UsagePurpose::QueryEmbedding,
+        conversation_id: None,
+    };
+    let private = build_project_retrieval_prompt(
+        &fixture.state,
+        subject,
+        source.project_id,
+        "quarterly budgets",
+        3,
+        false,
+    )
+    .await
+    .unwrap()
+    .expect("private project context");
+    let named = build_project_retrieval_prompt(
+        &fixture.state,
+        subject,
+        source.project_id,
+        "quarterly budgets",
+        3,
+        true,
+    )
+    .await
+    .unwrap()
+    .expect("named project context");
+    let ledger = fixture.ledger().await;
+    fixture.cleanup().await;
+    assert!(private.contains("Fixture notes"));
+    assert!(!private.contains("scan.png"));
+    assert!(named.contains("scan.png"));
+    let queries = charges_for(&ledger, "query_embedding");
+    assert_eq!(queries.len(), 2);
+    assert!(queries.iter().all(|row| row.cost_usd == embedding_cost()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn own_key_embeddings_are_priced_and_charged_under_the_resolved_model() {
+    use crate::services::rag::generate_embeddings;
+
+    let fixture = Fixture::new(false).await;
+    let gateway_id = Uuid::new_v4();
+    let qualified = format!("openai/{EMBED_MODEL}");
+    fixture.db.execute_unprepared(&format!(
+        r#"UPDATE ai_engines SET "engineKey" = 'openai', "apiKey" = 'fixture-only', "whitelistModels" = ARRAY['{EMBED_MODEL}'] WHERE id = '{}';
+           INSERT INTO ai_engines (id, "displayName", "isEnabled", "engineKey", "apiKeyStatus", "whitelistModels", "defaultModel", "createdAt", "updatedAt")
+             VALUES ('{gateway_id}', 'Gateway fixture', true, 'grengin', 'not_configured', ARRAY['{qualified}'], '{qualified}', now(), now());"#,
+        fixture.engine_id
+    )).await.expect("own-key routing fixtures");
+    let mut descriptor = fixture
+        .state
+        .provider_registry
+        .get_by_str(&fixture.engine_key)
+        .await
+        .unwrap()
+        .descriptor()
+        .clone();
+    descriptor.id = ProviderId::new("openai");
+    fixture
+        .state
+        .provider_registry
+        .register(Arc::new(FakeProvider {
+            descriptor,
+            calls: fixture.calls.clone(),
+            text_model: TEXT_MODEL.to_string(),
+        }))
+        .await;
+    let result = generate_embeddings(
+        &fixture.state,
+        &EmbeddingSettings {
+            provider: "grengin".into(),
+            model: qualified,
+            dimensions: Some(1536),
+            is_enabled: true,
+        },
+        UsageSubject {
+            user_id: fixture.user,
+            purpose: UsagePurpose::QueryEmbedding,
+            conversation_id: None,
+        },
+        vec!["A query about budgets".into()],
+    )
+    .await;
+    let ledger = fixture.ledger().await;
+    let calls = fixture.calls.embed.load(Ordering::SeqCst);
+    fixture
+        .db
+        .execute_unprepared(&format!("DELETE FROM ai_engines WHERE id = '{gateway_id}'"))
+        .await
+        .expect("remove gateway fixture");
+    fixture.cleanup().await;
+    assert!(result.unwrap().is_some());
+    assert_eq!(calls, 1);
+    assert_eq!(ledger.len(), 1);
+    assert_eq!(ledger[0].model_provider, "openai");
+    assert_eq!(ledger[0].model_name, EMBED_MODEL);
+    assert_eq!(ledger[0].cost_usd, embedding_cost());
 }
 
 async fn user_conversations(fixture: &Fixture) -> Vec<crate::models::conversations::Model> {

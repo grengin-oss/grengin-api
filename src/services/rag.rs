@@ -601,14 +601,7 @@ pub async fn generate_embeddings(
     let Some(embedder) = plugin.embeddings() else {
         return Ok(None);
     };
-    let charge = authorize_usage(
-        app_state,
-        subject,
-        plugin.as_ref(),
-        &provider,
-        &config.model,
-    )
-    .await?;
+    let charge = authorize_usage(app_state, subject, plugin.as_ref(), &provider, &model).await?;
     let estimated_input = inputs
         .iter()
         .map(|input| estimate_text_tokens(input))

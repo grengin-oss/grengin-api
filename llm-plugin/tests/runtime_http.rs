@@ -2372,6 +2372,86 @@ fn gateway_rejection(error_type: &str) -> MockResponse {
     )
 }
 
+#[tokio::test]
+async fn authorized_completion_keeps_late_usage_and_ignores_bytes_after_done() {
+    let mut wire = concat!(
+        "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":3}}\n\n",
+        "data: [DONE]\n\ndata: "
+    )
+    .as_bytes()
+    .to_vec();
+    wire.extend_from_slice(b"\xff\n\n");
+    let (base, requests) = serve(vec![
+        MockResponse::chunked("200 OK", "text/event-stream", vec![wire], Duration::ZERO)
+            .keep_open(),
+    ])
+    .await;
+    let mut operations = openai_chat_operations(Value::Null);
+    operations["chatStream"]["response"]["rules"].as_array_mut().unwrap().push(json!({
+        "id":"usage", "when":{"pointer":"/usage","exists":true}, "emit":"usage",
+        "fields":{"inputTokens":"/usage/prompt_tokens","outputTokens":"/usage/completion_tokens"}
+    }));
+    let provider = authorized_provider(&base, json!({"chat":{"streaming":true}}), operations);
+    let events = tokio::time::timeout(Duration::from_secs(2), collect_chat(&provider, "chat-1"))
+        .await
+        .expect("authorized DONE must not wait for EOF");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ProviderEvent::Completed { .. }))
+            .count(),
+        1
+    );
+    let usage = events
+        .iter()
+        .find_map(|event| match event {
+            ProviderEvent::Usage { usage } => Some(usage),
+            _ => None,
+        })
+        .expect("late usage is preserved");
+    assert_eq!(usage.input_tokens, Some(11));
+    assert_eq!(usage.output_tokens, Some(3));
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 1);
+    assert_minimal_headers(&requests[0], "grant-1", true);
+}
+
+#[tokio::test]
+async fn authorized_errors_after_completion_remain_private_and_nonreplayable() {
+    let wire = concat!(
+        "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"error\":{\"message\":\"private-after-completion\"}}\n\n"
+    );
+    let (base, requests) =
+        serve(vec![MockResponse::new("200 OK", "text/event-stream", wire)]).await;
+    let mut operations = openai_chat_operations(Value::Null);
+    operations["chatStream"]["response"]["rules"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id":"error", "when":{"pointer":"/error","exists":true}, "emit":"error",
+            "fields":{"message":"/error/message"}
+        }));
+    let provider = authorized_provider(&base, json!({"chat":{"streaming":true}}), operations);
+    let mut session = provider
+        .chat()
+        .unwrap()
+        .start(chat_request("chat-1"))
+        .await
+        .unwrap();
+    let mut stream = session.stream().await.unwrap();
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ProviderEvent::Completed { .. }))
+    ));
+    let error = stream.next().await.expect("protected error").unwrap_err();
+    assert!(matches!(error, ProviderError::NonReplayable(_)));
+    assert!(!error.is_retryable());
+    assert!(!error.to_string().contains("private-after-completion"));
+    assert_eq!(requests.lock().await.len(), 1);
+}
+
 async fn start_authorized_chat(
     responses: Vec<MockResponse>,
 ) -> (

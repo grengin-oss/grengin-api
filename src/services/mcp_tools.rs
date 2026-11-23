@@ -744,15 +744,21 @@ mod tests {
             json!({}),
             None,
         );
-        let call = || {
-            call_with_current_access(
-                &db,
-                &client,
-                "revocable_tool",
-                json!({}),
-                Some("user-token".into()),
-                user,
+        let cancel = crate::state::StreamCancel::new(Uuid::new_v4());
+        let call = || async {
+            crate::services::mcp_execution::cancellable_tool_call(
+                &cancel,
+                call_with_current_access(
+                    &db,
+                    &client,
+                    "revocable_tool",
+                    json!({}),
+                    Some("user-token".into()),
+                    user,
+                ),
             )
+            .await
+            .expect("this dispatch is not cancelled")
         };
         let rule = |target: &str, tool_id: &str, permission: &str| {
             format!(

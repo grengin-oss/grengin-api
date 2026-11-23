@@ -25,6 +25,34 @@ mod tests {
     use uuid::Uuid;
 
     #[tokio::test]
+    async fn cancelled_calls_never_enter_the_live_access_query_or_dispatch() {
+        use crate::{
+            models::mcp_servers::McpTransportType,
+            services::{mcp_client::McpServerClient, mcp_tools::call_with_current_access},
+        };
+        use sea_orm::DatabaseConnection;
+        use serde_json::json;
+
+        let db = DatabaseConnection::Disconnected;
+        let client = McpServerClient::new(
+            Uuid::new_v4(),
+            "combined guard".into(),
+            McpTransportType::Http,
+            Some("http://127.0.0.1:9/mcp".into()),
+            json!({}),
+            None,
+        );
+        let cancel = StreamCancel::new(Uuid::new_v4());
+        cancel.cancel(StopReason::UserCancelled);
+        let stopped = cancellable_tool_call(
+            &cancel,
+            call_with_current_access(&db, &client, "tool", json!({}), None, Uuid::new_v4()),
+        )
+        .await;
+        assert!(stopped.is_none());
+    }
+
+    #[tokio::test]
     async fn stop_drops_the_active_call_and_releases_its_lease() {
         let cancel = Arc::new(StreamCancel::new(Uuid::new_v4()));
         let lease = Arc::new(Mutex::new(()));
