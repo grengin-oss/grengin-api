@@ -493,10 +493,7 @@ pub async fn get_department_analytics(
     sort: Option<DepartmentAnalyticsSortRule>,
     ascending: Option<bool>,
 ) -> Result<DepartmentAnalytics, DbErr> {
-    let mut limit = limit.unwrap_or(20);
-    if limit == 0 {
-        limit = 20;
-    }
+    let limit = super::pagination::page_limit(limit, 20);
     let offset = offset.unwrap_or(0);
     // Message window condition (kept inside CASE so departments with 0 messages still show up)
     let mut active_msg_cond = Expr::col((messages::Entity, messages::Column::Deleted)).eq(false);
@@ -676,10 +673,7 @@ pub async fn get_department_analytics_scoped(
     query: DepartmentAnalyticsQuery,
     scope_paths: &[String],
 ) -> Result<DepartmentAnalytics, DbErr> {
-    let mut limit = query.limit.unwrap_or(20);
-    if limit == 0 {
-        limit = 20;
-    }
+    let limit = super::pagination::page_limit(query.limit, 20);
     let offset = query.offset.unwrap_or(0);
 
     if scope_paths.is_empty() {

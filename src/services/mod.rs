@@ -62,6 +62,7 @@ pub mod notifications;
 pub mod oidc_proxy;
 pub mod oidc_service;
 pub mod owner_bootstrap;
+pub mod pagination;
 pub mod permission_grants;
 pub mod project_helpers;
 pub mod project_source_processing;
