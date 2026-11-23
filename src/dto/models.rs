@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use utoipa::ToSchema;
 
 #[derive(Serialize, Deserialize, Clone, ToSchema, PartialEq, Debug)]
@@ -16,6 +17,21 @@ pub enum ModelType {
 pub struct ModelsResponse {
     pub providers: Vec<ProviderInfo>,
     pub global_attachments: GlobalAttachments,
+    pub specialties: Vec<SpecialtyInfo>,
+    pub price_tiers: Vec<PriceTierInfo>,
+}
+
+#[derive(Serialize, Deserialize, Clone, ToSchema, PartialEq, Debug)]
+pub struct SpecialtyInfo {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, ToSchema, PartialEq, Debug)]
+pub struct PriceTierInfo {
+    pub id: String,
+    pub label: String,
 }
 
 #[derive(Serialize, Clone, ToSchema, PartialEq, Debug)]
@@ -55,6 +71,11 @@ pub struct ModelInfo {
     pub name: String,
     pub engine: String,
     pub model_type: ModelType,
+    pub specialty: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_tier: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

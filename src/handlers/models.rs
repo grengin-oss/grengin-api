@@ -14,7 +14,8 @@ use crate::{
         chat_attachments::global_attachments,
         chat_stream_helpers::is_model_whitelisted,
         department_policies::{effective_allowed_models, model_policy_key},
-        models_cache::load_providers_cached,
+        model_picker::PickerMetadata,
+        models_cache::load_models_cache,
         provider_models::is_chat_selectable_model,
     },
     state::SharedState,
@@ -57,13 +58,18 @@ pub async fn get_list_models(
             .collect::<HashSet<(String, String)>>()
     });
 
-    let (status, providers) = match load_providers_cached(&app_state.req_client).await {
-        Ok(providers) => (StatusCode::OK, providers),
+    let (status, providers, picker) = match load_models_cache(&app_state.req_client).await {
+        Ok(cache) => (StatusCode::OK, cache.providers, cache.picker),
         Err(error) => {
             eprintln!("providers cache error: {error}");
-            (StatusCode::SERVICE_UNAVAILABLE, Vec::new())
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Vec::new(),
+                PickerMetadata::built_in(),
+            )
         }
     };
+    let catalog_providers = providers.clone();
 
     let mut filtered_providers = Vec::new();
     for provider in providers {
@@ -144,6 +150,7 @@ pub async fn get_list_models(
         let mut models = plugin_models
             .into_iter()
             .map(|model| crate::services::provider_models::to_model_info(&provider_key, model))
+            .map(|model| picker.enrich_plugin_model(model, &catalog_providers))
             .filter(is_chat_selectable_model)
             .filter(|model| is_model_whitelisted(&whitelist, &[&model.key, &model.name]))
             .collect::<Vec<_>>();
@@ -204,6 +211,8 @@ pub async fn get_list_models(
         Json(ModelsResponse {
             providers: filtered_providers,
             global_attachments: global_attachments(&app_state.settings.attachments),
+            specialties: picker.specialties(),
+            price_tiers: picker.price_tiers(),
         }),
     )
 }

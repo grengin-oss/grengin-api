@@ -5,7 +5,7 @@ use llm_plugin::{ProviderError, ProviderModel, ProviderModelType, ProviderPlugin
 
 use crate::{
     dto::models::{ModelInfo, ModelType},
-    services::live_models_cache::LiveModelsCache,
+    services::{live_models_cache::LiveModelsCache, model_picker::DEFAULT_SPECIALTY},
 };
 
 pub async fn find_provider_model(
@@ -61,6 +61,9 @@ pub fn to_model_info(provider_key: &str, model: ProviderModel) -> ModelInfo {
         key: model.id.to_string(),
         engine: provider_key.to_string(),
         model_type: resolved_model_type,
+        specialty: DEFAULT_SPECIALTY.to_string(),
+        summary: None,
+        price_tier: None,
         comment,
         input_token_rate: metadata_f64(&model, "inputTokenRate"),
         output_token_rate: metadata_f64(&model, "outputTokenRate"),
@@ -140,6 +143,9 @@ mod tests {
             name: "Model 1".to_string(),
             engine: "example".to_string(),
             model_type,
+            specialty: DEFAULT_SPECIALTY.to_string(),
+            summary: None,
+            price_tier: None,
             comment: None,
             input_token_rate: None,
             output_token_rate: None,

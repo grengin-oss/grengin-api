@@ -1,0 +1,33 @@
+{
+  "formatVersion": "1.0",
+  "currency": "USD",
+  "tiers": [
+    { "id": "free", "label": "Free" },
+    { "id": "cheap", "label": "Cheap" },
+    { "id": "moderate", "label": "Moderate" },
+    { "id": "expensive", "label": "Expensive" },
+    { "id": "premium", "label": "Premium" }
+  ],
+  "rules": {
+    "textGenerator": {
+      "weights": { "input": 3, "output": 1 },
+      "bands": [
+        { "tier": "free", "max": 0 },
+        { "tier": "cheap", "max": 1 },
+        { "tier": "moderate", "max": 5 },
+        { "tier": "expensive", "max": 15 },
+        { "tier": "premium" }
+      ]
+    },
+    "imageGenerator": {
+      "weights": { "imageOutput": 1 },
+      "bands": [
+        { "tier": "free", "max": 0 },
+        { "tier": "cheap", "max": 10 },
+        { "tier": "moderate", "max": 35 },
+        { "tier": "expensive", "max": 70 },
+        { "tier": "premium" }
+      ]
+    }
+  }
+}

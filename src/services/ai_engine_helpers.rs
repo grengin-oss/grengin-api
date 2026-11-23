@@ -7,32 +7,38 @@ use crate::{
     models::ai_engines::{self, ApiKeyStatus},
     services::{
         chat_attachments::global_attachments,
-        models_cache::{load_providers_cached, refresh_models_cache},
+        models_cache::{ProvidersCache, load_models_cache, refresh_models_cache},
     },
     state::SharedState,
 };
 
 pub async fn load_models_response(app_state: &SharedState) -> Result<ModelsResponse, AuthError> {
-    let providers = load_providers_cached(&app_state.req_client)
+    let cache = load_models_cache(&app_state.req_client)
         .await
         .map_err(|e| {
             eprintln!("providers cache error: {e}");
             AuthError::DbTimeout
         })?;
-    Ok(ModelsResponse {
-        providers,
+    Ok(models_response(app_state, cache))
+}
+
+fn models_response(app_state: &SharedState, cache: ProvidersCache) -> ModelsResponse {
+    ModelsResponse {
+        specialties: cache.picker.specialties(),
+        price_tiers: cache.picker.price_tiers(),
+        providers: cache.providers,
         global_attachments: global_attachments(&app_state.settings.attachments),
-    })
+    }
 }
 
 pub async fn load_models_response_refreshed(
     app_state: &SharedState,
 ) -> Result<ModelsResponse, AuthError> {
-    let providers = match refresh_models_cache(&app_state.req_client).await {
-        Ok(cache) => cache.providers,
+    let cache = match refresh_models_cache(&app_state.req_client).await {
+        Ok(cache) => cache,
         Err(error) => {
             eprintln!("providers cache refresh error: {error}");
-            load_providers_cached(&app_state.req_client)
+            load_models_cache(&app_state.req_client)
                 .await
                 .map_err(|e| {
                     eprintln!("providers cache fallback error: {e}");
@@ -40,10 +46,7 @@ pub async fn load_models_response_refreshed(
                 })?
         }
     };
-    Ok(ModelsResponse {
-        providers,
-        global_attachments: global_attachments(&app_state.settings.attachments),
-    })
+    Ok(models_response(app_state, cache))
 }
 
 // Ready engines lead the admin list: enabled first, then by how far the credential got,
