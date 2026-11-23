@@ -11,6 +11,7 @@ use crate::{
     dto::models::{ModelInfo, ModelsResponse, ProviderInfo},
     models::{ai_engines, users},
     services::{
+        chat_attachments::global_attachments,
         chat_stream_helpers::is_model_whitelisted,
         department_policies::{effective_allowed_models, model_policy_key},
         models_cache::load_providers_cached,
@@ -24,7 +25,7 @@ use crate::{
     path = "/models",
     tag = "models",
     responses(
-        (status = 200, body = ModelsResponse, description = "List of providers and models"),
+        (status = 200, body = ModelsResponse, description = "Providers and models, plus the attachment limits that apply to every model"),
         (status = 401),
     )
 )]
@@ -202,6 +203,7 @@ pub async fn get_list_models(
         status,
         Json(ModelsResponse {
             providers: filtered_providers,
+            global_attachments: global_attachments(&app_state.settings.attachments),
         }),
     )
 }

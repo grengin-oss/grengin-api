@@ -68,7 +68,7 @@ use crate::dto::me::EffectivePermissionsResponse;
 use crate::dto::me::MeDepartmentUsersResponse;
 use crate::dto::me::MetadataResponse;
 use crate::dto::me::UpdateMetadataRequest;
-use crate::dto::models::{ModelInfo, ProviderInfo};
+use crate::dto::models::{GlobalAttachments, ModelInfo, ProviderInfo};
 use crate::dto::notifications::{
     NotificationDto, NotificationsListQuery, NotificationsListResponse,
 };
@@ -373,6 +373,7 @@ use utoipa::OpenApi;
             PluginModel,
             ProviderInfo,
             ModelInfo,
+            GlobalAttachments,
             AIEngineValidation,
             AIEngineModels,
             AiModel,

@@ -5,7 +5,10 @@ use crate::{
     auth::error::AuthError,
     dto::models::ModelsResponse,
     models::ai_engines::{self, ApiKeyStatus},
-    services::models_cache::{load_providers_cached, refresh_models_cache},
+    services::{
+        chat_attachments::global_attachments,
+        models_cache::{load_providers_cached, refresh_models_cache},
+    },
     state::SharedState,
 };
 
@@ -16,7 +19,10 @@ pub async fn load_models_response(app_state: &SharedState) -> Result<ModelsRespo
             eprintln!("providers cache error: {e}");
             AuthError::DbTimeout
         })?;
-    Ok(ModelsResponse { providers })
+    Ok(ModelsResponse {
+        providers,
+        global_attachments: global_attachments(&app_state.settings.attachments),
+    })
 }
 
 pub async fn load_models_response_refreshed(
@@ -34,7 +40,10 @@ pub async fn load_models_response_refreshed(
                 })?
         }
     };
-    Ok(ModelsResponse { providers })
+    Ok(ModelsResponse {
+        providers,
+        global_attachments: global_attachments(&app_state.settings.attachments),
+    })
 }
 
 // Ready engines lead the admin list: enabled first, then by how far the credential got,

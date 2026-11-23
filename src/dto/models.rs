@@ -15,6 +15,15 @@ pub enum ModelType {
 #[derive(Serialize, ToSchema)]
 pub struct ModelsResponse {
     pub providers: Vec<ProviderInfo>,
+    pub global_attachments: GlobalAttachments,
+}
+
+#[derive(Serialize, Clone, ToSchema, PartialEq, Debug)]
+pub struct GlobalAttachments {
+    #[schema(example = json!(["image/*", "application/pdf", ".txt"]))]
+    pub accepted_types: Vec<String>,
+    pub max_file_size_bytes: u64,
+    pub max_files_per_message: usize,
 }
 
 impl ModelsResponse {
@@ -27,12 +36,6 @@ impl ModelsResponse {
         let icon = provider.map(|provider| provider.icon.clone());
         let icon_dark = provider.map(|provider| provider.icon_dark.clone());
         (icon, icon_dark)
-    }
-
-    pub fn default() -> Self {
-        ModelsResponse {
-            providers: Vec::new(),
-        }
     }
 }
 

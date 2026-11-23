@@ -439,6 +439,49 @@ pub async fn stored_attachments_size(
     Ok(sizes.into_iter().map(|size| size.max(0) as u64).sum())
 }
 
+pub struct StoredAttachment {
+    pub size: i64,
+    pub content_type: String,
+    pub name: String,
+}
+
+pub async fn stored_attachments(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    file_ids: &[Uuid],
+) -> Result<Vec<StoredAttachment>, AppError> {
+    if file_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let unique_ids = file_ids.iter().copied().collect::<HashSet<_>>();
+    let rows = files::Entity::find()
+        .select_only()
+        .column(files::Column::Size)
+        .column(files::Column::ContentType)
+        .column(files::Column::Name)
+        .filter(files::Column::Id.is_in(unique_ids.iter().copied()))
+        .filter(files::Column::UserId.eq(user_id))
+        .filter(files::Column::Status.eq(FileUploadStatus::Uploaded))
+        .into_tuple::<(i64, String, String)>()
+        .all(db)
+        .await
+        .map_err(|error| {
+            eprintln!("file attachment lookup failed: {error}");
+            AppError::DbTimeout
+        })?;
+    if rows.len() != unique_ids.len() {
+        return Err(AppError::ResourceNotFound);
+    }
+    Ok(rows
+        .into_iter()
+        .map(|(size, content_type, name)| StoredAttachment {
+            size,
+            content_type,
+            name,
+        })
+        .collect())
+}
+
 pub async fn read_model_bytes(root: &Path, model: &files::Model) -> Result<Vec<u8>, AppError> {
     let canonical_path = contained_stored_path(root, model).await?;
     fs::read(canonical_path).await.map_err(|error| {

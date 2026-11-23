@@ -33,6 +33,7 @@ pub struct Settings {
     pub ai_engines_cache: RwLock<HashMap<String, AiEngineStateCache>>,
     pub embedding: RwLock<Option<EmbeddingSettings>>,
     pub rag: RagSettings,
+    pub attachments: AttachmentSettings,
     pub file_storage_root: PathBuf,
 }
 
@@ -92,6 +93,17 @@ pub struct RagSettings {
     pub max_context_tokens: usize,
     pub summary_llm_provider: Option<String>,
     pub summary_llm_model: Option<String>,
+}
+
+pub const MAX_ATTACHMENTS_PER_REQUEST: usize = 32;
+// Uploads travel base64-encoded in a JSON body capped at 50 MiB, so larger files cannot arrive.
+pub const MAX_ATTACHMENT_FILE_BYTES: u64 = 36 * 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttachmentSettings {
+    pub accepted_types: Vec<String>,
+    pub max_file_bytes: u64,
+    pub max_files_per_message: usize,
 }
 
 #[derive(Clone, Default)]
@@ -347,6 +359,7 @@ impl Settings {
             ai_engines_cache: RwLock::new(HashMap::new()),
             embedding: RwLock::new(EmbeddingSettings::from_env()),
             rag: RagSettings::from_env(),
+            attachments: AttachmentSettings::from_env()?,
             file_storage_root: file_storage_root_from_env()?,
         })
     }
@@ -637,6 +650,92 @@ impl RagSettings {
     }
 }
 
+impl AttachmentSettings {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Self::parse(
+            std::env::var("ATTACHMENTS_ACCEPTED_TYPES").ok().as_deref(),
+            std::env::var("ATTACHMENTS_MAX_FILE_BYTES").ok().as_deref(),
+            std::env::var("ATTACHMENTS_MAX_FILES_PER_MESSAGE")
+                .ok()
+                .as_deref(),
+        )
+    }
+
+    fn parse(
+        accepted_types: Option<&str>,
+        max_file_bytes: Option<&str>,
+        max_files_per_message: Option<&str>,
+    ) -> Result<Self, ConfigError> {
+        let mut types = Vec::new();
+        for token in accepted_types.unwrap_or_default().split(',') {
+            let token = token.trim().to_ascii_lowercase();
+            if token.is_empty() || types.contains(&token) {
+                continue;
+            }
+            if !is_accept_token(&token) {
+                return Err(ConfigError::ParseError("ATTACHMENTS_ACCEPTED_TYPES"));
+            }
+            types.push(token);
+        }
+        if types.is_empty() || types.iter().any(|token| token == "*/*") {
+            types = vec!["*/*".to_string()];
+        }
+        let max_file_bytes = bounded(
+            max_file_bytes,
+            25 * 1024 * 1024,
+            MAX_ATTACHMENT_FILE_BYTES,
+            "ATTACHMENTS_MAX_FILE_BYTES",
+        )?;
+        let max_files_per_message = bounded(
+            max_files_per_message,
+            MAX_ATTACHMENTS_PER_REQUEST as u64,
+            MAX_ATTACHMENTS_PER_REQUEST as u64,
+            "ATTACHMENTS_MAX_FILES_PER_MESSAGE",
+        )? as usize;
+        Ok(Self {
+            accepted_types: types,
+            max_file_bytes,
+            max_files_per_message,
+        })
+    }
+}
+
+fn bounded(
+    value: Option<&str>,
+    default: u64,
+    max: u64,
+    name: &'static str,
+) -> Result<u64, ConfigError> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(default),
+        Some(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|value| (1..=max).contains(value))
+            .ok_or(ConfigError::ParseError(name)),
+    }
+}
+
+// The HTML `accept` forms: `*/*`, `type/*`, `type/subtype` or a `.extension`.
+fn is_accept_token(token: &str) -> bool {
+    let name_char = |c: char| c.is_ascii_alphanumeric() || "!#$&^_.+-".contains(c);
+    if let Some(extension) = token.strip_prefix('.') {
+        return !extension.is_empty()
+            && extension
+                .split('.')
+                .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+    match token.split_once('/') {
+        Some(("*", "*")) => true,
+        Some((top, sub)) => {
+            !top.is_empty()
+                && top.chars().all(name_char)
+                && (sub == "*" || (!sub.is_empty() && sub.chars().all(name_char)))
+        }
+        None => false,
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("missing configuration variable: {0}")]
@@ -662,8 +761,9 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::{
-        AzureSettings, EmbeddingSettings, GoogleSettings, RagSettings, file_storage_root_from_env,
-        parse_bool_setting, validate_file_storage_root,
+        AttachmentSettings, AzureSettings, EmbeddingSettings, GoogleSettings,
+        MAX_ATTACHMENT_FILE_BYTES, MAX_ATTACHMENTS_PER_REQUEST, RagSettings,
+        file_storage_root_from_env, parse_bool_setting, validate_file_storage_root,
     };
     use std::sync::{LazyLock, Mutex};
 
@@ -956,5 +1056,62 @@ mod tests {
         assert_eq!(rag.summary_llm_provider.as_deref(), Some("anthropic"));
 
         clear_rag_summary_env();
+    }
+
+    #[test]
+    fn attachment_settings_default_to_any_type_25_mib_and_the_request_cap() {
+        let settings = AttachmentSettings::parse(None, None, None).unwrap();
+        assert_eq!(settings.accepted_types, vec!["*/*"]);
+        assert_eq!(settings.max_file_bytes, 25 * 1024 * 1024);
+        assert_eq!(settings.max_files_per_message, MAX_ATTACHMENTS_PER_REQUEST);
+    }
+
+    #[test]
+    fn attachment_settings_normalise_and_validate_configured_values() {
+        let settings = AttachmentSettings::parse(
+            Some(" Image/*, application/PDF ,.TXT,.tar.gz,image/*,, "),
+            Some("1048576"),
+            Some("5"),
+        )
+        .unwrap();
+        assert_eq!(
+            settings.accepted_types,
+            vec!["image/*", "application/pdf", ".txt", ".tar.gz"]
+        );
+        assert_eq!(settings.max_file_bytes, 1_048_576);
+        assert_eq!(settings.max_files_per_message, 5);
+        assert_eq!(
+            AttachmentSettings::parse(Some("image/png,*/*"), None, None)
+                .unwrap()
+                .accepted_types,
+            vec!["*/*"]
+        );
+        for types in [
+            "pdf",
+            "image/",
+            "/png",
+            ".",
+            "..txt",
+            "text/plain;q=1",
+            "*/png",
+        ] {
+            assert!(
+                AttachmentSettings::parse(Some(types), None, None).is_err(),
+                "{types}"
+            );
+        }
+        let too_large = (MAX_ATTACHMENT_FILE_BYTES + 1).to_string();
+        for size in ["0", "-1", "abc", too_large.as_str()] {
+            assert!(
+                AttachmentSettings::parse(None, Some(size), None).is_err(),
+                "{size}"
+            );
+        }
+        for count in ["0", "33", "two"] {
+            assert!(
+                AttachmentSettings::parse(None, None, Some(count)).is_err(),
+                "{count}"
+            );
+        }
     }
 }
