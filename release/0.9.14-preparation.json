@@ -2,11 +2,15 @@
   "kind": "manual_release_preparation",
   "prepared_on": "2026-11-23",
   "version": "0.9.14",
-  "status": "preflight_only_not_merge_ready",
+  "status": "locally_integrated_awaiting_claude_review_not_merge_ready",
   "automatically_consumed_by_ci": false,
   "base_commit": "e9bcb2a02e86fd65c236f9ed4c53dbd5cd55b603",
   "previous_product_release": "https://github.com/grengin-oss/grengin/releases/tag/v0.9.13",
   "api_main_changed": false,
+  "pushed": false,
+  "worktree": "/home/anurag/work/grengin-api-0.9.14-integration",
+  "local_branch": "integration/release-0.9.14",
+  "validated_code_commit": "87f2ab02141d04c9acf4efc7ac2e8771a64cb57b",
   "version_bump_applied": false,
   "proposed_merge_order": [107, 108, 109, 110, 111, 112],
   "pull_requests": [
@@ -49,15 +53,67 @@
       "conflicting_files": ["llm-plugin/src/runtime.rs"]
     }
   ],
-  "combined_tree_checked": false,
+  "combined_tree_checked": true,
+  "local_merge_commits": {
+    "107": "81f8318",
+    "108": "d11080d",
+    "109": "d2b158e",
+    "110": "3b3648b",
+    "111": "3324fb4",
+    "112": "742d431"
+  },
   "resolution_requirements": [
     "Preserve the Grengin via_gateway title-generation bypass while adding title charges from PR 111.",
-    "Preserve gateway retrieval/embedding restrictions while adding UsageSubject to project retrieval.",
+    "Preserve include_source_names=false for gateway project retrieval while adding UsageSubject. This flag redacts source filenames; it does not disable embeddings.",
     "Retain model_route and add select_summary_model in RAG; do not drop Grengin routing.",
     "Retain RequestAuthorization, MAX_AUTHORIZED_BODY_BYTES and authorized-stream error sanitization while adding PR 112 completion and trailing-usage handling.",
     "Wrap PR 108 call_with_current_access in PR 112 cancellable_tool_call; neither access checks nor cancellation may be lost.",
     "Once PRs 110 and 111 are combined, initialize sso_client in AppState::for_tests.",
     "Recheck all conflicts after earlier PRs are combined; individual clean textual merges do not establish combined correctness."
+  ],
+  "additional_integration_fix": "generate_embeddings now authorizes and prices the resolved provider/model, not the original qualified Grengin alias, so own-key routing retains correct pricing and ledger identity.",
+  "validation": {
+    "toolchain": "Rust 1.91.0",
+    "resources": {"cargo_jobs": 1, "memory_max_gib": 3, "cpu_quota_percent": 150},
+    "workspace_build": "passed",
+    "workspace_tests": {"passed": 989, "failed": 0, "ignored": 108},
+    "selected_postgres_tests": {"passed": 33, "failed": 0, "database": "fresh disposable PostgreSQL 16 with pgvector"},
+    "http_security_checks": 24,
+    "http_extended_checks": 133,
+    "fmt": "passed",
+    "diff_check": "passed",
+    "clippy": "exit 0; inherited style warnings remain, not a warnings-as-errors pass",
+    "clippy_api_warnings": {"binary": 111, "test_binary": 112},
+    "real_vendor_calls": false,
+    "production_credentials_or_data_used": false,
+    "logs_directory": "target/review/",
+    "negative_controls": {
+      "gateway_title_bypass_removed": "new PostgreSQL test fails",
+      "resolved_embedding_model_replaced_with_original_alias": "new PostgreSQL test fails",
+      "authorized_stream_error_sanitization_removed": "new HTTP runtime test fails",
+      "restoration": "all three source file hashes exactly matched their pre-mutation values; workspace tests, build and clippy reran after restoration"
+    }
+  },
+  "new_regressions": [
+    "gateway_chats_do_not_generate_or_charge_a_background_title",
+    "project_retrieval_keeps_source_names_private_and_charges_both_queries",
+    "own_key_embeddings_are_priced_and_charged_under_the_resolved_model",
+    "cancelled_calls_never_enter_the_live_access_query_or_dispatch",
+    "authorized_completion_keeps_late_usage_and_ignores_bytes_after_done",
+    "authorized_errors_after_completion_remain_private_and_nonreplayable"
+  ],
+  "updated_regression": "revocation_blocks_the_next_remote_mcp_call_before_it_reaches_the_server now runs call_with_current_access inside cancellable_tool_call",
+  "claude_review_commands": [
+    "git diff e9bcb2a02e86fd65c236f9ed4c53dbd5cd55b603..HEAD",
+    "git show --cc 3324fb4",
+    "git show --cc 742d431",
+    "git show 87f2ab02141d04c9acf4efc7ac2e8771a64cb57b"
+  ],
+  "remaining_review_focus": [
+    "Review PR 111 task-model selection for all Grengin/own-key extraction and summary combinations; the added canonical-funding regression specifically covers embeddings, not every background-task combination.",
+    "PR 112 uses the configured request timeout as the trailing-usage window when a DONE marker is declared, versus two seconds when none is declared. Review this inherited latency trade-off.",
+    "The 108 tests ignored by the standard workspace run were not all executed. Only the 33 explicitly selected database tests were additionally enabled.",
+    "No ARM64 image build, real provider login/inference, hosted proxy deployment or 0.9.14 release publication was performed in this local conflict-resolution run."
   ],
   "required_validation_before_main_merge": [
     "Review every current PR head; reported older test runs are not approval of the combined tree.",
