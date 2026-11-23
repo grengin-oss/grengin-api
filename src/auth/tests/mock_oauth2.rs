@@ -74,7 +74,7 @@ fn http_client() -> ReqwestClient {
 }
 
 async fn mock_client(profile: &FlowProfile) -> Result<(OidcClient, SsoHttpClient)> {
-    let sso_client = SsoHttpClient::new()?;
+    let sso_client = SsoHttpClient::direct_for_tests()?;
     let issuer = mock_issuer(profile.issuer_id);
     let client = if profile.public_client {
         let metadata =

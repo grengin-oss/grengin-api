@@ -3,8 +3,7 @@
 
 pub const MAX_PAGE_LIMIT: u64 = 100;
 
-/// The page size for a listing request: `default` when absent or zero, never above
-/// `MAX_PAGE_LIMIT`, so a request can neither divide by zero nor load a whole table.
+// Zero selects the default instead of allowing division by zero in pagination.
 pub fn page_limit(requested: Option<u64>, default: u64) -> u64 {
     requested
         .filter(|limit| *limit > 0)

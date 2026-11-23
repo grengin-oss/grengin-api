@@ -172,7 +172,7 @@ fn parse_form_post(body: &str) -> Result<(String, HashMap<String, String>)> {
 }
 
 async fn begin_authorization(profile: &ProviderProfile) -> Result<PendingAuthorization> {
-    let sso_client = SsoHttpClient::new()?;
+    let sso_client = SsoHttpClient::direct_for_tests()?;
     let client = build_discovered_oidc_client(
         &sso_client,
         &mock_issuer(profile.issuer_id),

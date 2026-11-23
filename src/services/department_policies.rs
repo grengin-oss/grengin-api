@@ -68,22 +68,33 @@ pub async fn effective_allowed_models(
     department_id: Uuid,
 ) -> Result<Option<Vec<DepartmentModelKey>>, sea_orm::DbErr> {
     let mut current = Some(department_id);
-    let mut depth = 0;
+    let mut visited = HashSet::new();
+    let mut effective: Option<Vec<DepartmentModelKey>> = None;
     while let Some(dept_id) = current {
-        depth += 1;
-        if depth > 10 {
-            break;
+        if !visited.insert(dept_id) || visited.len() > 10 {
+            return Err(sea_orm::DbErr::Custom("invalid department ancestry".into()));
         }
 
         let explicit = load_allowed_models(db, dept_id).await?;
         if !explicit.is_empty() {
-            return Ok(Some(explicit));
+            match effective.as_mut() {
+                None => effective = Some(explicit),
+                Some(models) => {
+                    let allowed: HashSet<_> = explicit
+                        .iter()
+                        .map(|model| model_policy_key(&model.provider, &model.model))
+                        .collect();
+                    models.retain(|model| {
+                        allowed.contains(&model_policy_key(&model.provider, &model.model))
+                    });
+                }
+            }
         }
 
         let parent = load_parent_row(db, dept_id).await?;
         current = parent.parent_id;
     }
-    Ok(None)
+    Ok(effective)
 }
 
 pub async fn validate_allowed_models_subset(
@@ -185,5 +196,94 @@ async fn load_parent_row(
             parent_id: None,
             retention_days: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::{ConnectionTrait, Database};
+
+    #[tokio::test]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+    async fn ancestors_constrain_children_after_policy_changes_and_moves() {
+        let url = std::env::var("GRENGIN_SECURITY_TEST_DATABASE_URL").unwrap();
+        assert!(url.ends_with("/grengin_security_test"));
+        let db = Database::connect(url).await.unwrap();
+        let (root, parent, child, other) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        for (id, parent_id) in [
+            (root, None),
+            (parent, Some(root)),
+            (child, Some(parent)),
+            (other, None),
+        ] {
+            let parent_value = parent_id
+                .map(|id| format!("'{id}'"))
+                .unwrap_or("NULL".into());
+            db.execute_unprepared(&format!(r#"INSERT INTO departments (id, name, path, depth, "parentId", "createdAt", "updatedAt") VALUES ('{id}', 'policy-test', 'd{}', 0, {parent_value}, now(), now())"#, id.simple())).await.unwrap();
+        }
+        assert!(
+            effective_allowed_models(&db, child)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        for (department, provider, model) in [
+            (root, "openai", "a"),
+            (root, "openai", "b"),
+            (child, "grengin", "openai/a"),
+            (child, "openai", "b"),
+            (other, "openai", "c"),
+        ] {
+            db.execute_unprepared(&format!(r#"INSERT INTO department_allowed_models (id, "departmentId", provider, model, "createdAt", "updatedAt") VALUES ('{}', '{department}', '{provider}', '{model}', now(), now())"#, Uuid::new_v4())).await.unwrap();
+        }
+        assert!(
+            check_model_allowed(&db, Some(child), "openai", "a")
+                .await
+                .unwrap()
+        );
+        db.execute_unprepared(&format!(r#"DELETE FROM department_allowed_models WHERE "departmentId" = '{root}' AND model = 'a'"#)).await.unwrap();
+        assert!(
+            !check_model_allowed(&db, Some(child), "grengin", "openai/a")
+                .await
+                .unwrap()
+        );
+        assert!(
+            check_model_allowed(&db, Some(child), "openai", "b")
+                .await
+                .unwrap()
+        );
+        db.execute_unprepared(&format!(
+            r#"UPDATE departments SET "parentId" = '{other}' WHERE id = '{parent}'"#
+        ))
+        .await
+        .unwrap();
+        assert!(
+            effective_allowed_models(&db, child)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !check_model_allowed(&db, Some(child), "openai", "b")
+                .await
+                .unwrap()
+        );
+        db.execute_unprepared(&format!(
+            r#"UPDATE departments SET "parentId" = '{child}' WHERE id = '{other}'"#
+        ))
+        .await
+        .unwrap();
+        assert!(
+            effective_allowed_models(&db, child).await.is_err(),
+            "a corrupt cycle must not become unrestricted access"
+        );
+        db.execute_unprepared(&format!(r#"UPDATE departments SET "parentId" = NULL WHERE id IN ('{root}', '{parent}', '{child}', '{other}'); DELETE FROM department_allowed_models WHERE "departmentId" IN ('{root}', '{parent}', '{child}', '{other}'); DELETE FROM departments WHERE id IN ('{root}', '{parent}', '{child}', '{other}')"#)).await.unwrap();
     }
 }

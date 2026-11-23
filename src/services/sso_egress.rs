@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, sync::Arc};
+
+use hyper_util::client::proxy::matcher::Matcher;
 
 use openidconnect::{AsyncHttpClient, HttpRequest, HttpResponse};
 use reqwest::{IntoUrl, RequestBuilder, StatusCode};
@@ -10,7 +12,8 @@ use thiserror::Error;
 use url::{Host, Url};
 
 use crate::services::{
-    catalog_download::read_body_capped, safe_egress::checked_short_call_builder,
+    catalog_download::read_body_capped,
+    safe_egress::{DestinationError, checked_sso_call_builder, resolve_destination},
 };
 
 const SSO_RESPONSE_MAX_BYTES: usize = 1024 * 1024;
@@ -71,12 +74,38 @@ impl SsoResponse {
 #[derive(Clone)]
 pub struct SsoHttpClient {
     client: reqwest::Client,
+    proxy_matcher: Arc<Matcher>,
+}
+
+fn dns_failure_allowed(error: DestinationError, uses_proxy: bool) -> bool {
+    uses_proxy && matches!(error, DestinationError::Lookup)
 }
 
 impl SsoHttpClient {
+    #[cfg(test)]
+    pub(crate) fn direct_for_tests() -> reqwest::Result<Self> {
+        Ok(Self {
+            client: checked_sso_call_builder().no_proxy().build()?,
+            proxy_matcher: Arc::new(Matcher::builder().build()),
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_test_root(root: Option<reqwest::Certificate>) -> reqwest::Result<Self> {
+        let mut builder = checked_sso_call_builder();
+        if let Some(root) = root {
+            builder = builder.add_root_certificate(root);
+        }
+        Ok(Self {
+            client: builder.build()?,
+            proxy_matcher: Arc::new(Matcher::from_system()),
+        })
+    }
+
     pub fn new() -> reqwest::Result<Self> {
         Ok(Self {
-            client: checked_short_call_builder().build()?,
+            client: checked_sso_call_builder().build()?,
+            proxy_matcher: Arc::new(Matcher::from_system()),
         })
     }
 
@@ -94,6 +123,26 @@ impl SsoHttpClient {
 
     async fn execute(&self, request: reqwest::Request) -> Result<SsoResponse, SsoEgressError> {
         validate_literal_destination(request.url())?;
+        // CONNECT proxies resolve the target themselves. Check its DNS answers before dispatch
+        // too; the configured proxy remains an operator-trusted network boundary.
+        if let Some(Host::Domain(host)) = request.url().host() {
+            let uses_proxy = request
+                .url()
+                .as_str()
+                .parse::<axum::http::Uri>()
+                .ok()
+                .and_then(|uri| self.proxy_matcher.intercept(&uri))
+                .is_some();
+            let result =
+                tokio::time::timeout(std::time::Duration::from_secs(5), resolve_destination(host))
+                    .await
+                    .unwrap_or(Err(DestinationError::Lookup));
+            if let Err(error) = result
+                && !dns_failure_allowed(error, uses_proxy)
+            {
+                return Err(SsoEgressError::Destination);
+            }
+        }
         let response = self.client.execute(request).await?;
         let status = response.status();
         let version = response.version();
@@ -127,6 +176,14 @@ mod tests {
     use super::*;
     use std::sync::{Arc, OnceLock};
 
+    #[test]
+    fn a_proxy_can_resolve_a_missing_name_but_never_overrides_an_unsafe_answer() {
+        assert!(dns_failure_allowed(DestinationError::Lookup, true));
+        assert!(!dns_failure_allowed(DestinationError::Lookup, false));
+        assert!(!dns_failure_allowed(DestinationError::Unsafe, true));
+        assert!(!dns_failure_allowed(DestinationError::Unsafe, false));
+    }
+
     async fn serve(router: axum::Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -138,7 +195,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_sso_client_refuses_metadata_and_link_local_literals() {
-        let client = SsoHttpClient::new().expect("SSO client");
+        let client = SsoHttpClient::direct_for_tests().expect("SSO client");
         for url in [
             "http://169.254.169.254/latest/meta-data",
             "http://[::1]:1/",
@@ -190,7 +247,7 @@ mod tests {
 
         let error = openidconnect::core::CoreProviderMetadata::discover_async(
             openidconnect::IssuerUrl::new(url).unwrap(),
-            &SsoHttpClient::new().expect("SSO client"),
+            &SsoHttpClient::direct_for_tests().expect("SSO client"),
         )
         .await
         .expect_err("a JWKS URL on the metadata address must not be fetched");
@@ -221,7 +278,7 @@ mod tests {
                 ),
         )
         .await;
-        let client = SsoHttpClient::new().expect("SSO client");
+        let client = SsoHttpClient::direct_for_tests().expect("SSO client");
 
         let fits = client
             .send(client.get(format!("{base}/fits")))

@@ -623,6 +623,33 @@ async fn heartbeat_traffic_cannot_extend_the_post_completion_window() {
 }
 
 #[tokio::test]
+async fn a_missing_done_marker_cannot_keep_a_finished_reply_open_for_the_request_timeout() {
+    let (base, _) = serve(vec![
+        MockResponse::new(
+            "200 OK",
+            "text/event-stream",
+            b"data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n".to_vec(),
+        )
+        .keep_open(),
+    ])
+    .await;
+    let provider = provider(
+        base,
+        json!({"chat":{"streaming":true}}),
+        openai_chat_operations(json!({"timeoutMs":120000})),
+    );
+    let started = tokio::time::Instant::now();
+    let events = tokio::time::timeout(Duration::from_secs(7), collect_chat(&provider, "chat-1"))
+        .await
+        .expect("the post-completion window must be capped independently of the request timeout");
+    assert!(started.elapsed() >= Duration::from_secs(5));
+    assert!(matches!(
+        events.as_slice(),
+        [ProviderEvent::Completed { .. }]
+    ));
+}
+
+#[tokio::test]
 async fn malformed_trailing_usage_is_not_silently_accepted() {
     let (base_url, _) = serve_once(
         "200 OK",

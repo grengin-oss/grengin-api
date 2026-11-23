@@ -288,7 +288,7 @@ impl AppState {
     #[cfg(test)]
     pub fn for_tests(database: DatabaseConnection, settings: Settings) -> SharedState {
         let req_client = short_call_client().expect("test http client");
-        let sso_client = SsoHttpClient::new().expect("test SSO client");
+        let sso_client = SsoHttpClient::direct_for_tests().expect("test SSO client");
         let (notification_hub, _) = broadcast::channel(16);
         Arc::new(Self {
             database,

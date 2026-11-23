@@ -33,16 +33,15 @@ use crate::{
             content_type_to_ext,
         },
         budget_allocation::refresh_department_budget_available,
-        chat_attachments::{hydrate_files, hydrate_prompt_files, validate_incoming_attachments},
+        chat_attachments::{hydrate_prompt_files, validate_incoming_attachments},
         chat_helpers::{
             effective_max_tokens, effective_native_web_search, supports_native_web_search,
         },
         chat_stream_helpers::{
             ContentCheckpoint, DepartmentBudgetGate, ToolRoundOutcome, deliver_reply,
             department_budget_status, ensure_budget_pricing, ensure_model_whitelisted,
-            model_identifiers, next_tool_round, persistence_error_event_data,
-            publish_charged_title, record_stop_reason, response_stopped_event_data,
-            stop_reason_for_provider_error, with_stop_reason,
+            model_identifiers, next_tool_round, persistence_error_event_data, record_stop_reason,
+            response_stopped_event_data, stop_reason_for_provider_error, with_stop_reason,
         },
         conversation_access::{
             can_access_conversation, find_active_conversation_for_user,
@@ -50,7 +49,6 @@ use crate::{
         },
         department_policies::check_model_allowed,
         file_storage::{FileWrite, StorageCategory, safe_file_name, store_file_bytes},
-        llm_usage_gate::{ModelRates, TokenCounts, UsageCharge, UsagePurpose, UsageSubject},
         mcp_helpers::{
             McpOauthErrorPayload, McpOauthPrompt, McpOauthRequiredEvent, build_mcp_oauth_prompt,
             build_mcp_server_context, resolve_mcp_oauth_token, resolve_mcp_tool_descriptor,
@@ -61,7 +59,7 @@ use crate::{
         notifications::emit_budget_alerts,
         provider_chat::{
             LlmStreamError, LlmStreamEvent, PluginStreamParser, build_plugin_chat_request,
-            generate_provider_title, plugin_event_stream, provider_error_class,
+            plugin_event_stream, provider_error_class,
         },
         provider_resolver::{ResolveProviderError, model_route, resolve_provider},
         rag::{
@@ -727,37 +725,29 @@ pub async fn handle_chat_stream(
         let mut retrieval_embedding = None;
         if app_state.settings.rag.enabled {
             let top_k = app_state.settings.rag.retrieval_top_k;
-            let retrieval_future = async {
-                if app_state.settings.rag.retrieval_enabled {
-                    embed_retrieval_query(
-                        &app_state,
-                        claims.user_id,
-                        conversation_id,
-                        &retrieval_query,
-                    )
-                    .await
-                } else {
-                    Ok(None)
-                }
-            };
-            let (embedding_result, project_retrieval_results) = tokio::join!(
-                retrieval_future,
+            if app_state.settings.rag.retrieval_enabled || !linked_projects.is_empty() {
+                retrieval_embedding = embed_retrieval_query(
+                    &app_state,
+                    claims.user_id,
+                    conversation_id,
+                    &retrieval_query,
+                )
+                .await?;
+            }
+            let project_retrieval_results = if let Some(query) = retrieval_embedding.as_ref() {
                 futures_util::future::join_all(linked_projects.iter().map(|project| {
                     build_project_retrieval_prompt(
                         &app_state,
-                        UsageSubject {
-                            user_id: claims.user_id,
-                            purpose: UsagePurpose::QueryEmbedding,
-                            conversation_id: Some(conversation_id),
-                        },
                         project.id,
-                        &retrieval_query,
+                        query,
                         top_k,
                         !via_gateway,
                     )
-                })),
-            );
-            retrieval_embedding = embedding_result?;
+                }))
+                .await
+            } else {
+                Vec::new()
+            };
             let combined_project_text: String = project_retrieval_results
                 .into_iter()
                 .filter_map(|r| r.ok().flatten())
@@ -802,7 +792,8 @@ pub async fn handle_chat_stream(
                     }
                 }
             }
-            if let Some(query) = retrieval_embedding.as_ref()
+            if app_state.settings.rag.retrieval_enabled
+                && let Some(query) = retrieval_embedding.as_ref()
                 && let Some(text) = build_retrieval_prompt(
                     &app_state,
                     &snapshot,
@@ -852,118 +843,24 @@ pub async fn handle_chat_stream(
             .messages
             .first()
             .ok_or(AppError::ValidationEmptyField { field: "messages" })?;
-        let first_prompt = first_message.content.clone();
-        let mut first_message_files = first_message.files.clone();
-        // Best-effort: title generation is non-fatal, so a hydration failure just
-        // falls back to a text-only title instead of failing the whole request.
-        if hydrate_files(&mut first_message_files, claims.user_id, &app_state)
-            .await
-            .is_err()
-        {
-            first_message_files.clear();
-        }
-        let new_conversation_id = Uuid::new_v4();
-        let mut new_metadata = metadata.clone();
-        let title_charge = UsageCharge::pre_authorized(
-            UsageSubject {
+        crate::services::conversation_titles::create_conversation(
+            &app_state,
+            provider_config.as_ref(),
+            crate::dto::conversation_titles::NewConversation {
                 user_id: claims.user_id,
-                purpose: UsagePurpose::TitleGeneration,
-                conversation_id: Some(new_conversation_id),
+                department_id: user_department,
+                provider: provider.clone(),
+                model: model_name.clone(),
+                prompt: first_message.content.clone(),
+                files: first_message.files.clone(),
+                metadata: metadata.clone(),
+                is_image_gen,
+                via_gateway,
+                input_rate,
+                output_rate,
             },
-            user_department,
-            &provider_key,
-            &model_name,
-            ModelRates {
-                input: input_rate,
-                output: output_rate,
-            },
-        );
-        let title_result = if is_image_gen || via_gateway {
-            None
-        } else {
-            generate_provider_title(
-                provider_config.as_ref(),
-                model_name.clone(),
-                first_prompt.clone(),
-                first_message_files,
-            )
-            .await
-            .map_err(|error| {
-                if !matches!(
-                    error.underlying(),
-                    llm_plugin::ProviderError::QuotaExhausted
-                        | llm_plugin::ProviderError::ResponseMapping(_)
-                ) {
-                    eprintln!("title generation failed: {}", provider_error_class(&error));
-                }
-                error
-            })
-            .ok()
-        };
-        let generated_title = title_result
-            .as_ref()
-            .map(|response| response.title.clone())
-            .or_else(|| Some(first_prompt.chars().take(80).collect::<String>()));
-        let title_tokens = title_result.as_ref().map(|response| {
-            TokenCounts::for_text_reply(
-                response.input_tokens,
-                response.output_tokens,
-                response.estimated_input_tokens,
-                &response.title,
-            )
-        });
-        new_metadata["titleGenerationUsage"] = title_tokens.map_or_else(
-            || json!({ "model": Value::Null, "inputTokens": 0, "outputTokens": 0 }),
-            |tokens| {
-                json!({
-                    "model": model_name,
-                    "inputTokens": tokens.input,
-                    "outputTokens": tokens.output,
-                })
-            },
-        );
-        let new_conversation = conversations::ActiveModel {
-            id: Set(new_conversation_id.clone()),
-            user_id: Set(claims.user_id),
-            // A generated title is shown only once its charge is recorded (publish_charged_title).
-            title: Set(if title_result.is_some() {
-                None
-            } else {
-                generated_title.clone()
-            }),
-            model_provider: Set(provider.clone()),
-            model_name: Set(model_name.clone()),
-            created_at: Set(Utc::now()),
-            updated_at: Set(Utc::now()),
-            last_message_at: Set(Some(Utc::now())),
-            archived_at: Set(None),
-            pinned: Set(false),
-            edit_requests: Set(0),
-            edit_claim: Set(None),
-            // Each request message counts as it is added to the thread.
-            message_count: Set(0),
-            total_tokens: Set(0),
-            total_cost: Set(Decimal::from(0)),
-            metadata: Set(Some(new_metadata)),
-        };
-        new_conversation
-            .insert(&app_state.database)
-            .await
-            .map_err(|e| {
-                eprintln!("Db insert one error {:?}", e);
-                AppError::DbTimeout
-            })?;
-        if let (Some(response), Some(tokens)) = (title_result.as_ref(), title_tokens) {
-            publish_charged_title(
-                &app_state,
-                new_conversation_id,
-                &response.title,
-                &title_charge,
-                tokens,
-            )
-            .await?;
-        }
-        (new_conversation_id, generated_title)
+        )
+        .await?
     };
     let mut previous_message_id = thread_parent;
     // Sent back on message_start, so a client can edit the message it just sent.

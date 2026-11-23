@@ -11,8 +11,11 @@ use crate::{
     error::AppError,
     models::ai_engines,
     services::{
-        department_policies::effective_allowed_models, llm_usage_gate::active_user_department,
-        provider_models::resolve_model_info, provider_resolver::resolve_provider,
+        chat_stream_helpers::{is_model_whitelisted, model_identifiers},
+        department_policies::effective_allowed_models,
+        llm_usage_gate::active_user_department,
+        provider_models::resolve_model_info,
+        provider_resolver::resolve_provider,
     },
     state::SharedState,
 };
@@ -115,6 +118,7 @@ pub async fn select_summary_model(
     conversation_model: &str,
 ) -> Result<Option<TaskModel>, AppError> {
     let rag = &state.settings.rag;
+    let allowed = department_allowed_models(state, user_id).await?;
     let preferred = TaskModel {
         provider_key: rag
             .summary_llm_provider
@@ -136,7 +140,30 @@ pub async fn select_summary_model(
             &preferred.model,
         )
         .await;
-        if writes_text(info.as_ref()) {
+        let identifiers = model_identifiers(
+            &preferred.model,
+            &preferred.provider_key,
+            info.as_ref(),
+            None,
+        );
+        let whitelist = state
+            .settings
+            .get_ai_engine_whitelist(&preferred.provider_key)
+            .await
+            .unwrap_or_default();
+        let department_allows = allowed.as_ref().is_none_or(|allowed| {
+            identifiers.iter().any(|id| {
+                allowed.contains(&(preferred.provider_key.to_lowercase(), id.to_lowercase()))
+            })
+        });
+        if writes_text(info.as_ref())
+            && state
+                .check_ai_engine_is_enabled(&preferred.provider_key)
+                .await
+                == Some(true)
+            && is_model_whitelisted(&whitelist, &identifiers)
+            && department_allows
+        {
             return Ok(Some(preferred));
         }
     }

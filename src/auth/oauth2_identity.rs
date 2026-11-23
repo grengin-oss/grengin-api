@@ -592,7 +592,7 @@ mod tests {
             .complete(
                 "valid-code".to_string(),
                 "pkce-verifier".to_string(),
-                &SsoHttpClient::new().expect("SSO client"),
+                &SsoHttpClient::direct_for_tests().expect("SSO client"),
             )
             .await
             .expect("identity");

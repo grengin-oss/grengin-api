@@ -832,7 +832,7 @@ mod mock_oidc_matrix_tests {
                 return;
             }
         };
-        let req_client = SsoHttpClient::new().expect("SSO client");
+        let req_client = SsoHttpClient::direct_for_tests().expect("SSO client");
 
         for case in provider_cases() {
             let issuer_url = server.issuer_url(case.slug);

@@ -221,6 +221,16 @@ try {
   await waitFor(()=>sql(`SELECT metadata->>'stopReason' FROM messages WHERE id=${q(disconnectedId)}`)==='user_cancelled','Stop after disconnect');
   check('Stop after disconnect persists as cancellation, not network error',true);
 
+  const timeoutServer = {name:`Deadline ${randomUUID()}`,transport_type:'http',url:'http://127.0.0.1:1/mcp',enabled:false};
+  for (const invalid of [0,-1,300001,1.5,'30000',true]) {
+    await expect('POST','/admin/mcp-servers',{...timeoutServer,connection_config:{transport_config:{tool_timeout_ms:invalid}}},400);
+  }
+  check('invalid deadlines never persist even for disabled servers',sql(`SELECT count(*) FROM mcp_servers WHERE name=${q(timeoutServer.name)}`),'0');
+  const savedTimeoutServer=(await expect('POST','/admin/mcp-servers',{...timeoutServer,connection_config:{transport_config:{tool_timeout_ms:45000}}},201)).json();
+  await expect('PUT',`/admin/mcp-servers/${savedTimeoutServer.id}`,{connection_config:{transport_config:{tool_timeout_ms:0}}},400);
+  check('invalid deadline update preserves the valid configuration',sql(`SELECT "connectionConfig"->'transport_config'->>'tool_timeout_ms' FROM mcp_servers WHERE id=${q(savedTimeoutServer.id)}`),'45000');
+  await expect('DELETE',`/admin/mcp-servers/${savedTimeoutServer.id}`,undefined,204);
+
   // A delegator cannot use tool-level rules to exceed its own server access or to wipe others' rules.
   const delegatorId=await newUser(), delegator=token(delegatorId);
   const delegateRole=(await expect('POST','/admin/roles',{name:`Staging delegate ${randomUUID()}`,permissions:['mcp_servers:delegate']},201)).json();

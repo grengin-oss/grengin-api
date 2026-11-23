@@ -407,25 +407,12 @@ pub async fn delete_mcp_server(
 pub async fn test_mcp_server(
     claims: Claims,
     State(state): State<SharedState>,
-    Path(_server_id): Path<Uuid>,
+    Path(server_id): Path<Uuid>,
 ) -> Result<Json<McpServerTestResult>, AuthError> {
-    let authz = AuthorizationService::new(&state.database);
-    authz
-        .ensure_permission(
-            claims.user_id,
-            PERMISSION_MCP_ADMIN,
-            None,
-            PermissionScopeMode::RequireOrgWide,
-            None,
-        )
-        .await?;
-    Ok(Json(McpServerTestResult {
-        success: true,
-        message: Some("Connection test not implemented; stub response".into()),
-        latency_ms: None,
-        available_tools: None,
-        error: None,
-    }))
+    Ok(Json(
+        crate::services::mcp_connection_test::test_server(&state, claims.user_id, server_id)
+            .await?,
+    ))
 }
 
 #[utoipa::path(

@@ -11,16 +11,30 @@ use crate::services::http_client::HttpTimeouts;
 // Remote MCP servers and OAuth token endpoints are admin-supplied. Their URLs are checked as text when
 // saved, but a host name can still resolve to cloud metadata or a link-local address, so every address
 // is checked again at connect time. Private networks stay allowed: on-premise MCP servers are expected.
-async fn resolve_checked(host: &str) -> std::io::Result<Vec<SocketAddr>> {
-    let addresses: Vec<_> = tokio::net::lookup_host((host, 0)).await?.collect();
+pub(super) enum DestinationError {
+    Lookup,
+    Unsafe,
+}
+
+pub(super) async fn resolve_destination(host: &str) -> Result<Vec<SocketAddr>, DestinationError> {
+    let addresses: Vec<_> = tokio::net::lookup_host((host, 0))
+        .await
+        .map_err(|_| DestinationError::Lookup)?
+        .collect();
     if addresses.is_empty() {
-        return Err(std::io::Error::other("empty DNS answer"));
+        return Err(DestinationError::Lookup);
     }
     for address in &addresses {
         connector_plugin::validate_destination_ip(address.ip(), true)
-            .map_err(|_| std::io::Error::other("destination address is not allowed"))?;
+            .map_err(|_| DestinationError::Unsafe)?;
     }
     Ok(addresses)
+}
+
+async fn resolve_checked(host: &str) -> std::io::Result<Vec<SocketAddr>> {
+    resolve_destination(host)
+        .await
+        .map_err(|_| std::io::Error::other("destination lookup refused"))
 }
 
 struct CheckedResolver;
@@ -54,9 +68,12 @@ pub fn mcp_client_builder() -> reqwest_mcp::ClientBuilder {
 }
 
 pub fn checked_short_call_builder() -> reqwest::ClientBuilder {
+    checked_sso_call_builder().no_proxy()
+}
+
+pub fn checked_sso_call_builder() -> reqwest::ClientBuilder {
     HttpTimeouts::SHORT_CALL.apply(
         reqwest::Client::builder()
-            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .dns_resolver(Arc::new(CheckedResolver)),
     )

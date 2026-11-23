@@ -722,7 +722,7 @@ mod tests {
             }),
         ))
         .await;
-        let client = SsoHttpClient::new().expect("SSO client");
+        let client = SsoHttpClient::direct_for_tests().expect("SSO client");
         let started = Instant::now();
         let result = fetch_jwks_document(&client, &url).await;
 

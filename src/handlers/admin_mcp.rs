@@ -127,85 +127,13 @@ pub async fn update_mcp_server_access(
     Path(server_id): Path<Uuid>,
     Json(req): Json<McpServerAccessUpdate>,
 ) -> Result<(StatusCode, Json<McpServerAccess>), AuthError> {
-    let authz = AuthorizationService::new(&app_state.database);
-    authz
-        .ensure_permission(
-            claims.user_id,
-            PERMISSION_MCP_ADMIN,
-            None,
-            PermissionScopeMode::RequireOrgWide,
-            Some(server_id),
-        )
-        .await?;
-
-    if let Some(default_access) = req.default_access {
-        if let Some(server) = mcp_servers::Entity::find_by_id(server_id)
-            .one(&app_state.database)
-            .await
-            .map_err(|e| {
-                eprintln!("mcp server lookup error: {e}");
-                AuthError::DbTimeout
-            })?
-        {
-            let mut active: mcp_servers::ActiveModel = server.into();
-            active.default_access = Set(default_access);
-            active.updated_at = Set(Utc::now());
-            active.update(&app_state.database).await.map_err(|e| {
-                eprintln!("mcp server update error: {e}");
-                AuthError::DbTimeout
-            })?;
-        }
-    }
-
-    let _ = mcp_access_policies::Entity::delete_many()
-        .filter(mcp_access_policies::Column::TargetType.eq(McpAccessTarget::Server))
-        .filter(mcp_access_policies::Column::ServerId.eq(server_id))
-        .exec(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("mcp rule delete error: {e}");
-            AuthError::DbTimeout
-        })?;
-
-    if let Some(rules) = req.rules {
-        for r in rules {
-            let inherit_departments = if r.access_type == McpAccessType::Department {
-                r.inherit_departments.unwrap_or(true)
-            } else {
-                true
-            };
-            let (role_id, _) = resolve_role_reference(
-                &app_state.database,
-                r.access_type,
-                r.role_id,
-                r.role_name.clone(),
-            )
-            .await?;
-            let model = mcp_access_policies::ActiveModel {
-                id: Set(Uuid::new_v4()),
-                target_type: Set(McpAccessTarget::Server),
-                server_id: Set(Some(server_id)),
-                tool_id: Set(None),
-                access_type: Set(r.access_type),
-                permission: Set(r.permission),
-                role_id: Set(role_id),
-                role_name: Set(None),
-                department_id: Set(r.department_id),
-                user_id: Set(r.user_id),
-                inherit_departments: Set(inherit_departments),
-                inherit_from_server: Set(None),
-                created_at: Set(Utc::now()),
-                created_by: Set(Some(claims.user_id)),
-            };
-            model.insert(&app_state.database).await.map_err(|e| {
-                eprintln!("mcp rule insert error: {e}");
-                AuthError::DbTimeout
-            })?;
-        }
-    }
-
-    let _ = authz.recompute_effective_permissions_for_all_users().await;
-
+    crate::services::mcp_access::replace_server_access(
+        &app_state.database,
+        claims.user_id,
+        server_id,
+        req,
+    )
+    .await?;
     get_mcp_server_access(claims, State(app_state), Path(server_id)).await
 }
 

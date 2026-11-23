@@ -259,9 +259,10 @@ an environment that contains data.
 
 ## MCP tool execution
 
-Each tool call has a 30-second deadline, including connection setup and waiting
+Each tool call has a five-minute deadline, including connection setup and waiting
 for a session lease. Set `transport_config.tool_timeout_ms` in the server's
-connection configuration to override it (1–300000 milliseconds). Native plugins
+connection configuration to override it (1–300000 milliseconds); invalid values
+are refused when saving the server, even if it is disabled. Native plugins
 retain their own stricter runtime limits. Long-lived MCP connections do not need
 to close between calls.
 

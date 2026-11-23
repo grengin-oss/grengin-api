@@ -1572,6 +1572,7 @@ dependencies = [
  "flate2",
  "foreign-types",
  "futures-util",
+ "hyper-util",
  "jsonwebtoken",
  "libc",
  "llm-plugin",

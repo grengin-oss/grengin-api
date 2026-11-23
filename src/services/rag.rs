@@ -5,8 +5,8 @@ use chrono::{DateTime, Utc};
 use sea_orm::{
     AccessMode, ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DatabaseBackend,
     DatabaseConnection, DatabaseTransaction, EntityTrait, IntoActiveModel, IsolationLevel,
-    JoinType, QueryFilter, QueryOrder, QuerySelect, QueryTrait, RelationTrait, Statement,
-    TransactionTrait,
+    JoinType, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait, RelationTrait,
+    Statement, TransactionTrait,
     sea_query::{Alias, BinOper, Expr, Order},
 };
 use uuid::Uuid;
@@ -189,12 +189,15 @@ pub async fn embed_retrieval_query(
         purpose: UsagePurpose::QueryEmbedding,
         conversation_id: Some(conversation_id),
     };
-    let embedding = match skip_refused(
-        generate_embedding(app_state, &embedding_config, subject, query_text).await,
-    )? {
-        Some(embedding) => embedding,
-        None => return Ok(None),
-    };
+    let embedding =
+        match generate_embedding(app_state, &embedding_config, subject, query_text).await {
+            Ok(Some(embedding)) => embedding,
+            Ok(None) => return Ok(None),
+            Err(_) => {
+                eprintln!("optional query embedding failed; continuing without retrieval context");
+                return Ok(None);
+            }
+        };
     Ok(Some(RetrievalQuery {
         provider: embedding_config.provider,
         model: embedding_config.model,
@@ -422,6 +425,7 @@ pub async fn update_conversation_summary(
         return Ok(());
     }
 
+    let source_ids: Vec<_> = new_messages.iter().map(|message| message.id).collect();
     let last_message = new_messages.last().cloned();
     let new_chunk = new_messages
         .drain(..)
@@ -473,19 +477,19 @@ pub async fn update_conversation_summary(
             eprintln!("rag summary lock error: {e}");
             AppError::DbTimeout
         })?;
-    let still_shown = match last_message.as_ref() {
-        Some(last) => messages::Entity::find_by_id(last.id)
-            .filter(messages::Column::Deleted.eq(false))
-            .one(&txn)
-            .await
-            .map_err(|e| {
-                eprintln!("rag summary message check error: {e}");
-                AppError::DbTimeout
-            })?
-            .is_some(),
-        None => false,
+    let still_shown = messages::Entity::find()
+        .filter(messages::Column::Id.is_in(source_ids.iter().copied()))
+        .filter(messages::Column::Deleted.eq(false))
+        .count(&txn)
+        .await
+        .map_err(|_| AppError::DbTimeout)?;
+    let current_summary = load_summary(&txn, conversation_id).await?;
+    let same_base = match (&existing_summary, &current_summary) {
+        (None, None) => true,
+        (Some(before), Some(current)) => before == current,
+        _ => false,
     };
-    if !still_shown {
+    if still_shown != source_ids.len() as u64 || !same_base {
         return Ok(());
     }
 
@@ -810,34 +814,14 @@ pub fn format_pgvector(values: &[f32]) -> String {
 
 pub async fn build_project_retrieval_prompt(
     app_state: &SharedState,
-    subject: UsageSubject,
     project_id: uuid::Uuid,
-    query: &str,
+    query: &RetrievalQuery,
     top_k: usize,
     include_source_names: bool,
 ) -> Result<Option<String>, AppError> {
     if !app_state.settings.rag.enabled {
         return Ok(None);
     }
-    let embedding_config = match app_state.settings.get_embedding_config().await {
-        Some(c) if c.is_enabled => c,
-        _ => return Ok(None),
-    };
-
-    let embeddings = match skip_refused(
-        generate_embeddings(
-            app_state,
-            &embedding_config,
-            subject,
-            vec![query.to_string()],
-        )
-        .await,
-    )? {
-        Some(v) if !v.is_empty() => v,
-        _ => return Ok(None),
-    };
-    let query_vector = format_pgvector(&embeddings[0]);
-
     // <=> cosine operator and ::vector cast have no SeaORM integration.
     let distance_expr = Expr::col((
         project_source_chunks::Entity,
@@ -845,7 +829,7 @@ pub async fn build_project_retrieval_prompt(
     ))
     .binary(
         BinOper::Custom("<=>".into()),
-        Expr::val(query_vector).cast_as(Alias::new("vector")),
+        Expr::val(query.vector.as_str()).cast_as(Alias::new("vector")),
     );
 
     let rows = project_source_chunks::Entity::find()
@@ -854,8 +838,8 @@ pub async fn build_project_retrieval_prompt(
             project_source_chunks::Relation::ProjectSource.def(),
         )
         .filter(project_source_chunks::Column::ProjectId.eq(project_id))
-        .filter(project_source_chunks::Column::Provider.eq(embedding_config.provider.clone()))
-        .filter(project_source_chunks::Column::Model.eq(embedding_config.model.clone()))
+        .filter(project_source_chunks::Column::Provider.eq(query.provider.as_str()))
+        .filter(project_source_chunks::Column::Model.eq(query.model.as_str()))
         .filter(project_sources::Column::ProcessingStatus.eq("ready"))
         .select_only()
         .column_as(

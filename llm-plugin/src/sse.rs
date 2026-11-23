@@ -44,8 +44,8 @@ impl SseDecoder {
         }
     }
 
-    /// Decodes every complete event in `bytes`. A caller that may stop at an event (a done
-    /// marker) uses `feed` and `next_event` instead, so bytes after that event are never read.
+    // Decodes every complete event in `bytes`. A caller that may stop at an event (a done
+    // marker) uses `feed` and `next_event` instead, so bytes after that event are never read.
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<DecodedSseEvent>, ProviderError> {
         self.feed(bytes);
         let mut events = Vec::new();
@@ -59,7 +59,7 @@ impl SseDecoder {
         self.buffer.extend_from_slice(bytes);
     }
 
-    /// The next complete event among the bytes fed so far, decoding only as far as needed.
+    // The next complete event among the bytes fed so far, decoding only as far as needed.
     pub fn next_event(&mut self) -> Result<Option<DecodedSseEvent>, ProviderError> {
         while let Some(newline) = self.buffer.iter().position(|byte| *byte == b'\n') {
             let mut line = self.buffer.drain(..=newline).collect::<Vec<_>>();
@@ -148,8 +148,8 @@ impl SseEventMapper {
         }
     }
 
-    /// True once a completion or provider error event has made the stream terminal. Accounting and
-    /// diagnostic events may still be mapped after completion.
+    // True once a completion or provider error event has made the stream terminal. Accounting and
+    // diagnostic events may still be mapped after completion.
     pub fn is_completed(&self) -> bool {
         self.state.completed
     }
@@ -212,14 +212,14 @@ impl SseEventMapper {
     }
 }
 
-/// Cross-event mapper state, kept separate from the immutable spec so mapping a single event
-/// borrows the rules without cloning them.
+// Cross-event mapper state, kept separate from the immutable spec so mapping a single event
+// borrows the rules without cloning them.
 #[derive(Clone)]
 struct MapperState {
     tool_ids_by_index: BTreeMap<u32, ToolCallId>,
-    /// Server-executed tools, tracked separately because providers such as Anthropic number them
-    /// in the same content-block index space as client tools while streaming an identical delta
-    /// shape. Knowing which space an index belongs to is what lets one rule per kind coexist.
+    // Server-executed tools, tracked separately because providers such as Anthropic number them
+    // in the same content-block index space as client tools while streaming an identical delta
+    // shape. Knowing which space an index belongs to is what lets one rule per kind coexist.
     server_tools_by_index: BTreeMap<u32, (Option<ToolCallId>, String)>,
     message_started: bool,
     completed: bool,
@@ -238,11 +238,11 @@ impl Default for MapperState {
     }
 }
 
-/// Outcome of resolving a rule's target when the rule and the event may disagree about which tool
-/// space an index belongs to.
+// Outcome of resolving a rule's target when the rule and the event may disagree about which tool
+// space an index belongs to.
 enum Resolved<T> {
     Found(T),
-    /// The index belongs to the other tool space, so this rule simply does not apply.
+    // The index belongs to the other tool space, so this rule simply does not apply.
     OtherSpace,
 }
 
@@ -501,12 +501,12 @@ impl MapperState {
     }
 }
 
-/// Which rule kinds still apply once the completion event has been emitted.
-///
-/// Content and tool events after completion are trailing noise and are dropped, but accounting and
-/// diagnostics are not: OpenAI-compatible providers send the `stream_options.include_usage` totals
-/// in a chunk *after* the finish-reason chunk, so sealing the mapper outright would silently
-/// discard the token counts callers bill on.
+// Which rule kinds still apply once the completion event has been emitted.
+//
+// Content and tool events after completion are trailing noise and are dropped, but accounting and
+// diagnostics are not: OpenAI-compatible providers send the `stream_options.include_usage` totals
+// in a chunk *after* the finish-reason chunk, so sealing the mapper outright would silently
+// discard the token counts callers bill on.
 fn survives_completion(kind: EventKind) -> bool {
     matches!(
         kind,
@@ -613,8 +613,8 @@ fn optional_string(
     }
 }
 
-/// Reads a field that may be a single string or an array of strings, used for the search-query
-/// lists providers such as Gemini report in one shot.
+// Reads a field that may be a single string or an array of strings, used for the search-query
+// lists providers such as Gemini report in one shot.
 fn optional_string_list(
     rule: &ResponseRule,
     value: &Value,
@@ -646,10 +646,10 @@ fn optional_string_list(
     }
 }
 
-/// Maps each entry of a `collect` array through the rule's `itemFields`.
-///
-/// A `url` is mandatory because a citation without one is not actionable; entries missing it are
-/// skipped rather than failing the stream, so one malformed result cannot abort an answer.
+// Maps each entry of a `collect` array through the rule's `itemFields`.
+//
+// A `url` is mandatory because a citation without one is not actionable; entries missing it are
+// skipped rather than failing the stream, so one malformed result cannot abort an answer.
 fn collect_results(
     rule: &ResponseRule,
     value: &Value,
@@ -709,7 +709,7 @@ fn optional_u32(
     }
 }
 
-/// Reads a token counter that providers report as an integer, a whole float, or a numeric string.
+// Reads a token counter that providers report as an integer, a whole float, or a numeric string.
 pub(crate) fn value_to_u32(value: &Value) -> Option<u32> {
     let integer = match value {
         Value::Number(number) => number.as_u64().or_else(|| {
@@ -722,8 +722,8 @@ pub(crate) fn value_to_u32(value: &Value) -> Option<u32> {
     u32::try_from(integer).ok()
 }
 
-/// Converts provider-specific cache accounting into the canonical usage contract.
-/// Canonical input and total counters include both cache-read and cache-write tokens.
+// Converts provider-specific cache accounting into the canonical usage contract.
+// Canonical input and total counters include both cache-read and cache-write tokens.
 pub(crate) fn normalize_token_usage(
     mut usage: TokenUsage,
     input_tokens_include_cached: bool,
@@ -1224,8 +1224,8 @@ mod tests {
         assert!(mapper.map(&event(r#"{"input":-3}"#)).is_err());
     }
 
-    /// The Anthropic content-block rules from the reference manifest, where client and server tools
-    /// share one index space and stream an identical `input_json_delta`.
+    // The Anthropic content-block rules from the reference manifest, where client and server tools
+    // share one index space and stream an identical `input_json_delta`.
     fn anthropic_block_response() -> ChatResponseSpec {
         serde_json::from_value(json!({
             "rules": [

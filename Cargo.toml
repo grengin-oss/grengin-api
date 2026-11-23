@@ -35,6 +35,7 @@ tower-http = { version = "0.6.7", features = ["cors", "set-header"] }
 openssl = { version = "0.10.75", features = ["vendored"] }
 num-traits = "0.2.19"
 futures-util = "0.3.31"
+hyper-util = { version = "0.1.19", features = ["client-proxy-system"] }
 llm-plugin = { path = "llm-plugin" }
 connector-plugin = { path = "connector-plugin" }
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum", "vendored"] }

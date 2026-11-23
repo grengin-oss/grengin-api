@@ -21,6 +21,7 @@ pub mod chat_stream;
 pub mod common;
 pub mod connector_console;
 pub mod connectors;
+pub mod conversation_titles;
 pub mod deployment;
 pub mod discovery;
 pub mod embeddings;

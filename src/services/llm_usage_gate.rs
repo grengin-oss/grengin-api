@@ -176,6 +176,7 @@ pub struct UsageCharge {
     provider_key: String,
     model: String,
     rates: ModelRates,
+    unpriced_embedding: bool,
     started: Instant,
 }
 
@@ -195,6 +196,7 @@ impl UsageCharge {
             provider_key: provider_key.to_lowercase(),
             model: model.to_string(),
             rates,
+            unpriced_embedding: false,
             started: Instant::now(),
         }
     }
@@ -274,6 +276,9 @@ impl UsageCharge {
             "purpose": self.subject.purpose.to_string(),
             "estimatedTokens": tokens.estimated,
         });
+        if self.unpriced_embedding {
+            metadata["unpricedEmbedding"] = json!(true);
+        }
         if let Some(conversation_id) = self.subject.conversation_id {
             metadata["conversationId"] = json!(conversation_id);
         }
@@ -348,15 +353,30 @@ pub async fn authorize_usage(
             &model_identifiers(model, &provider_key, info.as_ref(), None),
         )
         .await?;
+        ensure_budget_pricing(gate.budget_configured, info.as_ref())?;
+    } else if info
+        .as_ref()
+        .and_then(|model| model.input_token_rate)
+        .is_some_and(|rate| !rate.is_finite() || rate < 0.0)
+    {
+        return Err(AppError::ValidationMissingField {
+            field: "model_pricing",
+        });
     }
-    ensure_budget_pricing(gate.budget_configured, info.as_ref())?;
+    let mut rates = ModelRates::from(info.as_ref());
+    let unpriced_embedding = !check_model && rates.input.is_none();
+    if !check_model {
+        rates.input = Some(rates.input.unwrap_or(0.0));
+        rates.output = Some(0.0);
+    }
     Ok(UsageCharge {
         id: Uuid::new_v4(),
         subject,
         department_id: gate.department_id,
         provider_key,
         model: model.to_string(),
-        rates: ModelRates::from(info.as_ref()),
+        rates,
+        unpriced_embedding,
         started: Instant::now(),
     })
 }

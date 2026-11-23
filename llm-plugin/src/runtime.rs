@@ -45,6 +45,7 @@ const MAX_CONFIGURATION_BYTES: usize = 1024 * 1024;
 const MAX_IMAGE_COUNT: u8 = 16;
 const MAX_AUTHORIZED_BODY_BYTES: usize = 32 * 1024 * 1024;
 const TRAILING_USAGE_GRACE: Duration = Duration::from_secs(2);
+const MAX_TRAILING_USAGE_GRACE: Duration = Duration::from_secs(5);
 
 /// API-owned authorization for a trusted destination. Implementations must reject every URL
 /// outside their exact origin and operation allowlist before returning a bearer token.
@@ -537,6 +538,7 @@ impl DeclarativeProvider {
         let response_limit = self.response_limit_for(&operation.request);
         let trailing_grace = if operation.response.done_data.is_some() {
             self.timeout_for(&operation.request)
+                .min(MAX_TRAILING_USAGE_GRACE)
         } else {
             TRAILING_USAGE_GRACE
         };

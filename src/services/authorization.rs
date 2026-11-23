@@ -232,9 +232,11 @@ impl<'a, C: ConnectionTrait> AuthorizationService<'a, C> {
         let permission_rows = self.user_permission_rows(user_id).await?;
         let role_names = self.user_role_names(user_id).await?;
         let role_ids = self.user_role_ids(user_id).await?;
-        let has_mcp_admin = permission_rows
-            .iter()
-            .any(|row| row.domain == "mcp_servers" && row.action == "admin");
+        let has_mcp_admin = permission_rows.iter().any(|row| {
+            row.domain == "mcp_servers"
+                && row.action == "admin"
+                && row.scope_department_id.is_none()
+        });
 
         let permissions_map = build_permissions_json(&permission_rows);
 
@@ -624,6 +626,7 @@ impl<'a, C: ConnectionTrait> AuthorizationService<'a, C> {
                 user_role_assignments::Relation::Roles.def(),
             )
             .filter(user_role_assignments::Column::UserId.eq(user_id))
+            .filter(user_role_assignments::Column::ScopeDepartmentId.is_null())
             .into_tuple::<String>()
             .all(self.db)
             .await
@@ -640,6 +643,7 @@ impl<'a, C: ConnectionTrait> AuthorizationService<'a, C> {
             .select_only()
             .column(user_role_assignments::Column::RoleId)
             .filter(user_role_assignments::Column::UserId.eq(user_id))
+            .filter(user_role_assignments::Column::ScopeDepartmentId.is_null())
             .into_tuple::<Uuid>()
             .all(self.db)
             .await

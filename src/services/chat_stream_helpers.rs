@@ -18,15 +18,11 @@ use crate::{
     dto::{chat_stream::ResponseStopped, models::ModelInfo},
     error::{AppError, ErrorDetailVariant, ErrorResponse},
     models::{
-        conversations,
         departments::ActionOnExceed,
         messages,
         messages::{ChatRole, StopReason},
     },
-    services::{
-        budget_allocation::{BudgetHealth, get_department_budget_status},
-        llm_usage_gate::{TokenCounts, UsageCharge},
-    },
+    services::budget_allocation::{BudgetHealth, get_department_budget_status},
     state::{SharedState, StreamCancel, StreamCancellations},
 };
 
@@ -79,39 +75,6 @@ pub async fn ensure_model_whitelisted(
             model: model_name.to_string(),
         })
     }
-}
-
-// A generated title is model output, so a new conversation shows it only after its charge is
-// recorded. If that fails, the conversation (created moments ago, still without messages) is removed
-// and the request fails, so no unbilled title is ever readable.
-pub async fn publish_charged_title(
-    state: &SharedState,
-    conversation_id: Uuid,
-    title: &str,
-    charge: &UsageCharge,
-    tokens: TokenCounts,
-) -> Result<(), AppError> {
-    let published = match charge.record(state, tokens).await {
-        Ok(()) => conversations::Entity::update_many()
-            .col_expr(conversations::Column::Title, Expr::value(title))
-            .filter(conversations::Column::Id.eq(conversation_id))
-            .exec(&state.database)
-            .await
-            .map(|_| ())
-            .map_err(|error| {
-                eprintln!("conversation title update error: {error}");
-                AppError::DbTimeout
-            }),
-        Err(error) => Err(error),
-    };
-    if published.is_err()
-        && let Err(error) = conversations::Entity::delete_by_id(conversation_id)
-            .exec(&state.database)
-            .await
-    {
-        eprintln!("untitled conversation cleanup failed for {conversation_id}: {error}");
-    }
-    published
 }
 
 #[derive(Debug, PartialEq, Eq)]

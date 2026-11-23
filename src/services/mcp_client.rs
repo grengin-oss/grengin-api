@@ -905,6 +905,20 @@ fn transport_config(connection_config: &Value) -> Result<TransportConfigInput, M
     Ok(config)
 }
 
+pub(super) fn tool_call_timeout(
+    connection_config: &Value,
+) -> Result<std::time::Duration, McpClientError> {
+    let timeout_ms = transport_config(connection_config)?
+        .tool_timeout_ms
+        .unwrap_or(300_000);
+    if !(1..=300_000).contains(&timeout_ms) {
+        return Err(McpClientError::Config(
+            "tool_timeout_ms must be between 1 and 300000".into(),
+        ));
+    }
+    Ok(std::time::Duration::from_millis(timeout_ms))
+}
+
 fn mcp_http_client(connection_config: &Value) -> Result<reqwest_mcp::Client, McpClientError> {
     let config = transport_config(connection_config)?;
     let mut headers = HeaderMap::new();
@@ -1122,17 +1136,10 @@ impl McpServerClient {
         auth_token: Option<String>,
         user_id: Option<Uuid>,
     ) -> Result<CallToolResult, McpClientError> {
-        let timeout_ms = transport_config(&self.connection_config)?
-            .tool_timeout_ms
-            .unwrap_or(30_000);
-        if !(1..=300_000).contains(&timeout_ms) {
-            return Err(McpClientError::Config(
-                "tool_timeout_ms must be between 1 and 300000".into(),
-            ));
-        }
+        let timeout = tool_call_timeout(&self.connection_config)?;
         // Include connection and lease acquisition; dropping rmcp's call future sends cancellation.
         tokio::time::timeout(
-            std::time::Duration::from_millis(timeout_ms),
+            timeout,
             self.call_tool_inner(tool_name, args, auth_token, user_id),
         )
         .await
@@ -2123,6 +2130,41 @@ mod tests {
             assert!(
                 mcp_http_client(&serde_json::json!({"transport_config":{"headers":headers}}))
                     .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn tool_deadlines_default_to_five_minutes_and_reject_invalid_saved_values() {
+        assert_eq!(
+            tool_call_timeout(&serde_json::json!({})).unwrap(),
+            std::time::Duration::from_secs(300)
+        );
+        assert!(
+            tool_call_timeout(&serde_json::json!({})).unwrap() > std::time::Duration::from_secs(45)
+        );
+        for value in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(300001),
+            serde_json::json!(1.5),
+            serde_json::json!("invalid"),
+            serde_json::json!(true),
+        ] {
+            assert!(
+                tool_call_timeout(
+                    &serde_json::json!({"transport_config":{"tool_timeout_ms":value}})
+                )
+                .is_err()
+            );
+        }
+        for value in [1, 45000, 300000] {
+            assert_eq!(
+                tool_call_timeout(
+                    &serde_json::json!({"transport_config":{"tool_timeout_ms":value}})
+                )
+                .unwrap(),
+                std::time::Duration::from_millis(value)
             );
         }
     }

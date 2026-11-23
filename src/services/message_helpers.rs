@@ -26,15 +26,35 @@ pub async fn soft_delete_message(
     chat_id: Uuid,
     message_id: Uuid,
 ) -> Result<(), AppError> {
-    let (_, message) = find_message_in_conversation(db, user_id, chat_id, message_id).await?;
+    find_message_in_conversation(db, user_id, chat_id, message_id).await?;
+    let txn = db.begin().await.map_err(|_| AppError::DbTimeout)?;
+    conversations::Entity::find_by_id(chat_id)
+        .lock_exclusive()
+        .one(&txn)
+        .await
+        .map_err(|_| AppError::DbTimeout)?
+        .ok_or(AppError::ResourceNotFound)?;
+    let message = messages::Entity::find_by_id(message_id)
+        .filter(messages::Column::ConversationId.eq(chat_id))
+        .one(&txn)
+        .await
+        .map_err(|_| AppError::DbTimeout)?
+        .ok_or(AppError::ResourceNotFound)?;
+    let since = message.created_at;
     let mut active_model = message.into_active_model();
     active_model.deleted = Set(true);
     active_model.inactive_branch = Set(false);
     active_model.updated_at = Set(Utc::now());
-    active_model.update(db).await.map_err(|e| {
+    active_model.update(&txn).await.map_err(|e| {
         eprintln!("db error :{}", e);
         AppError::DbTimeout
     })?;
+    stale_summary(chat_id, since)
+        .exec(&txn)
+        .await
+        .map_err(|_| AppError::DbTimeout)?;
+    recount_conversation(&txn, chat_id).await?;
+    txn.commit().await.map_err(|_| AppError::DbTimeout)?;
     Ok(())
 }
 

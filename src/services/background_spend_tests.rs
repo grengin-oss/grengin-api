@@ -66,6 +66,12 @@ struct Calls {
     chat: AtomicUsize,
     embed: AtomicUsize,
     omit_usage: AtomicBool,
+    omit_embedding_price: AtomicBool,
+    invalid_embedding_price: AtomicBool,
+    omit_text_price: AtomicBool,
+    pause_chat: AtomicBool,
+    chat_started: tokio::sync::Notify,
+    chat_release: tokio::sync::Notify,
 }
 
 struct FakeProvider {
@@ -101,6 +107,10 @@ impl ChatProvider for FakeProvider {
     async fn start(&self, request: ChatRequest) -> Result<Box<dyn ChatSession>, ProviderError> {
         assert_eq!(request.model.as_str(), self.text_model);
         self.calls.chat.fetch_add(1, Ordering::SeqCst);
+        if self.calls.pause_chat.load(Ordering::SeqCst) {
+            self.calls.chat_started.notify_one();
+            self.calls.chat_release.notified().await;
+        }
         Ok(Box::new(FakeSession {
             omit_usage: self.calls.omit_usage.load(Ordering::SeqCst),
         }))
@@ -183,18 +193,28 @@ impl ModelProvider for FakeProvider {
                     }),
                     ..Default::default()
                 },
-                metadata: json!({
-                    "inputTokenRate": 2.0,
-                    "outputTokenRate": 8.0,
-                    "supportsPdfNative": true,
-                }),
+                metadata: if self.calls.omit_text_price.load(Ordering::SeqCst) {
+                    json!({"supportsPdfNative":true})
+                } else {
+                    json!({
+                        "inputTokenRate": 2.0,
+                        "outputTokenRate": 8.0,
+                        "supportsPdfNative": true,
+                    })
+                },
             },
             ProviderModel {
                 id: ModelId::new(EMBED_MODEL),
                 name: "Etch".to_string(),
                 model_type: ProviderModelType::TextEmbedder,
                 capabilities: ProviderCapabilities::default(),
-                metadata: json!({ "inputTokenRate": 0.5 }),
+                metadata: if self.calls.omit_embedding_price.load(Ordering::SeqCst) {
+                    json!({})
+                } else if self.calls.invalid_embedding_price.load(Ordering::SeqCst) {
+                    json!({"inputTokenRate":-1.0})
+                } else {
+                    json!({ "inputTokenRate": 0.5 })
+                },
             },
         ]
     }
@@ -467,6 +487,7 @@ impl Fixture {
                    DELETE FROM files WHERE "userId" = '{user}';
                    DELETE FROM message_embeddings WHERE "conversationId" IN (SELECT id FROM conversations WHERE "userId" = '{user}');
                    DELETE FROM conversation_summaries WHERE "conversationId" IN (SELECT id FROM conversations WHERE "userId" = '{user}');
+                   UPDATE messages SET "previousMessageId" = NULL WHERE "conversationId" IN (SELECT id FROM conversations WHERE "userId" = '{user}');
                    DELETE FROM messages WHERE "conversationId" IN (SELECT id FROM conversations WHERE "userId" = '{user}');
                    DELETE FROM conversations WHERE "userId" = '{user}';
                    DELETE FROM notifications WHERE "departmentId" = '{}';
@@ -844,6 +865,15 @@ async fn start_new_chat(fixture: &Fixture) -> bool {
 }
 
 async fn start_new_chat_for(fixture: &Fixture, provider: &str, model: &str) -> bool {
+    start_chat_for(fixture, provider, model, None).await
+}
+
+async fn start_chat_for(
+    fixture: &Fixture,
+    provider: &str,
+    model: &str,
+    conversation: Option<Uuid>,
+) -> bool {
     use axum::{Json, extract::State};
     let input = serde_json::from_value(json!({
         "provider": provider,
@@ -858,14 +888,26 @@ async fn start_new_chat_for(fixture: &Fixture, provider: &str, model: &str) -> b
             user_id: fixture.user,
             exp: usize::MAX,
         },
-        None,
+        conversation.map(axum::extract::Path),
         State(fixture.state.clone()),
         None,
         Json(input),
     )
     .await;
     match result {
-        Ok(_) => true,
+        Ok(response) => {
+            use axum::response::IntoResponse;
+            let body = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                axum::body::to_bytes(response.into_response().into_body(), 1024 * 1024),
+            )
+            .await
+            .expect("chat finishes")
+            .expect("chat body");
+            let text = String::from_utf8(body.to_vec()).unwrap();
+            assert!(!text.contains("ai_error"), "chat failed: {text}");
+            true
+        }
         Err(crate::error::AppError::DbTimeout) => false,
         Err(error) => panic!("unexpected chat error: {error:?}"),
     }
@@ -912,11 +954,11 @@ async fn gateway_chats_do_not_generate_or_charge_a_background_title() {
     fixture.cleanup().await;
     assert!(started);
     assert_eq!(
-        calls, 0,
-        "the lazy response body has not dispatched inference, so no title call is permitted either"
+        calls, 1,
+        "only the requested answer, never a background title, may use the gateway"
     );
     assert!(
-        ledger.is_empty(),
+        charges_for(&ledger, "title_generation").is_empty(),
         "a gateway title must not create a local charge"
     );
     assert_eq!(conversations.len(), 1);
@@ -929,47 +971,39 @@ async fn gateway_chats_do_not_generate_or_charge_a_background_title() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
-async fn project_retrieval_keeps_source_names_private_and_charges_both_queries() {
-    use crate::services::{llm_usage_gate::UsagePurpose, rag::build_project_retrieval_prompt};
+async fn project_retrieval_reuses_one_billed_query_and_keeps_source_names_private() {
+    use crate::services::rag::{build_project_retrieval_prompt, embed_retrieval_query};
 
     let fixture = Fixture::new(false).await;
     let source_id = fixture.project_source().await;
     let source = fixture.source_status(source_id).await;
     assert_eq!(source.processing_status, "ready");
-    let subject = UsageSubject {
-        user_id: fixture.user,
-        purpose: UsagePurpose::QueryEmbedding,
-        conversation_id: None,
-    };
-    let private = build_project_retrieval_prompt(
+    let conversation = fixture.conversation().await;
+    let query = embed_retrieval_query(
         &fixture.state,
-        subject,
-        source.project_id,
+        fixture.user,
+        conversation,
         "quarterly budgets",
-        3,
-        false,
     )
     .await
     .unwrap()
-    .expect("private project context");
-    let named = build_project_retrieval_prompt(
-        &fixture.state,
-        subject,
-        source.project_id,
-        "quarterly budgets",
-        3,
-        true,
-    )
-    .await
-    .unwrap()
-    .expect("named project context");
+    .expect("shared query");
+    let private =
+        build_project_retrieval_prompt(&fixture.state, source.project_id, &query, 3, false)
+            .await
+            .unwrap()
+            .expect("private project context");
+    let named = build_project_retrieval_prompt(&fixture.state, source.project_id, &query, 3, true)
+        .await
+        .unwrap()
+        .expect("named project context");
     let ledger = fixture.ledger().await;
     fixture.cleanup().await;
     assert!(private.contains("Fixture notes"));
     assert!(!private.contains("scan.png"));
     assert!(named.contains("scan.png"));
     let queries = charges_for(&ledger, "query_embedding");
-    assert_eq!(queries.len(), 2);
+    assert_eq!(queries.len(), 1);
     assert!(queries.iter().all(|row| row.cost_usd == embedding_cost()));
 }
 
@@ -1047,6 +1081,220 @@ async fn user_conversations(fixture: &Fixture) -> Vec<crate::models::conversatio
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn unpriced_embeddings_run_for_budgeted_uploads_and_are_explicitly_marked_free() {
+    let fixture = Fixture::new(false).await;
+    fixture
+        .calls
+        .omit_embedding_price
+        .store(true, Ordering::SeqCst);
+    let source = fixture.project_source().await;
+    let status = fixture.source_status(source).await;
+    let ledger = fixture.ledger().await;
+    fixture.cleanup().await;
+    assert_eq!(status.processing_status, "ready");
+    let embeddings = charges_for(&ledger, "source_embedding");
+    assert_eq!(embeddings.len(), 1);
+    assert_eq!(embeddings[0].cost_usd, Decimal::ZERO);
+    assert_eq!(
+        embeddings[0].metadata.as_ref().unwrap()["unpricedEmbedding"],
+        true
+    );
+    assert_eq!(
+        charges_for(&ledger, "source_extraction")[0].cost_usd,
+        chat_cost()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn unpriced_text_models_and_invalid_embedding_prices_are_not_made_free() {
+    let fixture = Fixture::new(false).await;
+    fixture.calls.omit_text_price.store(true, Ordering::SeqCst);
+    let source = fixture.project_source().await;
+    assert_eq!(
+        fixture.source_status(source).await.processing_status,
+        "error"
+    );
+    assert_eq!(fixture.calls.chat.load(Ordering::SeqCst), 0);
+    fixture
+        .calls
+        .invalid_embedding_price
+        .store(true, Ordering::SeqCst);
+    let config = fixture.state.settings.get_embedding_config().await.unwrap();
+    let result = crate::services::rag::generate_embeddings(
+        &fixture.state,
+        &config,
+        UsageSubject {
+            user_id: fixture.user,
+            purpose: UsagePurpose::QueryEmbedding,
+            conversation_id: None,
+        },
+        vec!["query".into()],
+    )
+    .await;
+    let ledger = fixture.ledger().await;
+    let calls = fixture.calls.embed.load(Ordering::SeqCst);
+    fixture.cleanup().await;
+    assert!(result.is_err());
+    assert_eq!(calls, 0);
+    assert!(ledger.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn query_charge_failure_discards_context_but_keeps_the_message() {
+    let fixture = Fixture::new(false).await;
+    let conversation = fixture.conversation().await;
+    let trigger = format!("reject_query_{}", fixture.user.simple());
+    fixture.db.execute_unprepared(&format!(r#"CREATE FUNCTION {trigger}() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW."userId" = '{}' AND NEW.metadata->>'purpose' = 'query_embedding' THEN RAISE EXCEPTION 'ledger unavailable'; END IF; RETURN NEW; END $$;
+        CREATE TRIGGER {trigger} BEFORE INSERT ON usage_logs FOR EACH ROW EXECUTE FUNCTION {trigger}();"#, fixture.user)).await.unwrap();
+    let started = start_chat_for(
+        &fixture,
+        &fixture.engine_key,
+        TEXT_MODEL,
+        Some(conversation),
+    )
+    .await;
+    let rows = crate::models::messages::Entity::find()
+        .filter(crate::models::messages::Column::ConversationId.eq(conversation))
+        .all(&fixture.db)
+        .await
+        .unwrap();
+    let ledger = fixture.ledger().await;
+    let calls = fixture.calls.embed.load(Ordering::SeqCst);
+    fixture
+        .db
+        .execute_unprepared(&format!(
+            "DROP TRIGGER {trigger} ON usage_logs; DROP FUNCTION {trigger}();"
+        ))
+        .await
+        .unwrap();
+    fixture.cleanup().await;
+    assert!(started);
+    assert!(calls >= 1);
+    assert!(charges_for(&ledger, "query_embedding").is_empty());
+    assert!(rows.iter().any(
+        |message| message.role == ChatRole::User && message.message_content == "Plan a budget"
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn a_chat_with_five_linked_projects_embeds_and_charges_the_query_once() {
+    let fixture = Fixture::new(false).await;
+    let conversation = fixture.conversation().await;
+    for _ in 0..5 {
+        let source = fixture.project_source().await;
+        let project = fixture.source_status(source).await.project_id;
+        fixture.db.execute_unprepared(&format!(r#"INSERT INTO conversation_projects (id, "conversationId", "projectId", "createdAt")
+            VALUES ('{}', '{conversation}', '{project}', now())"#, Uuid::new_v4())).await.unwrap();
+    }
+    let before = fixture.calls.embed.load(Ordering::SeqCst);
+    let started = start_chat_for(
+        &fixture,
+        &fixture.engine_key,
+        TEXT_MODEL,
+        Some(conversation),
+    )
+    .await;
+    let after = fixture.calls.embed.load(Ordering::SeqCst);
+    let ledger = fixture.ledger().await;
+    fixture.cleanup().await;
+    assert!(started);
+    assert!(after > before);
+    assert_eq!(charges_for(&ledger, "query_embedding").len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn disallowed_summary_preferences_fall_back_to_an_allowed_model() {
+    use sea_orm::{ActiveModelTrait, IntoActiveModel, Set};
+    for denied_by_department in [false, true] {
+        let mut fixture = Fixture::new(false).await;
+        let alternate_id = Uuid::new_v4();
+        let alternate_key = format!("summary-{}", alternate_id.simple());
+        let mut alternate = crate::models::ai_engines::Entity::find_by_id(fixture.engine_id)
+            .one(&fixture.db)
+            .await
+            .unwrap()
+            .unwrap()
+            .into_active_model();
+        alternate.id = Set(alternate_id);
+        alternate.engine_key = Set(alternate_key.clone());
+        alternate.created_at = Set(Utc::now() + Duration::seconds(1));
+        alternate.insert(&fixture.db).await.unwrap();
+        let mut descriptor = fixture
+            .state
+            .provider_registry
+            .get_by_str(&fixture.engine_key)
+            .await
+            .unwrap()
+            .descriptor()
+            .clone();
+        descriptor.id = ProviderId::new(alternate_key.clone());
+        fixture
+            .state
+            .provider_registry
+            .register(Arc::new(FakeProvider {
+                descriptor,
+                calls: fixture.calls.clone(),
+                text_model: TEXT_MODEL.into(),
+            }))
+            .await;
+        fixture
+            .state
+            .settings
+            .set_ai_engine_cache(alternate_key.clone(), None, true, vec![TEXT_MODEL.into()])
+            .await;
+        let rag = &mut Arc::get_mut(&mut fixture.state).unwrap().settings.rag;
+        rag.summary_llm_provider = Some(if denied_by_department {
+            alternate_key
+        } else {
+            fixture.engine_key.clone()
+        });
+        rag.summary_llm_model = Some(if denied_by_department {
+            TEXT_MODEL.into()
+        } else {
+            "not-whitelisted".into()
+        });
+        let conversation = fixture.conversation().await;
+        for index in 0..4 {
+            fixture
+                .message(conversation, ChatRole::User, index, "0")
+                .await;
+        }
+        update_conversation_summary(
+            &fixture.state,
+            fixture.user,
+            conversation,
+            &fixture.engine_key,
+            TEXT_MODEL,
+        )
+        .await
+        .unwrap();
+        let summary = conversation_summaries::Entity::find()
+            .filter(conversation_summaries::Column::ConversationId.eq(conversation))
+            .one(&fixture.db)
+            .await
+            .unwrap();
+        let ledger = fixture.ledger().await;
+        crate::models::ai_engines::Entity::delete_by_id(alternate_id)
+            .exec(&fixture.db)
+            .await
+            .unwrap();
+        let engine_key = fixture.engine_key.clone();
+        fixture.cleanup().await;
+        assert!(summary.is_some());
+        assert_eq!(
+            charges_for(&ledger, "conversation_summary")[0].model_provider,
+            engine_key
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
 async fn a_generated_title_is_published_once_charged() {
     let fixture = Fixture::new(false).await;
 
@@ -1066,17 +1314,155 @@ async fn a_generated_title_is_published_once_charged() {
     assert_eq!(titles[0].conversation_id, Some(conversations[0].id));
 }
 
-// Every ledger write for this user fails, so the title's charge cannot be recorded.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
-async fn an_unbilled_title_is_never_readable() {
+async fn title_publication_failure_keeps_the_charged_chat_and_user_message() {
+    let fixture = Fixture::new(false).await;
+    let trigger = format!("reject_title_{}", fixture.user.simple());
+    fixture.db.execute_unprepared(&format!(
+        r#"CREATE FUNCTION {trigger}() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN IF NEW."userId" = '{}' THEN RAISE EXCEPTION 'title unavailable'; END IF; RETURN NEW; END $$;
+          CREATE TRIGGER {trigger} BEFORE UPDATE OF title ON conversations FOR EACH ROW EXECUTE FUNCTION {trigger}();"#,
+        fixture.user
+    )).await.unwrap();
+    let started = start_new_chat(&fixture).await;
+    let conversations = user_conversations(&fixture).await;
+    let ledger = fixture.ledger().await;
+    let messages = crate::models::messages::Entity::find()
+        .filter(crate::models::messages::Column::ConversationId.eq(conversations[0].id))
+        .all(&fixture.db)
+        .await
+        .unwrap();
+    fixture
+        .db
+        .execute_unprepared(&format!(
+            "DROP TRIGGER {trigger} ON conversations; DROP FUNCTION {trigger}();"
+        ))
+        .await
+        .unwrap();
+    fixture.cleanup().await;
+    assert!(started);
+    assert_eq!(conversations[0].title.as_deref(), Some("Plan a budget"));
+    assert_eq!(charges_for(&ledger, "title_generation").len(), 1);
+    assert!(messages.iter().any(
+        |message| message.role == ChatRole::User && message.message_content == "Plan a budget"
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn deleting_a_summarized_message_drops_the_summary_and_preserves_spend() {
+    let fixture = Fixture::new(false).await;
+    let chat = fixture.conversation().await;
+    let first = fixture.message(chat, ChatRole::User, 0, "0").await;
+    for order in 1..4 {
+        fixture
+            .message(chat, ChatRole::Assistant, order, "0.01")
+            .await;
+    }
+    update_conversation_summary(
+        &fixture.state,
+        fixture.user,
+        chat,
+        &fixture.engine_key,
+        TEXT_MODEL,
+    )
+    .await
+    .unwrap();
+    assert!(
+        crate::services::rag::load_summary(&fixture.db, chat)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let before: Decimal = fixture.ledger().await.iter().map(|row| row.cost_usd).sum();
+    crate::services::message_helpers::soft_delete_message(&fixture.db, fixture.user, chat, first)
+        .await
+        .unwrap();
+    let summary = crate::services::rag::load_summary(&fixture.db, chat)
+        .await
+        .unwrap();
+    let after: Decimal = fixture.ledger().await.iter().map(|row| row.cost_usd).sum();
+    fixture.cleanup().await;
+    assert!(summary.is_none());
+    assert_eq!(before, after);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn deleting_any_source_or_the_old_summary_while_summarizing_cannot_resurrect_it() {
+    for has_summary in [false, true] {
+        let fixture = Fixture::new(false).await;
+        let chat = fixture.conversation().await;
+        let first = fixture.message(chat, ChatRole::User, 0, "0").await;
+        for order in 1..4 {
+            fixture.message(chat, ChatRole::Assistant, order, "0").await;
+        }
+        if has_summary {
+            update_conversation_summary(
+                &fixture.state,
+                fixture.user,
+                chat,
+                &fixture.engine_key,
+                TEXT_MODEL,
+            )
+            .await
+            .unwrap();
+            for order in 4..8 {
+                fixture.message(chat, ChatRole::Assistant, order, "0").await;
+            }
+        }
+        fixture.calls.pause_chat.store(true, Ordering::SeqCst);
+        let (state, user, engine) = (
+            fixture.state.clone(),
+            fixture.user,
+            fixture.engine_key.clone(),
+        );
+        let generating = tokio::spawn(async move {
+            update_conversation_summary(&state, user, chat, &engine, TEXT_MODEL).await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fixture.calls.chat_started.notified(),
+        )
+        .await
+        .unwrap();
+        crate::services::message_helpers::soft_delete_message(
+            &fixture.db,
+            fixture.user,
+            chat,
+            first,
+        )
+        .await
+        .unwrap();
+        fixture.calls.chat_release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), generating)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let summary = crate::services::rag::load_summary(&fixture.db, chat)
+            .await
+            .unwrap();
+        fixture.cleanup().await;
+        assert!(
+            summary.is_none(),
+            "a deleted earlier message must not be retained just because the newest source is still visible"
+        );
+    }
+}
+
+// Only the optional title's charge fails; the main answer must still complete and be charged.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn title_charge_failure_keeps_the_message_and_only_the_fallback_title() {
     let fixture = Fixture::new(false).await;
     let trigger = format!("reject_ledger_{}", fixture.user.simple());
     fixture
         .db
         .execute_unprepared(&format!(
             r#"CREATE FUNCTION {trigger}() RETURNS trigger LANGUAGE plpgsql AS $$
-                 BEGIN IF NEW."userId" = '{}' THEN RAISE EXCEPTION 'ledger unavailable'; END IF; RETURN NEW; END $$;
+                 BEGIN IF NEW."userId" = '{}' AND NEW.metadata->>'purpose' = 'title_generation' THEN RAISE EXCEPTION 'ledger unavailable'; END IF; RETURN NEW; END $$;
                CREATE TRIGGER {trigger} BEFORE INSERT ON usage_logs FOR EACH ROW EXECUTE FUNCTION {trigger}();"#,
             fixture.user
         ))
@@ -1087,6 +1473,11 @@ async fn an_unbilled_title_is_never_readable() {
     let conversations = user_conversations(&fixture).await;
     let ledger = fixture.ledger().await;
     let calls = fixture.calls.chat.load(Ordering::SeqCst);
+    let user_messages = crate::models::messages::Entity::find()
+        .filter(crate::models::messages::Column::Role.eq(ChatRole::User))
+        .all(&fixture.db)
+        .await
+        .unwrap();
     fixture
         .db
         .execute_unprepared(&format!(
@@ -1095,11 +1486,23 @@ async fn an_unbilled_title_is_never_readable() {
         .await
         .expect("restore ledger");
     fixture.cleanup().await;
-    assert!(!started, "the request fails with DbTimeout");
-    assert_eq!(calls, 1);
-    assert!(ledger.is_empty());
     assert!(
-        conversations.is_empty(),
-        "the failed request leaves no conversation: {conversations:?}"
+        started,
+        "a failed optional charge must not fail the message"
+    );
+    assert_eq!(calls, 2);
+    assert!(charges_for(&ledger, "title_generation").is_empty());
+    assert!(ledger.iter().any(|row| {
+        row.metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.get("messageId").is_some())
+    }));
+    assert_eq!(conversations.len(), 1);
+    assert_eq!(conversations[0].title.as_deref(), Some("Plan a budget"));
+    assert!(
+        user_messages
+            .iter()
+            .any(|message| message.conversation_id == conversations[0].id
+                && message.message_content == "Plan a budget")
     );
 }

@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::{error::AuthError, permissions::PERMISSION_MCP_ADMIN},
-    dto::mcp::{McpAccessRuleInput, McpResolvedVia},
+    dto::mcp::{McpAccessRuleInput, McpResolvedVia, McpServerAccessUpdate},
     error::AppError,
     models::{
         departments, mcp_access_policies,
@@ -185,6 +185,7 @@ pub async fn build_access_context<C: ConnectionTrait>(
         .select_only()
         .column(user_role_assignments::Column::RoleId)
         .filter(user_role_assignments::Column::UserId.eq(user_id))
+        .filter(user_role_assignments::Column::ScopeDepartmentId.is_null())
         .into_tuple::<Uuid>()
         .all(db)
         .await
@@ -637,8 +638,8 @@ pub async fn resolve_tool_access_with_rules(
         .tool(tool, server_access, rules))
 }
 
-pub async fn resolve_role_reference(
-    db: &DatabaseConnection,
+pub async fn resolve_role_reference<C: ConnectionTrait>(
+    db: &C,
     access_type: mcp_access_policies::McpAccessType,
     role_id: Option<Uuid>,
     role_name: Option<String>,
@@ -673,6 +674,108 @@ pub async fn resolve_role_reference(
     }
 
     Err(AuthError::ResourceNotFound)
+}
+
+pub async fn replace_server_access(
+    db: &DatabaseConnection,
+    actor: Uuid,
+    server_id: Uuid,
+    request: McpServerAccessUpdate,
+) -> Result<(), AuthError> {
+    AuthorizationService::new(db)
+        .ensure_permission(
+            actor,
+            PERMISSION_MCP_ADMIN,
+            None,
+            PermissionScopeMode::RequireOrgWide,
+            Some(server_id),
+        )
+        .await?;
+    let txn = db.begin().await.map_err(|_| AuthError::DbTimeout)?;
+    let server = mcp_servers::Entity::find_by_id(server_id)
+        .lock_exclusive()
+        .one(&txn)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?
+        .ok_or(AuthError::ResourceNotFound)?;
+    let mut replacements = Vec::new();
+    if let Some(rules) = request.rules.as_ref() {
+        for rule in rules {
+            let (role_id, _) = resolve_role_reference(
+                &txn,
+                rule.access_type,
+                rule.role_id,
+                rule.role_name.clone(),
+            )
+            .await?;
+            let target_exists = match rule.access_type {
+                McpAccessType::Role => role_id.is_some(),
+                McpAccessType::User => match rule.user_id {
+                    Some(id) => users::Entity::find_by_id(id)
+                        .one(&txn)
+                        .await
+                        .map_err(|_| AuthError::DbTimeout)?
+                        .is_some(),
+                    None => false,
+                },
+                McpAccessType::Department => match rule.department_id {
+                    Some(id) => departments::Entity::find_by_id(id)
+                        .one(&txn)
+                        .await
+                        .map_err(|_| AuthError::DbTimeout)?
+                        .is_some(),
+                    None => false,
+                },
+            };
+            if !target_exists {
+                return Err(AuthError::ResourceNotFound);
+            }
+            replacements.push(mcp_access_policies::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                target_type: Set(McpAccessTarget::Server),
+                server_id: Set(Some(server_id)),
+                tool_id: Set(None),
+                access_type: Set(rule.access_type),
+                permission: Set(rule.permission),
+                role_id: Set(role_id),
+                role_name: Set(None),
+                department_id: Set(rule.department_id),
+                user_id: Set(rule.user_id),
+                inherit_departments: Set(rule.access_type != McpAccessType::Department
+                    || rule.inherit_departments.unwrap_or(true)),
+                inherit_from_server: Set(None),
+                created_at: Set(chrono::Utc::now()),
+                created_by: Set(Some(actor)),
+            });
+        }
+    }
+    if let Some(default_access) = request.default_access {
+        let mut active: mcp_servers::ActiveModel = server.into();
+        active.default_access = Set(default_access);
+        active.updated_at = Set(chrono::Utc::now());
+        active
+            .update(&txn)
+            .await
+            .map_err(|_| AuthError::DbTimeout)?;
+    }
+    // An omitted rules field is a partial update, not an instruction to remove every deny.
+    if request.rules.is_some() {
+        mcp_access_policies::Entity::delete_many()
+            .filter(mcp_access_policies::Column::TargetType.eq(McpAccessTarget::Server))
+            .filter(mcp_access_policies::Column::ServerId.eq(server_id))
+            .exec(&txn)
+            .await
+            .map_err(|_| AuthError::DbTimeout)?;
+        for rule in replacements {
+            rule.insert(&txn).await.map_err(|_| AuthError::DbTimeout)?;
+        }
+    }
+    txn.commit().await.map_err(|_| AuthError::DbTimeout)?;
+    // Cached /me snapshots include MCP access; a stale snapshot only affects display, not enforcement.
+    let _ = AuthorizationService::new(db)
+        .recompute_effective_permissions_for_all_users()
+        .await;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1186,5 +1289,132 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+    async fn a_rejected_server_access_save_keeps_every_existing_rule() {
+        use crate::{
+            dto::mcp::McpAccessRuleInput,
+            models::{mcp_access_policies::McpPermission, mcp_servers::McpDefaultAccess},
+        };
+        use sea_orm::Database;
+        let url = std::env::var("GRENGIN_SECURITY_TEST_DATABASE_URL").expect("test database URL");
+        assert!(
+            url.contains("/grengin_security_test"),
+            "refusing a non-test database"
+        );
+        let db = Database::connect(&url).await.expect("fixture database");
+        let (admin, member, server, department) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let super_admin = roles::Entity::find()
+            .filter(roles::Column::Name.eq("Super Admin"))
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("seeded Super Admin role");
+        let other_role = roles::Entity::find()
+            .filter(roles::Column::Name.ne("Super Admin"))
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("another seeded role");
+        db.execute_unprepared(&format!(
+            r#"INSERT INTO users (id, status, email, "emailVerified", "mfaEnabled", "createdAt", "updatedAt", "lastLoginAt")
+                 VALUES ('{admin}', 'active', 'atomic-{admin}@example.invalid', true, false, now(), now(), now()),
+                        ('{member}', 'active', 'atomic-{member}@example.invalid', true, false, now(), now(), now());
+               INSERT INTO departments (id, name, path, depth, "parentId", "createdAt", "updatedAt")
+                 VALUES ('{department}', 'atomic-scope', 'd{}', 0, NULL, now(), now());
+               INSERT INTO user_role_assignments (id, "userId", "roleId", "scopeDepartmentId", "assignedBy", "createdAt", "updatedAt")
+                 VALUES ('{}', '{admin}', '{}', NULL, '{admin}', now(), now()),
+                        ('{}', '{member}', '{}', '{department}', '{admin}', now(), now());
+               INSERT INTO mcp_servers (id, name, "transportType", "connectionConfig", enabled, "toolCount", "defaultAccess", "createdAt", "updatedAt")
+                 VALUES ('{server}', 'Atomic access fixture', 'http', '{{}}', true, 0, 'all_users', now(), now());
+               INSERT INTO mcp_access_policies (id, "targetType", "serverId", "toolId", "accessType", permission, "userId", "inheritDepartments", "createdAt", "createdBy")
+                 VALUES ('{}', 'server', '{server}', NULL, 'user', 'denied', '{member}', true, now(), '{admin}');"#,
+            department.simple(),
+            Uuid::new_v4(), super_admin.id,
+            Uuid::new_v4(), other_role.id,
+            Uuid::new_v4(),
+        ))
+        .await
+        .expect("fixture rows");
+
+        let context = build_access_context(&db, member)
+            .await
+            .expect("member context");
+        let rule = |user_id| McpAccessRuleInput {
+            access_type: McpAccessType::User,
+            role_id: None,
+            role_name: None,
+            department_id: None,
+            user_id: Some(user_id),
+            permission: McpPermission::Full,
+            inherit_departments: None,
+        };
+        let rejected = replace_server_access(
+            &db,
+            admin,
+            server,
+            McpServerAccessUpdate {
+                default_access: Some(McpDefaultAccess::AdminOnly),
+                rules: Some(vec![rule(member), rule(Uuid::new_v4())]),
+            },
+        )
+        .await;
+        let rules = mcp_access_policies::Entity::find()
+            .filter(mcp_access_policies::Column::ServerId.eq(server))
+            .all(&db)
+            .await
+            .unwrap();
+        let default_access = mcp_servers::Entity::find_by_id(server)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .default_access;
+        let accepted = replace_server_access(
+            &db,
+            admin,
+            server,
+            McpServerAccessUpdate {
+                default_access: None,
+                rules: Some(vec![rule(member)]),
+            },
+        )
+        .await;
+        let replaced = mcp_access_policies::Entity::find()
+            .filter(mcp_access_policies::Column::ServerId.eq(server))
+            .all(&db)
+            .await
+            .unwrap();
+        db.execute_unprepared(&format!(
+            r#"DELETE FROM mcp_access_policies WHERE "serverId" = '{server}';
+               DELETE FROM mcp_servers WHERE id = '{server}';
+               DELETE FROM user_role_assignments WHERE "userId" IN ('{admin}', '{member}');
+               DELETE FROM departments WHERE id = '{department}';"#
+        ))
+        .await
+        .expect("fixture cleanup");
+
+        assert!(
+            context.role_ids.is_empty() && context.role_names.is_empty(),
+            "a department-scoped role must not satisfy org-wide MCP role rules"
+        );
+        assert!(rejected.is_err());
+        assert_eq!(
+            rules.len(),
+            1,
+            "a rejected save must keep the existing deny rule"
+        );
+        assert_eq!(rules[0].permission, McpPermission::Denied);
+        assert_eq!(default_access, McpDefaultAccess::AllUsers);
+        assert!(accepted.is_ok());
+        assert_eq!(replaced.len(), 1);
+        assert_eq!(replaced[0].permission, McpPermission::Full);
     }
 }

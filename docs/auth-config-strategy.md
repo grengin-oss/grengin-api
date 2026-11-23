@@ -62,6 +62,26 @@ methods are configured or enabled on an installation.
 
 ## Provider Configuration
 
+### Corporate HTTP proxies
+
+SSO discovery, JWKS, token and profile requests honor the standard `HTTPS_PROXY`,
+`HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` environment settings (including lowercase
+forms supported by the HTTP client). `HTTPS_PROXY` selects the proxy for HTTPS
+destinations; an `http://` proxy URL uses CONNECT and does not downgrade the
+destination's TLS. Certificate verification remains enabled. Redirects are not
+followed and responses are limited to 1 MiB.
+
+Literal metadata/link-local destinations and unsafe local DNS answers are refused
+before dispatch; DNS preflight has a five-second deadline. Direct connections also
+validate DNS answers at connection time. A CONNECT proxy performs its own target
+resolution, which cannot be pinned by the application: the configured proxy is an
+operator-trusted egress boundary and must itself block metadata/link-local access.
+If local DNS cannot resolve the identity provider, the request may proceed only
+when the system proxy matcher selects a proxy for that exact URL. `NO_PROXY`
+and destination scheme still apply; an unsafe DNS answer is always refused.
+`NO_PROXY` retains direct access to private enterprise identity providers. These
+transport settings do not change the Grengin SSO broker protocol or credentials.
+
 The `configuration` JSON document is versioned independently from the database schema:
 
 ```json
