@@ -104,7 +104,7 @@ pub async fn build_azure_public_client_for_redirect(
             provider: Some("azure".to_string()),
         })?;
     build_azure_public_client(
-        &app_state.req_client,
+        &app_state.sso_client,
         azure.client_id,
         redirect_uri.to_string(),
         azure.tenant_id,
@@ -728,7 +728,7 @@ pub async fn oidc_oauth_callback(
         let code = cb.code.ok_or(AuthError::InvalidCallbackParameters)?;
         if let Some(AuthProtocolClient::OAuth2(adapter)) = runtime.client.clone() {
             adapter
-                .complete(code, sess.pkce_verifier.clone(), &app_state.req_client)
+                .complete(code, sess.pkce_verifier.clone(), &app_state.sso_client)
                 .await
                 .map_err(|error| {
                     eprintln!("OAuth2 sign-in completion failed: {error}");
@@ -769,7 +769,7 @@ pub async fn oidc_oauth_callback(
                     .set_pkce_verifier(PkceCodeVerifier::new(sess.pkce_verifier.clone()));
             }
             let token_resp = token_request
-                .request_async(&app_state.req_client)
+                .request_async(&app_state.sso_client)
                 .await
                 .map_err(|e| {
                     eprintln!("token exchange err: {e:?}");
@@ -875,7 +875,7 @@ pub async fn oidc_oauth_callback(
                     Some(claims.subject().clone()),
                 ) {
                     let info: CoreUserInfoClaims = request
-                        .request_async(&app_state.req_client)
+                        .request_async(&app_state.sso_client)
                         .await
                         .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
                     email = info.email().map(|e| e.as_str().to_string());

@@ -4,7 +4,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    net::IpAddr,
     sync::Arc,
     time::Duration,
 };
@@ -21,7 +20,7 @@ use reqwest::{
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::{net::lookup_host, sync::Mutex};
-use url::Url;
+use url::{Host, Url};
 
 use crate::{
     BodyEncoding, ChatMessage, ChatOperation, ChatProvider, ChatRequest, ChatRole, ChatSession,
@@ -463,12 +462,10 @@ impl DeclarativeProvider {
             self.runtime.allow_insecure_http,
             self.runtime.allow_private_network,
         )?;
-        let host = url
-            .host_str()
-            .ok_or_else(|| ProviderError::UrlNotAllowed("provider URL has no host".to_string()))?;
-        if host.parse::<IpAddr>().is_ok() {
+        // validate_provider_url already checked literal addresses, and only names need DNS.
+        let Some(Host::Domain(host)) = url.host() else {
             return Ok(());
-        }
+        };
         let port = url.port_or_known_default().ok_or_else(|| {
             ProviderError::UrlNotAllowed("provider URL has no destination port".to_string())
         })?;

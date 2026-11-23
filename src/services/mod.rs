@@ -80,6 +80,7 @@ pub mod search;
 pub mod share_access;
 pub mod skill_access;
 pub mod skills_helpers;
+pub mod sso_egress;
 pub mod sso_seed;
 pub mod sso_validation;
 pub mod startup_migrations;

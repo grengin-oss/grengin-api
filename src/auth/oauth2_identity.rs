@@ -5,13 +5,14 @@ use crate::auth::{
     identity::VerifiedIdentity,
     provider_config::{OidcProviderConfiguration, ProviderConfigError, validate_provider_url},
 };
+use crate::services::sso_egress::SsoHttpClient;
 use oauth2::{
     AuthType, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointNotSet,
     EndpointSet, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse, TokenUrl,
     basic::BasicClient,
 };
 use reqwest::{
-    Client as ReqwestClient, Url,
+    Url,
     header::{ACCEPT, AUTHORIZATION, HeaderName, HeaderValue, USER_AGENT},
 };
 use serde::{Deserialize, Serialize};
@@ -233,12 +234,12 @@ impl OAuth2IdentityAdapter {
     // Without a client check there is nothing to verify before a real sign-in.
     pub async fn validate_remote(
         &self,
-        http_client: &ReqwestClient,
+        http_client: &SsoHttpClient,
     ) -> Result<bool, OAuth2AdapterError> {
         let Some(probe) = &self.profile.client_check else {
             return Ok(false);
         };
-        let response = http_client
+        let request = http_client
             .post(&self.profile.token_url)
             .header(ACCEPT, "application/json")
             .form(&[
@@ -246,13 +247,12 @@ impl OAuth2IdentityAdapter {
                 ("client_secret", self.client_secret.secret()),
                 ("code", "grengin-credential-probe"),
                 ("redirect_uri", self.redirect_url.as_str()),
-            ])
-            .send()
+            ]);
+        let body: Value = http_client
+            .send(request)
             .await
-            .map_err(|_| OAuth2AdapterError::OAuthRequest)?;
-        let body: Value = response
+            .map_err(|_| OAuth2AdapterError::OAuthRequest)?
             .json()
-            .await
             .map_err(|_| OAuth2AdapterError::OAuthRequest)?;
         match body.get("error").and_then(Value::as_str) {
             Some(error) if error == probe.accepted_error => Ok(true),
@@ -267,7 +267,7 @@ impl OAuth2IdentityAdapter {
         &self,
         code: String,
         pkce_verifier: String,
-        http_client: &ReqwestClient,
+        http_client: &SsoHttpClient,
     ) -> Result<VerifiedIdentity, OAuth2AdapterError> {
         let token_response = self
             .client
@@ -332,7 +332,7 @@ impl OAuth2IdentityAdapter {
 
     async fn api_get(
         &self,
-        http_client: &ReqwestClient,
+        http_client: &SsoHttpClient,
         url: &str,
         access_token: &str,
     ) -> Result<Value, OAuth2AdapterError> {
@@ -344,16 +344,15 @@ impl OAuth2IdentityAdapter {
         for (name, value) in &self.profile.api_headers {
             request = request.header(name, value);
         }
-        let response = request
-            .send()
+        let response = http_client
+            .send(request)
             .await
             .map_err(|_| OAuth2AdapterError::OAuthRequest)?;
-        if !response.status().is_success() {
+        if !response.status.is_success() {
             return Err(OAuth2AdapterError::OAuthRequest);
         }
         response
             .json()
-            .await
             .map_err(|_| OAuth2AdapterError::InvalidIdentity)
     }
 }
@@ -593,7 +592,7 @@ mod tests {
             .complete(
                 "valid-code".to_string(),
                 "pkce-verifier".to_string(),
-                &ReqwestClient::new(),
+                &SsoHttpClient::new().expect("SSO client"),
             )
             .await
             .expect("identity");

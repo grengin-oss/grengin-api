@@ -21,6 +21,7 @@ use crate::{
     services::mcp_client::McpServerClient,
     services::notifications::NotificationEvent,
     services::owner_bootstrap::ensure_bootstrap_super_admin,
+    services::sso_egress::SsoHttpClient,
 };
 use anyhow::Error;
 use llm_plugin::ProviderRegistry;
@@ -116,6 +117,7 @@ pub struct AppState {
     pub share_index_slots: Arc<tokio::sync::Semaphore>,
     pub oidc_providers: RwLock<HashMap<String, OidcProviderRuntime>>,
     pub req_client: ReqwestClient,
+    pub sso_client: SsoHttpClient,
     pub settings: Settings,
     pub mcp_clients: RwLock<HashMap<Uuid, Arc<McpServerClient>>>,
     pub mcp_refresh_locks: crate::services::mcp_oauth::OAuthRefreshLocks,
@@ -229,6 +231,8 @@ impl AppState {
             .filter(|settings| settings.is_enabled && !settings.use_grengin_proxy);
         let req_client =
             short_call_client().map_err(|e| ConfigError::ReqwestClientBuildError(e.to_string()))?;
+        let sso_client = SsoHttpClient::new()
+            .map_err(|e| ConfigError::ReqwestClientBuildError(e.to_string()))?;
         let database = Database::connect(&settings.auth.database_url)
             .await
             .map_err(|e| ConfigError::DbError(e.to_string()))?;
@@ -258,6 +262,7 @@ impl AppState {
             database,
             oidc_providers: RwLock::new(HashMap::new()),
             req_client,
+            sso_client,
             settings,
             mcp_clients: RwLock::new(HashMap::new()),
             share_rate_limiter: Default::default(),
@@ -471,7 +476,7 @@ impl AppState {
             "google",
         )?;
         let client = build_google_client(
-            &self.req_client,
+            &self.sso_client,
             settings.client_id,
             settings.client_secret,
             settings.redirect_url.clone(),
@@ -508,7 +513,7 @@ impl AppState {
             tenant_id: settings.tenant_id.clone(),
         };
         let azure = build_azure_client(
-            &self.req_client,
+            &self.sso_client,
             settings.client_id,
             settings.client_secret,
             settings.redirect_url.clone(),
@@ -573,7 +578,7 @@ impl AppState {
                         .clone()
                         .unwrap_or_else(|| "common".to_string());
                     let azure = build_azure_client(
-                        &self.req_client,
+                        &self.sso_client,
                         model.client_id.clone(),
                         client_secret,
                         model.redirect_url.clone(),
@@ -591,7 +596,7 @@ impl AppState {
                 }
                 (None, "google") => {
                     let client = build_google_client(
-                        &self.req_client,
+                        &self.sso_client,
                         model.client_id.clone(),
                         client_secret,
                         model.redirect_url.clone(),
@@ -601,7 +606,7 @@ impl AppState {
                 }
                 _ => {
                     let client = build_discovered_oidc_client(
-                        &self.req_client,
+                        &self.sso_client,
                         &model.issuer_url,
                         model.client_id.clone(),
                         client_secret,

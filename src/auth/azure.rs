@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::config::setting::OidcClient;
+use crate::services::sso_egress::SsoHttpClient;
 use anyhow::Error;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use openidconnect::{
@@ -12,7 +13,6 @@ use openidconnect::{
         CoreResponseType, CoreSubjectIdentifierType,
     },
 };
-use reqwest::Client as ReqwestClient;
 use serde::Deserialize;
 use std::{
     collections::HashMap,
@@ -29,7 +29,6 @@ const AZURE_METADATA_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
 const AZURE_METADATA_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const AZURE_METADATA_REQUEST_TIMEOUT: Duration = Duration::from_millis(200);
-const AZURE_METADATA_MAX_BYTES: usize = 1024 * 1024;
 const AZURE_CONSUMER_TENANT_ID: &str = "9188040d-6c67-4c5b-b112-36a304b66dad";
 const AZURE_MULTITENANT_ISSUER: &str = "https://login.microsoftonline.com/{tenantid}/v2.0";
 
@@ -197,11 +196,11 @@ fn multitenant_provider_metadata(
 }
 
 async fn fetch_multitenant_provider_metadata(
-    req_client: &ReqwestClient,
+    sso_client: &SsoHttpClient,
     authority: &str,
 ) -> Result<AzureMetadataSnapshot, Error> {
     let (issuer, auth, token, jwks_url, userinfo) = mk_urls(authority)?;
-    let document = fetch_jwks_document(req_client, jwks_url.as_str()).await?;
+    let document = fetch_jwks_document(sso_client, jwks_url.as_str()).await?;
     let jwks: CoreJsonWebKeySet = serde_json::from_value(document.clone())?;
     if jwks.keys().is_empty() {
         anyhow::bail!("Azure returned an empty JSON Web Key Set");
@@ -225,29 +224,16 @@ async fn fetch_multitenant_provider_metadata(
 }
 
 async fn fetch_jwks_document(
-    req_client: &ReqwestClient,
+    sso_client: &SsoHttpClient,
     url: &str,
 ) -> Result<serde_json::Value, Error> {
-    let mut response = req_client
-        .get(url)
-        .timeout(AZURE_METADATA_REQUEST_TIMEOUT)
-        .send()
-        .await?
-        .error_for_status()?;
-    if response
-        .content_length()
-        .is_some_and(|length| length > AZURE_METADATA_MAX_BYTES as u64)
-    {
-        anyhow::bail!("Azure JWKS document exceeds size limit");
+    let response = sso_client
+        .send(sso_client.get(url).timeout(AZURE_METADATA_REQUEST_TIMEOUT))
+        .await?;
+    if !response.status.is_success() {
+        anyhow::bail!("Azure JWKS request failed with status {}", response.status);
     }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        if body.len().saturating_add(chunk.len()) > AZURE_METADATA_MAX_BYTES {
-            anyhow::bail!("Azure JWKS document exceeds size limit");
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(serde_json::from_slice(&body)?)
+    Ok(response.json()?)
 }
 
 async fn cached_metadata_fetch<F>(
@@ -296,7 +282,7 @@ where
 }
 
 async fn cached_multitenant_provider_metadata(
-    req_client: &ReqwestClient,
+    sso_client: &SsoHttpClient,
     tenant_id: &str,
 ) -> Result<AzureMetadataSnapshot, Error> {
     let authority = normalized_authority(tenant_id);
@@ -304,7 +290,7 @@ async fn cached_multitenant_provider_metadata(
     cached_metadata_fetch(
         cache,
         authority.clone(),
-        fetch_multitenant_provider_metadata(req_client, &authority),
+        fetch_multitenant_provider_metadata(sso_client, &authority),
     )
     .await
 }
@@ -398,7 +384,7 @@ pub fn azure_email_domain_owner_verified(id_token: &CoreIdToken) -> Option<bool>
 }
 
 pub async fn build_azure_client<S: Into<String>>(
-    req_client: &ReqwestClient,
+    sso_client: &SsoHttpClient,
     client_id: S,
     client_secret: S,
     redirect_url: S,
@@ -409,7 +395,7 @@ pub async fn build_azure_client<S: Into<String>>(
     let tenant_id = tenant_id.into();
     let redirect_uri = RedirectUrl::new(redirect_url.into())?;
     let (client, multitenant_validation) = if is_azure_multitenant_authority(&tenant_id) {
-        let snapshot = cached_multitenant_provider_metadata(req_client, &tenant_id).await?;
+        let snapshot = cached_multitenant_provider_metadata(sso_client, &tenant_id).await?;
         (
             CoreClient::from_provider_metadata(
                 snapshot.provider_metadata,
@@ -423,7 +409,7 @@ pub async fn build_azure_client<S: Into<String>>(
             "https://login.microsoftonline.com/{}/v2.0",
             tenant_id
         ))?;
-        let provider = CoreProviderMetadata::discover_async(issuer, req_client).await?;
+        let provider = CoreProviderMetadata::discover_async(issuer, sso_client).await?;
         (
             CoreClient::from_provider_metadata(provider, client_id, Some(client_secret)),
             None,
@@ -436,7 +422,7 @@ pub async fn build_azure_client<S: Into<String>>(
 }
 
 pub async fn build_azure_public_client<C, R, T>(
-    req_client: &ReqwestClient,
+    sso_client: &SsoHttpClient,
     client_id: C,
     redirect_url: R,
     tenant_id: T,
@@ -450,7 +436,7 @@ where
     let tenant_id = tenant_id.into();
     let redirect_uri = RedirectUrl::new(redirect_url.into())?;
     let (client, multitenant_validation) = if is_azure_multitenant_authority(&tenant_id) {
-        let snapshot = cached_multitenant_provider_metadata(req_client, &tenant_id).await?;
+        let snapshot = cached_multitenant_provider_metadata(sso_client, &tenant_id).await?;
         (
             CoreClient::from_provider_metadata(snapshot.provider_metadata, client_id, None),
             Some(snapshot.validation),
@@ -460,7 +446,7 @@ where
             "https://login.microsoftonline.com/{}/v2.0",
             tenant_id
         ))?;
-        let provider = CoreProviderMetadata::discover_async(issuer, req_client).await?;
+        let provider = CoreProviderMetadata::discover_async(issuer, sso_client).await?;
         (
             CoreClient::from_provider_metadata(provider, client_id, None),
             None,
@@ -736,7 +722,7 @@ mod tests {
             }),
         ))
         .await;
-        let client = ReqwestClient::new();
+        let client = SsoHttpClient::new().expect("SSO client");
         let started = Instant::now();
         let result = fetch_jwks_document(&client, &url).await;
 

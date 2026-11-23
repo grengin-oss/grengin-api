@@ -45,12 +45,6 @@ pub fn short_call_client() -> reqwest::Result<Client> {
         .build()
 }
 
-pub fn long_lived_stream_client() -> reqwest::Result<Client> {
-    HttpTimeouts::LONG_LIVED_STREAM
-        .apply(Client::builder())
-        .build()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,9 +68,8 @@ mod tests {
     }
 
     #[test]
-    fn both_shared_clients_build() {
+    fn the_short_call_client_builds() {
         short_call_client().expect("short call client");
-        long_lived_stream_client().expect("long lived client");
     }
 
     #[tokio::test]

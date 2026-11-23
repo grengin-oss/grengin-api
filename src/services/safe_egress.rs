@@ -53,16 +53,19 @@ pub fn mcp_client_builder() -> reqwest_mcp::ClientBuilder {
         .dns_resolver(Arc::new(CheckedMcpResolver))
 }
 
+pub fn checked_short_call_builder() -> reqwest::ClientBuilder {
+    HttpTimeouts::SHORT_CALL.apply(
+        reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .dns_resolver(Arc::new(CheckedResolver)),
+    )
+}
+
 pub fn oauth_token_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        HttpTimeouts::SHORT_CALL
-            .apply(
-                reqwest::Client::builder()
-                    .no_proxy()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .dns_resolver(Arc::new(CheckedResolver)),
-            )
+        checked_short_call_builder()
             .build()
             .expect("the OAuth token client uses only static settings")
     })

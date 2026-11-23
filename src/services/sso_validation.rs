@@ -296,22 +296,21 @@ pub fn grengin_proxy_config_hash(
 }
 
 pub async fn validate_grengin_proxy(app_state: &SharedState) -> Result<(bool, String), AuthError> {
-    let response = app_state
-        .req_client
-        .get(sso_proxy_jwks_url())
-        .send()
+    let sso_client = &app_state.sso_client;
+    let response = sso_client
+        .send(sso_client.get(sso_proxy_jwks_url()))
         .await
         .map_err(|error| {
             eprintln!("Grengin SSO proxy validation request failed: {error}");
             AuthError::ServiceTemporarilyUnavailable
         })?;
-    if !response.status().is_success() {
+    if !response.status.is_success() {
         return Ok((
             false,
             "Grengin SSO proxy verification endpoint is unavailable".to_string(),
         ));
     }
-    let jwks = response.json::<JwkSet>().await.map_err(|error| {
+    let jwks = response.json::<JwkSet>().map_err(|error| {
         eprintln!("Grengin SSO proxy JWKS validation failed: {error}");
         AuthError::ServiceTemporarilyUnavailable
     })?;
@@ -343,8 +342,8 @@ async fn probe_google_config(
     app_state: &SharedState,
     draft: &SsoDraftConfig,
 ) -> Result<(bool, String), AuthError> {
-    let response = app_state
-        .req_client
+    let sso_client = &app_state.sso_client;
+    let request = sso_client
         .post("https://oauth2.googleapis.com/token")
         .form(&[
             ("client_id", draft.client_id.as_str()),
@@ -352,19 +351,13 @@ async fn probe_google_config(
             ("grant_type", "authorization_code"),
             ("code", "grengin-sso-validation-probe"),
             ("redirect_uri", draft.redirect_url.as_str()),
-        ])
-        .send()
-        .await
-        .map_err(|e| {
-            eprintln!("google validation request failed: {e}");
-            AuthError::ServiceTemporarilyUnavailable
-        })?;
-    let status = response.status();
-    let body = response.text().await.map_err(|e| {
-        eprintln!("google validation response read failed: {e}");
+        ]);
+    let response = sso_client.send(request).await.map_err(|e| {
+        eprintln!("google validation request failed: {e}");
         AuthError::ServiceTemporarilyUnavailable
     })?;
-    let (error, description) = parse_oauth_error(&body);
+    let status = response.status;
+    let (error, description) = parse_oauth_error(&response.text());
     if error == "invalid_grant" {
         return Ok((
             true,
@@ -395,28 +388,20 @@ async fn probe_azure_config(
         .clone()
         .unwrap_or_else(|| "common".to_string());
     let token_url = format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
-    let response = app_state
-        .req_client
-        .post(token_url)
-        .form(&[
-            ("client_id", draft.client_id.as_str()),
-            ("client_secret", draft.client_secret.as_str()),
-            ("grant_type", "authorization_code"),
-            ("code", "grengin-sso-validation-probe"),
-            ("redirect_uri", draft.redirect_url.as_str()),
-        ])
-        .send()
-        .await
-        .map_err(|e| {
-            eprintln!("azure validation request failed: {e}");
-            AuthError::ServiceTemporarilyUnavailable
-        })?;
-    let status = response.status();
-    let body = response.text().await.map_err(|e| {
-        eprintln!("azure validation response read failed: {e}");
+    let sso_client = &app_state.sso_client;
+    let request = sso_client.post(token_url).form(&[
+        ("client_id", draft.client_id.as_str()),
+        ("client_secret", draft.client_secret.as_str()),
+        ("grant_type", "authorization_code"),
+        ("code", "grengin-sso-validation-probe"),
+        ("redirect_uri", draft.redirect_url.as_str()),
+    ]);
+    let response = sso_client.send(request).await.map_err(|e| {
+        eprintln!("azure validation request failed: {e}");
         AuthError::ServiceTemporarilyUnavailable
     })?;
-    let (error, description) = parse_oauth_error(&body);
+    let status = response.status;
+    let (error, description) = parse_oauth_error(&response.text());
     if error == "invalid_grant" {
         return Ok((
             true,
@@ -471,7 +456,7 @@ pub async fn validate_sso_draft(
         .map_err(|_| AuthError::InvalidProvider {
             provider: Some(draft.provider.clone()),
         })?;
-        return match adapter.validate_remote(&app_state.req_client).await {
+        return match adapter.validate_remote(&app_state.sso_client).await {
             Ok(true) => Ok((
                 true,
                 "OAuth2 client credentials and callback configuration validated".to_string(),
@@ -498,7 +483,7 @@ pub async fn validate_sso_draft(
         "azure" => probe_azure_config(app_state, draft).await,
         _ => {
             build_discovered_oidc_client(
-                &app_state.req_client,
+                &app_state.sso_client,
                 &draft.issuer_url,
                 draft.client_id.clone(),
                 draft.client_secret.clone(),
