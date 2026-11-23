@@ -49,6 +49,8 @@ pub enum McpClientError {
     ToolArgs(String),
     #[error("mcp config error: {0}")]
     Config(String),
+    #[error("mcp tool execution deadline exceeded")]
+    Timeout,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -991,6 +993,7 @@ struct StdioConnectionConfig {
 struct TransportConfigInput {
     headers: Option<HashMap<String, String>>,
     session_cache: Option<SessionCachePolicy>,
+    tool_timeout_ms: Option<u64>,
 }
 
 impl McpServerClient {
@@ -1113,6 +1116,30 @@ impl McpServerClient {
     }
 
     pub async fn call_tool(
+        &self,
+        tool_name: &str,
+        args: serde_json::Value,
+        auth_token: Option<String>,
+        user_id: Option<Uuid>,
+    ) -> Result<CallToolResult, McpClientError> {
+        let timeout_ms = transport_config(&self.connection_config)?
+            .tool_timeout_ms
+            .unwrap_or(30_000);
+        if !(1..=300_000).contains(&timeout_ms) {
+            return Err(McpClientError::Config(
+                "tool_timeout_ms must be between 1 and 300000".into(),
+            ));
+        }
+        // Include connection and lease acquisition; dropping rmcp's call future sends cancellation.
+        tokio::time::timeout(
+            std::time::Duration::from_millis(timeout_ms),
+            self.call_tool_inner(tool_name, args, auth_token, user_id),
+        )
+        .await
+        .map_err(|_| McpClientError::Timeout)?
+    }
+
+    async fn call_tool_inner(
         &self,
         tool_name: &str,
         args: serde_json::Value,
@@ -2097,6 +2124,147 @@ mod tests {
                 mcp_http_client(&serde_json::json!({"transport_config":{"headers":headers}}))
                     .is_err()
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stalled_remote_tool_times_out_without_replay_and_releases_its_session() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cancellations = Arc::new(tokio::sync::Notify::new());
+        let router = Router::new().route("/mcp", post({
+            let calls = calls.clone();
+            let cancellations = cancellations.clone();
+            move |Json(message): Json<Value>| {
+                let calls = calls.clone();
+                let cancellations = cancellations.clone();
+                async move {
+                    if message.get("id").is_none() {
+                        if message["method"] == "notifications/cancelled" {
+                            cancellations.notify_one();
+                        }
+                        return StatusCode::ACCEPTED.into_response();
+                    }
+                    let result = match message["method"].as_str().unwrap() {
+                        "initialize" => serde_json::json!({
+                            "protocolVersion":message["params"]["protocolVersion"],
+                            "capabilities":{"tools":{}}, "serverInfo":{"name":"deadline", "version":"1"}
+                        }),
+                        "tools/call" => {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            if message["params"]["name"] == "hang" {
+                                std::future::pending::<()>().await;
+                            }
+                            serde_json::json!({"content":[{"type":"text","text":"ok"}]})
+                        }
+                        _ => return StatusCode::BAD_REQUEST.into_response(),
+                    };
+                    Json(serde_json::json!({"jsonrpc":"2.0", "id":message["id"], "result":result})).into_response()
+                }
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        for authenticated in [true, false] {
+            let client = McpServerClient::new(
+                Uuid::new_v4(),
+                "deadline".into(),
+                McpTransportType::Http,
+                Some(url.clone()),
+                serde_json::json!({"transport_config":{"tool_timeout_ms":500}}),
+                None,
+            );
+            let user = authenticated.then(Uuid::new_v4);
+            let token = authenticated.then(|| "fixture-user".to_string());
+            let before = calls.load(Ordering::SeqCst);
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                client.call_tool("hang", serde_json::json!({}), token.clone(), user),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(result, Err(McpClientError::Timeout)));
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                before + 1,
+                "a timed-out tool must not be replayed"
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(1), cancellations.notified())
+                .await
+                .unwrap();
+            client
+                .call_tool("ping", serde_json::json!({}), token, user)
+                .await
+                .unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), before + 2);
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tool_deadline_includes_waiting_for_the_same_users_lease() {
+        let client = McpServerClient::new(
+            Uuid::new_v4(),
+            "queued".into(),
+            McpTransportType::Http,
+            Some("https://example.invalid/mcp".into()),
+            serde_json::json!({"transport_config":{"tool_timeout_ms":25}}),
+            None,
+        );
+        let user = Uuid::new_v4();
+        let lease = client
+            .http_clients
+            .as_ref()
+            .unwrap()
+            .lease(user)
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.call_tool(
+                "ping",
+                serde_json::json!({}),
+                Some("fixture".into()),
+                Some(user),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(McpClientError::Timeout)));
+        drop(lease);
+        assert!(
+            client
+                .http_clients
+                .as_ref()
+                .unwrap()
+                .lease(user)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_tool_deadlines_are_rejected_before_dispatch() {
+        for timeout in [
+            serde_json::json!(0),
+            serde_json::json!(300001),
+            serde_json::json!("forever"),
+        ] {
+            let client = McpServerClient::new(
+                Uuid::new_v4(),
+                "invalid".into(),
+                McpTransportType::Http,
+                Some("https://example.invalid/mcp".into()),
+                serde_json::json!({"transport_config":{"tool_timeout_ms":timeout}}),
+                None,
+            );
+            assert!(matches!(
+                client
+                    .call_tool("ping", serde_json::json!({}), None, None)
+                    .await,
+                Err(McpClientError::Config(_))
+            ));
         }
     }
 

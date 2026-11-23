@@ -2531,16 +2531,20 @@ pub async fn handle_chat_stream(
                                                }
                                                Err("mcp oauth connection required".to_string())
                                            } else {
-                                               crate::services::mcp_tools::call_with_current_access(
+                                               match crate::services::mcp_execution::cancellable_tool_call(
+                                                   &cancel_handle,
+                                                   crate::services::mcp_tools::call_with_current_access(
                                                        &app_state.database,
                                                        &client,
                                                        &tool_ref.original_name,
                                                        args_for_call.clone(),
                                                        auth_token,
                                                        claims.user_id,
-                                                   )
-                                                   .await
-                                                   .map_err(|e| e.to_string())
+                                                   ),
+                                               ).await {
+                                                   Some(result) => result.map_err(|e| e.to_string()),
+                                                   None => break,
+                                               }
                                            }
                                        }
                                        None => Err(format!(

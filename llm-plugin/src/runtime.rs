@@ -44,6 +44,7 @@ const MAX_SSE_EVENT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CONFIGURATION_BYTES: usize = 1024 * 1024;
 const MAX_IMAGE_COUNT: u8 = 16;
 const MAX_AUTHORIZED_BODY_BYTES: usize = 32 * 1024 * 1024;
+const TRAILING_USAGE_GRACE: Duration = Duration::from_secs(2);
 
 /// API-owned authorization for a trusted destination. Implementations must reject every URL
 /// outside their exact origin and operation allowlist before returning a bearer token.
@@ -534,6 +535,11 @@ impl DeclarativeProvider {
         }
 
         let response_limit = self.response_limit_for(&operation.request);
+        let trailing_grace = if operation.response.done_data.is_some() {
+            self.timeout_for(&operation.request)
+        } else {
+            TRAILING_USAGE_GRACE
+        };
         let mut mapper = SseEventMapper::new(operation.response.clone());
         let captures = operation.continuation.captures.clone();
         let authorized = self.authorization.is_some();
@@ -542,35 +548,68 @@ impl DeclarativeProvider {
             let mut decoder = SseDecoder::new(MAX_SSE_EVENT_BYTES.min(response_limit));
             let mut total = 0usize;
             let mut drained = false;
+            let mut trailing_deadline = None;
             while !drained {
-                let events = match body.next().await {
+                let next = if let Some(deadline) = trailing_deadline {
+                    match tokio::time::timeout_at(deadline, body.next()).await {
+                        Ok(next) => next,
+                        Err(_) => break,
+                    }
+                } else {
+                    body.next().await
+                };
+                let at_end = next.is_none();
+                match next {
                     Some(chunk) => {
                         let chunk = chunk.map_err(ProviderError::from)?;
                         total = total.saturating_add(chunk.len());
                         if total > response_limit {
                             Err(ProviderError::ResponseTooLarge)?;
                         }
-                        decoder.push(&chunk)?
+                        decoder.feed(&chunk);
                     }
-                    None => {
-                        drained = true;
-                        decoder.finish()?
-                    }
-                };
-                for event in events {
-                    // Trailing events are still decoded after completion: the mapper decides which
-                    // kinds remain meaningful (usage arrives last on OpenAI-compatible providers)
-                    // and drops the rest.
-                    if operation.response.done_data.as_deref() != Some(event.data.trim()) {
+                    None => drained = true,
+                }
+                // Events are decoded one at a time, so a done marker ends the stream before any
+                // bytes after it in the same chunk are read.
+                let mut tail = std::collections::VecDeque::new();
+                let mut tail_loaded = false;
+                loop {
+                    let event = match decoder.next_event()? {
+                        Some(event) => event,
+                        None if at_end && !tail_loaded => {
+                            tail_loaded = true;
+                            tail.extend(decoder.finish()?);
+                            match tail.pop_front() {
+                                Some(event) => event,
+                                None => break,
+                            }
+                        }
+                        None => match tail.pop_front() {
+                            Some(event) => event,
+                            None => break,
+                        },
+                    };
+                    let final_marker = operation.response.done_data.as_deref() == Some(event.data.trim());
+                    if !final_marker {
                         let data = mapper.decode_data(&event)?;
                         observed.lock().await.captures.extend(capture_values(&captures, &data));
                     }
-                    for mapped in mapper.map(&event)? {
+                    let mapped_events = mapper.map(&event)?;
+                    // Preserve late usage, but never let heartbeat traffic extend the tail forever.
+                    if mapper.is_completed() && trailing_deadline.is_none() {
+                        trailing_deadline = Some(tokio::time::Instant::now() + trailing_grace);
+                    }
+                    for mapped in mapped_events {
                         if authorized && matches!(mapped, ProviderEvent::Error { .. }) {
                             Err(ProviderError::ResponseMapping("authorized provider stream failed".into()))?;
                         }
                         observed.lock().await.record(&mapped)?;
                         yield mapped;
+                    }
+                    if final_marker {
+                        drained = true;
+                        break;
                     }
                 }
             }
