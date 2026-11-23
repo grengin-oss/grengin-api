@@ -19,7 +19,6 @@ use crate::{
         conversations,
         mcp_access_policies::McpPermission,
         mcp_executions,
-        mcp_servers::McpTransportType,
         messages::{self, ChatRole, StopReason},
         users,
     },
@@ -2414,21 +2413,10 @@ pub async fn handle_chat_stream(
                                let call_result = if let Some(error) = access_error {
                                    Err(error)
                                } else {
-                                   let (client, requires_oauth) = {
-                                       let clients = app_state.mcp_clients.read().await;
-                                       match clients.get(&tool_ref.server_id) {
-                                           Some(client) => {
-                                               let requires_oauth = matches!(
-                                                   client.transport_type,
-                                                   McpTransportType::Http | McpTransportType::Sse
-                                               )
-                                                   && client.connection_config.get("oauth").is_some();
-                                               (Some(client.clone()), requires_oauth)
-                                           }
-                                           None => (None, false),
-                                       }
-                                   };
-                                   let auth_token = if requires_oauth || client.as_ref().is_some_and(|client| client.requires_user_credentials()) {
+                                   let client = app_state.mcp_clients.read().await.get(&tool_ref.server_id).cloned();
+                                   let requirement = client.as_ref().map(|client| client.connection_requirement());
+                                   let requires_oauth = requirement.is_some_and(|requirement| requirement.signs_in_through_oauth());
+                                   let auth_token = if requirement.is_some_and(|requirement| requirement.needs_user_token()) {
                                        match resolve_mcp_oauth_token(&app_state, claims.user_id, tool_ref.server_id,client.as_ref().and_then(|value|value.http_url_for_transport().ok()))
                                            .await
                                        {
@@ -2492,8 +2480,8 @@ pub async fn handle_chat_stream(
                                                }
                                                Err("mcp oauth connection required".to_string())
                                            } else {
-                                               crate::services::mcp_plugin_helpers::call_with_current_access(
-                                                       &app_state,
+                                               crate::services::mcp_tools::call_with_current_access(
+                                                       &app_state.database,
                                                        &client,
                                                        &tool_ref.original_name,
                                                        args_for_call.clone(),

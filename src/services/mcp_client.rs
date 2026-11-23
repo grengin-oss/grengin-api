@@ -925,6 +925,43 @@ fn mcp_http_client(connection_config: &Value) -> Result<reqwest_mcp::Client, Mcp
         .map_err(|e| McpClientError::Config(format!("http client build failed: {e}")))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum McpConnectionRequirement {
+    None,
+    DirectOAuth,
+    BrokerOAuth,
+    UserToken,
+}
+
+impl McpConnectionRequirement {
+    fn of(transport: McpTransportType, config: &Value, plugin: Option<&CompiledConnector>) -> Self {
+        match plugin.map(|plugin| plugin.manifest().auth) {
+            Some(connector_plugin::ConnectorAuth::None) => Self::None,
+            Some(connector_plugin::ConnectorAuth::ApiKey) => Self::UserToken,
+            Some(connector_plugin::ConnectorAuth::Oauth2)
+                if config.get("oauth_broker").is_some() =>
+            {
+                Self::BrokerOAuth
+            }
+            Some(connector_plugin::ConnectorAuth::Oauth2) => Self::DirectOAuth,
+            None if matches!(transport, McpTransportType::Http | McpTransportType::Sse)
+                && config.get("oauth").is_some() =>
+            {
+                Self::DirectOAuth
+            }
+            None => Self::None,
+        }
+    }
+
+    pub fn needs_user_token(self) -> bool {
+        self != Self::None
+    }
+
+    pub fn signs_in_through_oauth(self) -> bool {
+        matches!(self, Self::DirectOAuth | Self::BrokerOAuth)
+    }
+}
+
 pub struct McpServerClient {
     pub server_id: Uuid,
     pub name: String,
@@ -957,12 +994,12 @@ struct TransportConfigInput {
 }
 
 impl McpServerClient {
-    pub fn requires_user_credentials(&self) -> bool {
-        self.plugin
-            .as_ref()
-            .ok()
-            .and_then(Option::as_ref)
-            .is_some_and(|plugin| plugin.manifest().auth != connector_plugin::ConnectorAuth::None)
+    pub fn connection_requirement(&self) -> McpConnectionRequirement {
+        McpConnectionRequirement::of(
+            self.transport_type,
+            &self.connection_config,
+            self.plugin.as_ref().ok().and_then(Option::as_ref),
+        )
     }
     pub fn new(
         server_id: Uuid,
@@ -1662,20 +1699,84 @@ mod tests {
     }
 
     #[test]
-    fn api_key_plugins_require_the_same_per_user_token_lookup_as_oauth_plugins() {
+    fn connection_requirement_separates_oauth_sign_in_from_api_tokens() {
+        use McpConnectionRequirement as Requirement;
         let mut manifest: Value =
             serde_json::from_str(include_str!("../../connector-plugin/example.json")).unwrap();
-        for (kind, expected) in [("api_key", true), ("none", false)] {
+        let base = manifest["base_url"].as_str().map(str::to_owned);
+        let direct_oauth = serde_json::json!({"auth_url":"https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize","token_url":"https://login.microsoftonline.com/organizations/oauth2/v2.0/token","redirect_url":"http://localhost:5173/mcp/oauth/callback","scopes":["Mail.Read"]});
+        let mut cases = Vec::new();
+        for (kind, extra, expected) in [
+            ("api_key", None, Requirement::UserToken),
+            ("none", None, Requirement::None),
+            (
+                "oauth2",
+                Some(("oauth", direct_oauth.clone())),
+                Requirement::DirectOAuth,
+            ),
+            (
+                "oauth2",
+                Some(("oauth_broker", serde_json::json!({}))),
+                Requirement::BrokerOAuth,
+            ),
+        ] {
             manifest["auth"] = serde_json::json!(kind);
+            let mut config = serde_json::json!({"connector_plugin":{"manifest":manifest}});
+            if let Some((key, value)) = extra {
+                config[key] = value;
+            }
+            cases.push((McpTransportType::Http, base.clone(), config, expected));
+        }
+        let remote = Some("https://mcp.example.com/mcp".to_owned());
+        cases.extend([
+            (
+                McpTransportType::Http,
+                remote.clone(),
+                serde_json::json!({ "oauth": direct_oauth }),
+                Requirement::DirectOAuth,
+            ),
+            (
+                McpTransportType::Sse,
+                remote.clone(),
+                serde_json::json!({"oauth":{}}),
+                Requirement::DirectOAuth,
+            ),
+            (
+                McpTransportType::Http,
+                remote,
+                serde_json::json!({}),
+                Requirement::None,
+            ),
+            (
+                McpTransportType::Stdio,
+                None,
+                serde_json::json!({"command":"db-mcp","oauth":{}}),
+                Requirement::None,
+            ),
+        ]);
+        for (transport, url, config, expected) in cases {
             let client = McpServerClient::new(
                 Uuid::new_v4(),
                 "fixture".into(),
-                McpTransportType::Http,
-                manifest["base_url"].as_str().map(str::to_owned),
-                serde_json::json!({"connector_plugin":{"manifest":manifest}}),
+                transport,
+                url,
+                config.clone(),
                 None,
             );
-            assert_eq!(client.requires_user_credentials(), expected);
+            assert!(client.connector_plugin().is_ok(), "{config}");
+            let requirement = client.connection_requirement();
+            assert_eq!(requirement, expected, "{config}");
+            assert_eq!(
+                requirement.needs_user_token(),
+                expected != Requirement::None
+            );
+            assert_eq!(
+                requirement.signs_in_through_oauth(),
+                matches!(
+                    expected,
+                    Requirement::DirectOAuth | Requirement::BrokerOAuth
+                )
+            );
         }
     }
 
