@@ -13,6 +13,7 @@ use crate::{
     config::setting::EmbeddingSettings,
     error::AppError,
     models::{conversations, message_embeddings, messages, messages::ChatRole},
+    services::llm_usage_gate::{UsagePurpose, UsageSubject, is_usage_refusal},
     state::SharedState,
 };
 
@@ -217,9 +218,14 @@ pub async fn semantic_conversation_search(
         _ => return Ok(None),
     };
     let embedding =
-        match generate_search_embedding(app_state, &embedding_config, query_text).await? {
-            Some(embedding) => embedding,
-            None => return Ok(None),
+        match generate_search_embedding(app_state, &embedding_config, user_id, query_text).await {
+            Ok(Some(embedding)) => embedding,
+            Ok(None) => return Ok(None),
+            Err(error) if is_usage_refusal(&error) => {
+                eprintln!("semantic search skipped: {error:?}");
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
         };
 
     let total =
@@ -418,9 +424,15 @@ async fn load_semantic_snippets(
 async fn generate_search_embedding(
     app_state: &SharedState,
     config: &EmbeddingSettings,
+    user_id: Uuid,
     text: &str,
 ) -> Result<Option<Vec<f32>>, AppError> {
-    crate::services::rag::generate_embeddings(app_state, config, vec![text.to_string()])
+    let subject = UsageSubject {
+        user_id,
+        purpose: UsagePurpose::QueryEmbedding,
+        conversation_id: None,
+    };
+    crate::services::rag::generate_embeddings(app_state, config, subject, vec![text.to_string()])
         .await
         .map(|embeddings| embeddings.and_then(|mut embeddings| embeddings.pop()))
 }

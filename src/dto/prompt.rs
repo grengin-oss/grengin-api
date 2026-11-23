@@ -13,13 +13,16 @@ pub struct Prompt {
 #[derive(Debug)]
 pub struct PromptTitleResponse {
     pub title: String,
-    pub input_tokens: i32,
-    pub output_tokens: i32,
+    pub input_tokens: Option<i32>,
+    pub output_tokens: Option<i32>,
+    pub estimated_input_tokens: i32,
 }
 
 #[derive(Debug)]
+// Token counts are None when the provider reported no usage, so it is never mistaken for zero.
 pub struct PromptTextResponse {
     pub text: String,
-    pub input_tokens: i32,
-    pub output_tokens: i32,
+    pub input_tokens: Option<i32>,
+    pub output_tokens: Option<i32>,
+    pub estimated_input_tokens: i32,
 }

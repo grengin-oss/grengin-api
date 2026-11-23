@@ -5,7 +5,11 @@ use llm_plugin::{ProviderError, ProviderModel, ProviderModelType, ProviderPlugin
 
 use crate::{
     dto::models::{ModelInfo, ModelType},
-    services::live_models_cache::LiveModelsCache,
+    services::{
+        live_models_cache::LiveModelsCache, models_cache::get_model_info_cached,
+        provider_chat::provider_error_class,
+    },
+    state::SharedState,
 };
 
 pub async fn find_provider_model(
@@ -32,6 +36,30 @@ pub async fn find_provider_model(
         .await?
         .into_iter()
         .find(|model| model.id.as_str() == model_id || model.name == model_id))
+}
+
+// Same precedence as chat pricing: catalog entry first, then the provider plugin's own listing.
+pub async fn resolve_model_info(
+    state: &SharedState,
+    provider: &dyn ProviderPlugin,
+    provider_key: &str,
+    model_id: &str,
+) -> Option<ModelInfo> {
+    match get_model_info_cached(&state.req_client, provider_key, model_id).await {
+        Ok(Some(model)) => return Some(model),
+        Ok(None) => {}
+        Err(error) => eprintln!("models cache error: {error}"),
+    }
+    match find_provider_model(provider, provider_key, &state.live_models_cache, model_id).await {
+        Ok(model) => model.map(|model| to_model_info(provider_key, model)),
+        Err(error) => {
+            eprintln!(
+                "provider plugin model lookup failed: {}",
+                provider_error_class(&error)
+            );
+            None
+        }
+    }
 }
 
 pub fn model_type(model: &ProviderModel) -> ModelType {
