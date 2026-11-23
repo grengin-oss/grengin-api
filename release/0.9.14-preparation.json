@@ -1,0 +1,83 @@
+{
+  "kind": "manual_release_preparation",
+  "prepared_on": "2026-11-23",
+  "version": "0.9.14",
+  "status": "preflight_only_not_merge_ready",
+  "automatically_consumed_by_ci": false,
+  "base_commit": "e9bcb2a02e86fd65c236f9ed4c53dbd5cd55b603",
+  "previous_product_release": "https://github.com/grengin-oss/grengin/releases/tag/v0.9.13",
+  "api_main_changed": false,
+  "version_bump_applied": false,
+  "proposed_merge_order": [107, 108, 109, 110, 111, 112],
+  "pull_requests": [
+    {
+      "number": 107,
+      "head": "68b4aba41954d967fcbf70cd50e16e004838310e",
+      "scope": "Pagination bounds, queued connector content calls, formatting",
+      "textual_merge_against_base": "clean"
+    },
+    {
+      "number": 108,
+      "head": "bfd94a300eae7adcb3134d0d518b4810a097e912",
+      "scope": "Live MCP authorization and connector reconnect prompts",
+      "textual_merge_against_base": "clean"
+    },
+    {
+      "number": 109,
+      "head": "86a2305ea87c04b950d4dabac7e2596808059cfc",
+      "scope": "OIDC first-login race and identity matching",
+      "textual_merge_against_base": "clean"
+    },
+    {
+      "number": 110,
+      "head": "c96448e7ed95f9d36914400f078536ef6fdbbcfb",
+      "scope": "IPv6 egress checks and protected SSO HTTP client",
+      "textual_merge_against_base": "clean"
+    },
+    {
+      "number": 111,
+      "head": "239216012d83b431ba91d233369b608f7f489845",
+      "scope": "Background LLM spend, estimation, durable idempotent charges",
+      "textual_merge_against_base": "conflicts",
+      "conflicting_files": ["src/handlers/chat_stream.rs", "src/services/rag.rs"]
+    },
+    {
+      "number": 112,
+      "head": "3e0e1eddf16699a1d97d3d360bbf9372b59a8c0c",
+      "scope": "MCP cancellation/deadlines and bounded LLM stream completion",
+      "textual_merge_against_base": "conflicts",
+      "conflicting_files": ["llm-plugin/src/runtime.rs"]
+    }
+  ],
+  "combined_tree_checked": false,
+  "resolution_requirements": [
+    "Preserve the Grengin via_gateway title-generation bypass while adding title charges from PR 111.",
+    "Preserve gateway retrieval/embedding restrictions while adding UsageSubject to project retrieval.",
+    "Retain model_route and add select_summary_model in RAG; do not drop Grengin routing.",
+    "Retain RequestAuthorization, MAX_AUTHORIZED_BODY_BYTES and authorized-stream error sanitization while adding PR 112 completion and trailing-usage handling.",
+    "Wrap PR 108 call_with_current_access in PR 112 cancellable_tool_call; neither access checks nor cancellation may be lost.",
+    "Once PRs 110 and 111 are combined, initialize sso_client in AppState::for_tests.",
+    "Recheck all conflicts after earlier PRs are combined; individual clean textual merges do not establish combined correctness."
+  ],
+  "required_validation_before_main_merge": [
+    "Review every current PR head; reported older test runs are not approval of the combined tree.",
+    "Build and test the full locked Rust workspace, with memory-limited jobs; run formatting and whole-workspace clippy.",
+    "Run PostgreSQL regressions on a disposable database: OIDC concurrent first login, MCP access races, migration spend-copy race, missing usage estimates, deleted conversations and lost-acknowledgement idempotency.",
+    "Run both HTTP security suites, MCP Stop/timeout tests and DONE/bad-framing/late-usage regressions.",
+    "Add combined gateway/billing and authorized-stream regressions covering the manual resolutions.",
+    "Build and smoke-test both GNU image architectures, migrations and product release archives."
+  ],
+  "release_gates": [
+    "Bump the product version to 0.9.14 only after the combined source is reviewed.",
+    "Generate the 0.9.14 catalog distribution against the final API source commit, preserving existing released package bytes.",
+    "Catalog/R2 publication needs its own explicit reviewed approval.",
+    "Resolve release coordination so approved catalog publication can promote the matching tested image digest without an unnecessary rebuild or version-check bypass.",
+    "Validate the complete product Release workflow without publishing before creating the 0.9.14 tag/release.",
+    "Hosted proxy service readiness and Hatchery identity rollout remain separate deployment gates; no AWS/VM deployment is authorized by this preparation."
+  ],
+  "other_prs_need_separate_scope_review": {
+    "grengin-api": [70],
+    "grengin": [44, 45, 64],
+    "grengin-list": [39, 58]
+  }
+}
