@@ -61,7 +61,7 @@ pub async fn load_models_cache(req_client: &reqwest::Client) -> Result<Providers
         return Ok(cached.clone());
     }
 
-    let cache = build_providers_cache(fetch_all(req_client).await?);
+    let cache = build_providers_cache(fetch_all(req_client, None).await?);
     let mut write_guard = providers_cache().await.write().await;
     if let Some(cached) = write_guard.as_ref() {
         return Ok(cached.clone());
@@ -84,7 +84,8 @@ fn claim_refresh() -> bool {
 }
 
 pub async fn refresh_models_cache(req_client: &reqwest::Client) -> Result<ProvidersCache, Error> {
-    let refreshed = build_providers_cache(fetch_all(req_client).await?);
+    let previous = providers_cache().await.read().await.clone();
+    let refreshed = build_providers_cache(fetch_all(req_client, previous.as_ref()).await?);
     let mut write_guard = providers_cache().await.write().await;
     *write_guard = Some(refreshed.clone());
     Ok(refreshed)
@@ -129,6 +130,7 @@ struct FetchedData {
     title_model_by_engine: HashMap<String, String>,
     plugin_url_by_key: HashMap<String, String>,
     picker: PickerMetadata,
+    complete: bool,
 }
 
 fn build_providers_cache(mut data: FetchedData) -> ProvidersCache {
@@ -158,11 +160,21 @@ fn build_providers_cache(mut data: FetchedData) -> ProvidersCache {
         title_model_by_engine: data.title_model_by_engine,
         plugin_url_by_key: data.plugin_url_by_key,
         picker: data.picker,
-        fetched_at: Instant::now(),
+        // A copy that kept older data for a failed document is refreshed again soon.
+        fetched_at: if data.complete {
+            Instant::now()
+        } else {
+            Instant::now()
+                .checked_sub(REFRESH_AFTER - RETRY_AFTER)
+                .unwrap_or_else(Instant::now)
+        },
     }
 }
 
-async fn fetch_all(req_client: &reqwest::Client) -> Result<FetchedData, Error> {
+async fn fetch_all(
+    req_client: &reqwest::Client,
+    previous: Option<&ProvidersCache>,
+) -> Result<FetchedData, Error> {
     let (providers, title_model_by_engine, specialties, price_tiers) = tokio::join!(
         fetch_providers(req_client),
         fetch_title_models(req_client),
@@ -170,11 +182,23 @@ async fn fetch_all(req_client: &reqwest::Client) -> Result<FetchedData, Error> {
         fetch_json(req_client, PRICE_TIERS_URL),
     );
     let (providers, plugin_url_by_key) = providers?;
+    let complete = title_model_by_engine.is_ok() && specialties.is_ok() && price_tiers.is_ok();
+    let picker = previous
+        .map(|cache| cache.picker.clone())
+        .unwrap_or_else(PickerMetadata::built_in)
+        .with_catalog(specialties.ok(), price_tiers.ok());
+    let title_model_by_engine = title_model_by_engine.unwrap_or_else(|error| {
+        eprintln!("title generators fetch failed; keeping the previous list: {error}");
+        previous
+            .map(|cache| cache.title_model_by_engine.clone())
+            .unwrap_or_default()
+    });
     Ok(FetchedData {
         providers,
-        title_model_by_engine: title_model_by_engine.unwrap_or_default(),
+        title_model_by_engine,
         plugin_url_by_key,
-        picker: PickerMetadata::from_catalog(specialties.ok(), price_tiers.ok()),
+        picker,
+        complete,
     })
 }
 

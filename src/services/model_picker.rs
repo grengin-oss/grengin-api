@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::LazyLock,
+};
 
 use anyhow::{Error, anyhow, bail};
 use serde::Deserialize;
@@ -52,39 +55,42 @@ pub struct PickerMetadata {
     rules: BTreeMap<String, TierRule>,
 }
 
+static BUILT_IN: LazyLock<PickerMetadata> = LazyLock::new(|| {
+    let specialties = parse_specialties(&serde_json::from_str(BUILT_IN_SPECIALTIES).unwrap())
+        .expect("built-in model specialties are valid");
+    let (tiers, rules) = parse_price_tiers(&serde_json::from_str(BUILT_IN_PRICE_TIERS).unwrap())
+        .expect("built-in price tiers are valid");
+    PickerMetadata {
+        specialties,
+        tiers,
+        rules,
+    }
+});
+
 impl PickerMetadata {
     pub fn built_in() -> Self {
-        let specialties = parse_specialties(&serde_json::from_str(BUILT_IN_SPECIALTIES).unwrap())
-            .expect("built-in model specialties are valid");
-        let (tiers, rules) =
-            parse_price_tiers(&serde_json::from_str(BUILT_IN_PRICE_TIERS).unwrap())
-                .expect("built-in price tiers are valid");
-        Self {
-            specialties,
-            tiers,
-            rules,
-        }
+        BUILT_IN.clone()
     }
 
-    // Each document falls back to the built-in one on its own when it is missing or invalid.
-    pub fn from_catalog(specialties: Option<Value>, price_tiers: Option<Value>) -> Self {
-        let mut metadata = Self::built_in();
+    // A missing or invalid document keeps what this metadata already had (the previous
+    // catalog copy on a refresh, the built-in one at start-up).
+    pub fn with_catalog(mut self, specialties: Option<Value>, price_tiers: Option<Value>) -> Self {
         if let Some(value) = specialties {
             match parse_specialties(&value) {
-                Ok(specialties) => metadata.specialties = specialties,
+                Ok(specialties) => self.specialties = specialties,
                 Err(error) => eprintln!("ignoring catalog model specialties: {error}"),
             }
         }
         if let Some(value) = price_tiers {
             match parse_price_tiers(&value) {
                 Ok((tiers, rules)) => {
-                    metadata.tiers = tiers;
-                    metadata.rules = rules;
+                    self.tiers = tiers;
+                    self.rules = rules;
                 }
                 Err(error) => eprintln!("ignoring catalog price tiers: {error}"),
             }
         }
-        metadata
+        self
     }
 
     pub fn specialties(&self) -> Vec<SpecialtyInfo> {
@@ -142,7 +148,7 @@ impl PickerMetadata {
         let rule = self.rules.get(rule_key(&model.model_type)?)?;
         let mut weighted = 0.0;
         let mut total_weight = 0.0;
-        for (field, weight) in &rule.weights {
+        for (field, weight) in rule.weights.iter().filter(|(_, weight)| **weight > 0.0) {
             weighted += weight * rate(model, field)?;
             total_weight += weight;
         }
@@ -186,7 +192,7 @@ fn rule_key(model_type: &ModelType) -> Option<&'static str> {
 }
 
 fn rate(model: &ModelInfo, field: &str) -> Option<f64> {
-    match field {
+    let value = match field {
         "input" => model.input_token_rate,
         "output" => model.output_token_rate,
         "cachedInput" => model.cached_input_token_rate,
@@ -194,7 +200,8 @@ fn rate(model: &ModelInfo, field: &str) -> Option<f64> {
         // Some image models bill their image output as plain output tokens.
         "imageOutput" => model.image_output_token_rate.or(model.output_token_rate),
         _ => None,
-    }
+    };
+    value.filter(|rate| rate.is_finite() && *rate >= 0.0)
 }
 
 const RATE_FIELDS: [&str; 5] = [
@@ -228,6 +235,9 @@ fn parse_price_tiers(
 ) -> Result<(Vec<PriceTierInfo>, BTreeMap<String, TierRule>), Error> {
     let document: PriceTiersDocument = serde_json::from_value(value.clone())?;
     ensure_format(&document.format_version)?;
+    if document.tiers.is_empty() {
+        bail!("price tiers are empty");
+    }
     let mut tiers = HashSet::new();
     for tier in &document.tiers {
         if !is_code(&tier.id) || !tiers.insert(tier.id.as_str()) || tier.label.trim().is_empty() {
@@ -239,6 +249,7 @@ fn parse_price_tiers(
             && rule.weights.iter().all(|(field, weight)| {
                 RATE_FIELDS.contains(&field.as_str()) && weight.is_finite() && *weight >= 0.0
             })
+            && rule.weights.values().sum::<f64>().is_finite()
             && rule.weights.values().sum::<f64>() > 0.0;
         if !weights_valid {
             bail!("price tier rule {name} has invalid weights");
@@ -382,6 +393,23 @@ mod tests {
             None,
             "a model without a known price gets no tier"
         );
+        assert_eq!(
+            tier(&metadata, ModelType::TextGenerator, -5.0, 1.0),
+            None,
+            "a negative rate is not a price"
+        );
+        let zero_weight = PickerMetadata::built_in().with_catalog(
+            None,
+            Some(
+                json!({"formatVersion": "1.0", "tiers": [{"id": "low", "label": "Low"}],
+                "rules": {"textGenerator": {"weights": {"input": 1, "cachedInput": 0},
+                "bands": [{"tier": "low"}]}}}),
+            ),
+        );
+        assert_eq!(
+            tier(&zero_weight, ModelType::TextGenerator, 1.0, 1.0).as_deref(),
+            Some("low")
+        );
         let mut image = model(ModelType::ImageGenerator, Some(5.0), Some(10.0));
         image.image_output_token_rate = Some(8.0);
         assert_eq!(metadata.price_tier(&image).as_deref(), Some("cheap"));
@@ -396,7 +424,7 @@ mod tests {
                 {"tier": "low", "max": 3}, {"tier": "high"}
             ]}}
         });
-        let metadata = PickerMetadata::from_catalog(None, Some(tiers));
+        let metadata = PickerMetadata::built_in().with_catalog(None, Some(tiers));
         assert_eq!(metadata.price_tiers().len(), 2);
         assert_eq!(
             tier(&metadata, ModelType::TextGenerator, 100.0, 4.0).as_deref(),
@@ -420,17 +448,29 @@ mod tests {
                 "textGenerator": {"weights": {"price": 1}, "bands": [{"tier": "a"}]}}}),
             json!({"formatVersion": "1.0", "tiers": [{"id": "A b", "label": "A"}], "rules": {}}),
         ] {
-            let metadata = PickerMetadata::from_catalog(None, Some(broken));
+            let metadata = PickerMetadata::built_in().with_catalog(None, Some(broken));
             assert_eq!(
                 metadata.price_tiers(),
                 PickerMetadata::built_in().price_tiers()
             );
         }
+        let previous = metadata.clone();
+        let invalid = json!({"formatVersion": "1.0", "tiers": [], "rules": {}});
+        assert_eq!(
+            previous
+                .clone()
+                .with_catalog(None, Some(invalid))
+                .price_tiers(),
+            previous.price_tiers(),
+            "a failed or invalid refresh keeps the previous catalog tiers"
+        );
         let no_general = json!({"formatVersion": "1.0", "specialties": [
             {"id": "coding", "label": "Coding", "description": "Code"}
         ]});
         assert_eq!(
-            PickerMetadata::from_catalog(Some(no_general), None).specialties(),
+            PickerMetadata::built_in()
+                .with_catalog(Some(no_general), None)
+                .specialties(),
             PickerMetadata::built_in().specialties()
         );
     }

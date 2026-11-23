@@ -5,7 +5,10 @@ use llm_plugin::{ProviderError, ProviderModel, ProviderModelType, ProviderPlugin
 
 use crate::{
     dto::models::{ModelInfo, ModelType},
-    services::{live_models_cache::LiveModelsCache, model_picker::DEFAULT_SPECIALTY},
+    services::{
+        live_models_cache::LiveModelsCache,
+        model_picker::{catalog_specialty, catalog_summary},
+    },
 };
 
 pub async fn find_provider_model(
@@ -61,8 +64,8 @@ pub fn to_model_info(provider_key: &str, model: ProviderModel) -> ModelInfo {
         key: model.id.to_string(),
         engine: provider_key.to_string(),
         model_type: resolved_model_type,
-        specialty: DEFAULT_SPECIALTY.to_string(),
-        summary: None,
+        specialty: catalog_specialty(&model.metadata),
+        summary: catalog_summary(&model.metadata),
         price_tier: None,
         comment,
         input_token_rate: metadata_f64(&model, "inputTokenRate"),
@@ -143,7 +146,7 @@ mod tests {
             name: "Model 1".to_string(),
             engine: "example".to_string(),
             model_type,
-            specialty: DEFAULT_SPECIALTY.to_string(),
+            specialty: crate::services::model_picker::DEFAULT_SPECIALTY.to_string(),
             summary: None,
             price_tier: None,
             comment: None,
@@ -239,11 +242,24 @@ mod tests {
                 "cachedInputTokenRate": 0.1,
                 "cacheCreationTokenRate": 1.25,
                 "maxInputTokens": 128000,
-                "maxOutputTokens": 64000
+                "maxOutputTokens": 64000,
+                "specialty": "coding",
+                "summary": {"en": "Writes code for the team", "ko": "팀을 위한 코드 작성"}
             }),
         };
 
         let info = to_model_info("custom-provider", model);
+        assert_eq!(
+            info.specialty, "coding",
+            "a plugin may name its own specialty"
+        );
+        assert_eq!(
+            info.summary
+                .as_ref()
+                .and_then(|summary| summary.get("ko"))
+                .map(String::as_str),
+            Some("팀을 위한 코드 작성")
+        );
         assert_eq!(info.input_token_rate, Some(1.0));
         assert_eq!(info.output_token_rate, Some(5.0));
         assert_eq!(info.cached_input_token_rate, Some(0.1));
