@@ -12,6 +12,7 @@ use crate::{
         error::AuthError,
         identity::VerifiedIdentity,
         oauth2_identity::OAuth2AdapterError,
+        permissions::{ROLE_SUPER_ADMIN, ROLE_USER},
         provider_config::EmailLinkingMode,
     },
     config::setting::OidcClient,
@@ -37,10 +38,11 @@ use openidconnect::{
     core::{CoreIdToken, CoreIdTokenClaims, CoreUserInfoClaims},
 };
 use openidconnect::{OAuth2TokenResponse, TokenResponse as OidcTokenResponse};
+use sea_orm::sea_query::{Expr, Func};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection,
     DatabaseTransaction, DbErr, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
-    Select, TransactionTrait, TryIntoModel, sea_query::Expr,
+    Select, TransactionTrait,
 };
 use serde::Deserialize;
 use std::borrow::Cow;
@@ -364,6 +366,279 @@ where
     Ok(sessions.pop())
 }
 
+struct SsoLogin<'a> {
+    provider: &'a str,
+    subject: &'a str,
+    email: Option<&'a str>,
+    email_verified: bool,
+    display_name: Option<&'a str>,
+    picture: Option<&'a str>,
+    hosted_domain: Option<&'a str>,
+    email_linking: &'a EmailLinkingMode,
+    jit_provisioning: bool,
+}
+
+impl SsoLogin<'_> {
+    fn normalized_provider(&self) -> String {
+        self.provider.trim().to_ascii_lowercase()
+    }
+
+    fn legacy_subject(&self, legacy_provider: &str) -> Option<String> {
+        (self.normalized_provider() == legacy_provider).then(|| self.subject.to_string())
+    }
+
+    fn identities_with(&self, existing: &users::IdentityMap) -> Option<serde_json::Value> {
+        merged_identities(existing, self.provider, self.subject, self.email)
+    }
+}
+
+fn ensure_login_status(status: &UserStatus) -> Result<(), AuthError> {
+    match status {
+        UserStatus::Deactivated | UserStatus::Suspended => Err(AuthError::AccountDeactivated),
+        UserStatus::Pending => Err(AuthError::AccountPendingApproval),
+        _ => Ok(()),
+    }
+}
+
+async fn find_user_by_identity(
+    txn: &DatabaseTransaction,
+    login: &SsoLogin<'_>,
+) -> Result<Option<Uuid>, AuthError> {
+    let provider = login.normalized_provider();
+    let identity_match = serde_json::json!({ provider.clone(): { "subject": login.subject } });
+    // Oldest first: a duplicate row for one identity can only come from a lost first-login race,
+    // and the oldest is the one that was provisioned (and, on a fresh instance, made Super Admin).
+    let user = users::Entity::find()
+        .filter(Expr::cust_with_values(
+            r#""identities" @> $1::jsonb"#,
+            [identity_match],
+        ))
+        .filter(users::Column::Status.ne(UserStatus::Deleted))
+        .order_by_asc(users::Column::CreatedAt)
+        .one(txn)
+        .await
+        .map_err(|e| {
+            eprintln!("db error while fetching user: {e:?}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
+    if user.is_some() {
+        return Ok(user.map(|user| user.id));
+    }
+    let legacy_column = match provider.as_str() {
+        "google" => users::Column::GoogleId,
+        "azure" => users::Column::AzureId,
+        _ => return Ok(None),
+    };
+    users::Entity::find()
+        .filter(legacy_column.eq(login.subject))
+        .filter(users::Column::Status.ne(UserStatus::Deleted))
+        .order_by_asc(users::Column::CreatedAt)
+        .one(txn)
+        .await
+        .map(|user| user.map(|user| user.id))
+        .map_err(|error| {
+            eprintln!("db error while fetching legacy OIDC identity: {error:?}");
+            AuthError::ServiceTemporarilyUnavailable
+        })
+}
+
+// owner_bootstrap stores the configured owner email lowercased while IdPs return any casing.
+async fn find_user_by_email(
+    txn: &DatabaseTransaction,
+    email: &str,
+) -> Result<Option<Uuid>, AuthError> {
+    users::Entity::find()
+        .filter(
+            Expr::expr(Func::lower(Expr::col(users::Column::Email)))
+                .eq(Func::lower(Expr::val(email))),
+        )
+        .filter(users::Column::Status.ne(UserStatus::Deleted))
+        .order_by_asc(users::Column::CreatedAt)
+        .one(txn)
+        .await
+        .map(|user| user.map(|user| user.id))
+        .map_err(|e| {
+            eprintln!("db error while fetching user by email: {e:?}");
+            AuthError::ServiceTemporarilyUnavailable
+        })
+}
+
+async fn claim_existing_user(
+    txn: &DatabaseTransaction,
+    login: &SsoLogin<'_>,
+) -> Result<Option<users::Model>, AuthError> {
+    if let Some(user_id) = find_user_by_identity(txn, login).await? {
+        let user = lock_user_for_login(txn, user_id).await?;
+        ensure_login_status(&user.status)?;
+        let mut active_user: users::ActiveModel = user.clone().into();
+        active_user.identities = Set(login.identities_with(&user.identity_map()));
+        active_user.last_login_at = Set(Utc::now());
+        active_user.update(txn).await.map_err(|e| {
+            eprintln!("db error while updating user {:?}", e);
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
+        return Ok(Some(user));
+    }
+    let Some(email) = login.email else {
+        return Ok(None);
+    };
+    let Some(user_id) = find_user_by_email(txn, email).await? else {
+        return Ok(None);
+    };
+    let user = lock_user_for_login(txn, user_id).await?;
+    let provider = login.normalized_provider();
+    // A login that may not claim this account learns nothing about it, not even its status.
+    let linked_identity = user.identity_for(&provider);
+    if !email_link_allowed(
+        login.email_linking,
+        email,
+        login.email_verified,
+        linked_identity
+            .as_ref()
+            .map(|identity| identity.subject.as_str()),
+        login.subject,
+    ) {
+        return Err(AuthError::InvalidToken);
+    }
+    ensure_login_status(&user.status)?;
+    let mut active_user: users::ActiveModel = user.clone().into();
+    if user.google_id.is_none()
+        && let Some(google_id) = login.legacy_subject("google")
+    {
+        active_user.google_id = Set(Some(google_id));
+    }
+    if user.azure_id.is_none()
+        && let Some(azure_id) = login.legacy_subject("azure")
+    {
+        active_user.azure_id = Set(Some(azure_id));
+    }
+    active_user.identities = Set(login.identities_with(&user.identity_map()));
+    active_user.updated_at = Set(Utc::now());
+    active_user.last_login_at = Set(Utc::now());
+    active_user.update(txn).await.map_err(|e| {
+        eprintln!("db error while updating user {:?}", e);
+        AuthError::ServiceTemporarilyUnavailable
+    })?;
+    Ok(Some(user))
+}
+
+// Caller must hold lock_first_user_bootstrap so the first-user decision and insert are atomic.
+async fn provision_sso_user(
+    txn: &DatabaseTransaction,
+    login: &SsoLogin<'_>,
+) -> Result<users::Model, AuthError> {
+    let is_first_user = users::Entity::find().count(txn).await.map_err(|e| {
+        eprintln!("db error while counting users {:?}", e);
+        AuthError::ServiceTemporarilyUnavailable
+    })? == 0;
+    if !is_first_user && !login.jit_provisioning {
+        return Err(AuthError::SsoJitProvisioningDisabled {
+            provider: Some(login.provider.to_string()),
+        });
+    }
+    let initial_status = if is_first_user {
+        UserStatus::Active
+    } else {
+        ensure_pending_account_email(login.email, login.email_verified)?;
+        UserStatus::Pending
+    };
+    let role_name = if is_first_user {
+        ROLE_SUPER_ADMIN
+    } else {
+        ROLE_USER
+    };
+    let role = roles::Entity::find()
+        .filter(roles::Column::Name.eq(role_name))
+        .one(txn)
+        .await
+        .map_err(|e| {
+            eprintln!("role lookup error: {e}");
+            AuthError::ServiceTemporarilyUnavailable
+        })?
+        .ok_or_else(|| {
+            eprintln!("the {role_name} role is missing; run migrations before SSO sign-in");
+            AuthError::ServiceTemporarilyUnavailable
+        })?;
+    let now = Utc::now();
+    let new_user = users::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        email: Set(login
+            .email
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{}@{PLACEHOLDER_EMAIL_DOMAIN}", login.subject))),
+        name: Set(login.display_name.map(str::to_string)),
+        google_id: Set(login.legacy_subject("google")),
+        azure_id: Set(login.legacy_subject("azure")),
+        email_verified: Set(login.email_verified),
+        created_at: Set(now),
+        updated_at: Set(now),
+        last_login_at: Set(now),
+        password_changed_at: Set(None),
+        department_id: Set(None),
+        is_independent: Set(false),
+        effective_permissions: Set(None),
+        status: Set(initial_status),
+        mfa_enabled: Set(false),
+        mfa_secret: Set(None),
+        picture: Set(login.picture.map(str::to_string)),
+        password: Set(None),
+        metadata: Set(TourGuideMetadata::default().merge_into(None)),
+        hd: Set(login.hosted_domain.map(str::to_string)),
+        identities: Set(login.identities_with(&users::IdentityMap::new())),
+    };
+    let inserted_user = new_user.insert(txn).await.map_err(|e| {
+        eprintln!("db error while inserting user {e:?}");
+        AuthError::ServiceTemporarilyUnavailable
+    })?;
+    user_role_assignments::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        user_id: Set(inserted_user.id),
+        role_id: Set(role.id),
+        scope_department_id: Set(None),
+        assigned_by: Set(inserted_user.id),
+        created_at: Set(now),
+        updated_at: Set(now),
+    }
+    .insert(txn)
+    .await
+    .map_err(|e| {
+        eprintln!("db error while assigning the new user's role {e:?}");
+        AuthError::ServiceTemporarilyUnavailable
+    })?;
+    Ok(inserted_user)
+}
+
+// Shared by every sign-in protocol (OIDC, OAuth2 adapter, proxy assertion) once the identity is verified.
+async fn resolve_sso_user(
+    database: &DatabaseConnection,
+    login: &SsoLogin<'_>,
+) -> Result<users::Model, AuthError> {
+    let txn = begin_login_transaction(database).await?;
+    if let Some(user) = claim_existing_user(&txn, login).await? {
+        commit_login_transaction(txn).await?;
+        return Ok(user);
+    }
+    lock_first_user_bootstrap(&txn).await.map_err(|e| {
+        eprintln!("db error while locking first-user bootstrap {e:?}");
+        AuthError::ServiceTemporarilyUnavailable
+    })?;
+    // Concurrent first logins of one identity all miss above; whoever waited on the lock must
+    // see the row the winner committed instead of inserting a duplicate.
+    if let Some(user) = claim_existing_user(&txn, login).await? {
+        commit_login_transaction(txn).await?;
+        return Ok(user);
+    }
+    let user = provision_sso_user(&txn, login).await?;
+    commit_login_transaction(txn).await?;
+    let _ = AuthorizationService::new(database)
+        .recompute_effective_permissions(user.id)
+        .await;
+    if user.status == UserStatus::Pending {
+        return Err(AuthError::AccountPendingApproval);
+    }
+    Ok(user)
+}
+
 pub async fn oidc_oauth_callback(
     provider: AuthProvider,
     cb: AuthCallback,
@@ -632,241 +907,19 @@ pub async fn oidc_oauth_callback(
         hosted_domain: hd,
     } = identity;
 
-    let google_id = if provider == "google" {
-        Some(sub.clone())
-    } else {
-        None
-    };
-    let azure_id = if provider == "azure" {
-        Some(sub.clone())
-    } else {
-        None
-    };
     ensure_email_domain_allowed(email.as_deref(), email_verified, &runtime.allowed_domains)?;
-    let normalized_provider = provider.trim().to_ascii_lowercase();
-    let identity_match = serde_json::json!({
-        normalized_provider.clone(): { "subject": sub.clone() }
-    });
-    let mut user = users::Entity::find()
-        .filter(Expr::cust_with_values(
-            r#""identities" @> $1::jsonb"#,
-            [identity_match],
-        ))
-        .filter(users::Column::Status.ne(UserStatus::Deleted))
-        .order_by_desc(users::Column::CreatedAt)
-        .one(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("db error while fetching user: {e:?}");
-            AuthError::ServiceTemporarilyUnavailable
-        })?;
-    if user.is_none() {
-        let legacy_column = match normalized_provider.as_str() {
-            "google" => Some(users::Column::GoogleId),
-            "azure" => Some(users::Column::AzureId),
-            _ => None,
-        };
-        if let Some(column) = legacy_column {
-            user = users::Entity::find()
-                .filter(column.eq(Some(sub.clone())))
-                .filter(users::Column::Status.ne(UserStatus::Deleted))
-                .order_by_desc(users::Column::CreatedAt)
-                .one(&app_state.database)
-                .await
-                .map_err(|error| {
-                    eprintln!("db error while fetching legacy OIDC identity: {error:?}");
-                    AuthError::ServiceTemporarilyUnavailable
-                })?;
-        }
-    }
-    if let Some(user_id) = user.as_ref().map(|u| u.id) {
-        let txn = begin_login_transaction(&app_state.database).await?;
-        let u = lock_user_for_login(&txn, user_id).await?;
-        match &u.status {
-            UserStatus::Deactivated | UserStatus::Suspended => {
-                return Err(AuthError::AccountDeactivated);
-            }
-            UserStatus::Pending => {
-                return Err(AuthError::AccountPendingApproval);
-            }
-            _ => (),
-        }
-        let mut active_user: users::ActiveModel = u.clone().into();
-        active_user.identities = Set(merged_identities(
-            &u.identity_map(),
-            &provider,
-            &sub,
-            email.as_deref(),
-        ));
-        active_user.last_login_at = Set(Utc::now());
-        active_user.update(&txn).await.map_err(|e| {
-            eprintln!("db error while updating user {:?}", e);
-            AuthError::ServiceTemporarilyUnavailable
-        })?;
-        commit_login_transaction(txn).await?;
-        user = Some(u);
-    }
-    if user.is_none() {
-        if let Some(ref em) = email {
-            user = users::Entity::find()
-                .filter(users::Column::Email.eq(em))
-                .filter(users::Column::Status.ne(UserStatus::Deleted))
-                .order_by_asc(users::Column::CreatedAt)
-                .one(&app_state.database)
-                .await
-                .map_err(|e| {
-                    eprintln!("{:?}", e);
-                    AuthError::ServiceTemporarilyUnavailable
-                })?;
-
-            if let Some(user_id) = user.as_ref().map(|u| u.id) {
-                let txn = begin_login_transaction(&app_state.database).await?;
-                let u = lock_user_for_login(&txn, user_id).await?;
-                // A login that may not claim this account learns nothing about it, not even its status.
-                let linked_identity = u.identity_for(&normalized_provider);
-                if !email_link_allowed(
-                    &runtime.configuration.email_linking,
-                    em,
-                    email_verified,
-                    linked_identity
-                        .as_ref()
-                        .map(|identity| identity.subject.as_str()),
-                    &sub,
-                ) {
-                    return Err(AuthError::InvalidToken);
-                }
-                match &u.status {
-                    UserStatus::Deactivated | UserStatus::Suspended => {
-                        return Err(AuthError::AccountDeactivated);
-                    }
-                    UserStatus::Pending => {
-                        return Err(AuthError::AccountPendingApproval);
-                    }
-                    _ => (),
-                }
-                let can_link_google = google_id.is_some() && u.google_id.is_none();
-                let can_link_azure = azure_id.is_some() && u.azure_id.is_none();
-                let mut active_user: users::ActiveModel = u.clone().into();
-                if can_link_google {
-                    active_user.google_id = Set(google_id.clone());
-                }
-                if can_link_azure {
-                    active_user.azure_id = Set(azure_id.clone());
-                }
-                active_user.identities = Set(merged_identities(
-                    &u.identity_map(),
-                    &provider,
-                    &sub,
-                    email.as_deref(),
-                ));
-                active_user.updated_at = Set(Utc::now());
-                active_user.last_login_at = Set(Utc::now());
-                active_user.update(&txn).await.map_err(|e| {
-                    eprintln!("db error while updating user {:?}", e);
-                    AuthError::ServiceTemporarilyUnavailable
-                })?;
-                commit_login_transaction(txn).await?;
-                user = Some(u);
-            }
-        }
-    }
-    if user.is_none() {
-        let txn = begin_login_transaction(&app_state.database).await?;
-        lock_first_user_bootstrap(&txn).await.map_err(|e| {
-            eprintln!("db error while locking first-user bootstrap {e:?}");
-            AuthError::ServiceTemporarilyUnavailable
-        })?;
-        let is_first_user = users::Entity::find().count(&txn).await.map_err(|e| {
-            eprintln!("db error while counting users {:?}", e);
-            AuthError::ServiceTemporarilyUnavailable
-        })? == 0;
-        let jit_provisioning = app_state.sso_jit_provisioning_enabled(&provider).await;
-        if !is_first_user && !jit_provisioning {
-            return Err(AuthError::SsoJitProvisioningDisabled {
-                provider: Some(provider.clone()),
-            });
-        }
-        let initial_status = if is_first_user {
-            UserStatus::Active
-        } else {
-            ensure_pending_account_email(email.as_deref(), email_verified)?;
-            UserStatus::Pending
-        };
-        let new_user = users::ActiveModel {
-            id: Set(Uuid::new_v4()),
-            email: Set(email
-                .clone()
-                .unwrap_or_else(|| format!("{sub}@{PLACEHOLDER_EMAIL_DOMAIN}"))),
-            name: Set(display_name.into()),
-            google_id: Set(google_id),
-            azure_id: Set(azure_id),
-            email_verified: Set(email_verified),
-            created_at: Set(Utc::now()),
-            updated_at: Set(Utc::now()),
-            last_login_at: Set(Utc::now()),
-            password_changed_at: Set(None),
-            department_id: Set(None),
-            is_independent: Set(false),
-            effective_permissions: Set(None),
-            status: Set(initial_status),
-            mfa_enabled: Set(false),
-            mfa_secret: Set(None),
-            picture: Set(picture.clone()),
-            password: Set(None),
-            metadata: Set(TourGuideMetadata::default().merge_into(None)),
-            hd: Set(hd),
-            identities: Set(merged_identities(
-                &users::IdentityMap::new(),
-                &provider,
-                &sub,
-                email.as_deref(),
-            )),
-        };
-        new_user.clone().insert(&txn).await.map_err(|e| {
-            eprintln!("{:?}", e);
-            AuthError::ServiceTemporarilyUnavailable
-        })?;
-        let inserted_user = new_user.try_into_model().map_err(|e| {
-            eprintln!("db error while parsing user {:?}", e);
-            AuthError::ServiceTemporarilyUnavailable
-        })?;
-        let role_name = if is_first_user { "Super Admin" } else { "User" };
-        if let Some(role) = roles::Entity::find()
-            .filter(roles::Column::Name.eq(role_name))
-            .one(&txn)
-            .await
-            .map_err(|e| {
-                eprintln!("role lookup error: {e}");
-                AuthError::ServiceTemporarilyUnavailable
-            })?
-        {
-            let now = Utc::now();
-            let assignment = user_role_assignments::ActiveModel {
-                id: Set(Uuid::new_v4()),
-                user_id: Set(inserted_user.id),
-                role_id: Set(role.id),
-                scope_department_id: Set(None),
-                assigned_by: Set(inserted_user.id),
-                created_at: Set(now),
-                updated_at: Set(now),
-            };
-            assignment.insert(&txn).await.map_err(|e| {
-                eprintln!("db error while assigning the new user's role {e:?}");
-                AuthError::ServiceTemporarilyUnavailable
-            })?;
-        }
-        commit_login_transaction(txn).await?;
-        let authz = AuthorizationService::new(&app_state.database);
-        let _ = authz
-            .recompute_effective_permissions(inserted_user.id)
-            .await;
-        let pending_approval = !is_first_user && jit_provisioning;
-        user = Some(inserted_user);
-        if pending_approval {
-            return Err(AuthError::AccountPendingApproval);
-        }
+    let login = SsoLogin {
+        provider: &provider,
+        subject: &sub,
+        email: email.as_deref(),
+        email_verified,
+        display_name: display_name.as_deref(),
+        picture: picture.as_deref(),
+        hosted_domain: hd.as_deref(),
+        email_linking: &runtime.configuration.email_linking,
+        jit_provisioning: app_state.sso_jit_provisioning_enabled(&provider).await,
     };
-    let user = user.ok_or(AuthError::EmailDoesNotExist)?;
+    let user = resolve_sso_user(&app_state.database, &login).await?;
 
     let access_token_claims =
         Claims::new_access_token(user.email.clone(), user.name.clone(), user.id);
@@ -888,7 +941,7 @@ pub async fn oidc_oauth_callback(
         sub: sub.clone(),
         email: user.email,
         name: user.name,
-        picture: picture,
+        picture,
         hd: user.hd,
         roles,
         status: user.status,
@@ -1433,5 +1486,251 @@ mod tests {
             Some("User".to_string())
         );
         assert!(apple_callback_display_name(Some("not-json")).is_none());
+    }
+
+    // First-user provisioning needs an empty users table, which the shared security-test
+    // database cannot promise, so each DB-backed test migrates a database of its own.
+    struct FreshDatabase {
+        server: DatabaseConnection,
+        name: String,
+        db: DatabaseConnection,
+    }
+
+    impl FreshDatabase {
+        async fn create() -> Self {
+            use migration::MigratorTrait;
+            let raw =
+                std::env::var("GRENGIN_SECURITY_TEST_DATABASE_URL").expect("test database URL");
+            assert!(
+                raw.contains("/grengin_security_test"),
+                "refusing a non-test database"
+            );
+            let server = sea_orm::Database::connect(&raw)
+                .await
+                .expect("test database server");
+            let name = format!("grengin_security_test_sso_{}", Uuid::new_v4().simple());
+            server
+                .execute_unprepared(&format!(r#"CREATE DATABASE "{name}""#))
+                .await
+                .expect("create fresh database");
+            let mut url = url::Url::parse(&raw).expect("database URL");
+            url.set_path(&format!("/{name}"));
+            let db = sea_orm::Database::connect(url.as_str())
+                .await
+                .expect("fresh database");
+            migration::Migrator::up(&db, None)
+                .await
+                .expect("migrate fresh database");
+            Self { server, name, db }
+        }
+
+        async fn remove(self) {
+            self.db.close().await.expect("close fresh database");
+            self.server
+                .execute_unprepared(&format!(r#"DROP DATABASE "{}" WITH (FORCE)"#, self.name))
+                .await
+                .expect("drop fresh database");
+        }
+    }
+
+    fn keycloak_login<'a>(
+        subject: &'a str,
+        email: &'a str,
+        email_linking: &'a EmailLinkingMode,
+    ) -> SsoLogin<'a> {
+        SsoLogin {
+            provider: "keycloak",
+            subject,
+            email: Some(email),
+            email_verified: true,
+            display_name: Some("Ada Lovelace"),
+            picture: None,
+            hosted_domain: None,
+            email_linking,
+            jit_provisioning: true,
+        }
+    }
+
+    async fn user_count(db: &DatabaseConnection) -> u64 {
+        users::Entity::find().count(db).await.expect("user count")
+    }
+
+    async fn role_names(db: &DatabaseConnection, user_id: Uuid) -> Vec<String> {
+        AuthorizationService::new(db)
+            .user_roles_map(&[user_id])
+            .await
+            .expect("user roles")
+            .remove(&user_id)
+            .unwrap_or_default()
+    }
+
+    async fn wait_for_bootstrap_lock_waiters(db: &DatabaseConnection, expected: i64) {
+        let query = sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Postgres,
+            "SELECT COUNT(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted \
+             AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+        );
+        for _ in 0..200 {
+            let waiting = db
+                .query_one(query.clone())
+                .await
+                .expect("lock waiters")
+                .map(|row| row.try_get::<i64>("", "n").expect("waiter count"))
+                .unwrap_or_default();
+            if waiting == expected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("{expected} logins never queued on the first-user bootstrap lock");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+    async fn concurrent_first_logins_of_one_identity_create_one_super_admin() {
+        let fresh = FreshDatabase::create().await;
+        let db = fresh.db.clone();
+        // Holding the bootstrap lock lets both logins finish their unlocked lookup and queue
+        // on it together, which is the interleaving that used to insert two rows.
+        let holder = db.begin().await.expect("lock holder");
+        lock_first_user_bootstrap(&holder)
+            .await
+            .expect("hold bootstrap lock");
+        let logins: Vec<_> = (0..2)
+            .map(|_| {
+                let db = db.clone();
+                tokio::spawn(async move {
+                    let linking = EmailLinkingMode::VerifiedEmail;
+                    resolve_sso_user(
+                        &db,
+                        &keycloak_login("race-subject", "race@example.com", &linking),
+                    )
+                    .await
+                    .map(|user| user.id)
+                })
+            })
+            .collect();
+        wait_for_bootstrap_lock_waiters(&db, 2).await;
+        holder.commit().await.expect("release bootstrap lock");
+        let mut ids = Vec::new();
+        for login in logins {
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(20), login)
+                .await
+                .expect("no login may hang")
+                .expect("login task");
+            ids.push(outcome.expect("both racing first logins sign in"));
+        }
+
+        assert_eq!(ids[0], ids[1], "both callbacks resolve to one account");
+        assert_eq!(user_count(&db).await, 1, "exactly one user row");
+        let owner = users::Entity::find_by_id(ids[0])
+            .one(&db)
+            .await
+            .expect("owner lookup")
+            .expect("owner row");
+        assert_eq!(owner.status, UserStatus::Active);
+        assert_eq!(role_names(&db, owner.id).await, vec![ROLE_SUPER_ADMIN]);
+
+        let linking = EmailLinkingMode::VerifiedEmail;
+        let later = resolve_sso_user(
+            &db,
+            &keycloak_login("race-subject", "race@example.com", &linking),
+        )
+        .await
+        .expect("a later login signs the owner in");
+        assert_eq!(later.id, owner.id);
+        assert_eq!(user_count(&db).await, 1);
+        fresh.remove().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+    async fn a_missing_role_rolls_back_the_new_account() {
+        let fresh = FreshDatabase::create().await;
+        let db = &fresh.db;
+        let linking = EmailLinkingMode::VerifiedEmail;
+        let rename_role =
+            |from: &str, to: &str| format!("UPDATE roles SET name = '{to}' WHERE name = '{from}'");
+
+        db.execute_unprepared(&rename_role(
+            ROLE_SUPER_ADMIN,
+            "Super Admin (hidden by test)",
+        ))
+        .await
+        .expect("hide Super Admin role");
+        let owner_login = keycloak_login("owner-subject", "owner@example.com", &linking);
+        assert!(matches!(
+            resolve_sso_user(db, &owner_login).await,
+            Err(AuthError::ServiceTemporarilyUnavailable)
+        ));
+        assert_eq!(user_count(db).await, 0, "no role-less owner is committed");
+
+        db.execute_unprepared(&rename_role(
+            "Super Admin (hidden by test)",
+            ROLE_SUPER_ADMIN,
+        ))
+        .await
+        .expect("restore Super Admin role");
+        let owner = resolve_sso_user(db, &owner_login)
+            .await
+            .expect("first login once the role exists");
+        assert_eq!(role_names(db, owner.id).await, vec![ROLE_SUPER_ADMIN]);
+
+        db.execute_unprepared(&rename_role(ROLE_USER, "User (hidden by test)"))
+            .await
+            .expect("hide User role");
+        assert!(matches!(
+            resolve_sso_user(
+                db,
+                &keycloak_login("member-subject", "member@example.com", &linking)
+            )
+            .await,
+            Err(AuthError::ServiceTemporarilyUnavailable)
+        ));
+        assert_eq!(
+            user_count(db).await,
+            1,
+            "no role-less pending user is committed"
+        );
+        fresh.remove().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+    async fn a_mixed_case_email_links_the_bootstrapped_owner() {
+        let fresh = FreshDatabase::create().await;
+        let db = &fresh.db;
+        crate::services::owner_bootstrap::ensure_bootstrap_super_admin(
+            db,
+            Some("Owner@Example.com"),
+        )
+        .await
+        .expect("bootstrap owner");
+        let owner = users::Entity::find()
+            .one(db)
+            .await
+            .expect("owner lookup")
+            .expect("bootstrapped owner");
+        assert_eq!(owner.email, "owner@example.com");
+
+        let linking = EmailLinkingMode::VerifiedEmail;
+        let user = resolve_sso_user(
+            db,
+            &keycloak_login("owner-subject", "OWNER@example.COM", &linking),
+        )
+        .await
+        .expect("owner signs in with IdP casing");
+        assert_eq!(user.id, owner.id);
+        assert_eq!(user_count(db).await, 1, "no duplicate pending account");
+        let linked = users::Entity::find_by_id(owner.id)
+            .one(db)
+            .await
+            .expect("owner lookup")
+            .expect("owner row")
+            .identity_for("keycloak")
+            .expect("keycloak identity linked");
+        assert_eq!(linked.subject, "owner-subject");
+        assert_eq!(role_names(db, owner.id).await, vec![ROLE_SUPER_ADMIN]);
+        fresh.remove().await;
     }
 }
