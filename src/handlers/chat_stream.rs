@@ -10,7 +10,8 @@ use crate::{
         chat_stream::{
             ActiveSkillInfo, ArtifactSavedPayload, BudgetWarningPayload, ChatInput, ChatStream,
             ChatStreamEvent, ChatStreamEvents, ChatStreamPayload, ChatStreamToolCall,
-            ChatStreamToolResult, ChatStreamWebSearchAction, ChatToolKind, SkillsActivePayload,
+            ChatStreamToolResult, ChatStreamWebSearchAction, ChatToolKind, ResumeStreamQuery,
+            SkillsActivePayload,
         },
         files::File,
     },
@@ -69,6 +70,7 @@ use crate::{
             embed_retrieval_query, end_history_snapshot, load_recent_prompts, load_summary,
             summary_usable_with_cutoff, update_conversation_summary,
         },
+        reply_feed::{ReplyFeed, record, resumable_reply, resume_position},
         skills_helpers::{load_skill_knowledge_for_stream, load_skills_for_stream},
         system_prompts,
     },
@@ -82,7 +84,8 @@ use crate::{
 };
 use axum::{
     Extension, Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
+    http::HeaderMap,
     response::{
         Sse,
         sse::{Event, KeepAlive},
@@ -473,6 +476,38 @@ pub async fn cancel_chat_stream(
     } else {
         Ok(StatusCode::NO_CONTENT)
     }
+}
+
+#[utoipa::path(
+    get,
+    path = "/chat/stream/{message_id}/events",
+    tag = "chat",
+    description = "Reconnects to an assistant reply that is still generating, for a page that lost its stream (for example after a refresh). Pass the message_id of a reply that GET /chat/{chat_id} shows with `generating: true`.\n\nThe response is the reply's own server-sent events from the start of its stream (conversation, message_start, deltas, tool and artifact events, stream_finished, done), each with an `id` that is its 1-based position, then the new ones live until the reply ends. To continue after a dropped connection, send the last id received as the Last-Event-ID header (EventSource does this automatically) or as `after`; only later events are sent. Edit replies can be followed the same way.\n\n404 means there is nothing to reconnect to: the reply has finished, never streamed, was too long to keep, or is generating on another instance after a restart. Then read GET /chat/{chat_id} and poll it while `generating` is true.",
+    params(
+        ("message_id" = Uuid, Path, description = "Assistant message id of the generating reply"),
+        ResumeStreamQuery,
+        ("Last-Event-ID" = Option<String>, Header, description = "The id of the last event received; takes precedence over `after`")
+    ),
+    responses(
+        (status = 200, content_type = "text/event-stream", description = "The reply's events from the requested position, then live until it ends"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+        (status = 404, content_type = "application/json", body = ErrorResponse, description = "Nothing to reconnect to, or the message belongs to another user's conversation (code=1001); read the conversation instead"),
+        (status = 503, content_type = "application/json", body = ErrorResponse, description = "DB unavailable (code=5000) or timeout (code=5001)"),
+    )
+)]
+pub async fn resume_chat_stream(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Path(message_id): Path<Uuid>,
+    Query(query): Query<ResumeStreamQuery>,
+    headers: HeaderMap,
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, AppError> {
+    let feed = resumable_reply(&app_state, claims.user_id, message_id).await?;
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok());
+    let position = resume_position(last_event_id, query.after);
+    Ok(Sse::new(feed.follow(position)).keep_alive(KeepAlive::new()))
 }
 
 pub async fn handle_chat_stream(
@@ -1230,6 +1265,8 @@ pub async fn handle_chat_stream(
         None
     };
 
+    let feed = ReplyFeed::new();
+    let recorded_feed = feed.clone();
     let sse_stream = async_stream::try_stream! {
        let check_access = || async {
            if let Some(installation) = gateway_installation {
@@ -1573,7 +1610,7 @@ pub async fn handle_chat_stream(
         // A plain reply is registered before its row exists, so a page reading the conversation never
         // sees it without generating. An edit's rows stay hidden until it commits, so it registers later.
         let early_cancel = if edit_in_progress.is_none() {
-            Some(app_state.register_stream_cancel(new_message_id, conversation_id, None).await)
+            Some(app_state.register_stream_cancel(new_message_id, conversation_id, None, feed.clone()).await)
         } else {
             None
         };
@@ -1632,6 +1669,7 @@ pub async fn handle_chat_stream(
                         new_message_id,
                         conversation_id,
                         edit_in_progress.as_ref().map(EditInProgress::view),
+                        feed.clone(),
                     )
                     .await
             }
@@ -3000,6 +3038,7 @@ pub async fn handle_chat_stream(
            }
        }
     };
-    let sse_response = Sse::new(deliver_reply(sse_stream)).keep_alive(KeepAlive::new());
+    let sse_response =
+        Sse::new(deliver_reply(record(recorded_feed, sse_stream))).keep_alive(KeepAlive::new());
     Ok(sse_response)
 }

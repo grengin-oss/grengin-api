@@ -21,6 +21,7 @@ use crate::{
     services::mcp_client::McpServerClient,
     services::notifications::NotificationEvent,
     services::owner_bootstrap::ensure_bootstrap_super_admin,
+    services::reply_feed::ReplyFeed,
 };
 use anyhow::Error;
 use chrono::{DateTime, Utc};
@@ -52,6 +53,7 @@ pub struct EditView {
 pub struct StreamRegistry {
     streams: HashMap<Uuid, Arc<StreamCancel>>,
     edit_views: HashMap<Uuid, EditView>,
+    feeds: HashMap<Uuid, Arc<ReplyFeed>>,
     // Counts every reply that started or stopped generating, so a reader can tell whether the
     // set changed while it read the messages.
     changes: u64,
@@ -65,6 +67,7 @@ impl StreamRegistry {
 
     pub fn remove(&mut self, message_id: &Uuid) {
         self.edit_views.remove(message_id);
+        self.feeds.remove(message_id);
         if self.streams.remove(message_id).is_some() {
             self.changes += 1;
         }
@@ -361,12 +364,25 @@ impl AppState {
         message_id: Uuid,
         conversation_id: Uuid,
         edit: Option<EditView>,
+        feed: Arc<ReplyFeed>,
     ) -> Arc<StreamCancel> {
         let mut registry = self.stream_cancellations.write().await;
-        match edit {
+        let handle = match edit {
             Some(view) => registry.register_edit(message_id, conversation_id, view),
             None => registry.register(message_id, conversation_id, None),
-        }
+        };
+        registry.feeds.insert(message_id, feed);
+        handle
+    }
+
+    // The recorded events of a reply still generating here, for a page that lost its stream.
+    pub async fn reply_feed(&self, message_id: Uuid) -> Option<Arc<ReplyFeed>> {
+        self.stream_cancellations
+            .read()
+            .await
+            .feeds
+            .get(&message_id)
+            .cloned()
     }
 
     pub async fn release_stream_cancel(&self, message_id: Uuid) {
