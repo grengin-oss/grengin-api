@@ -160,15 +160,27 @@ struct CloseOnDrop(Arc<ReplyFeed>);
 impl Drop for CloseOnDrop {
     fn drop(&mut self) {
         self.0.close();
-        let feed = self.0.clone();
-        match tokio::runtime::Handle::try_current() {
-            Ok(runtime) => {
-                runtime.spawn(async move {
-                    tokio::time::sleep(KEEP_AFTER_CLOSE).await;
+        discard_later(&self.0, KEEP_AFTER_CLOSE);
+    }
+}
+
+// The timer holds the feed weakly: with no follower left the events are freed as soon as the
+// registry lets go of the feed, and a follower still replaying keeps them for `after` at most.
+fn discard_later(feed: &Arc<ReplyFeed>, after: Duration) {
+    let feed = Arc::downgrade(feed);
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => {
+            runtime.spawn(async move {
+                tokio::time::sleep(after).await;
+                if let Some(feed) = feed.upgrade() {
                     feed.discard();
-                });
+                }
+            });
+        }
+        Err(_) => {
+            if let Some(feed) = feed.upgrade() {
+                feed.discard();
             }
-            Err(_) => feed.discard(),
         }
     }
 }
@@ -306,6 +318,31 @@ mod tests {
     fn an_event_size_is_at_least_its_encoded_length() {
         let event = Event::default().event("delta").data("héllo\nworld");
         assert!(event_size(&event) >= "event: delta\ndata: héllo\ndata: world\n\n".len());
+    }
+
+    #[tokio::test]
+    async fn a_finished_reply_with_no_follower_is_freed_at_once() {
+        let feed = ReplyFeed::new();
+        let weak = Arc::downgrade(&feed);
+        let reply = futures_util::stream::iter([Ok::<_, Infallible>(Event::default().data("x"))]);
+        record(feed.clone(), reply).for_each(|_| async {}).await;
+        drop(feed);
+        assert!(
+            weak.upgrade().is_none(),
+            "the cleanup timer must not keep the events alive"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_follower_keeps_the_events_only_until_the_grace_period_ends() {
+        let feed = ReplyFeed::new();
+        feed.push(Event::default().data("x"));
+        feed.close();
+        discard_later(&feed, Duration::from_millis(20));
+        assert!(feed.resumable());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!feed.resumable());
+        assert!(feed.state().events.is_empty());
     }
 
     #[test]
