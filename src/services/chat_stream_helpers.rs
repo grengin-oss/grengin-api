@@ -209,7 +209,7 @@ pub async fn messages_with_generating(
     for attempt in 1..=GENERATING_READ_ATTEMPTS {
         let before = state.generating_replies(conversation_id).await;
         let edit = match before.edit.clone() {
-            Some(edit) => current_edit(state, conversation_id, edit).await?,
+            Some(edit) => current_edit(&state.database, conversation_id, edit).await?,
             None => None,
         };
         let shown = match &edit {
@@ -246,29 +246,29 @@ pub async fn messages_with_generating(
     unreachable!("the last attempt always settles")
 }
 
-// Postgres numbers every edit (and branch switch) of a conversation, so an edit whose number has
-// been passed is superseded, even when the edit that passed it already finished and left the
-// registry before this one registered.
+// An edit can still become the shown version only while no newer edit has claimed the
+// conversation (a branch switch claims too). The claim lives in Postgres, so this holds even when
+// the newer edit already finished and left the registry before this one registered. Requests that
+// were numbered but rejected before replying never claim, so they hide nothing.
 async fn current_edit(
-    state: &SharedState,
+    db: &DatabaseConnection,
     conversation_id: Uuid,
     edit: EditView,
 ) -> Result<Option<EditView>, AppError> {
-    let latest = conversations::Entity::find_by_id(conversation_id)
-        .one(&state.database)
+    let conversation = conversations::Entity::find_by_id(conversation_id)
+        .one(db)
         .await
         .map_err(|error| {
-            eprintln!("edit request lookup error: {error}");
+            eprintln!("edit claim lookup error: {error}");
             AppError::DbTimeout
-        })?
-        .map(|conversation| conversation.edit_requests);
-    Ok(latest
-        .is_some_and(|latest| still_current(&edit, latest))
+        })?;
+    Ok(conversation
+        .is_some_and(|conversation| still_current(&edit, conversation.edit_claim))
         .then_some(edit))
 }
 
-fn still_current(edit: &EditView, latest_request: i32) -> bool {
-    edit.request >= latest_request
+fn still_current(edit: &EditView, latest_claim: Option<i32>) -> bool {
+    latest_claim.is_none_or(|claim| edit.request >= claim)
 }
 
 // While an edit's reply generates, its turn (still hidden until it commits) is shown in place of
@@ -509,17 +509,125 @@ mod tests {
         assert_eq!(produced.load(std::sync::atomic::Ordering::SeqCst), 100);
     }
 
-    #[test]
-    fn an_edit_is_shown_only_while_no_later_edit_has_been_numbered() {
-        let edit = EditView {
-            request: 1,
+    fn edit_view(request: i32) -> EditView {
+        EditView {
+            request,
             cutoff: Utc::now(),
             message_ids: vec![Uuid::new_v4()],
-        };
-        assert!(still_current(&edit, 1));
+        }
+    }
+
+    #[test]
+    fn an_edit_is_shown_until_a_newer_edit_claims_the_conversation() {
+        assert!(still_current(&edit_view(1), None), "not claimed yet");
+        assert!(still_current(&edit_view(1), Some(1)), "its own claim");
+        assert!(still_current(&edit_view(2), Some(1)), "about to claim");
         assert!(
-            !still_current(&edit, 2),
-            "a later edit finished before this one registered"
+            !still_current(&edit_view(1), Some(2)),
+            "a newer edit claimed, even if it already finished"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable, migrated database)"]
+    async fn a_rejected_newer_edit_leaves_the_running_edit_shown_and_a_claimed_one_hides_it() {
+        use crate::services::message_helpers::{begin_pending_edit, prepare_message_edit};
+        use sea_orm::{ActiveModelTrait, ConnectionTrait, Database, IntoActiveModel};
+
+        let url = std::env::var("GRENGIN_SECURITY_TEST_DATABASE_URL").expect("test database URL");
+        assert!(
+            url.contains("/grengin_security_test"),
+            "refusing a non-test database"
+        );
+        let db = Database::connect(&url).await.expect("fixture database");
+        let (user, chat, message) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        db.execute_unprepared(&format!(
+            r#"INSERT INTO users (id, status, email, "emailVerified", "mfaEnabled", "createdAt", "updatedAt", "lastLoginAt")
+                 VALUES ('{user}', 'active', 'edit-fence-{user}@example.invalid', true, false, now(), now(), now())"#
+        ))
+        .await
+        .expect("fixture user");
+        let now = Utc::now();
+        conversations::Model {
+            id: chat,
+            user_id: user,
+            title: None,
+            model_provider: "openai".into(),
+            model_name: "gpt-test".into(),
+            created_at: now,
+            updated_at: now,
+            last_message_at: None,
+            archived_at: None,
+            message_count: 1,
+            total_tokens: 0,
+            total_cost: Decimal::ZERO,
+            metadata: None,
+            pinned: false,
+            edit_requests: 0,
+            edit_claim: None,
+        }
+        .into_active_model()
+        .insert(&db)
+        .await
+        .expect("fixture conversation");
+        messages::Model {
+            id: message,
+            conversation_id: chat,
+            previous_message_id: None,
+            deleted: false,
+            inactive_branch: false,
+            role: ChatRole::User,
+            message_content: "question".into(),
+            model_provider: "openai".into(),
+            model_name: "gpt-test".into(),
+            request_tokens: 0,
+            response_tokens: 0,
+            request_id: None,
+            tools_calls: Vec::new(),
+            tools_results: Vec::new(),
+            created_at: now,
+            updated_at: now,
+            total_tokens: 0,
+            latency: 0,
+            cost: Decimal::ZERO,
+            metadata: None,
+        }
+        .into_active_model()
+        .insert(&db)
+        .await
+        .expect("fixture message");
+        let input = || {
+            serde_json::from_value::<crate::dto::chat_stream::ChatInput>(serde_json::json!({
+                "provider": "openai",
+                "model_name": "gpt-test",
+                "messages": [],
+            }))
+            .unwrap()
+        };
+        let start_edit = || async {
+            let pending = prepare_message_edit(&db, user, chat, message, &mut input())
+                .await
+                .expect("edit numbered");
+            begin_pending_edit(chat, Some(pending)).expect("edit of this conversation")
+        };
+
+        let mut running = start_edit().await;
+        running.claim(&db).await.expect("claim");
+        let shown = running.view();
+        // Numbered, then refused (for example an invalid provider) before it replied.
+        let _rejected = start_edit().await;
+        assert_eq!(
+            current_edit(&db, chat, shown.clone()).await.unwrap(),
+            Some(shown.clone()),
+            "a rejected newer request must not hide the running edit"
+        );
+
+        let mut newer = start_edit().await;
+        newer.claim(&db).await.expect("claim");
+        assert_eq!(
+            current_edit(&db, chat, shown).await.unwrap(),
+            None,
+            "a newer claimed edit hides it, even once the newer one has finished"
         );
     }
 
