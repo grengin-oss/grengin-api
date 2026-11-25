@@ -5,9 +5,10 @@
 // reply complete; GET /chat/{id} marks it `generating: true` until then, and the webapp polls it
 // (webapp #113). An edit's reply keeps generating too and is shown as the edited version.
 import { expect, test, type Page } from '@playwright/test';
-import { sql, tokenFor } from '../../support/api';
+import { api, sql } from '../../support/api';
 import { env } from '../../support/env';
 import { assistantMessage, conversation, currentChatId, openNewChat, ownerToken, send, transcript, unique, userMessage } from '../../support/chat';
+import { signInMember, tokenOf } from '../../support/projects';
 
 const SLOW = 30;
 
@@ -186,14 +187,23 @@ test.describe('refreshing while a reply is generating', () => {
     expect(later.events.at(-1)?.event).toContain('done');
   });
 
-  test('another user cannot reconnect to the reply', async ({ page }) => {
-    const prompt = unique('refresh-resume-private');
-    const chatId = await reloadMidStream(page, prompt);
-    const live = (await conversation(chatId)).json.messages.find((m: any) => m.role === 'assistant');
-    const stranger = await fetch(`${env.apiUrl}/chat/stream/${live.id}/events`, {
-      headers: { Authorization: `Bearer ${tokenFor('00000000-0000-4000-8000-000000000000', 'nobody@e2e.grengin.test')}` },
-    });
-    expect([401, 404]).toContain(stranger.status);
-    await expect.poll(async () => (await conversation(chatId)).json.messages.at(-1)?.generating, { timeout: 30_000 }).toBe(false);
+  test('another user cannot reconnect to the reply', async ({ page, browser }) => {
+    const member = await signInMember(browser);
+    try {
+      const prompt = unique('refresh-resume-private');
+      const chatId = await reloadMidStream(page, prompt);
+      const live = (await conversation(chatId)).json.messages.find((m: any) => m.role === 'assistant');
+      const token = await tokenOf('member');
+      // The member's token is accepted, so the refusal below comes from the ownership check.
+      expect((await api(token, 'GET', '/chats')).status).toBe(200);
+      const stranger = await fetch(`${env.apiUrl}/chat/stream/${live.id}/events`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(stranger.status).toBe(404);
+      // Still resumable by its owner, so the 404 was not because the reply had ended.
+      expect((await resume(live.id)).status).toBe(200);
+    } finally {
+      await member.restore();
+    }
   });
 });
