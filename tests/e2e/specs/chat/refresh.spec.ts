@@ -195,7 +195,7 @@ test.describe('refreshing while a reply is generating', () => {
       const live = (await conversation(chatId)).json.messages.find((m: any) => m.role === 'assistant');
       const token = await tokenOf('member');
       // The member's token is accepted, so the refusal below comes from the ownership check.
-      expect((await api(token, 'GET', '/chats')).status).toBe(200);
+      expect((await api(token, 'GET', '/chat')).status).toBe(200);
       const stranger = await fetch(`${env.apiUrl}/chat/stream/${live.id}/events`, {
         headers: { Authorization: `Bearer ${token}` },
       });
