@@ -13,7 +13,7 @@ use crate::{
     services::{
         chat_stream_helpers::is_model_whitelisted,
         department_policies::{effective_allowed_models, model_policy_key},
-        models_cache::load_providers_cached,
+        models_cache::{load_providers_cached, provider_icons},
         provider_models::is_chat_selectable_model,
     },
     state::SharedState,
@@ -64,6 +64,7 @@ pub async fn get_list_models(
         }
     };
 
+    let catalog_icons = provider_icons(&providers);
     let mut filtered_providers = Vec::new();
     for provider in providers {
         let is_enabled = app_state
@@ -155,11 +156,15 @@ pub async fn get_list_models(
         if models.is_empty() {
             continue;
         }
+        let (icon, icon_dark) = catalog_icons
+            .get(&provider_key.to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default();
         filtered_providers.push(ProviderInfo {
             key: provider_key,
             name: descriptor.name,
-            icon: String::new(),
-            icon_dark: String::new(),
+            icon,
+            icon_dark,
             status: "enabled".to_string(),
             models,
         });
