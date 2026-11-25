@@ -3,7 +3,9 @@
 
 use std::{
     convert::Infallible,
+    fmt::Write,
     sync::{Arc, Mutex, MutexGuard},
+    time::Duration,
 };
 
 use axum::response::sse::Event;
@@ -19,9 +21,13 @@ use crate::{
     state::SharedState,
 };
 
-// Bounds the memory one reply's replay can hold. A longer reply stops recording, and a page
-// that reconnects to it falls back to reading the saved conversation.
+// Bound the memory one reply's replay can hold. A larger reply stops recording, and a page that
+// reconnects to it falls back to reading the saved conversation.
 const MAX_EVENTS: usize = 20_000;
+const MAX_BYTES: usize = 8 * 1024 * 1024;
+// How long a finished reply's events stay for followers still replaying them. After that they
+// are freed even if a stalled connection still holds the feed.
+const KEEP_AFTER_CLOSE: Duration = Duration::from_secs(30);
 
 // Every event of one reply's stream, kept while the reply generates, so a page that lost the
 // stream (a refresh) can replay it from the start or from the last event it saw, then follow it.
@@ -34,8 +40,35 @@ pub struct ReplyFeed {
 #[derive(Default)]
 struct FeedState {
     events: Vec<Event>,
+    bytes: usize,
     closed: bool,
-    overflowed: bool,
+    discarded: bool,
+}
+
+impl FeedState {
+    fn discard(&mut self) {
+        self.discarded = true;
+        self.events = Vec::new();
+        self.bytes = 0;
+    }
+}
+
+#[derive(Default)]
+struct ByteCount(usize);
+
+impl Write for ByteCount {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        self.0 += text.len();
+        Ok(())
+    }
+}
+
+// axum does not expose an event's encoded length; its Debug form escapes the encoded bytes, so
+// it is never shorter and serves as an upper bound.
+fn event_size(event: &Event) -> usize {
+    let mut count = ByteCount::default();
+    let _ = write!(count, "{event:?}");
+    count.0
 }
 
 enum Next {
@@ -56,15 +89,16 @@ impl ReplyFeed {
     }
 
     fn push(&self, event: Event) {
+        let size = event_size(&event);
         {
             let mut state = self.state();
-            if state.closed || state.overflowed {
+            if state.closed || state.discarded {
                 return;
             }
-            if state.events.len() >= MAX_EVENTS {
-                state.overflowed = true;
-                state.events = Vec::new();
+            if state.events.len() >= MAX_EVENTS || state.bytes + size > MAX_BYTES {
+                state.discard();
             } else {
+                state.bytes += size;
                 state.events.push(event);
             }
         }
@@ -76,13 +110,18 @@ impl ReplyFeed {
         self.changed.notify_waiters();
     }
 
+    fn discard(&self) {
+        self.state().discard();
+        self.changed.notify_waiters();
+    }
+
     fn resumable(&self) -> bool {
-        !self.state().overflowed
+        !self.state().discarded
     }
 
     fn next(&self, position: usize) -> Next {
         let state = self.state();
-        if state.overflowed {
+        if state.discarded {
             Next::End
         } else if let Some(event) = state.events.get(position) {
             Next::Event(event.clone())
@@ -121,6 +160,16 @@ struct CloseOnDrop(Arc<ReplyFeed>);
 impl Drop for CloseOnDrop {
     fn drop(&mut self) {
         self.0.close();
+        let feed = self.0.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    tokio::time::sleep(KEEP_AFTER_CLOSE).await;
+                    feed.discard();
+                });
+            }
+            Err(_) => feed.discard(),
+        }
     }
 }
 
@@ -176,7 +225,7 @@ pub async fn resumable_reply(
         .ok_or(AppError::ResourceNotFound)
 }
 
-// Last-Event-ID (sent by EventSource on reconnect) wins over the explicit `after` parameter.
+// Last-Event-ID wins over the explicit `after` parameter.
 pub fn resume_position(last_event_id: Option<&str>, after: Option<u64>) -> usize {
     last_event_id
         .and_then(|id| id.trim().parse::<u64>().ok())
@@ -237,6 +286,35 @@ mod tests {
             .expect("the follower ends once the reply task is gone")
             .unwrap();
         assert!(received.iter().any(|event| event.contains("data: live")));
+    }
+
+    #[tokio::test]
+    async fn a_reply_over_the_byte_limit_is_not_resumable() {
+        let feed = ReplyFeed::new();
+        let large = "x".repeat(MAX_BYTES / 4);
+        for _ in 0..3 {
+            feed.push(Event::default().data(large.as_str()));
+        }
+        assert!(feed.resumable());
+        feed.push(Event::default().data(large.as_str()));
+        assert!(!feed.resumable());
+        assert_eq!(feed.state().bytes, 0);
+        assert!(collect(feed.follow(0)).await.is_empty());
+    }
+
+    #[test]
+    fn an_event_size_is_at_least_its_encoded_length() {
+        let event = Event::default().event("delta").data("héllo\nworld");
+        assert!(event_size(&event) >= "event: delta\ndata: héllo\ndata: world\n\n".len());
+    }
+
+    #[test]
+    fn a_finished_reply_frees_its_events_once_no_follower_needs_them() {
+        let feed = ReplyFeed::new();
+        feed.push(Event::default().data("x"));
+        drop(CloseOnDrop(feed.clone()));
+        assert!(!feed.resumable());
+        assert!(feed.state().events.is_empty());
     }
 
     #[tokio::test]
