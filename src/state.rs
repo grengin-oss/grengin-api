@@ -91,7 +91,21 @@ impl StreamRegistry {
         view: EditView,
     ) -> Arc<StreamCancel> {
         let handle = self.register(message_id, conversation_id, Some(view.request));
-        self.edit_views.insert(message_id, view);
+        // An older edit stopped by this one keeps its stream entry until it has saved, but must
+        // never be shown again, even after this edit's reply leaves the registry.
+        let streams = &self.streams;
+        self.edit_views.retain(|other, other_view| {
+            other_view.request >= view.request
+                || streams
+                    .get(other)
+                    .is_none_or(|handle| handle.conversation_id != conversation_id)
+        });
+        let superseded = self
+            .newest_edit(conversation_id)
+            .is_some_and(|newest| newest.request > view.request);
+        if !superseded {
+            self.edit_views.insert(message_id, view);
+        }
         handle
     }
 
@@ -103,8 +117,7 @@ impl StreamRegistry {
         }
     }
 
-    // The newest edit replying in this conversation is the one the user sees: an older one has
-    // been stopped by it and will not become the shown version.
+    // The newest edit replying in this conversation is the one the user sees.
     fn newest_edit(&self, conversation_id: Uuid) -> Option<EditView> {
         self.edit_views
             .iter()
@@ -1033,12 +1046,15 @@ mod tests {
         assert_eq!(snapshot.replies.len(), 2);
 
         registry.remove(&newer);
+        let snapshot = registry.generating(conversation);
         assert_eq!(
-            registry
-                .generating(conversation)
-                .edit
-                .map(|edit| edit.request),
-            Some(1)
+            snapshot.edit, None,
+            "the stopped older edit is never shown again"
+        );
+        assert_eq!(
+            snapshot.replies.len(),
+            1,
+            "it still counts as generating until saved"
         );
         registry.remove(&older);
         assert_eq!(registry.generating(conversation).edit, None);
@@ -1046,5 +1062,28 @@ mod tests {
             registry.edit_views.len() == 1,
             "only the other conversation's edit remains"
         );
+    }
+
+    #[test]
+    fn an_older_edit_registering_late_is_not_shown_over_a_newer_one() {
+        let conversation = Uuid::new_v4();
+        let view = |request| super::EditView {
+            request,
+            cutoff: chrono::Utc::now(),
+            message_ids: vec![Uuid::new_v4()],
+        };
+        let mut registry = StreamRegistry::default();
+        let newer = Uuid::new_v4();
+        registry.register_edit(newer, conversation, view(3));
+        registry.register_edit(Uuid::new_v4(), conversation, view(2));
+        assert_eq!(
+            registry
+                .generating(conversation)
+                .edit
+                .map(|edit| edit.request),
+            Some(3)
+        );
+        registry.remove(&newer);
+        assert_eq!(registry.generating(conversation).edit, None);
     }
 }
