@@ -481,6 +481,7 @@ mod tests {
             specialty: "general".to_string(),
             summaries: None,
             summary: None,
+            recommended: false,
             price_tier: None,
             comment: None,
             input_token_rate: None,

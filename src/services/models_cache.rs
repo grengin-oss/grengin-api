@@ -15,7 +15,8 @@ use crate::{
     services::{
         catalog_download::{MAX_CATALOG_DOCUMENT_BYTES, read_body_capped},
         model_picker::{
-            PRICE_TIERS_URL, PickerMetadata, SPECIALTIES_URL, catalog_specialty, catalog_summary,
+            PRICE_TIERS_URL, PickerMetadata, SPECIALTIES_URL, catalog_recommended,
+            catalog_specialty, catalog_summary,
         },
     },
 };
@@ -434,6 +435,7 @@ fn parse_text_model(value: &Value) -> Result<ModelInfo, Error> {
         specialty: catalog_specialty(value),
         summaries: catalog_summary(value),
         summary: None,
+        recommended: catalog_recommended(value),
         price_tier: None,
         comment: value
             .get("note")
@@ -505,6 +507,7 @@ fn parse_image_model(value: &Value) -> Result<ModelInfo, Error> {
         specialty: catalog_specialty(value),
         summaries: catalog_summary(value),
         summary: None,
+        recommended: catalog_recommended(value),
         price_tier: None,
         comment: value
             .get("note")
@@ -559,6 +562,7 @@ fn parse_embed_model(value: &Value, provider_key: &str) -> Result<ModelInfo, Err
         specialty: catalog_specialty(value),
         summaries: catalog_summary(value),
         summary: None,
+        recommended: catalog_recommended(value),
         price_tier: None,
         comment: value
             .get("notes")

@@ -134,6 +134,7 @@ impl PickerMetadata {
             if model.specialty == DEFAULT_SPECIALTY {
                 model.specialty = known.specialty;
             }
+            model.recommended |= known.recommended;
             if model.summaries.is_none() {
                 model.summaries = known.summaries;
             }
@@ -167,6 +168,13 @@ pub fn catalog_specialty(value: &Value) -> String {
         .filter(|code| is_code(code))
         .unwrap_or(DEFAULT_SPECIALTY)
         .to_string()
+}
+
+pub fn catalog_recommended(value: &Value) -> bool {
+    value
+        .get("recommended")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 pub fn catalog_summary(value: &Value) -> Option<BTreeMap<String, String>> {
@@ -358,6 +366,7 @@ mod tests {
             specialty: DEFAULT_SPECIALTY.into(),
             summaries: None,
             summary: None,
+            recommended: false,
             price_tier: None,
             comment: None,
             input_token_rate: input,
@@ -546,6 +555,7 @@ mod tests {
         let mut upstream = model(ModelType::TextGenerator, Some(2.0), Some(10.0));
         upstream.key = "gpt-x".into();
         upstream.specialty = "reasoning".into();
+        upstream.recommended = catalog_recommended(&json!({"recommended": true}));
         upstream.summaries = Some(BTreeMap::from([("en".into(), "Thinks hard".into())]));
         metadata.annotate(&mut upstream);
         let catalog = vec![ProviderInfo {
@@ -563,12 +573,19 @@ mod tests {
         assert_eq!(enriched.specialty, "reasoning");
         assert_eq!(enriched.price_tier.as_deref(), Some("moderate"));
         assert!(enriched.summaries.is_some());
+        assert!(
+            enriched.recommended,
+            "the gateway model is recommended like its upstream model"
+        );
+        assert!(!catalog_recommended(&json!({"recommended": "yes"})));
+        assert!(!catalog_recommended(&json!({})));
 
         let mut custom = model(ModelType::TextGenerator, None, None);
         custom.engine = "my-vllm".into();
         let custom = metadata.enrich_plugin_model(custom, &catalog);
         assert_eq!(custom.specialty, DEFAULT_SPECIALTY);
         assert_eq!(custom.price_tier, None);
+        assert!(!custom.recommended);
     }
 
     #[test]

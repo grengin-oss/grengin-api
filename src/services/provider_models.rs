@@ -7,7 +7,7 @@ use crate::{
     dto::models::{ModelInfo, ModelType},
     services::{
         live_models_cache::LiveModelsCache,
-        model_picker::{catalog_specialty, catalog_summary},
+        model_picker::{catalog_recommended, catalog_specialty, catalog_summary},
     },
 };
 
@@ -67,6 +67,7 @@ pub fn to_model_info(provider_key: &str, model: ProviderModel) -> ModelInfo {
         specialty: catalog_specialty(&model.metadata),
         summaries: catalog_summary(&model.metadata),
         summary: None,
+        recommended: catalog_recommended(&model.metadata),
         price_tier: None,
         comment,
         input_token_rate: metadata_f64(&model, "inputTokenRate"),
@@ -150,6 +151,7 @@ mod tests {
             specialty: crate::services::model_picker::DEFAULT_SPECIALTY.to_string(),
             summaries: None,
             summary: None,
+            recommended: false,
             price_tier: None,
             comment: None,
             input_token_rate: None,
