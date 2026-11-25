@@ -18,6 +18,7 @@ use crate::{
             hide_as_other_version, recount_conversation, show_messages, stale_summary,
         },
     },
+    state::EditView,
 };
 
 pub async fn soft_delete_message(
@@ -142,6 +143,15 @@ impl EditInProgress {
 
     pub fn record_attempt_message(&mut self, message_id: Uuid) {
         self.attempt_message_ids.push(message_id);
+    }
+
+    // Registered with the reply so GET /chat can show this edit while it generates.
+    pub fn view(&self) -> EditView {
+        EditView {
+            request: self.request,
+            cutoff: self.history_cutoff,
+            message_ids: self.attempt_message_ids.clone(),
+        }
     }
 
     // Taken once this edit's reply has started, so a request that never got that far cannot

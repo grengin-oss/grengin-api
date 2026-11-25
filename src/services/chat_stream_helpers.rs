@@ -6,7 +6,7 @@ use chrono::Utc;
 use futures_util::{Stream, StreamExt};
 use llm_plugin::ProviderError;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, UpdateMany,
+    ColumnTrait, Condition, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, UpdateMany,
     prelude::Decimal, sea_query::Expr,
 };
 use serde_json::Value;
@@ -23,7 +23,7 @@ use crate::{
         messages::{ChatRole, StopReason},
     },
     services::budget_allocation::{BudgetHealth, get_department_budget_status},
-    state::{SharedState, StreamCancel, StreamCancellations},
+    state::{EditView, SharedState, StreamCancel, StreamCancellations},
 };
 
 const CONTENT_SAVE_INTERVAL: Duration = Duration::from_millis(500);
@@ -161,22 +161,17 @@ pub fn next_tool_round(
     }
 }
 
-// A reply keeps generating and is saved when its client goes away (a page refresh), instead
-// of being stopped as a network error; the reloaded chat reads it back. Stop still cancels it.
-// An edit becomes a version only for the client that asked for it, so it stops with its stream (the
-// documented "no version is added" on disconnect); any other reply keeps generating and is saved.
+// A reply keeps generating when its client goes away (a page refresh, a closed tab), instead
+// of being stopped as a network error; the reloaded chat reads it back. That includes an edit's
+// reply: GET /chat shows the edit while it generates and it becomes the version once complete.
+// Stop still cancels it.
 pub fn deliver_reply<S>(
     events: S,
-    is_edit: bool,
 ) -> std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>
 where
     S: Stream<Item = Result<Event, Infallible>> + Send + 'static,
 {
-    if is_edit {
-        Box::pin(events)
-    } else {
-        Box::pin(detach_from_client(events))
-    }
+    Box::pin(detach_from_client(events))
 }
 
 pub fn detach_from_client<S>(events: S) -> impl Stream<Item = Result<Event, Infallible>> + Send
@@ -212,9 +207,16 @@ pub async fn messages_with_generating(
 ) -> Result<(Vec<messages::Model>, HashSet<Uuid>), AppError> {
     for attempt in 1..=GENERATING_READ_ATTEMPTS {
         let before = state.generating_replies(conversation_id).await;
-        let rows = messages::Entity::find()
+        let edit = before.edit.clone();
+        let shown = match &edit {
+            Some(edit) => Condition::any()
+                .add(messages::Column::Deleted.eq(false))
+                .add(messages::Column::Id.is_in(edit.message_ids.iter().copied())),
+            None => Condition::all().add(messages::Column::Deleted.eq(false)),
+        };
+        let mut rows = messages::Entity::find()
             .filter(messages::Column::ConversationId.eq(conversation_id))
-            .filter(messages::Column::Deleted.eq(false))
+            .filter(shown)
             .order_by_asc(messages::Column::CreatedAt)
             .all(&state.database)
             .await
@@ -231,10 +233,19 @@ pub async fn messages_with_generating(
         if let Some(generating) =
             before.settle(after, newest_reply, attempt == GENERATING_READ_ATTEMPTS)
         {
+            if let Some(edit) = &edit {
+                show_running_edit(&mut rows, edit);
+            }
             return Ok((rows, generating));
         }
     }
     unreachable!("the last attempt always settles")
+}
+
+// While an edit's reply generates, its turn (still hidden until it commits) is shown in place of
+// everything from the edited message on, exactly as the commit will swap them.
+fn show_running_edit(rows: &mut Vec<messages::Model>, edit: &EditView) {
+    rows.retain(|row| edit.message_ids.contains(&row.id) || row.created_at < edit.cutoff);
 }
 
 pub struct ContentCheckpoint {
@@ -450,26 +461,76 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_edit_stops_with_its_client_but_a_reply_keeps_generating() {
-        for (is_edit, expect_finished) in [(true, false), (false, true)] {
-            let produced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let counter = produced.clone();
-            let reply = async_stream::stream! {
-                for chunk in 0..100 {
-                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    tokio::task::yield_now().await;
-                    yield Ok::<_, Infallible>(Event::default().data(chunk.to_string()));
-                }
-            };
-            let mut client = deliver_reply(reply, is_edit);
-            assert!(client.next().await.is_some());
-            drop(client);
-            for _ in 0..1000 {
+    async fn every_reply_including_an_edit_keeps_generating_after_its_client_leaves() {
+        let produced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = produced.clone();
+        let reply = async_stream::stream! {
+            for chunk in 0..100 {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 tokio::task::yield_now().await;
+                yield Ok::<_, Infallible>(Event::default().data(chunk.to_string()));
             }
-            let finished = produced.load(std::sync::atomic::Ordering::SeqCst) == 100;
-            assert_eq!(finished, expect_finished, "is_edit={is_edit}");
+        };
+        let mut client = deliver_reply(reply);
+        assert!(client.next().await.is_some());
+        drop(client);
+        for _ in 0..1000 {
+            tokio::task::yield_now().await;
         }
+        assert_eq!(produced.load(std::sync::atomic::Ordering::SeqCst), 100);
+    }
+
+    #[test]
+    fn a_running_edit_replaces_the_conversation_from_the_edited_message() {
+        let cutoff = Utc::now();
+        let earlier = cutoff - chrono::Duration::seconds(10);
+        let later = cutoff + chrono::Duration::seconds(5);
+        let row = |id: Uuid, created_at| messages::Model {
+            id,
+            conversation_id: Uuid::nil(),
+            previous_message_id: None,
+            role: ChatRole::User,
+            deleted: false,
+            inactive_branch: false,
+            message_content: String::new(),
+            model_provider: String::new(),
+            model_name: String::new(),
+            request_id: None,
+            request_tokens: 0,
+            response_tokens: 0,
+            tools_calls: Vec::new(),
+            tools_results: Vec::new(),
+            created_at,
+            updated_at: created_at,
+            total_tokens: 0,
+            latency: 0,
+            cost: Decimal::ZERO,
+            metadata: None,
+        };
+        let (kept, edited, old_reply, edit_user, edit_reply) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let mut rows = vec![
+            row(kept, earlier),
+            row(edited, cutoff),
+            row(old_reply, cutoff + chrono::Duration::seconds(1)),
+            row(edit_user, later),
+            row(edit_reply, later),
+        ];
+        let edit = EditView {
+            request: 3,
+            cutoff,
+            message_ids: vec![edit_user, edit_reply],
+        };
+        show_running_edit(&mut rows, &edit);
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            [kept, edit_user, edit_reply]
+        );
     }
 
     fn model(engine: &str, key: &str, name: &str) -> ModelInfo {

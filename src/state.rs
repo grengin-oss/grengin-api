@@ -23,6 +23,7 @@ use crate::{
     services::owner_bootstrap::ensure_bootstrap_super_admin,
 };
 use anyhow::Error;
+use chrono::{DateTime, Utc};
 use llm_plugin::ProviderRegistry;
 use reqwest::Client as ReqwestClient;
 use sea_orm::{ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter};
@@ -38,9 +39,19 @@ use uuid::Uuid;
 
 pub type StreamCancellations = Arc<RwLock<StreamRegistry>>;
 
+// What an edit's reply shows while it generates: its new turn in place of the conversation from
+// the edited message on. The turn is still hidden in the database until the edit commits.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditView {
+    pub request: i32,
+    pub cutoff: DateTime<Utc>,
+    pub message_ids: Vec<Uuid>,
+}
+
 #[derive(Default)]
 pub struct StreamRegistry {
     streams: HashMap<Uuid, Arc<StreamCancel>>,
+    edit_views: HashMap<Uuid, EditView>,
     // Counts every reply that started or stopped generating, so a reader can tell whether the
     // set changed while it read the messages.
     changes: u64,
@@ -53,6 +64,7 @@ impl StreamRegistry {
     }
 
     pub fn remove(&mut self, message_id: &Uuid) {
+        self.edit_views.remove(message_id);
         if self.streams.remove(message_id).is_some() {
             self.changes += 1;
         }
@@ -72,17 +84,45 @@ impl StreamRegistry {
         register_stream(&mut self.streams, message_id, conversation_id, edit_request)
     }
 
+    fn register_edit(
+        &mut self,
+        message_id: Uuid,
+        conversation_id: Uuid,
+        view: EditView,
+    ) -> Arc<StreamCancel> {
+        let handle = self.register(message_id, conversation_id, Some(view.request));
+        self.edit_views.insert(message_id, view);
+        handle
+    }
+
     fn generating(&self, conversation_id: Uuid) -> GeneratingSnapshot {
         GeneratingSnapshot {
             changes: self.changes,
             replies: generating_in(&self.streams, conversation_id),
+            edit: self.newest_edit(conversation_id),
         }
+    }
+
+    // The newest edit replying in this conversation is the one the user sees: an older one has
+    // been stopped by it and will not become the shown version.
+    fn newest_edit(&self, conversation_id: Uuid) -> Option<EditView> {
+        self.edit_views
+            .iter()
+            .filter(|(message_id, _)| {
+                self.streams
+                    .get(message_id)
+                    .is_some_and(|handle| handle.conversation_id == conversation_id)
+            })
+            .map(|(_, view)| view)
+            .max_by_key(|view| view.request)
+            .cloned()
     }
 }
 
 pub struct GeneratingSnapshot {
     changes: u64,
     pub replies: HashSet<Uuid>,
+    pub edit: Option<EditView>,
 }
 
 impl GeneratingSnapshot {
@@ -307,12 +347,13 @@ impl AppState {
         &self,
         message_id: Uuid,
         conversation_id: Uuid,
-        edit_request: Option<i32>,
+        edit: Option<EditView>,
     ) -> Arc<StreamCancel> {
-        self.stream_cancellations
-            .write()
-            .await
-            .register(message_id, conversation_id, edit_request)
+        let mut registry = self.stream_cancellations.write().await;
+        match edit {
+            Some(view) => registry.register_edit(message_id, conversation_id, view),
+            None => registry.register(message_id, conversation_id, None),
+        }
     }
 
     pub async fn release_stream_cancel(&self, message_id: Uuid) {
@@ -970,5 +1011,40 @@ mod tests {
 
         assert_eq!(stopped, vec![plain]);
         assert!(!streams[&newer].is_cancelled());
+    }
+
+    #[test]
+    fn the_newest_running_edit_is_the_one_shown_and_leaves_with_its_reply() {
+        let conversation = Uuid::new_v4();
+        let view = |request| super::EditView {
+            request,
+            cutoff: chrono::Utc::now(),
+            message_ids: vec![Uuid::new_v4()],
+        };
+        let mut registry = StreamRegistry::default();
+        assert_eq!(registry.generating(conversation).edit, None);
+        let older = Uuid::new_v4();
+        let newer = Uuid::new_v4();
+        registry.register_edit(older, conversation, view(1));
+        registry.register_edit(newer, conversation, view(2));
+        registry.register_edit(Uuid::new_v4(), Uuid::new_v4(), view(9));
+        let snapshot = registry.generating(conversation);
+        assert_eq!(snapshot.edit.map(|edit| edit.request), Some(2));
+        assert_eq!(snapshot.replies.len(), 2);
+
+        registry.remove(&newer);
+        assert_eq!(
+            registry
+                .generating(conversation)
+                .edit
+                .map(|edit| edit.request),
+            Some(1)
+        );
+        registry.remove(&older);
+        assert_eq!(registry.generating(conversation).edit, None);
+        assert!(
+            registry.edit_views.len() == 1,
+            "only the other conversation's edit remains"
+        );
     }
 }

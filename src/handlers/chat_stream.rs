@@ -483,7 +483,6 @@ pub async fn handle_chat_stream(
     Json(req): Json<ChatInput>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, AppError> {
     let start = Instant::now();
-    let is_edit = pending_edit.is_some();
     let (provider, model_name, gateway_installation) =
         model_route(&app_state, &req.provider, &req.model_name).await?;
     let via_gateway = gateway_installation.is_some() && provider == "grengin";
@@ -1632,7 +1631,7 @@ pub async fn handle_chat_stream(
                     .register_stream_cancel(
                         new_message_id,
                         conversation_id,
-                        edit_in_progress.as_ref().map(EditInProgress::request),
+                        edit_in_progress.as_ref().map(EditInProgress::view),
                     )
                     .await
             }
@@ -3001,6 +3000,6 @@ pub async fn handle_chat_stream(
            }
        }
     };
-    let sse_response = Sse::new(deliver_reply(sse_stream, is_edit)).keep_alive(KeepAlive::new());
+    let sse_response = Sse::new(deliver_reply(sse_stream)).keep_alive(KeepAlive::new());
     Ok(sse_response)
 }
