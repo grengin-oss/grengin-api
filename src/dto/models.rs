@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
 #[derive(Serialize, Deserialize, Clone, ToSchema, PartialEq, Debug)]
 #[serde(rename_all = "snake_case")]
@@ -19,6 +19,12 @@ pub struct ModelsResponse {
     pub global_attachments: GlobalAttachments,
     pub specialties: Vec<SpecialtyInfo>,
     pub price_tiers: Vec<PriceTierInfo>,
+}
+
+#[derive(Deserialize, IntoParams, ToSchema)]
+pub struct ModelsQuery {
+    #[param(example = "fr-CA")]
+    pub locale: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, ToSchema, PartialEq, Debug)]
@@ -72,8 +78,11 @@ pub struct ModelInfo {
     pub engine: String,
     pub model_type: ModelType,
     pub specialty: String,
+    // Every catalog translation, kept in the shared cache; responses carry `summary` only.
+    #[serde(skip)]
+    pub summaries: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<BTreeMap<String, String>>,
+    pub summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price_tier: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

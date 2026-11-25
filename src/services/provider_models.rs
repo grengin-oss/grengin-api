@@ -65,7 +65,8 @@ pub fn to_model_info(provider_key: &str, model: ProviderModel) -> ModelInfo {
         engine: provider_key.to_string(),
         model_type: resolved_model_type,
         specialty: catalog_specialty(&model.metadata),
-        summary: catalog_summary(&model.metadata),
+        summaries: catalog_summary(&model.metadata),
+        summary: None,
         price_tier: None,
         comment,
         input_token_rate: metadata_f64(&model, "inputTokenRate"),
@@ -147,6 +148,7 @@ mod tests {
             engine: "example".to_string(),
             model_type,
             specialty: crate::services::model_picker::DEFAULT_SPECIALTY.to_string(),
+            summaries: None,
             summary: None,
             price_tier: None,
             comment: None,
@@ -254,7 +256,7 @@ mod tests {
             "a plugin may name its own specialty"
         );
         assert_eq!(
-            info.summary
+            info.summaries
                 .as_ref()
                 .and_then(|summary| summary.get("ko"))
                 .map(String::as_str),

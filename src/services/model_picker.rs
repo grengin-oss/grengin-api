@@ -134,8 +134,8 @@ impl PickerMetadata {
             if model.specialty == DEFAULT_SPECIALTY {
                 model.specialty = known.specialty;
             }
-            if model.summary.is_none() {
-                model.summary = known.summary;
+            if model.summaries.is_none() {
+                model.summaries = known.summaries;
             }
             if model.price_tier.is_none() {
                 model.price_tier = known.price_tier;
@@ -177,10 +177,45 @@ pub fn catalog_summary(value: &Value) -> Option<BTreeMap<String, String>> {
         .filter_map(|(locale, text)| {
             let text = text.as_str()?.trim();
             (!text.is_empty() && text.chars().count() <= MAX_SUMMARY_CHARS)
-                .then(|| (locale.to_string(), text.to_string()))
+                .then(|| (locale.to_ascii_lowercase(), text.to_string()))
         })
         .collect::<BTreeMap<_, _>>();
     summary.contains_key("en").then_some(summary)
+}
+
+// Resolves each model's summary for one request, on the response copy: the shared cache keeps
+// every translation. `fr-CA` tries `fr-ca`, then `fr`, then `en`; a missing or malformed
+// locale means English.
+pub fn localize(providers: &mut [ProviderInfo], locale: Option<&str>) {
+    let chain = locale_chain(locale);
+    for model in providers
+        .iter_mut()
+        .flat_map(|provider| provider.models.iter_mut())
+    {
+        model.summary = model
+            .summaries
+            .as_ref()
+            .and_then(|summaries| chain.iter().find_map(|tag| summaries.get(tag)))
+            .cloned();
+    }
+}
+
+fn locale_chain(locale: Option<&str>) -> Vec<String> {
+    let mut chain = Vec::new();
+    let tag = locale
+        .map(|tag| tag.trim().replace('_', "-").to_ascii_lowercase())
+        .filter(|tag| tag.len() <= 35 && is_locale(tag));
+    if let Some(tag) = tag {
+        let mut parts = tag.split('-').collect::<Vec<_>>();
+        while !parts.is_empty() {
+            chain.push(parts.join("-"));
+            parts.pop();
+        }
+    }
+    if !chain.iter().any(|tag| tag == "en") {
+        chain.push("en".to_string());
+    }
+    chain
 }
 
 fn rule_key(model_type: &ModelType) -> Option<&'static str> {
@@ -321,6 +356,7 @@ mod tests {
             engine: "openai".into(),
             model_type,
             specialty: DEFAULT_SPECIALTY.into(),
+            summaries: None,
             summary: None,
             price_tier: None,
             comment: None,
@@ -510,7 +546,7 @@ mod tests {
         let mut upstream = model(ModelType::TextGenerator, Some(2.0), Some(10.0));
         upstream.key = "gpt-x".into();
         upstream.specialty = "reasoning".into();
-        upstream.summary = Some(BTreeMap::from([("en".into(), "Thinks hard".into())]));
+        upstream.summaries = Some(BTreeMap::from([("en".into(), "Thinks hard".into())]));
         metadata.annotate(&mut upstream);
         let catalog = vec![ProviderInfo {
             key: "openai".into(),
@@ -526,12 +562,72 @@ mod tests {
         let enriched = metadata.enrich_plugin_model(gateway, &catalog);
         assert_eq!(enriched.specialty, "reasoning");
         assert_eq!(enriched.price_tier.as_deref(), Some("moderate"));
-        assert!(enriched.summary.is_some());
+        assert!(enriched.summaries.is_some());
 
         let mut custom = model(ModelType::TextGenerator, None, None);
         custom.engine = "my-vllm".into();
         let custom = metadata.enrich_plugin_model(custom, &catalog);
         assert_eq!(custom.specialty, DEFAULT_SPECIALTY);
         assert_eq!(custom.price_tier, None);
+    }
+
+    #[test]
+    fn locales_fall_back_from_region_to_language_to_english() {
+        assert_eq!(locale_chain(Some("fr-CA")), ["fr-ca", "fr", "en"]);
+        assert_eq!(locale_chain(Some(" pt_BR ")), ["pt-br", "pt", "en"]);
+        assert_eq!(locale_chain(Some("en-GB")), ["en-gb", "en"]);
+        for missing in [None, Some(""), Some("../etc"), Some("x"), Some("fr-")] {
+            assert_eq!(locale_chain(missing), ["en"], "{missing:?}");
+        }
+    }
+
+    #[test]
+    fn summaries_resolve_per_request_without_changing_the_cached_catalog() {
+        let mut translated = model(ModelType::TextGenerator, None, None);
+        translated.summaries = catalog_summary(&json!({"summary": {
+            "en": "Writes code", "fr": "Écrit du code", "pt-BR": "Escreve código"
+        }}));
+        let english_only = model(ModelType::TextGenerator, None, None);
+        let cached = vec![ProviderInfo {
+            key: "openai".into(),
+            name: "OpenAI".into(),
+            icon: String::new(),
+            icon_dark: String::new(),
+            status: "active".into(),
+            models: vec![translated, english_only],
+        }];
+        let resolve = |locale: Option<&str>| {
+            let mut response = cached.clone();
+            localize(&mut response, locale);
+            response[0]
+                .models
+                .iter()
+                .map(|model| model.summary.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            resolve(Some("fr-CA")),
+            [Some("Écrit du code".to_string()), None]
+        );
+        assert_eq!(
+            resolve(Some("pt-BR")),
+            [Some("Escreve código".to_string()), None]
+        );
+        assert_eq!(resolve(Some("ja")), [Some("Writes code".to_string()), None]);
+        assert_eq!(resolve(None), [Some("Writes code".to_string()), None]);
+        assert!(cached[0].models.iter().all(|model| model.summary.is_none()));
+        assert_eq!(
+            cached[0].models[0].summaries.as_ref().map(BTreeMap::len),
+            Some(3)
+        );
+
+        let mut response = cached.clone();
+        localize(&mut response, Some("fr"));
+        let body = serde_json::to_value(&response[0].models[0]).unwrap();
+        assert_eq!(body["summary"], "Écrit du code");
+        assert!(
+            body.get("summaries").is_none(),
+            "translations stay internal"
+        );
     }
 }

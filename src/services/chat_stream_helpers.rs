@@ -479,6 +479,7 @@ mod tests {
             engine: engine.to_string(),
             model_type: ModelType::TextGenerator,
             specialty: "general".to_string(),
+            summaries: None,
             summary: None,
             price_tier: None,
             comment: None,

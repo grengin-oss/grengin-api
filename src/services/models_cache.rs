@@ -432,7 +432,8 @@ fn parse_text_model(value: &Value) -> Result<ModelInfo, Error> {
         engine,
         model_type: ModelType::TextGenerator,
         specialty: catalog_specialty(value),
-        summary: catalog_summary(value),
+        summaries: catalog_summary(value),
+        summary: None,
         price_tier: None,
         comment: value
             .get("note")
@@ -502,7 +503,8 @@ fn parse_image_model(value: &Value) -> Result<ModelInfo, Error> {
         engine,
         model_type: ModelType::ImageGenerator,
         specialty: catalog_specialty(value),
-        summary: catalog_summary(value),
+        summaries: catalog_summary(value),
+        summary: None,
         price_tier: None,
         comment: value
             .get("note")
@@ -555,7 +557,8 @@ fn parse_embed_model(value: &Value, provider_key: &str) -> Result<ModelInfo, Err
         engine: provider_key.to_string(),
         model_type: ModelType::TextEmbedder,
         specialty: catalog_specialty(value),
-        summary: catalog_summary(value),
+        summaries: catalog_summary(value),
+        summary: None,
         price_tier: None,
         comment: value
             .get("notes")
