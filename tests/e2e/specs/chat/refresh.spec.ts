@@ -2,12 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Refreshing while a reply streams (grengin-api PR #100): the server keeps generating and saves the
-// reply complete; GET /chat/{id} marks it `generating: true` until then. Webapp `main` does not yet
-// follow such a reply after a reload (no polling, no Stop) — see
-// grengin-docs/chat-reply-after-refresh-frontend.md — so those UI checks are expected failures.
+// reply complete; GET /chat/{id} marks it `generating: true` until then, and the webapp polls it
+// (webapp #113). An edit's reply keeps generating too and is shown as the edited version.
 import { expect, test, type Page } from '@playwright/test';
 import { sql } from '../../support/api';
-import { assistantMessage, conversation, currentChatId, openNewChat, send, transcript, unique } from '../../support/chat';
+import { assistantMessage, conversation, currentChatId, openNewChat, send, transcript, unique, userMessage } from '../../support/chat';
 
 const SLOW = 30;
 
@@ -65,11 +64,6 @@ test.describe('refreshing while a reply is generating', () => {
   });
 
   test('after a reload the reply keeps growing on screen until it is complete', async ({ page }) => {
-    test.fail(
-      true,
-      'Webapp main renders the saved partial text once and never re-fetches while `generating` is true ' +
-        '(grengin-docs/chat-reply-after-refresh-frontend.md, "What the frontend should do" 1-3).',
-    );
     const prompt = unique('refresh-follows');
     const chatId = await reloadMidStream(page, prompt);
     await expect(assistantMessage(page, /part1 /)).toBeVisible();
@@ -79,11 +73,6 @@ test.describe('refreshing while a reply is generating', () => {
   });
 
   test('after a reload Stop is offered and cancels the reply on the server', async ({ page }) => {
-    test.fail(
-      true,
-      'Webapp main offers Stop only for a stream open in the same tab; after a reload it does not call ' +
-        'POST /chat/stream/{message_id}/cancel (grengin-docs/chat-reply-after-refresh-frontend.md, step 5).',
-    );
     const prompt = unique('refresh-stop');
     const chatId = await reloadMidStream(page, prompt);
     const stop = page.getByRole('button', { name: 'Stop generating' });
@@ -98,5 +87,42 @@ test.describe('refreshing while a reply is generating', () => {
       // Let the generation the UI could not stop end before the next test.
       await expect.poll(async () => (await conversation(chatId)).json.messages.at(-1)?.generating, { timeout: 30_000 }).toBe(false);
     }
+  });
+
+  test('an edited message keeps replying after a reload and becomes the shown version', async ({ page }) => {
+    const original = unique('refresh-edit-original');
+    const edited = `${unique('refresh-edit-new')} [slow:${SLOW}]`;
+    await send(page, original);
+    await expect(assistantMessage(page, `Mock reply: ${original}`)).toBeVisible();
+    const chatId = await currentChatId(page);
+
+    await userMessage(page, original).hover();
+    await userMessage(page, original).getByRole('button', { name: 'Edit message' }).click();
+    const editor = transcript(page).getByRole('textbox', { name: 'Edit message' });
+    await editor.fill(edited);
+    await transcript(page).getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(transcript(page).getByText(/part2 /)).toBeVisible();
+    await page.reload();
+
+    // Right after the reload the API shows the edit, still generating, in place of the original.
+    const during = (await conversation(chatId)).json.messages;
+    expect(during.find((m: any) => m.role === 'user')?.parts.text).toBe(edited);
+    expect(during.find((m: any) => m.role === 'assistant')?.generating).toBe(true);
+
+    // The reloaded page follows the edited reply until it is complete, without another reload.
+    await expect(userMessage(page, edited)).toBeVisible();
+    await expect(assistantMessage(page, lastPart)).toBeVisible({ timeout: 30_000 });
+    await expect(userMessage(page, original)).toHaveCount(0);
+
+    await expect
+      .poll(async () => (await conversation(chatId)).json.messages.at(-1)?.generating, { timeout: 10_000 })
+      .toBe(false);
+    const final = (await conversation(chatId)).json.messages;
+    const user = final.find((m: any) => m.role === 'user');
+    expect(user.parts.text).toBe(edited);
+    expect(user.versions).toMatchObject({ current: 2, total: 2 });
+    expect(final.find((m: any) => m.role === 'assistant')?.parts.text.trim()).toBe(
+      Array.from({ length: SLOW }, (_, i) => `part${i + 1}`).join(' '),
+    );
   });
 });
