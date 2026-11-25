@@ -5,8 +5,9 @@
 // reply complete; GET /chat/{id} marks it `generating: true` until then, and the webapp polls it
 // (webapp #113). An edit's reply keeps generating too and is shown as the edited version.
 import { expect, test, type Page } from '@playwright/test';
-import { sql } from '../../support/api';
-import { assistantMessage, conversation, currentChatId, openNewChat, send, transcript, unique, userMessage } from '../../support/chat';
+import { sql, tokenFor } from '../../support/api';
+import { env } from '../../support/env';
+import { assistantMessage, conversation, currentChatId, openNewChat, ownerToken, send, transcript, unique, userMessage } from '../../support/chat';
 
 const SLOW = 30;
 
@@ -27,6 +28,37 @@ async function reloadMidStream(page: Page, prompt: string) {
   const chatId = await currentChatId(page);
   await page.reload();
   return chatId;
+}
+
+type SseEvent = { id?: string; event?: string; data: string };
+// Reads GET /chat/stream/{message_id}/events until the reply ends, the way a reloaded page would.
+async function resume(messageId: string, headers: Record<string, string> = {}) {
+  const response = await fetch(`${env.apiUrl}/chat/stream/${messageId}/events`, {
+    headers: { Authorization: `Bearer ${await ownerToken()}`, Accept: 'text/event-stream', ...headers },
+  });
+  const events: SseEvent[] = [];
+  if (response.status !== 200) return { status: response.status, events };
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let end: number;
+    while ((end = buffer.indexOf('\n\n')) >= 0) {
+      const frame = buffer.slice(0, end);
+      buffer = buffer.slice(end + 2);
+      const event: SseEvent = { data: '' };
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('id: ')) event.id = line.slice(4);
+        else if (line.startsWith('event: ')) event.event = line.slice(7);
+        else if (line.startsWith('data: ')) event.data += line.slice(6);
+      }
+      if (event.event || event.data) events.push(event);
+    }
+  }
+  return { status: response.status, events };
 }
 
 const lastPart = new RegExp(`part${SLOW}\\b`);
@@ -124,5 +156,44 @@ test.describe('refreshing while a reply is generating', () => {
     expect(final.find((m: any) => m.role === 'assistant')?.parts.text.trim()).toBe(
       Array.from({ length: SLOW }, (_, i) => `part${i + 1}`).join(' '),
     );
+  });
+
+  test('a reloaded page can reconnect to the reply stream, replay it and follow it live', async ({ page }) => {
+    const prompt = unique('refresh-resume');
+    const chatId = await reloadMidStream(page, prompt);
+    const live = (await conversation(chatId)).json.messages.find((m: any) => m.role === 'assistant');
+    expect(live?.generating).toBe(true);
+
+    // From the start: the reply's own events with positions as ids, then live until done.
+    const full = await resume(live.id);
+    expect(full.status).toBe(200);
+    expect(full.events.map((e) => e.id)).toEqual(full.events.map((_, i) => String(i + 1)));
+    expect(full.events.at(-1)?.event).toContain('done');
+    const text = full.events.map((e) => e.data).join(' ');
+    for (const part of ['part1', 'part2', `part${SLOW}`]) expect(text).toContain(part);
+
+    // Once the reply has ended there is nothing to reconnect to; the client reads the conversation.
+    await expect.poll(async () => (await resume(live.id)).status, { timeout: 10_000 }).toBe(404);
+  });
+
+  test('reconnecting with Last-Event-ID sends only the later events', async ({ page }) => {
+    const prompt = unique('refresh-resume-after');
+    const chatId = await reloadMidStream(page, prompt);
+    const live = (await conversation(chatId)).json.messages.find((m: any) => m.role === 'assistant');
+    const later = await resume(live.id, { 'Last-Event-ID': '3' });
+    expect(later.status).toBe(200);
+    expect(later.events[0]?.id).toBe('4');
+    expect(later.events.at(-1)?.event).toContain('done');
+  });
+
+  test('another user cannot reconnect to the reply', async ({ page }) => {
+    const prompt = unique('refresh-resume-private');
+    const chatId = await reloadMidStream(page, prompt);
+    const live = (await conversation(chatId)).json.messages.find((m: any) => m.role === 'assistant');
+    const stranger = await fetch(`${env.apiUrl}/chat/stream/${live.id}/events`, {
+      headers: { Authorization: `Bearer ${tokenFor('00000000-0000-4000-8000-000000000000', 'nobody@e2e.grengin.test')}` },
+    });
+    expect([401, 404]).toContain(stranger.status);
+    await expect.poll(async () => (await conversation(chatId)).json.messages.at(-1)?.generating, { timeout: 30_000 }).toBe(false);
   });
 });
