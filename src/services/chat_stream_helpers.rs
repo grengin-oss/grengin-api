@@ -18,6 +18,7 @@ use crate::{
     dto::{chat_stream::ResponseStopped, models::ModelInfo},
     error::{AppError, ErrorDetailVariant, ErrorResponse},
     models::{
+        conversations,
         departments::ActionOnExceed,
         messages,
         messages::{ChatRole, StopReason},
@@ -207,7 +208,10 @@ pub async fn messages_with_generating(
 ) -> Result<(Vec<messages::Model>, HashSet<Uuid>), AppError> {
     for attempt in 1..=GENERATING_READ_ATTEMPTS {
         let before = state.generating_replies(conversation_id).await;
-        let edit = before.edit.clone();
+        let edit = match before.edit.clone() {
+            Some(edit) => current_edit(state, conversation_id, edit).await?,
+            None => None,
+        };
         let shown = match &edit {
             Some(edit) => Condition::any()
                 .add(messages::Column::Deleted.eq(false))
@@ -240,6 +244,31 @@ pub async fn messages_with_generating(
         }
     }
     unreachable!("the last attempt always settles")
+}
+
+// Postgres numbers every edit (and branch switch) of a conversation, so an edit whose number has
+// been passed is superseded, even when the edit that passed it already finished and left the
+// registry before this one registered.
+async fn current_edit(
+    state: &SharedState,
+    conversation_id: Uuid,
+    edit: EditView,
+) -> Result<Option<EditView>, AppError> {
+    let latest = conversations::Entity::find_by_id(conversation_id)
+        .one(&state.database)
+        .await
+        .map_err(|error| {
+            eprintln!("edit request lookup error: {error}");
+            AppError::DbTimeout
+        })?
+        .map(|conversation| conversation.edit_requests);
+    Ok(latest
+        .is_some_and(|latest| still_current(&edit, latest))
+        .then_some(edit))
+}
+
+fn still_current(edit: &EditView, latest_request: i32) -> bool {
+    edit.request >= latest_request
 }
 
 // While an edit's reply generates, its turn (still hidden until it commits) is shown in place of
@@ -478,6 +507,20 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert_eq!(produced.load(std::sync::atomic::Ordering::SeqCst), 100);
+    }
+
+    #[test]
+    fn an_edit_is_shown_only_while_no_later_edit_has_been_numbered() {
+        let edit = EditView {
+            request: 1,
+            cutoff: Utc::now(),
+            message_ids: vec![Uuid::new_v4()],
+        };
+        assert!(still_current(&edit, 1));
+        assert!(
+            !still_current(&edit, 2),
+            "a later edit finished before this one registered"
+        );
     }
 
     #[test]
