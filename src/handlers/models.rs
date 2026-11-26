@@ -19,7 +19,9 @@ use crate::{
         department_policies::{effective_allowed_models, model_policy_key},
         model_picker::{PickerMetadata, localize},
         models_cache::load_models_cache,
-        provider_models::is_chat_selectable_model,
+        provider_models::{
+            add_provider_models, is_chat_selectable_model, sort_models_newest_first,
+        },
     },
     state::SharedState,
 };
@@ -168,14 +170,17 @@ pub async fn get_list_models(
         if models.is_empty() {
             continue;
         }
-        filtered_providers.push(ProviderInfo {
-            key: provider_key,
-            name: descriptor.name,
-            icon: String::new(),
-            icon_dark: String::new(),
-            status: "enabled".to_string(),
-            models,
-        });
+        add_provider_models(
+            &mut filtered_providers,
+            ProviderInfo {
+                key: provider_key,
+                name: descriptor.name,
+                icon: String::new(),
+                icon_dark: String::new(),
+                status: "enabled".to_string(),
+                models,
+            },
+        );
     }
 
     if filtered_providers
@@ -211,6 +216,7 @@ pub async fn get_list_models(
         }
         filtered_providers.retain(|provider| !provider.models.is_empty());
     }
+    sort_models_newest_first(&mut filtered_providers);
     localize(&mut filtered_providers, query.locale.as_deref());
     (
         status,

@@ -296,6 +296,7 @@ mod tests {
             price_tier: None,
             recommended: false,
             r#default: false,
+            launch_date: None,
             comment: None,
             input_token_rate: Some(1.0),
             output_token_rate: Some(2.0),

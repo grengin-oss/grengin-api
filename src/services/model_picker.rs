@@ -144,6 +144,9 @@ impl PickerMetadata {
             if model.price_tier.is_none() {
                 model.price_tier = known.price_tier;
             }
+            if model.launch_date.is_none() {
+                model.launch_date = known.launch_date;
+            }
         }
         model
     }
@@ -185,6 +188,15 @@ pub fn catalog_default(value: &Value) -> bool {
         .get("default")
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+pub fn catalog_launch_date(value: &Value) -> Option<String> {
+    value
+        .get("launchDate")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|date| !date.is_empty())
+        .map(str::to_string)
 }
 
 pub fn catalog_summary(value: &Value) -> Option<BTreeMap<String, String>> {
@@ -378,6 +390,7 @@ mod tests {
             summary: None,
             recommended: false,
             r#default: false,
+            launch_date: None,
             price_tier: None,
             comment: None,
             input_token_rate: input,
@@ -637,6 +650,34 @@ mod tests {
         gateway.engine = "grengin".into();
         gateway.key = "openai/gpt-test".into();
         assert!(!metadata.enrich_plugin_model(gateway, &catalog).r#default);
+    }
+
+    #[test]
+    fn gateway_models_borrow_the_upstream_launch_date_without_publishing_it() {
+        assert_eq!(
+            catalog_launch_date(&json!({"launchDate": " 2026-11-17 "})).as_deref(),
+            Some("2026-11-17")
+        );
+        assert_eq!(catalog_launch_date(&json!({"launchDate": ""})), None);
+        let mut upstream = model(ModelType::TextGenerator, None, None);
+        upstream.engine = "openai".into();
+        upstream.key = "gpt-test".into();
+        upstream.launch_date = Some("2026-11-17".into());
+        let catalog = vec![ProviderInfo {
+            key: "openai".into(),
+            name: "OpenAI".into(),
+            icon: String::new(),
+            icon_dark: String::new(),
+            status: "active".into(),
+            models: vec![upstream],
+        }];
+        let mut gateway = model(ModelType::TextGenerator, None, None);
+        gateway.engine = "grengin".into();
+        gateway.key = "openai/gpt-test".into();
+        let gateway = PickerMetadata::built_in().enrich_plugin_model(gateway, &catalog);
+        assert_eq!(gateway.launch_date.as_deref(), Some("2026-11-17"));
+        let json = serde_json::to_value(&gateway).unwrap();
+        assert!(json.get("launch_date").is_none());
     }
 
     #[test]

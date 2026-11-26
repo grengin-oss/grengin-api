@@ -437,6 +437,7 @@ fn parse_text_model(value: &Value) -> Result<ModelInfo, Error> {
         summary: None,
         recommended: catalog_recommended(value),
         r#default: crate::services::model_picker::catalog_default(value),
+        launch_date: crate::services::model_picker::catalog_launch_date(value),
         price_tier: None,
         comment: value
             .get("note")
@@ -510,6 +511,7 @@ fn parse_image_model(value: &Value) -> Result<ModelInfo, Error> {
         summary: None,
         recommended: catalog_recommended(value),
         r#default: crate::services::model_picker::catalog_default(value),
+        launch_date: crate::services::model_picker::catalog_launch_date(value),
         price_tier: None,
         comment: value
             .get("note")
@@ -566,6 +568,7 @@ fn parse_embed_model(value: &Value, provider_key: &str) -> Result<ModelInfo, Err
         summary: None,
         recommended: catalog_recommended(value),
         r#default: crate::services::model_picker::catalog_default(value),
+        launch_date: crate::services::model_picker::catalog_launch_date(value),
         price_tier: None,
         comment: value
             .get("notes")

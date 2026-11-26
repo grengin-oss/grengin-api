@@ -87,6 +87,9 @@ pub struct ModelInfo {
     pub price_tier: Option<String>,
     pub recommended: bool,
     pub r#default: bool,
+    // Orders the picker newest first; the catalog date, borrowed by plugin and gateway models.
+    #[serde(skip)]
+    pub launch_date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
