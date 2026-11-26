@@ -24,7 +24,7 @@ use crate::{
 pub async fn validate_incoming_attachments(
     state: &SharedState,
     user_id: Uuid,
-    messages: &[MessageRequest],
+    messages: &mut [MessageRequest],
     image_generation: bool,
 ) -> Result<(), AppError> {
     ensure_attachment_counts(messages)?;
@@ -34,13 +34,31 @@ pub async fn validate_incoming_attachments(
     {
         return Err(AppError::ValidationInvalidField { field: "files" });
     }
-    read_attachments_for_user(
+    let stored = read_attachments_for_user(
         &state.database,
         &state.settings.file_storage_root,
         user_id,
         &ids,
     )
     .await?;
+    if image_generation {
+        canonicalize_stored_files(messages, &stored)?;
+    }
+    Ok(())
+}
+
+fn canonicalize_stored_files(
+    messages: &mut [MessageRequest],
+    stored: &HashMap<Uuid, Attachment>,
+) -> Result<(), AppError> {
+    for file in messages.iter_mut().flat_map(|message| &mut message.files) {
+        let record = stored.get(&file.id).ok_or(AppError::ResourceNotFound)?;
+        file.name = record.name.clone();
+        file.content_type = record.content_type.clone();
+        file.base64 = None;
+        file.openai_id = None;
+        file.size = record.file.as_ref().map(Vec::len);
+    }
     Ok(())
 }
 
@@ -106,7 +124,11 @@ fn attachments_accepted(
         .filter_map(|file| {
             file.base64.as_deref().map(|data| {
                 (
-                    inline_size(data),
+                    if data.len() as u64 > max_inline_len(policy.max_file_bytes) {
+                        u64::MAX
+                    } else {
+                        inline_size(data)
+                    },
                     file.content_type.as_str(),
                     file.name.as_str(),
                 )
@@ -128,15 +150,51 @@ fn attachments_accepted(
         })
 }
 
+// The longest text an allowed file can take inline: its base64, a line break (CRLF) every 76
+// characters as MIME encoders write it, and a data: header. Anything longer is refused before it
+// is parsed, so whitespace or a long header cannot hide extra bytes.
+fn max_inline_len(max_file_bytes: u64) -> u64 {
+    let encoded = max_file_bytes.div_ceil(3).saturating_mul(4);
+    encoded
+        .saturating_add(encoded.div_ceil(76).saturating_mul(2))
+        .saturating_add(MAX_DATA_HEADER_LEN + "data:,".len() as u64)
+}
+
+const MAX_DATA_HEADER_LEN: u64 = 256;
+
 fn inline_size(data: &str) -> u64 {
-    let payload = data
-        .strip_prefix("data:")
-        .and_then(|rest| rest.split_once(','))
-        .map_or(data, |(_, payload)| payload);
-    let encoded = payload
-        .bytes()
-        .filter(|byte| !byte.is_ascii_whitespace() && *byte != b'=')
-        .count() as u64;
+    let payload = if let Some(rest) = data.strip_prefix("data:") {
+        let Some((header, payload)) = rest.split_once(',') else {
+            return u64::MAX;
+        };
+        if header.len() as u64 > MAX_DATA_HEADER_LEN || !header.ends_with(";base64") {
+            return u64::MAX;
+        }
+        payload
+    } else {
+        data
+    };
+    let mut encoded = 0u64;
+    let mut padding = 0u64;
+    for byte in payload.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        } else if byte == b'=' {
+            padding += 1;
+            if padding > 2 {
+                return u64::MAX;
+            }
+        } else if padding == 0 && (byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/') {
+            encoded += 1;
+        } else {
+            return u64::MAX;
+        }
+    }
+    if encoded % 4 == 1
+        || (padding > 0 && (!(encoded + padding).is_multiple_of(4) || encoded % 4 + padding != 4))
+    {
+        return u64::MAX;
+    }
     encoded * 3 / 4
 }
 
@@ -383,7 +441,7 @@ mod tests {
         assert_eq!(inline_size("aGVs\nbG8="), 5);
         assert_eq!(
             inline_size("aGVsbG8gd29ybGQ=,YQ=="),
-            13,
+            u64::MAX,
             "a comma inside a plain payload must not hide the bytes before it"
         );
     }
@@ -403,6 +461,78 @@ mod tests {
                 "max_files_per_message": 3
             })
         );
+    }
+
+    #[test]
+    fn inline_headers_padding_and_whitespace_cannot_hide_large_inputs() {
+        for value in [
+            format!("data:{};base64,YQ==", "a".repeat(257)),
+            "YQ===".into(),
+            "YQ==YQ==".into(),
+            "a".into(),
+        ] {
+            assert_eq!(inline_size(&value), u64::MAX);
+        }
+        assert_eq!(inline_size("YQ"), 1);
+        assert_eq!(inline_size("YWI="), 2);
+        assert_eq!(inline_size("Y W\nI="), 2);
+    }
+
+    #[test]
+    fn whitespace_cannot_hide_bytes_but_mime_line_breaks_are_accepted() {
+        let policy = AttachmentSettings {
+            accepted_types: vec![".txt".into()],
+            max_file_bytes: 3 * 1024,
+            max_files_per_message: 1,
+        };
+        let inline = |data: String| {
+            vec![message(vec![File {
+                base64: Some(data),
+                ..file(Uuid::new_v4(), true)
+            }])]
+        };
+        let full = "QUFB".repeat(1024);
+        let wrapped = full
+            .as_bytes()
+            .chunks(76)
+            .map(|line| std::str::from_utf8(line).unwrap())
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        assert!(attachments_accepted(&policy, &inline(wrapped), false, &[]));
+        let padded = format!("YQ{}==", " ".repeat(64 * 1024));
+        assert_eq!(inline_size(&padded), 1, "the bytes it decodes to are tiny");
+        assert!(
+            !attachments_accepted(&policy, &inline(padded), false, &[]),
+            "but the text sent is far larger than any allowed file"
+        );
+    }
+
+    #[test]
+    fn image_generation_persists_only_canonical_stored_references() {
+        let id = Uuid::new_v4();
+        let mut request = vec![message(vec![File {
+            name: "wrong.exe".into(),
+            content_type: "bad/type".into(),
+            openai_id: Some("untrusted".into()),
+            ..file(id, true)
+        }])];
+        let stored = HashMap::from([(
+            id,
+            Attachment {
+                file: Some(vec![1, 2]),
+                name: "ok.png".into(),
+                content_type: "image/png".into(),
+            },
+        )]);
+        canonicalize_stored_files(&mut request, &stored).unwrap();
+        let file = &request[0].files[0];
+        assert!(file.base64.is_none() && file.openai_id.is_none());
+        assert_eq!(
+            (file.name.as_str(), file.content_type.as_str(), file.size),
+            ("ok.png", "image/png", Some(2))
+        );
+        hydrate_files_from(&stored, &mut request[0].files).unwrap();
+        assert_eq!(request[0].files[0].base64.as_deref(), Some("AQI="));
     }
 
     #[test]
