@@ -68,6 +68,7 @@ use crate::{
             embed_retrieval_query, end_history_snapshot, load_recent_prompts, load_summary,
             summary_usable_with_cutoff, update_conversation_summary,
         },
+        reply_ledger::{charge_unsaved_reply, save_reply},
         skills_helpers::{load_skill_knowledge_for_stream, load_skills_for_stream},
         system_prompts,
     },
@@ -1311,7 +1312,7 @@ pub async fn handle_chat_stream(
                         metadata: Set(Some(json!({ "files": files_meta }))),
                     };
                     let inserted = if edit_in_progress.is_some() {
-                        img_msg.insert(&app_state.database).await.map(|_| ()).map_err(|e| {
+                        img_msg.clone().insert(&app_state.database).await.map(|_| ()).map_err(|e| {
                             eprintln!("image gen message insert error: {e}");
                             AppError::DbTimeout
                         })
@@ -1320,6 +1321,7 @@ pub async fn handle_chat_stream(
                     };
                     if let Err(e) = inserted {
                         eprintln!("image gen message insert error: {e:?}");
+                        charge_unsaved_reply(&app_state.database, claims.user_id, &img_msg).await;
                         yield Event::default()
                             .event(ChatStreamEvents::AiError.to_string())
                             .data(persistence_error_event_data());
@@ -1645,7 +1647,7 @@ pub async fn handle_chat_stream(
                        "cachedInputTokens": cached_input_tokens_acc,
                        "cacheCreationTokens": cache_creation_tokens_acc,
                    })));
-                   match new_llm_message.clone().update(&app_state.database).await {
+                   match save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
                        Ok(_) => content_checkpoint.saved(Instant::now()),
                        Err(error) => persist_error = Some(error),
                    }
@@ -1709,7 +1711,7 @@ pub async fn handle_chat_stream(
                            ));
                            let now = Instant::now();
                            if content_checkpoint.is_due(now) {
-                               if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                               if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
                                    persist_error = Some(error);
                                    break 'events;
                                }
@@ -1820,7 +1822,7 @@ pub async fn handle_chat_stream(
                               "cachedInputTokens": cached_input_tokens_acc,
                               "cacheCreationTokens": cache_creation_tokens_acc,
                           })));
-                          if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                          if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
                               persist_error = Some(error);
                               break 'events;
                           }
@@ -1876,7 +1878,7 @@ pub async fn handle_chat_stream(
                               "cachedInputTokens": cached_input_tokens_acc,
                               "cacheCreationTokens": cache_creation_tokens_acc,
                           })));
-                          if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                          if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
                               persist_error = Some(error);
                               break 'events;
                           }
@@ -1925,7 +1927,7 @@ pub async fn handle_chat_stream(
                            tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
                            new_llm_message.tools_calls = Set(tool_calls.clone());
                            new_llm_message.updated_at = Set(Utc::now());
-                           if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                           if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
                                persist_error = Some(error);
                                break 'events;
                            }
@@ -2002,7 +2004,7 @@ pub async fn handle_chat_stream(
                                        );
                                        new_llm_message.tools_calls = Set(tool_calls.clone());
                                        new_llm_message.updated_at = Set(Utc::now());
-                                       if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                                       if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
                                            persist_error = Some(error);
                                            break 'events;
                                        }
@@ -2101,7 +2103,7 @@ pub async fn handle_chat_stream(
                            tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
                            new_llm_message.tools_calls = Set(tool_calls.clone());
                            new_llm_message.updated_at = Set(Utc::now());
-                           if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                           if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
                                persist_error = Some(error);
                                break 'events;
                            }
@@ -2150,7 +2152,7 @@ pub async fn handle_chat_stream(
                                tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
                                new_llm_message.tools_calls = Set(tool_calls.clone());
                                new_llm_message.updated_at = Set(Utc::now());
-                               if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                               if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
                                    persist_error = Some(error);
                                    break 'events;
                                }
@@ -2196,7 +2198,7 @@ pub async fn handle_chat_stream(
                                tool_results.push(serde_json::to_value(&tool_result).unwrap_or_else(|_| json!({})));
                                new_llm_message.tools_results = Set(tool_results.clone());
                                new_llm_message.updated_at = Set(Utc::now());
-                               if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                               if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
                                    persist_error = Some(error);
                                    break 'events;
                                }
@@ -2238,7 +2240,7 @@ pub async fn handle_chat_stream(
                            tool_results.push(serde_json::to_value(&tool_result).unwrap_or_else(|_| json!({})));
                            new_llm_message.tools_results = Set(tool_results.clone());
                            new_llm_message.updated_at = Set(Utc::now());
-                           if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                           if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
                                persist_error = Some(error);
                                break 'events;
                            }
@@ -2302,7 +2304,7 @@ pub async fn handle_chat_stream(
                        new_llm_message.tools_calls = Set(tool_calls.clone());
                        new_llm_message.tools_results = Set(tool_results.clone());
                        new_llm_message.updated_at = Set(Utc::now());
-                       if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                       if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
                            persist_error = Some(error);
                            break 'events;
                        }
@@ -2530,7 +2532,7 @@ pub async fn handle_chat_stream(
                                );
                                new_llm_message.tools_results = Set(tool_results.clone());
                                new_llm_message.updated_at = Set(Utc::now());
-                               if let Err(error) = new_llm_message.clone().update(&app_state.database).await {
+                               if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
                                    persist_error = Some(error);
                                    break 'events;
                                }
@@ -2746,7 +2748,7 @@ pub async fn handle_chat_stream(
                    new_llm_message.metadata = Set(Some(with_stop_reason(metadata, reason)));
                }
                new_llm_message.updated_at = Set(Utc::now());
-               match new_llm_message.clone().update(&app_state.database).await {
+               match save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
                    Ok(_) => {
                        content_checkpoint.saved(Instant::now());
                        content_checkpoint.finish();
@@ -2874,7 +2876,7 @@ pub async fn handle_chat_stream(
                            None => metadata,
                        }));
                        new_llm_message.updated_at = Set(Utc::now());
-                       let _ = new_llm_message.clone().update(&app_state.database).await;
+                       let _ = save_reply(&app_state.database, claims.user_id, &new_llm_message).await;
                    }
                }
                let finished_event = ChatStream {

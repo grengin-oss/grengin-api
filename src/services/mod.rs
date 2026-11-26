@@ -79,6 +79,7 @@ pub mod provider_runtime;
 pub mod provider_stream;
 pub mod rag;
 pub mod reconfigure;
+pub mod reply_ledger;
 pub mod role_assignment;
 pub mod safe_egress;
 pub mod search;
