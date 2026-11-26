@@ -474,6 +474,7 @@ mod tests {
 
     fn model(engine: &str, key: &str, name: &str) -> ModelInfo {
         ModelInfo {
+            launch_date: None,
             key: key.to_string(),
             name: name.to_string(),
             engine: engine.to_string(),

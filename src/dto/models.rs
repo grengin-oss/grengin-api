@@ -52,6 +52,9 @@ pub struct ModelInfo {
     pub name: String,
     pub engine: String,
     pub model_type: ModelType,
+    // Orders the picker newest first; never serialized.
+    #[serde(skip)]
+    pub launch_date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
