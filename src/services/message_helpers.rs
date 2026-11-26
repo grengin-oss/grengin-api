@@ -18,6 +18,7 @@ use crate::{
             hide_as_other_version, recount_conversation, show_messages, stale_summary,
         },
     },
+    state::EditView,
 };
 
 pub async fn soft_delete_message(
@@ -155,6 +156,14 @@ impl EditInProgress {
         self.request
     }
 
+    pub async fn is_current(&self, db: &DatabaseConnection) -> Result<bool, AppError> {
+        let conversation = conversations::Entity::find_by_id(self.conversation_id)
+            .one(db)
+            .await
+            .map_err(|_| AppError::DbTimeout)?;
+        Ok(conversation.is_some_and(|row| self.holds_claim(row.edit_claim)))
+    }
+
     // The new version shares the edited message's parent, which makes the two siblings.
     pub fn parent_id(&self) -> Option<Uuid> {
         self.parent_id
@@ -162,6 +171,15 @@ impl EditInProgress {
 
     pub fn record_attempt_message(&mut self, message_id: Uuid) {
         self.attempt_message_ids.push(message_id);
+    }
+
+    // Registered with the reply so GET /chat can show this edit while it generates.
+    pub fn view(&self) -> EditView {
+        EditView {
+            request: self.request,
+            cutoff: self.history_cutoff,
+            message_ids: self.attempt_message_ids.clone(),
+        }
     }
 
     // Taken once this edit's reply has started, so a request that never got that far cannot

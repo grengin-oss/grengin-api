@@ -6,8 +6,8 @@ use chrono::Utc;
 use futures_util::{Stream, StreamExt};
 use llm_plugin::ProviderError;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, UpdateMany,
-    prelude::Decimal, sea_query::Expr,
+    ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, EntityTrait, IsolationLevel,
+    QueryFilter, QueryOrder, TransactionTrait, UpdateMany, prelude::Decimal, sea_query::Expr,
 };
 use serde_json::Value;
 use std::{collections::HashSet, convert::Infallible, sync::Arc, time::Duration};
@@ -18,15 +18,17 @@ use crate::{
     dto::{chat_stream::ResponseStopped, models::ModelInfo},
     error::{AppError, ErrorDetailVariant, ErrorResponse},
     models::{
+        conversations,
         departments::ActionOnExceed,
         messages,
         messages::{ChatRole, StopReason},
     },
     services::budget_allocation::{BudgetHealth, get_department_budget_status},
-    state::{SharedState, StreamCancel, StreamCancellations},
+    state::{EditView, GeneratingSnapshot, SharedState, StreamCancel, StreamCancellations},
 };
 
 const CONTENT_SAVE_INTERVAL: Duration = Duration::from_millis(500);
+const CLIENT_BACKPRESSURE_TIMEOUT: Duration = Duration::from_secs(5);
 // The webapp sends Stop and closes the stream at the same time, so a disconnect waits this long
 // for the stop request before the reply stays recorded as a network error.
 const STOP_REQUEST_GRACE: Duration = Duration::from_secs(5);
@@ -163,22 +165,17 @@ pub fn next_tool_round(
     }
 }
 
-// A reply keeps generating and is saved when its client goes away (a page refresh), instead
-// of being stopped as a network error; the reloaded chat reads it back. Stop still cancels it.
-// An edit becomes a version only for the client that asked for it, so it stops with its stream (the
-// documented "no version is added" on disconnect); any other reply keeps generating and is saved.
+// A reply keeps generating when its client goes away (a page refresh, a closed tab), instead
+// of being stopped as a network error; the reloaded chat reads it back. That includes an edit's
+// reply: GET /chat shows the edit while it generates and it becomes the version once complete.
+// Stop still cancels it.
 pub fn deliver_reply<S>(
     events: S,
-    is_edit: bool,
 ) -> std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>
 where
     S: Stream<Item = Result<Event, Infallible>> + Send + 'static,
 {
-    if is_edit {
-        Box::pin(events)
-    } else {
-        Box::pin(detach_from_client(events))
-    }
+    Box::pin(detach_from_client(events))
 }
 
 pub fn detach_from_client<S>(events: S) -> impl Stream<Item = Result<Event, Infallible>> + Send
@@ -187,9 +184,18 @@ where
 {
     let (sender, receiver) = tokio::sync::mpsc::channel(32);
     tokio::spawn(async move {
+        let mut sender = Some(sender);
         let mut events = std::pin::pin!(events);
         while let Some(event) = events.next().await {
-            let _ = sender.send(event).await;
+            if let Some(active) = sender.as_ref()
+                && !matches!(
+                    tokio::time::timeout(CLIENT_BACKPRESSURE_TIMEOUT, active.send(event)).await,
+                    Ok(Ok(()))
+                )
+            {
+                // End the stalled transport; generation and the resumable feed keep advancing.
+                sender = None;
+            }
         }
     });
     futures_util::stream::unfold(receiver, |mut receiver| async move {
@@ -214,29 +220,94 @@ pub async fn messages_with_generating(
 ) -> Result<(Vec<messages::Model>, HashSet<Uuid>), AppError> {
     for attempt in 1..=GENERATING_READ_ATTEMPTS {
         let before = state.generating_replies(conversation_id).await;
+        let txn = state
+            .database
+            .begin_with_config(Some(IsolationLevel::RepeatableRead), None)
+            .await
+            .map_err(|_| AppError::DbTimeout)?;
+        let edit = match before.edit.clone() {
+            Some(edit) => current_edit(&txn, conversation_id, edit).await?,
+            None => None,
+        };
+        let shown = match &edit {
+            Some(edit) => Condition::any()
+                .add(messages::Column::Deleted.eq(false))
+                .add(messages::Column::Id.is_in(edit.message_ids.iter().copied())),
+            None => Condition::all().add(messages::Column::Deleted.eq(false)),
+        };
         let rows = messages::Entity::find()
             .filter(messages::Column::ConversationId.eq(conversation_id))
-            .filter(messages::Column::Deleted.eq(false))
+            .filter(shown)
             .order_by_asc(messages::Column::CreatedAt)
-            .all(&state.database)
+            .all(&txn)
             .await
             .map_err(|error| {
                 eprintln!("{error}");
                 AppError::DbTimeout
             })?;
+        txn.commit().await.map_err(|_| AppError::DbTimeout)?;
         let after = state.generating_replies(conversation_id).await;
-        let newest_reply = rows
-            .iter()
-            .rev()
-            .find(|row| row.role == ChatRole::Assistant)
-            .map(|row| row.id);
-        if let Some(generating) =
-            before.settle(after, newest_reply, attempt == GENERATING_READ_ATTEMPTS)
-        {
-            return Ok((rows, generating));
+        if let Some(result) = settle_generating_read(
+            rows,
+            edit,
+            before,
+            after,
+            attempt == GENERATING_READ_ATTEMPTS,
+        ) {
+            return Ok(result);
         }
     }
     unreachable!("the last attempt always settles")
+}
+
+pub(crate) fn settle_generating_read(
+    mut rows: Vec<messages::Model>,
+    edit: Option<EditView>,
+    before: GeneratingSnapshot,
+    after: GeneratingSnapshot,
+    last_attempt: bool,
+) -> Option<(Vec<messages::Model>, HashSet<Uuid>)> {
+    let newest_reply = rows
+        .iter()
+        .rev()
+        .find(|row| row.role == ChatRole::Assistant)
+        .map(|row| row.id);
+    let generating = before.settle(after, newest_reply, last_attempt)?;
+    if let Some(edit) = &edit {
+        show_running_edit(&mut rows, edit);
+    }
+    Some((rows, generating))
+}
+
+// An edit can still become the shown version only while no newer edit has claimed the
+// conversation (a branch switch claims too). The claim lives in Postgres, so this holds even when
+// the newer edit already finished and left the registry before this one registered. Requests that
+// were numbered but rejected before replying never claim, so they hide nothing.
+async fn current_edit<C: ConnectionTrait>(
+    db: &C,
+    conversation_id: Uuid,
+    edit: EditView,
+) -> Result<Option<EditView>, AppError> {
+    let conversation = conversations::Entity::find_by_id(conversation_id)
+        .one(db)
+        .await
+        .map_err(|error| {
+            eprintln!("edit claim lookup error: {error}");
+            AppError::DbTimeout
+        })?;
+    Ok(conversation
+        .is_some_and(|conversation| still_current(&edit, conversation.edit_claim))
+        .then_some(edit))
+}
+
+fn still_current(edit: &EditView, latest_claim: Option<i32>) -> bool {
+    latest_claim.is_none_or(|claim| edit.request >= claim)
+}
+
+// While an edit's reply generates, its turn (still hidden until it commits) is shown in place of
+// everything from the edited message on, exactly as the commit will swap them.
+fn show_running_edit(rows: &mut Vec<messages::Model>, edit: &EditView) {
+    rows.retain(|row| edit.message_ids.contains(&row.id) || row.created_at < edit.cutoff);
 }
 
 pub struct ContentCheckpoint {
@@ -426,6 +497,61 @@ pub fn response_stopped_event_data(message_id: Uuid, reason: StopReason) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_stalled_original_connection_cannot_block_generation() {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let progress = count.clone();
+        let events = futures_util::stream::iter(0..200).map(move |_| {
+            progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(Event::default().data("delta"))
+        });
+        let original = deliver_reply(events);
+        tokio::time::timeout(
+            CLIENT_BACKPRESSURE_TIMEOUT + Duration::from_secs(2),
+            async {
+                while count.load(std::sync::atomic::Ordering::Relaxed) < 200 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            },
+        )
+        .await
+        .expect("a full browser queue must detach, not freeze generation");
+        let buffered: Vec<_> = original.collect().await;
+        assert_eq!(buffered.len(), 32, "the stalled transport eventually ends");
+    }
+
+    #[tokio::test]
+    async fn a_temporarily_slow_reader_receives_every_event_without_detaching() {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let progress = count.clone();
+        let events = futures_util::stream::iter(0..200).map(move |index| {
+            progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(Event::default().data(index.to_string()))
+        });
+        let client = deliver_reply(events);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while count.load(std::sync::atomic::Ordering::Relaxed) < 33 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fill the outgoing queue before simulating a slow reader");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let received: Vec<_> = tokio::time::timeout(
+            CLIENT_BACKPRESSURE_TIMEOUT + Duration::from_secs(2),
+            client.collect(),
+        )
+        .await
+        .expect("the recovered reader must finish");
+        assert_eq!(received.len(), 200);
+        for (index, event) in received.iter().enumerate() {
+            assert_eq!(
+                format!("{:?}", event.as_ref().unwrap()),
+                format!("{:?}", Event::default().data(index.to_string()))
+            );
+        }
+    }
     use crate::dto::models::ModelType;
 
     #[tokio::test]
@@ -452,26 +578,212 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_edit_stops_with_its_client_but_a_reply_keeps_generating() {
-        for (is_edit, expect_finished) in [(true, false), (false, true)] {
-            let produced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let counter = produced.clone();
-            let reply = async_stream::stream! {
-                for chunk in 0..100 {
-                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    tokio::task::yield_now().await;
-                    yield Ok::<_, Infallible>(Event::default().data(chunk.to_string()));
-                }
-            };
-            let mut client = deliver_reply(reply, is_edit);
-            assert!(client.next().await.is_some());
-            drop(client);
-            for _ in 0..1000 {
+    async fn every_reply_including_an_edit_keeps_generating_after_its_client_leaves() {
+        let produced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = produced.clone();
+        let reply = async_stream::stream! {
+            for chunk in 0..100 {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 tokio::task::yield_now().await;
+                yield Ok::<_, Infallible>(Event::default().data(chunk.to_string()));
             }
-            let finished = produced.load(std::sync::atomic::Ordering::SeqCst) == 100;
-            assert_eq!(finished, expect_finished, "is_edit={is_edit}");
+        };
+        let mut client = deliver_reply(reply);
+        assert!(client.next().await.is_some());
+        drop(client);
+        for _ in 0..1000 {
+            tokio::task::yield_now().await;
         }
+        assert_eq!(produced.load(std::sync::atomic::Ordering::SeqCst), 100);
+    }
+
+    fn edit_view(request: i32) -> EditView {
+        EditView {
+            request,
+            cutoff: Utc::now(),
+            message_ids: vec![Uuid::new_v4()],
+        }
+    }
+
+    #[test]
+    fn an_edit_is_shown_until_a_newer_edit_claims_the_conversation() {
+        assert!(still_current(&edit_view(1), None), "not claimed yet");
+        assert!(still_current(&edit_view(1), Some(1)), "its own claim");
+        assert!(still_current(&edit_view(2), Some(1)), "about to claim");
+        assert!(
+            !still_current(&edit_view(1), Some(2)),
+            "a newer edit claimed, even if it already finished"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable, migrated database)"]
+    async fn a_rejected_newer_edit_leaves_the_running_edit_shown_and_a_claimed_one_hides_it() {
+        use crate::services::message_helpers::{begin_pending_edit, prepare_message_edit};
+        use sea_orm::{ActiveModelTrait, ConnectionTrait, Database, IntoActiveModel};
+
+        let url = std::env::var("GRENGIN_SECURITY_TEST_DATABASE_URL").expect("test database URL");
+        assert!(
+            url.contains("/grengin_security_test"),
+            "refusing a non-test database"
+        );
+        let db = Database::connect(&url).await.expect("fixture database");
+        let (user, chat, message) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        db.execute_unprepared(&format!(
+            r#"INSERT INTO users (id, status, email, "emailVerified", "mfaEnabled", "createdAt", "updatedAt", "lastLoginAt")
+                 VALUES ('{user}', 'active', 'edit-fence-{user}@example.invalid', true, false, now(), now(), now())"#
+        ))
+        .await
+        .expect("fixture user");
+        let now = Utc::now();
+        conversations::Model {
+            id: chat,
+            user_id: user,
+            title: None,
+            model_provider: "openai".into(),
+            model_name: "gpt-test".into(),
+            created_at: now,
+            updated_at: now,
+            last_message_at: None,
+            archived_at: None,
+            message_count: 1,
+            total_tokens: 0,
+            total_cost: Decimal::ZERO,
+            metadata: None,
+            pinned: false,
+            edit_requests: 0,
+            edit_claim: None,
+        }
+        .into_active_model()
+        .insert(&db)
+        .await
+        .expect("fixture conversation");
+        messages::Model {
+            id: message,
+            conversation_id: chat,
+            previous_message_id: None,
+            deleted: false,
+            inactive_branch: false,
+            role: ChatRole::User,
+            message_content: "question".into(),
+            model_provider: "openai".into(),
+            model_name: "gpt-test".into(),
+            request_tokens: 0,
+            response_tokens: 0,
+            request_id: None,
+            tools_calls: Vec::new(),
+            tools_results: Vec::new(),
+            created_at: now,
+            updated_at: now,
+            total_tokens: 0,
+            latency: 0,
+            cost: Decimal::ZERO,
+            metadata: None,
+        }
+        .into_active_model()
+        .insert(&db)
+        .await
+        .expect("fixture message");
+        let input = || {
+            serde_json::from_value::<crate::dto::chat_stream::ChatInput>(serde_json::json!({
+                "provider": "openai",
+                "model_name": "gpt-test",
+                "messages": [],
+            }))
+            .unwrap()
+        };
+        let start_edit = || async {
+            let pending = prepare_message_edit(&db, user, chat, message, &mut input())
+                .await
+                .expect("edit numbered");
+            begin_pending_edit(chat, Some(pending)).expect("edit of this conversation")
+        };
+
+        let mut running = start_edit().await;
+        running.claim(&db).await.expect("claim");
+        let shown = running.view();
+        // Numbered, then refused (for example an invalid provider) before it replied.
+        let _rejected = start_edit().await;
+        assert!(running.is_current(&db).await.unwrap());
+        assert_eq!(
+            current_edit(&db, chat, shown.clone()).await.unwrap(),
+            Some(shown.clone()),
+            "a rejected newer request must not hide the running edit"
+        );
+
+        let mut newer = start_edit().await;
+        newer.claim(&db).await.expect("claim");
+        assert!(
+            !running.is_current(&db).await.unwrap(),
+            "a late registration must check the durable fence even after the newer stream left"
+        );
+        assert!(newer.is_current(&db).await.unwrap());
+        let plain = crate::services::message_branches::claim_plain_turn(&db, chat)
+            .await
+            .unwrap();
+        assert!(plain > newer.request());
+        assert!(
+            !newer.is_current(&db).await.unwrap(),
+            "a plain turn must supersede a still-running edit"
+        );
+        assert_eq!(
+            current_edit(&db, chat, shown).await.unwrap(),
+            None,
+            "a newer claimed edit hides it, even once the newer one has finished"
+        );
+    }
+
+    #[test]
+    fn a_running_edit_replaces_the_conversation_from_the_edited_message() {
+        let cutoff = Utc::now();
+        let earlier = cutoff - chrono::Duration::seconds(10);
+        let later = cutoff + chrono::Duration::seconds(5);
+        let row = |id: Uuid, created_at| messages::Model {
+            id,
+            conversation_id: Uuid::nil(),
+            previous_message_id: None,
+            role: ChatRole::User,
+            deleted: false,
+            inactive_branch: false,
+            message_content: String::new(),
+            model_provider: String::new(),
+            model_name: String::new(),
+            request_id: None,
+            request_tokens: 0,
+            response_tokens: 0,
+            tools_calls: Vec::new(),
+            tools_results: Vec::new(),
+            created_at,
+            updated_at: created_at,
+            total_tokens: 0,
+            latency: 0,
+            cost: Decimal::ZERO,
+            metadata: None,
+        };
+        let (kept, edited, old_reply, edit_user, edit_reply) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let mut rows = vec![
+            row(kept, earlier),
+            row(edited, cutoff),
+            row(old_reply, cutoff + chrono::Duration::seconds(1)),
+            row(edit_user, later),
+            row(edit_reply, later),
+        ];
+        let edit = EditView {
+            request: 3,
+            cutoff,
+            message_ids: vec![edit_user, edit_reply],
+        };
+        show_running_edit(&mut rows, &edit);
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            [kept, edit_user, edit_reply]
+        );
     }
 
     fn model(engine: &str, key: &str, name: &str) -> ModelInfo {

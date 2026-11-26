@@ -21,17 +21,19 @@ use crate::{
     services::mcp_client::McpServerClient,
     services::notifications::NotificationEvent,
     services::owner_bootstrap::ensure_bootstrap_super_admin,
+    services::reply_feed::ReplyFeed,
     services::sso_egress::SsoHttpClient,
 };
 use anyhow::Error;
+use chrono::{DateTime, Utc};
 use llm_plugin::ProviderRegistry;
 use reqwest::Client as ReqwestClient;
 use sea_orm::{ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter};
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, OnceLock, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use tokio::sync::{Notify, RwLock, broadcast};
@@ -39,28 +41,62 @@ use uuid::Uuid;
 
 pub type StreamCancellations = Arc<RwLock<StreamRegistry>>;
 
+// What an edit's reply shows while it generates: its new turn in place of the conversation from
+// the edited message on. The turn is still hidden in the database until the edit commits.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditView {
+    pub request: i32,
+    pub cutoff: DateTime<Utc>,
+    pub message_ids: Vec<Uuid>,
+}
+
 #[derive(Default)]
 pub struct StreamRegistry {
     streams: HashMap<Uuid, Arc<StreamCancel>>,
+    edit_views: HashMap<Uuid, EditView>,
+    feeds: HashMap<Uuid, Arc<ReplyFeed>>,
     // Counts every reply that started or stopped generating, so a reader can tell whether the
     // set changed while it read the messages.
-    changes: u64,
+    changes: HashMap<Uuid, Weak<AtomicU64>>,
 }
 
 impl StreamRegistry {
+    fn epoch(&mut self, conversation: Uuid) -> Arc<AtomicU64> {
+        if let Some(epoch) = self.changes.get(&conversation).and_then(Weak::upgrade) {
+            return epoch;
+        }
+        self.changes.retain(|_, epoch| epoch.strong_count() > 0);
+        let epoch = Arc::new(AtomicU64::new(0));
+        self.changes.insert(conversation, Arc::downgrade(&epoch));
+        epoch
+    }
+
     pub fn insert(&mut self, message_id: Uuid, handle: Arc<StreamCancel>) {
-        self.changes += 1;
+        let epoch = self.epoch(handle.conversation_id);
+        epoch.fetch_add(1, Ordering::Relaxed);
+        let _ = handle.epoch.set(epoch);
         self.streams.insert(message_id, handle);
     }
 
     pub fn remove(&mut self, message_id: &Uuid) {
-        if self.streams.remove(message_id).is_some() {
-            self.changes += 1;
+        self.edit_views.remove(message_id);
+        self.feeds.remove(message_id);
+        if let Some(handle) = self.streams.remove(message_id) {
+            self.epoch(handle.conversation_id)
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 
     pub fn is_empty(&self) -> bool {
         self.streams.is_empty()
+    }
+
+    pub fn cancel_conversation(&self, conversation_id: Uuid) {
+        for handle in self.streams.values() {
+            if handle.conversation_id == conversation_id {
+                handle.cancel(StopReason::UserCancelled);
+            }
+        }
     }
 
     fn register(
@@ -69,21 +105,68 @@ impl StreamRegistry {
         conversation_id: Uuid,
         edit_request: Option<i32>,
     ) -> Arc<StreamCancel> {
-        self.changes += 1;
-        register_stream(&mut self.streams, message_id, conversation_id, edit_request)
+        let epoch = self.epoch(conversation_id);
+        epoch.fetch_add(1, Ordering::Relaxed);
+        let handle = register_stream(&mut self.streams, message_id, conversation_id, edit_request);
+        let _ = handle.epoch.set(epoch);
+        handle
     }
 
-    fn generating(&self, conversation_id: Uuid) -> GeneratingSnapshot {
-        GeneratingSnapshot {
-            changes: self.changes,
-            replies: generating_in(&self.streams, conversation_id),
+    fn register_edit(
+        &mut self,
+        message_id: Uuid,
+        conversation_id: Uuid,
+        view: EditView,
+    ) -> Arc<StreamCancel> {
+        let handle = self.register(message_id, conversation_id, Some(view.request));
+        // An older edit stopped by this one keeps its stream entry until it has saved, but must
+        // never be shown again, even after this edit's reply leaves the registry.
+        let streams = &self.streams;
+        self.edit_views.retain(|other, other_view| {
+            other_view.request >= view.request
+                || streams
+                    .get(other)
+                    .is_none_or(|handle| handle.conversation_id != conversation_id)
+        });
+        let superseded = self
+            .newest_edit(conversation_id)
+            .is_some_and(|newest| newest.request > view.request);
+        if !superseded {
+            self.edit_views.insert(message_id, view);
         }
+        handle
+    }
+
+    fn generating(&mut self, conversation_id: Uuid) -> GeneratingSnapshot {
+        let epoch = self.epoch(conversation_id);
+        GeneratingSnapshot {
+            changes: epoch.load(Ordering::Relaxed),
+            _epoch: epoch,
+            replies: generating_in(&self.streams, conversation_id),
+            edit: self.newest_edit(conversation_id),
+        }
+    }
+
+    // The newest edit replying in this conversation is the one the user sees.
+    fn newest_edit(&self, conversation_id: Uuid) -> Option<EditView> {
+        self.edit_views
+            .iter()
+            .filter(|(message_id, _)| {
+                self.streams
+                    .get(message_id)
+                    .is_some_and(|handle| handle.conversation_id == conversation_id)
+            })
+            .map(|(_, view)| view)
+            .max_by_key(|view| view.request)
+            .cloned()
     }
 }
 
 pub struct GeneratingSnapshot {
     changes: u64,
+    _epoch: Arc<AtomicU64>,
     pub replies: HashSet<Uuid>,
+    pub edit: Option<EditView>,
 }
 
 impl GeneratingSnapshot {
@@ -163,6 +246,7 @@ pub struct StreamCancel {
     cancelled: AtomicBool,
     reason: std::sync::Mutex<Option<StopReason>>,
     notify: Notify,
+    epoch: OnceLock<Arc<AtomicU64>>,
 }
 
 impl StreamCancel {
@@ -173,6 +257,7 @@ impl StreamCancel {
             cancelled: AtomicBool::new(false),
             reason: std::sync::Mutex::new(None),
             notify: Notify::new(),
+            epoch: OnceLock::new(),
         }
     }
 
@@ -339,12 +424,26 @@ impl AppState {
         &self,
         message_id: Uuid,
         conversation_id: Uuid,
-        edit_request: Option<i32>,
+        edit: Option<EditView>,
+        feed: Arc<ReplyFeed>,
     ) -> Arc<StreamCancel> {
+        let mut registry = self.stream_cancellations.write().await;
+        let handle = match edit {
+            Some(view) => registry.register_edit(message_id, conversation_id, view),
+            None => registry.register(message_id, conversation_id, None),
+        };
+        registry.feeds.insert(message_id, feed);
+        handle
+    }
+
+    // The recorded events of a reply still generating here, for a page that lost its stream.
+    pub async fn reply_feed(&self, message_id: Uuid) -> Option<Arc<ReplyFeed>> {
         self.stream_cancellations
-            .write()
+            .read()
             .await
-            .register(message_id, conversation_id, edit_request)
+            .feeds
+            .get(&message_id)
+            .cloned()
     }
 
     pub async fn release_stream_cancel(&self, message_id: Uuid) {
@@ -363,14 +462,30 @@ impl AppState {
 
     pub async fn generating_replies(&self, conversation_id: Uuid) -> GeneratingSnapshot {
         self.stream_cancellations
-            .read()
+            .write()
             .await
             .generating(conversation_id)
     }
 
     pub async fn interrupt_older_streams(&self, conversation_id: Uuid, edit_request: i32) {
-        let guard = self.stream_cancellations.read().await;
+        let mut guard = self.stream_cancellations.write().await;
         interrupt_older_streams(&guard.streams, conversation_id, edit_request);
+        let streams = &guard.streams;
+        let removed: Vec<_> = guard
+            .edit_views
+            .iter()
+            .filter(|(id, view)| {
+                view.request < edit_request
+                    && streams
+                        .get(id)
+                        .is_some_and(|handle| handle.conversation_id == conversation_id)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in removed {
+            guard.edit_views.remove(&id);
+        }
+        guard.epoch(conversation_id).fetch_add(1, Ordering::Relaxed);
     }
 
     pub async fn get_oidc_provider_runtime(
@@ -800,6 +915,38 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn unrelated_conversations_do_not_invalidate_a_generating_snapshot() {
+        let mut registry = StreamRegistry::default();
+        let conversation = Uuid::new_v4();
+        let before = registry.generating(conversation);
+        let other = Uuid::new_v4();
+        let reply = Uuid::new_v4();
+        registry.register(reply, other, None);
+        registry.remove(&reply);
+        let result = before.settle(registry.generating(conversation), None, false);
+        assert!(result.is_some_and(|generating| generating.is_empty()));
+    }
+
+    #[test]
+    fn idle_conversation_epochs_are_pruned_without_losing_live_readers() {
+        let mut registry = StreamRegistry::default();
+        for _ in 0..100 {
+            drop(registry.generating(Uuid::new_v4()));
+        }
+        assert!(registry.changes.len() <= 1);
+        let chat = Uuid::new_v4();
+        let before = registry.generating(chat);
+        let reply = Uuid::new_v4();
+        registry.register(reply, chat, None);
+        registry.remove(&reply);
+        assert!(
+            before
+                .settle(registry.generating(chat), None, false)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn only_replies_still_registered_in_that_conversation_are_generating() {
         let mut streams = HashMap::new();
         let conversation = Uuid::new_v4();
@@ -813,6 +960,131 @@ mod tests {
         assert!(generating_in(&streams, conversation).contains(&reply));
         streams.remove(&reply);
         assert!(generating_in(&streams, conversation).is_empty());
+    }
+
+    #[test]
+    fn deleting_a_conversation_cancels_its_plain_and_edit_replies_only() {
+        let mut registry = StreamRegistry::default();
+        let conversation = Uuid::new_v4();
+        let edit = registry.register(Uuid::new_v4(), conversation, Some(2));
+        let plain = registry.register(Uuid::new_v4(), conversation, None);
+        let other = registry.register(Uuid::new_v4(), Uuid::new_v4(), None);
+        registry.cancel_conversation(Uuid::new_v4());
+        assert!(!edit.is_cancelled());
+        assert!(!plain.is_cancelled());
+        registry.cancel_conversation(conversation);
+        assert_eq!(edit.reason(), Some(StopReason::UserCancelled));
+        assert_eq!(plain.reason(), Some(StopReason::UserCancelled));
+        assert!(!other.is_cancelled());
+        assert_eq!(
+            registry.streams.len(),
+            3,
+            "settlement still owns the handles"
+        );
+    }
+
+    #[test]
+    fn deleting_a_conversation_does_not_overwrite_an_existing_stop_reason() {
+        let mut registry = StreamRegistry::default();
+        let conversation = Uuid::new_v4();
+        let reply = registry.register(Uuid::new_v4(), conversation, None);
+        reply.cancel(StopReason::ProviderError);
+        registry.cancel_conversation(conversation);
+        assert_eq!(reply.reason(), Some(StopReason::ProviderError));
+    }
+
+    #[test]
+    fn three_mid_read_edit_changes_never_return_both_turns() {
+        use crate::{
+            models::messages::{ChatRole, Model},
+            services::chat_stream_helpers::settle_generating_read,
+        };
+        use chrono::{Duration, Utc};
+
+        let conversation = Uuid::new_v4();
+        let cutoff = Utc::now();
+        let row = |id, role, created_at| Model {
+            id,
+            conversation_id: conversation,
+            previous_message_id: None,
+            deleted: false,
+            inactive_branch: false,
+            role,
+            message_content: String::new(),
+            model_provider: String::new(),
+            model_name: String::new(),
+            request_tokens: 0,
+            response_tokens: 0,
+            request_id: None,
+            tools_calls: vec![],
+            tools_results: vec![],
+            created_at,
+            updated_at: created_at,
+            total_tokens: 0,
+            latency: 0,
+            cost: rust_decimal::Decimal::ZERO,
+            metadata: None,
+        };
+        let kept = Uuid::new_v4();
+        let edit_user = Uuid::new_v4();
+        let edit_reply = Uuid::new_v4();
+        let rows = vec![
+            row(kept, ChatRole::User, cutoff - Duration::seconds(1)),
+            row(Uuid::new_v4(), ChatRole::User, cutoff),
+            row(Uuid::new_v4(), ChatRole::Assistant, cutoff),
+            row(edit_user, ChatRole::User, cutoff + Duration::seconds(1)),
+            row(
+                edit_reply,
+                ChatRole::Assistant,
+                cutoff + Duration::seconds(1),
+            ),
+        ];
+        for replaced_by_newer_edit in [false, true] {
+            for attempt in 1..=3 {
+                let mut registry = StreamRegistry::default();
+                registry.register_edit(
+                    edit_reply,
+                    conversation,
+                    super::EditView {
+                        request: 1,
+                        cutoff,
+                        message_ids: vec![edit_user, edit_reply],
+                    },
+                );
+                let before = registry.generating(conversation);
+                let read_edit = before.edit.clone();
+                if replaced_by_newer_edit {
+                    registry.register_edit(
+                        Uuid::new_v4(),
+                        conversation,
+                        super::EditView {
+                            request: 2,
+                            cutoff,
+                            message_ids: vec![Uuid::new_v4()],
+                        },
+                    );
+                } else {
+                    registry.remove(&edit_reply);
+                }
+                let result = settle_generating_read(
+                    rows.clone(),
+                    read_edit,
+                    before,
+                    registry.generating(conversation),
+                    attempt == 3,
+                );
+                if attempt < 3 {
+                    assert!(result.is_none());
+                } else {
+                    let (shown, generating) = result.expect("bounded final read");
+                    assert_eq!(
+                        shown.iter().map(|row| row.id).collect::<Vec<_>>(),
+                        [kept, edit_user, edit_reply]
+                    );
+                    assert!(generating.contains(&edit_reply));
+                }
+            }
+        }
     }
 
     #[test]
@@ -869,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn other_conversations_and_unknown_releases_do_not_hide_changes() {
+    fn other_conversations_and_unknown_releases_do_not_invalidate_a_read() {
         let mut registry = StreamRegistry::default();
         let conversation = Uuid::new_v4();
         let before = registry.generating(conversation);
@@ -881,11 +1153,10 @@ mod tests {
         );
         let before = registry.generating(conversation);
         registry.register(Uuid::new_v4(), Uuid::new_v4(), None);
-        // A change anywhere forces a re-read: cheap, and it never reports a partial reply as final.
         assert!(
             before
                 .settle(registry.generating(conversation), None, false)
-                .is_none()
+                .is_some()
         );
     }
 
@@ -1002,5 +1273,66 @@ mod tests {
 
         assert_eq!(stopped, vec![plain]);
         assert!(!streams[&newer].is_cancelled());
+    }
+
+    #[test]
+    fn the_newest_running_edit_is_the_one_shown_and_leaves_with_its_reply() {
+        let conversation = Uuid::new_v4();
+        let view = |request| super::EditView {
+            request,
+            cutoff: chrono::Utc::now(),
+            message_ids: vec![Uuid::new_v4()],
+        };
+        let mut registry = StreamRegistry::default();
+        assert_eq!(registry.generating(conversation).edit, None);
+        let older = Uuid::new_v4();
+        let newer = Uuid::new_v4();
+        registry.register_edit(older, conversation, view(1));
+        registry.register_edit(newer, conversation, view(2));
+        registry.register_edit(Uuid::new_v4(), Uuid::new_v4(), view(9));
+        let snapshot = registry.generating(conversation);
+        assert_eq!(snapshot.edit.map(|edit| edit.request), Some(2));
+        assert_eq!(snapshot.replies.len(), 2);
+
+        registry.remove(&newer);
+        let snapshot = registry.generating(conversation);
+        assert_eq!(
+            snapshot.edit, None,
+            "the stopped older edit is never shown again"
+        );
+        assert_eq!(
+            snapshot.replies.len(),
+            1,
+            "it still counts as generating until saved"
+        );
+        registry.remove(&older);
+        assert_eq!(registry.generating(conversation).edit, None);
+        assert!(
+            registry.edit_views.len() == 1,
+            "only the other conversation's edit remains"
+        );
+    }
+
+    #[test]
+    fn an_older_edit_registering_late_is_not_shown_over_a_newer_one() {
+        let conversation = Uuid::new_v4();
+        let view = |request| super::EditView {
+            request,
+            cutoff: chrono::Utc::now(),
+            message_ids: vec![Uuid::new_v4()],
+        };
+        let mut registry = StreamRegistry::default();
+        let newer = Uuid::new_v4();
+        registry.register_edit(newer, conversation, view(3));
+        registry.register_edit(Uuid::new_v4(), conversation, view(2));
+        assert_eq!(
+            registry
+                .generating(conversation)
+                .edit
+                .map(|edit| edit.request),
+            Some(3)
+        );
+        registry.remove(&newer);
+        assert_eq!(registry.generating(conversation).edit, None);
     }
 }
