@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
+    collections::HashMap,
     convert::Infallible,
     fmt::Write,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, LazyLock, Mutex, MutexGuard},
     time::Duration,
 };
 
@@ -25,6 +26,46 @@ use crate::{
 // reconnects to it falls back to reading the saved conversation.
 const MAX_EVENTS: usize = 20_000;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
+const GLOBAL_REPLAY_BYTES: usize = 64 * 1024 * 1024;
+const USER_REPLAY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_FOLLOWERS: usize = 4;
+static MEMORY: LazyLock<Mutex<ReplayMemory>> =
+    LazyLock::new(|| Mutex::new(ReplayMemory::default()));
+
+#[derive(Default)]
+struct ReplayMemory {
+    total: usize,
+    users: HashMap<Uuid, usize>,
+}
+
+impl ReplayMemory {
+    fn reserve(&mut self, owner: Uuid, bytes: usize) -> bool {
+        let used = self.users.get(&owner).copied().unwrap_or_default();
+        if self.total.saturating_add(bytes) > GLOBAL_REPLAY_BYTES
+            || used.saturating_add(bytes) > USER_REPLAY_BYTES
+        {
+            return false;
+        }
+        self.total += bytes;
+        self.users.insert(owner, used + bytes);
+        true
+    }
+    fn release(&mut self, owner: Uuid, bytes: usize) {
+        self.total -= bytes;
+        if let Some(used) = self.users.get_mut(&owner) {
+            *used -= bytes;
+            if *used == 0 {
+                self.users.remove(&owner);
+            }
+        }
+    }
+}
+
+fn memory() -> MutexGuard<'static, ReplayMemory> {
+    MEMORY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 // How long a finished reply's events stay for followers still replaying them. After that they
 // are freed even if a stalled connection still holds the feed.
 const KEEP_AFTER_CLOSE: Duration = Duration::from_secs(30);
@@ -37,19 +78,40 @@ pub struct ReplyFeed {
     changed: Notify,
 }
 
-#[derive(Default)]
 struct FeedState {
-    events: Vec<Event>,
+    events: Vec<Arc<Event>>,
     bytes: usize,
     closed: bool,
     discarded: bool,
+    owner: Uuid,
+    followers: usize,
+}
+
+impl Default for FeedState {
+    fn default() -> Self {
+        Self {
+            events: Vec::new(),
+            bytes: 0,
+            closed: false,
+            discarded: false,
+            owner: Uuid::new_v4(),
+            followers: 0,
+        }
+    }
+}
+
+impl Drop for FeedState {
+    fn drop(&mut self) {
+        memory().release(self.owner, self.bytes);
+    }
 }
 
 impl FeedState {
-    fn discard(&mut self) {
+    fn discard(&mut self) -> Vec<Arc<Event>> {
         self.discarded = true;
-        self.events = Vec::new();
+        memory().release(self.owner, self.bytes);
         self.bytes = 0;
+        std::mem::take(&mut self.events)
     }
 }
 
@@ -72,7 +134,7 @@ fn event_size(event: &Event) -> usize {
 }
 
 enum Next {
-    Event(Event),
+    Event(Arc<Event>),
     Wait,
     End,
 }
@@ -80,6 +142,15 @@ enum Next {
 impl ReplyFeed {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    pub fn new_for_user(owner: Uuid) -> Arc<Self> {
+        let mut state = FeedState::default();
+        state.owner = owner;
+        Arc::new(Self {
+            state: Mutex::new(state),
+            changed: Notify::new(),
+        })
     }
 
     fn state(&self) -> MutexGuard<'_, FeedState> {
@@ -90,18 +161,23 @@ impl ReplyFeed {
 
     fn push(&self, event: Event) {
         let size = event_size(&event);
-        {
+        let discarded = {
             let mut state = self.state();
             if state.closed || state.discarded {
                 return;
             }
-            if state.events.len() >= MAX_EVENTS || state.bytes + size > MAX_BYTES {
-                state.discard();
+            if state.events.len() >= MAX_EVENTS
+                || state.bytes + size > MAX_BYTES
+                || !memory().reserve(state.owner, size)
+            {
+                state.discard()
             } else {
                 state.bytes += size;
-                state.events.push(event);
+                state.events.push(Arc::new(event));
+                Vec::new()
             }
-        }
+        };
+        drop(discarded);
         self.changed.notify_waiters();
     }
 
@@ -111,7 +187,8 @@ impl ReplyFeed {
     }
 
     fn discard(&self) {
-        self.state().discard();
+        let discarded = self.state().discard();
+        drop(discarded);
         self.changed.notify_waiters();
     }
 
@@ -144,7 +221,7 @@ impl ReplyFeed {
                 changed.as_mut().enable();
                 match feed.next(position) {
                     Next::Event(event) => {
-                        let event = event.id((position + 1).to_string());
+                        let event = event.as_ref().clone().id((position + 1).to_string());
                         return Some((Ok(event), (feed, position + 1)));
                     }
                     Next::End => return None,
@@ -152,6 +229,36 @@ impl ReplyFeed {
                 }
             }
         })
+    }
+
+    pub fn try_follow(
+        self: Arc<Self>,
+        after: usize,
+    ) -> Result<impl Stream<Item = Result<Event, Infallible>>, AppError> {
+        {
+            let mut state = self.state();
+            if state.discarded
+                || state.closed
+                || state.followers >= MAX_FOLLOWERS
+                || after > state.events.len()
+            {
+                return Err(AppError::ResourceNotFound);
+            }
+            state.followers += 1;
+        }
+        let guard = Follower(self.clone());
+        Ok(async_stream::stream! {
+            let _guard = guard;
+            let mut events = std::pin::pin!(self.follow(after));
+            while let Some(event) = events.next().await { yield event; }
+        })
+    }
+}
+
+struct Follower(Arc<ReplyFeed>);
+impl Drop for Follower {
+    fn drop(&mut self) {
+        self.0.state().followers -= 1;
     }
 }
 
@@ -195,7 +302,7 @@ where
         let _close = CloseOnDrop(feed.clone());
         let mut events = std::pin::pin!(events);
         while let Some(event) = events.next().await {
-            if let Ok(event) = &event {
+            if let Ok(event) = &event && feed.resumable() {
                 feed.push(event.clone());
             }
             yield event;
@@ -249,6 +356,48 @@ pub fn resume_position(last_event_id: Option<&str>, after: Option<u64>) -> usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_memory_is_bounded_per_user_and_globally_and_released() {
+        let mut memory = ReplayMemory::default();
+        let owner = Uuid::new_v4();
+        assert!(memory.reserve(owner, USER_REPLAY_BYTES));
+        assert!(!memory.reserve(owner, 1));
+        for _ in 0..3 {
+            assert!(memory.reserve(Uuid::new_v4(), USER_REPLAY_BYTES));
+        }
+        assert!(!memory.reserve(Uuid::new_v4(), 1));
+        memory.release(owner, USER_REPLAY_BYTES);
+        assert!(memory.reserve(Uuid::new_v4(), 1));
+        assert!(!memory.users.contains_key(&owner));
+    }
+
+    #[tokio::test]
+    async fn follower_admission_is_bounded_released_and_refuses_closed_feeds() {
+        let feed = ReplyFeed::new();
+        assert!(feed.clone().try_follow(1).is_err());
+        let followers: Vec<_> = (0..MAX_FOLLOWERS)
+            .map(|_| feed.clone().try_follow(0).ok().unwrap())
+            .collect();
+        assert!(feed.clone().try_follow(0).is_err());
+        drop(followers);
+        assert!(feed.clone().try_follow(0).is_ok());
+        feed.close();
+        assert!(feed.try_follow(0).is_err());
+    }
+
+    #[test]
+    fn replay_reads_share_the_stored_event_without_copying_under_the_mutex() {
+        let feed = ReplyFeed::new();
+        feed.push(Event::default().data("payload"));
+        let Next::Event(first) = feed.next(0) else {
+            panic!("missing event")
+        };
+        let Next::Event(second) = feed.next(0) else {
+            panic!("missing event")
+        };
+        assert!(Arc::ptr_eq(&first, &second));
+    }
 
     fn data(event: &Event) -> String {
         format!("{event:?}")

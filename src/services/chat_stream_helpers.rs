@@ -6,8 +6,8 @@ use chrono::Utc;
 use futures_util::{Stream, StreamExt};
 use llm_plugin::ProviderError;
 use sea_orm::{
-    ColumnTrait, Condition, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, UpdateMany,
-    prelude::Decimal, sea_query::Expr,
+    ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, EntityTrait, IsolationLevel,
+    QueryFilter, QueryOrder, TransactionTrait, UpdateMany, prelude::Decimal, sea_query::Expr,
 };
 use serde_json::Value;
 use std::{collections::HashSet, convert::Infallible, sync::Arc, time::Duration};
@@ -24,10 +24,11 @@ use crate::{
         messages::{ChatRole, StopReason},
     },
     services::budget_allocation::{BudgetHealth, get_department_budget_status},
-    state::{EditView, SharedState, StreamCancel, StreamCancellations},
+    state::{EditView, GeneratingSnapshot, SharedState, StreamCancel, StreamCancellations},
 };
 
 const CONTENT_SAVE_INTERVAL: Duration = Duration::from_millis(500);
+const CLIENT_BACKPRESSURE_TIMEOUT: Duration = Duration::from_secs(5);
 // The webapp sends Stop and closes the stream at the same time, so a disconnect waits this long
 // for the stop request before the reply stays recorded as a network error.
 const STOP_REQUEST_GRACE: Duration = Duration::from_secs(5);
@@ -181,9 +182,18 @@ where
 {
     let (sender, receiver) = tokio::sync::mpsc::channel(32);
     tokio::spawn(async move {
+        let mut sender = Some(sender);
         let mut events = std::pin::pin!(events);
         while let Some(event) = events.next().await {
-            let _ = sender.send(event).await;
+            if let Some(active) = sender.as_ref()
+                && !matches!(
+                    tokio::time::timeout(CLIENT_BACKPRESSURE_TIMEOUT, active.send(event)).await,
+                    Ok(Ok(()))
+                )
+            {
+                // End the stalled transport; generation and the resumable feed keep advancing.
+                sender = None;
+            }
         }
     });
     futures_util::stream::unfold(receiver, |mut receiver| async move {
@@ -208,8 +218,13 @@ pub async fn messages_with_generating(
 ) -> Result<(Vec<messages::Model>, HashSet<Uuid>), AppError> {
     for attempt in 1..=GENERATING_READ_ATTEMPTS {
         let before = state.generating_replies(conversation_id).await;
+        let txn = state
+            .database
+            .begin_with_config(Some(IsolationLevel::RepeatableRead), None)
+            .await
+            .map_err(|_| AppError::DbTimeout)?;
         let edit = match before.edit.clone() {
-            Some(edit) => current_edit(&state.database, conversation_id, edit).await?,
+            Some(edit) => current_edit(&txn, conversation_id, edit).await?,
             None => None,
         };
         let shown = match &edit {
@@ -218,40 +233,56 @@ pub async fn messages_with_generating(
                 .add(messages::Column::Id.is_in(edit.message_ids.iter().copied())),
             None => Condition::all().add(messages::Column::Deleted.eq(false)),
         };
-        let mut rows = messages::Entity::find()
+        let rows = messages::Entity::find()
             .filter(messages::Column::ConversationId.eq(conversation_id))
             .filter(shown)
             .order_by_asc(messages::Column::CreatedAt)
-            .all(&state.database)
+            .all(&txn)
             .await
             .map_err(|error| {
                 eprintln!("{error}");
                 AppError::DbTimeout
             })?;
+        txn.commit().await.map_err(|_| AppError::DbTimeout)?;
         let after = state.generating_replies(conversation_id).await;
-        let newest_reply = rows
-            .iter()
-            .rev()
-            .find(|row| row.role == ChatRole::Assistant)
-            .map(|row| row.id);
-        if let Some(generating) =
-            before.settle(after, newest_reply, attempt == GENERATING_READ_ATTEMPTS)
-        {
-            if let Some(edit) = &edit {
-                show_running_edit(&mut rows, edit);
-            }
-            return Ok((rows, generating));
+        if let Some(result) = settle_generating_read(
+            rows,
+            edit,
+            before,
+            after,
+            attempt == GENERATING_READ_ATTEMPTS,
+        ) {
+            return Ok(result);
         }
     }
     unreachable!("the last attempt always settles")
+}
+
+pub(crate) fn settle_generating_read(
+    mut rows: Vec<messages::Model>,
+    edit: Option<EditView>,
+    before: GeneratingSnapshot,
+    after: GeneratingSnapshot,
+    last_attempt: bool,
+) -> Option<(Vec<messages::Model>, HashSet<Uuid>)> {
+    let newest_reply = rows
+        .iter()
+        .rev()
+        .find(|row| row.role == ChatRole::Assistant)
+        .map(|row| row.id);
+    let generating = before.settle(after, newest_reply, last_attempt)?;
+    if let Some(edit) = &edit {
+        show_running_edit(&mut rows, edit);
+    }
+    Some((rows, generating))
 }
 
 // An edit can still become the shown version only while no newer edit has claimed the
 // conversation (a branch switch claims too). The claim lives in Postgres, so this holds even when
 // the newer edit already finished and left the registry before this one registered. Requests that
 // were numbered but rejected before replying never claim, so they hide nothing.
-async fn current_edit(
-    db: &DatabaseConnection,
+async fn current_edit<C: ConnectionTrait>(
+    db: &C,
     conversation_id: Uuid,
     edit: EditView,
 ) -> Result<Option<EditView>, AppError> {
@@ -464,6 +495,61 @@ pub fn response_stopped_event_data(message_id: Uuid, reason: StopReason) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_stalled_original_connection_cannot_block_generation() {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let progress = count.clone();
+        let events = futures_util::stream::iter(0..200).map(move |_| {
+            progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(Event::default().data("delta"))
+        });
+        let original = deliver_reply(events);
+        tokio::time::timeout(
+            CLIENT_BACKPRESSURE_TIMEOUT + Duration::from_secs(2),
+            async {
+                while count.load(std::sync::atomic::Ordering::Relaxed) < 200 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            },
+        )
+        .await
+        .expect("a full browser queue must detach, not freeze generation");
+        let buffered: Vec<_> = original.collect().await;
+        assert_eq!(buffered.len(), 32, "the stalled transport eventually ends");
+    }
+
+    #[tokio::test]
+    async fn a_temporarily_slow_reader_receives_every_event_without_detaching() {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let progress = count.clone();
+        let events = futures_util::stream::iter(0..200).map(move |index| {
+            progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(Event::default().data(index.to_string()))
+        });
+        let client = deliver_reply(events);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while count.load(std::sync::atomic::Ordering::Relaxed) < 33 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fill the outgoing queue before simulating a slow reader");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let received: Vec<_> = tokio::time::timeout(
+            CLIENT_BACKPRESSURE_TIMEOUT + Duration::from_secs(2),
+            client.collect(),
+        )
+        .await
+        .expect("the recovered reader must finish");
+        assert_eq!(received.len(), 200);
+        for (index, event) in received.iter().enumerate() {
+            assert_eq!(
+                format!("{:?}", event.as_ref().unwrap()),
+                format!("{:?}", Event::default().data(index.to_string()))
+            );
+        }
+    }
     use crate::dto::models::ModelType;
 
     #[tokio::test]
@@ -616,6 +702,7 @@ mod tests {
         let shown = running.view();
         // Numbered, then refused (for example an invalid provider) before it replied.
         let _rejected = start_edit().await;
+        assert!(running.is_current(&db).await.unwrap());
         assert_eq!(
             current_edit(&db, chat, shown.clone()).await.unwrap(),
             Some(shown.clone()),
@@ -624,6 +711,19 @@ mod tests {
 
         let mut newer = start_edit().await;
         newer.claim(&db).await.expect("claim");
+        assert!(
+            !running.is_current(&db).await.unwrap(),
+            "a late registration must check the durable fence even after the newer stream left"
+        );
+        assert!(newer.is_current(&db).await.unwrap());
+        let plain = crate::services::message_branches::claim_plain_turn(&db, chat)
+            .await
+            .unwrap();
+        assert!(plain > newer.request());
+        assert!(
+            !newer.is_current(&db).await.unwrap(),
+            "a plain turn must supersede a still-running edit"
+        );
         assert_eq!(
             current_edit(&db, chat, shown).await.unwrap(),
             None,

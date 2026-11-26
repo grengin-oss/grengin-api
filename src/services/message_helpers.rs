@@ -136,6 +136,14 @@ impl EditInProgress {
         self.request
     }
 
+    pub async fn is_current(&self, db: &DatabaseConnection) -> Result<bool, AppError> {
+        let conversation = conversations::Entity::find_by_id(self.conversation_id)
+            .one(db)
+            .await
+            .map_err(|_| AppError::DbTimeout)?;
+        Ok(conversation.is_some_and(|row| self.holds_claim(row.edit_claim)))
+    }
+
     // The new version shares the edited message's parent, which makes the two siblings.
     pub fn parent_id(&self) -> Option<Uuid> {
         self.parent_id

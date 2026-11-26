@@ -38,6 +38,7 @@ use crate::{
         chat_attachments::{hydrate_files, hydrate_prompt_files, validate_incoming_attachments},
         chat_helpers::{
             effective_max_tokens, effective_native_web_search, supports_native_web_search,
+            validate_turn_messages,
         },
         chat_stream_helpers::{
             ContentCheckpoint, DepartmentBudgetGate, ToolRoundOutcome, deliver_reply,
@@ -223,7 +224,7 @@ use uuid::Uuid;
       })
     )),
     ("response_stopped" = (
-      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation or switched to another version while it was generating, including before it started streaming, or a newer edit of the same message took over; the reply stays with the version it was sent in), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnects (for example a page refresh) keeps generating and is saved complete; GET /chat/{chat_id} returns it.",
+      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message, sent a newer message in this conversation (including from another tab or API client), or switched to another version while it was generating, including before it started streaming, or a newer edit of the same message took over; the reply stays with the version it was sent in), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnects (for example a page refresh) keeps generating and is saved complete; GET /chat/{chat_id} returns it.",
       value = json!({
         "event": "response_stopped",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "stop_reason": "user_cancelled" }
@@ -383,7 +384,7 @@ pub async fn handle_chat_stream_path_doc() {}
       })
     )),
     ("response_stopped" = (
-      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation or switched to another version while it was generating, including before it started streaming, or a newer edit of the same message took over; the reply stays with the version it was sent in), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnects (for example a page refresh) keeps generating and is saved complete; GET /chat/{chat_id} returns it.",
+      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message, sent a newer message in this conversation (including from another tab or API client), or switched to another version while it was generating, including before it started streaming, or a newer edit of the same message took over; the reply stays with the version it was sent in), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnects (for example a page refresh) keeps generating and is saved complete; GET /chat/{chat_id} returns it.",
       value = json!({
         "event": "response_stopped",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "stop_reason": "user_cancelled" }
@@ -507,7 +508,7 @@ pub async fn resume_chat_stream(
         .get("last-event-id")
         .and_then(|value| value.to_str().ok());
     let position = resume_position(last_event_id, query.after);
-    Ok(Sse::new(feed.follow(position)).keep_alive(KeepAlive::new()))
+    Ok(Sse::new(feed.try_follow(position)?).keep_alive(KeepAlive::new()))
 }
 
 pub async fn handle_chat_stream(
@@ -517,6 +518,7 @@ pub async fn handle_chat_stream(
     pending_edit: Option<Extension<PendingEdit>>,
     Json(req): Json<ChatInput>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, AppError> {
+    validate_turn_messages(&req)?;
     let start = Instant::now();
     let (provider, model_name, gateway_installation) =
         model_route(&app_state, &req.provider, &req.model_name).await?;
@@ -740,6 +742,16 @@ pub async fn handle_chat_stream(
                 .await?;
         edit_in_progress =
             begin_pending_edit(conversation_id, pending_edit.map(|Extension(edit)| edit));
+        if edit_in_progress.is_none() {
+            let claim = crate::services::message_branches::claim_plain_turn(
+                &app_state.database,
+                conversation_id,
+            )
+            .await?;
+            app_state
+                .interrupt_older_streams(conversation_id, claim)
+                .await;
+        }
         let history_cutoff = edit_in_progress
             .as_ref()
             .map(EditInProgress::history_cutoff);
@@ -1265,7 +1277,7 @@ pub async fn handle_chat_stream(
         None
     };
 
-    let feed = ReplyFeed::new();
+    let feed = ReplyFeed::new_for_user(claims.user_id);
     let recorded_feed = feed.clone();
     let sse_stream = async_stream::try_stream! {
        let check_access = || async {
@@ -1538,6 +1550,7 @@ pub async fn handle_chat_stream(
             yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
             return;
         };
+
         let mut provider_session = match chat.start(provider_request).await {
             Ok(session) => session,
             Err(error) => {
@@ -1687,6 +1700,32 @@ pub async fn handle_chat_stream(
             cancel_handle.clone(),
             app_state.stream_cancellations.clone(),
         );
+
+        if let Some(edit) = &edit_in_progress {
+            match edit.is_current(&app_state.database).await {
+                Ok(true) => {},
+                Ok(false) => {
+                    cancel_handle.cancel(StopReason::UserEdited);
+                    record_stop_reason(&app_state.database, new_message_id, StopReason::UserEdited).await;
+                    content_checkpoint.finish();
+                    yield Event::default().event(ChatStreamEvents::ResponseStopped.to_string()).data(response_stopped_event_data(new_message_id, StopReason::UserEdited));
+                    yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                    return;
+                },
+                Err(_) => {
+                    content_checkpoint.fail_with(StopReason::ServerError);
+                    yield Event::default().event(ChatStreamEvents::AiError.to_string()).data(persistence_error_event_data());
+                    yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                    return;
+                }
+            }
+        }
+        if cancel_handle.is_cancelled() {
+            content_checkpoint.fail_with(cancel_handle.reason().unwrap_or(StopReason::UserCancelled));
+            yield Event::default().event(ChatStreamEvents::ResponseStopped.to_string()).data(response_stopped_event_data(new_message_id, cancel_handle.reason().unwrap_or(StopReason::UserCancelled)));
+            yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+            return;
+        }
 
         // Emit before the event loop so message_start always arrives before any delta,
         // regardless of provider (Gemini fires usageMetadata only on the last chunk).
@@ -2990,7 +3029,8 @@ pub async fn handle_chat_stream(
                    tool_call: None,
                    tool_result: None,
                };
-               let mut turn_visible = edit_in_progress.is_none();
+               let mut turn_visible = edit_in_progress.is_none()
+                   && matches!(is_shown(&app_state.database, new_message_id).await, Ok(true));
                if !turn_failed && let Some(edit) = edit_in_progress.take() {
                    match edit.commit(&app_state.database).await {
                        Ok(EditStatus::Current) => turn_visible = true,

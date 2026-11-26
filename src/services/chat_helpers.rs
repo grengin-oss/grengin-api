@@ -1,6 +1,45 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use uuid::Uuid;
+
+use crate::{
+    dto::chat_stream::ChatInput, error::AppError, models::conversations, state::SharedState,
+};
+
+pub fn validate_turn_messages(input: &ChatInput) -> Result<(), AppError> {
+    if input.messages.is_empty() {
+        return Err(AppError::ValidationInvalidField { field: "messages" });
+    }
+    Ok(())
+}
+
+pub async fn delete_chat_owned(
+    state: &SharedState,
+    user_id: Uuid,
+    chat_id: Uuid,
+) -> Result<(), AppError> {
+    let result = conversations::Entity::delete_many()
+        .filter(conversations::Column::Id.eq(chat_id))
+        .filter(conversations::Column::UserId.eq(user_id))
+        .exec(&state.database)
+        .await
+        .map_err(|error| {
+            eprintln!("chat delete error: {error}");
+            AppError::DbTimeout
+        })?;
+    if result.rows_affected == 0 {
+        return Err(AppError::DbNotFound);
+    }
+    state
+        .stream_cancellations
+        .read()
+        .await
+        .cancel_conversation(chat_id);
+    Ok(())
+}
+
 pub fn resolve_web_search_enabled(metadata: Option<&serde_json::Value>) -> bool {
     metadata
         .and_then(|value| value.get("webSearch"))
@@ -28,6 +67,34 @@ pub fn effective_max_tokens(requested: Option<u32>, model_max: Option<u32>) -> O
 #[cfg(test)]
 mod tests {
     use super::{effective_max_tokens, effective_native_web_search, supports_native_web_search};
+
+    #[test]
+    fn empty_turns_are_rejected() {
+        let input = serde_json::from_value(serde_json::json!({
+            "provider": "fixture", "model_name": "model", "messages": []
+        }))
+        .unwrap();
+        assert!(matches!(
+            super::validate_turn_messages(&input),
+            Err(crate::error::AppError::ValidationInvalidField { field: "messages" })
+        ));
+    }
+
+    #[test]
+    fn text_and_attachment_only_turns_remain_valid() {
+        for message in [
+            serde_json::json!({"role": "user", "content": "question", "files": []}),
+            serde_json::json!({"role": "user", "content": "", "files": [{
+                "id": uuid::Uuid::new_v4(), "name": "image.png", "type": "image/png"
+            }]}),
+        ] {
+            let input = serde_json::from_value(serde_json::json!({
+                "provider": "fixture", "model_name": "model", "messages": [message]
+            }))
+            .unwrap();
+            assert!(super::validate_turn_messages(&input).is_ok());
+        }
+    }
 
     #[test]
     fn unknown_models_never_gain_search_from_the_provider_name() {

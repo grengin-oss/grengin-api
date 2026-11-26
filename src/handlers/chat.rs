@@ -17,8 +17,10 @@ use crate::{
         messages::{self, StopReason},
     },
     services::{
-        chat_helpers::resolve_web_search_enabled, chat_stream_helpers::messages_with_generating,
-        message_branches::load_message_versions, search,
+        chat_helpers::{delete_chat_owned, resolve_web_search_enabled},
+        chat_stream_helpers::messages_with_generating,
+        message_branches::load_message_versions,
+        search,
     },
     state::SharedState,
 };
@@ -560,22 +562,6 @@ pub async fn delete_chat_by_id(
     Path(chat_id): Path<Uuid>,
     State(app_state): State<SharedState>,
 ) -> Result<StatusCode, AppError> {
-    let conversation_model = conversations::Entity::find_by_id(chat_id)
-        .filter(conversations::Column::UserId.eq(claims.user_id))
-        .one(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("{}", e);
-            AppError::DbTimeout
-        })?
-        .ok_or(AppError::DbNotFound)?;
-    conversation_model
-        .into_active_model()
-        .delete(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("{}", e);
-            AppError::DbTimeout
-        })?;
+    delete_chat_owned(&app_state, claims.user_id, chat_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
