@@ -516,7 +516,7 @@ pub async fn handle_chat_stream(
     mut chat_id: Option<Path<Uuid>>,
     State(app_state): State<SharedState>,
     pending_edit: Option<Extension<PendingEdit>>,
-    Json(req): Json<ChatInput>,
+    Json(mut req): Json<ChatInput>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, AppError> {
     validate_turn_messages(&req)?;
     let start = Instant::now();
@@ -708,7 +708,8 @@ pub async fn handle_chat_stream(
         req.max_tokens,
         max_output_tokens.and_then(|value| u32::try_from(value).ok()),
     );
-    validate_incoming_attachments(&app_state, claims.user_id, &req.messages, is_image_gen).await?;
+    validate_incoming_attachments(&app_state, claims.user_id, &mut req.messages, is_image_gen)
+        .await?;
     if let Some(conversation_id) = req.conversation_id {
         chat_id = Some(Path(conversation_id));
     }

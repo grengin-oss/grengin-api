@@ -1,19 +1,24 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use axum::{Json, extract::State};
+use axum::{
+    Json,
+    extract::{Query, State},
+};
 use reqwest::StatusCode;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 use std::collections::HashSet;
 
 use crate::{
     auth::claims::Claims,
-    dto::models::{ModelInfo, ModelsResponse, ProviderInfo},
+    dto::models::{ModelInfo, ModelsQuery, ModelsResponse, ProviderInfo},
     models::{ai_engines, users},
     services::{
+        chat_attachments::global_attachments,
         chat_stream_helpers::is_model_whitelisted,
         department_policies::{effective_allowed_models, model_policy_key},
-        models_cache::load_providers_cached,
+        model_picker::{PickerMetadata, localize},
+        models_cache::load_models_cache,
         provider_models::is_chat_selectable_model,
     },
     state::SharedState,
@@ -23,14 +28,16 @@ use crate::{
     get,
     path = "/models",
     tag = "models",
+    params(ModelsQuery),
     responses(
-        (status = 200, body = ModelsResponse, description = "List of providers and models"),
+        (status = 200, body = ModelsResponse, description = "Providers and models, plus the attachment limits that apply to every model"),
         (status = 401),
     )
 )]
 pub async fn get_list_models(
     claims: Claims,
     State(app_state): State<SharedState>,
+    Query(query): Query<ModelsQuery>,
 ) -> (StatusCode, Json<ModelsResponse>) {
     let user = users::Entity::find_by_id(claims.user_id)
         .one(&app_state.database)
@@ -56,13 +63,18 @@ pub async fn get_list_models(
             .collect::<HashSet<(String, String)>>()
     });
 
-    let (status, providers) = match load_providers_cached(&app_state.req_client).await {
-        Ok(providers) => (StatusCode::OK, providers),
+    let (status, providers, picker) = match load_models_cache(&app_state.req_client).await {
+        Ok(cache) => (StatusCode::OK, cache.providers, cache.picker),
         Err(error) => {
             eprintln!("providers cache error: {error}");
-            (StatusCode::SERVICE_UNAVAILABLE, Vec::new())
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Vec::new(),
+                PickerMetadata::built_in(),
+            )
         }
     };
+    let catalog_providers = providers.clone();
 
     let mut filtered_providers = Vec::new();
     for provider in providers {
@@ -143,6 +155,7 @@ pub async fn get_list_models(
         let mut models = plugin_models
             .into_iter()
             .map(|model| crate::services::provider_models::to_model_info(&provider_key, model))
+            .map(|model| picker.enrich_plugin_model(model, &catalog_providers))
             .filter(is_chat_selectable_model)
             .filter(|model| is_model_whitelisted(&whitelist, &[&model.key, &model.name]))
             .collect::<Vec<_>>();
@@ -198,10 +211,14 @@ pub async fn get_list_models(
         }
         filtered_providers.retain(|provider| !provider.models.is_empty());
     }
+    localize(&mut filtered_providers, query.locale.as_deref());
     (
         status,
         Json(ModelsResponse {
             providers: filtered_providers,
+            global_attachments: global_attachments(&app_state.settings.attachments),
+            specialties: picker.specialties(),
+            price_tiers: picker.price_tiers(),
         }),
     )
 }

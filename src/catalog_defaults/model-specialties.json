@@ -1,0 +1,65 @@
+{
+  "formatVersion": "1.0",
+  "specialties": [
+    {
+      "id": "general",
+      "label": "All-rounder",
+      "description": "Reliable everyday help with writing, questions and analysis."
+    },
+    {
+      "id": "frontier",
+      "label": "Most capable",
+      "description": "Top-tier quality for the hardest and most important work."
+    },
+    {
+      "id": "reasoning",
+      "label": "Reasoning",
+      "description": "Thinks step by step through complex problems, math and logic."
+    },
+    {
+      "id": "coding",
+      "label": "Coding",
+      "description": "Writes, reviews and debugs code across languages."
+    },
+    {
+      "id": "agentic",
+      "label": "Agents & tools",
+      "description": "Plans multi-step tasks and works well with tools and connectors."
+    },
+    {
+      "id": "fast-cheap",
+      "label": "Fast & cheap",
+      "description": "Quick, low-cost answers for simple and high-volume tasks."
+    },
+    {
+      "id": "long-context",
+      "label": "Long documents",
+      "description": "Reads and reasons over very long documents and large inputs."
+    },
+    {
+      "id": "multimodal",
+      "label": "Vision & files",
+      "description": "Understands images, documents and other media alongside text."
+    },
+    {
+      "id": "research",
+      "label": "Web research",
+      "description": "Searches the web and answers with current, cited sources."
+    },
+    {
+      "id": "writing",
+      "label": "Writing",
+      "description": "Natural, polished writing and creative work."
+    },
+    {
+      "id": "multilingual",
+      "label": "Multilingual",
+      "description": "Strong across many languages, including regional ones."
+    },
+    {
+      "id": "image-generation",
+      "label": "Image generation",
+      "description": "Creates and edits images from text descriptions."
+    }
+  ]
+}

@@ -61,6 +61,7 @@ pub mod me_helpers;
 pub mod me_skills_helpers;
 pub mod message_branches;
 pub mod message_helpers;
+pub mod model_picker;
 pub mod models_cache;
 pub mod native_connector_broker;
 pub mod notifications;

@@ -3,12 +3,22 @@
 
 use anyhow::{Error, anyhow};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{LazyLock, Mutex},
+    time::{Duration, Instant},
+};
 use tokio::sync::{OnceCell, RwLock};
 
 use crate::{
     dto::models::{ModelInfo, ModelType, ProviderInfo},
-    services::catalog_download::{MAX_CATALOG_DOCUMENT_BYTES, read_body_capped},
+    services::{
+        catalog_download::{MAX_CATALOG_DOCUMENT_BYTES, read_body_capped},
+        model_picker::{
+            PRICE_TIERS_URL, PickerMetadata, SPECIALTIES_URL, catalog_recommended,
+            catalog_specialty, catalog_summary,
+        },
+    },
 };
 
 const PROVIDERS_URLS: [&str; 2] = [
@@ -16,6 +26,10 @@ const PROVIDERS_URLS: [&str; 2] = [
     "https://meta.grengin.com/providers.json",
 ];
 const TITLE_GENERATORS_URL: &str = "https://meta.grengin.com/common/title_generators.json";
+// Catalog edits (prices, tiers, specialties) reach running servers without a release.
+const REFRESH_AFTER: Duration = Duration::from_secs(60 * 60);
+const RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
+static LAST_REFRESH_ATTEMPT: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(|| Mutex::new(None));
 
 #[derive(Clone)]
 pub struct ProvidersCache {
@@ -23,6 +37,8 @@ pub struct ProvidersCache {
     pub models_by_key: HashMap<String, ModelInfo>,
     pub title_model_by_engine: HashMap<String, String>,
     pub plugin_url_by_key: HashMap<String, String>,
+    pub picker: PickerMetadata,
+    fetched_at: Instant,
 }
 
 static PROVIDERS_CACHE: OnceCell<RwLock<Option<ProvidersCache>>> = OnceCell::const_new();
@@ -35,10 +51,18 @@ async fn providers_cache() -> &'static RwLock<Option<ProvidersCache>> {
 
 pub async fn load_models_cache(req_client: &reqwest::Client) -> Result<ProvidersCache, Error> {
     if let Some(cached) = providers_cache().await.read().await.as_ref() {
+        if cached.fetched_at.elapsed() >= REFRESH_AFTER && claim_refresh() {
+            let client = req_client.clone();
+            tokio::spawn(async move {
+                if let Err(error) = refresh_models_cache(&client).await {
+                    eprintln!("models catalog refresh failed; serving the previous copy: {error}");
+                }
+            });
+        }
         return Ok(cached.clone());
     }
 
-    let cache = build_providers_cache(fetch_all(req_client).await?);
+    let cache = build_providers_cache(fetch_all(req_client, None).await?);
     let mut write_guard = providers_cache().await.write().await;
     if let Some(cached) = write_guard.as_ref() {
         return Ok(cached.clone());
@@ -47,8 +71,22 @@ pub async fn load_models_cache(req_client: &reqwest::Client) -> Result<Providers
     Ok(cache)
 }
 
+// One background refresh at a time, and a failing catalog is retried every few minutes,
+// not on every request.
+fn claim_refresh() -> bool {
+    let mut last = LAST_REFRESH_ATTEMPT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if last.is_some_and(|attempt| attempt.elapsed() < RETRY_AFTER) {
+        return false;
+    }
+    *last = Some(Instant::now());
+    true
+}
+
 pub async fn refresh_models_cache(req_client: &reqwest::Client) -> Result<ProvidersCache, Error> {
-    let refreshed = build_providers_cache(fetch_all(req_client).await?);
+    let previous = providers_cache().await.read().await.clone();
+    let refreshed = build_providers_cache(fetch_all(req_client, previous.as_ref()).await?);
     let mut write_guard = providers_cache().await.write().await;
     *write_guard = Some(refreshed.clone());
     Ok(refreshed)
@@ -92,9 +130,18 @@ struct FetchedData {
     providers: Vec<ProviderInfo>,
     title_model_by_engine: HashMap<String, String>,
     plugin_url_by_key: HashMap<String, String>,
+    picker: PickerMetadata,
+    complete: bool,
 }
 
-fn build_providers_cache(data: FetchedData) -> ProvidersCache {
+fn build_providers_cache(mut data: FetchedData) -> ProvidersCache {
+    for model in data
+        .providers
+        .iter_mut()
+        .flat_map(|provider| provider.models.iter_mut())
+    {
+        data.picker.annotate(model);
+    }
     let mut models_by_key = HashMap::new();
     for provider in &data.providers {
         for model in &provider.models {
@@ -113,17 +160,46 @@ fn build_providers_cache(data: FetchedData) -> ProvidersCache {
         models_by_key,
         title_model_by_engine: data.title_model_by_engine,
         plugin_url_by_key: data.plugin_url_by_key,
+        picker: data.picker,
+        // A copy that kept older data for a failed document is refreshed again soon.
+        fetched_at: if data.complete {
+            Instant::now()
+        } else {
+            Instant::now()
+                .checked_sub(REFRESH_AFTER - RETRY_AFTER)
+                .unwrap_or_else(Instant::now)
+        },
     }
 }
 
-async fn fetch_all(req_client: &reqwest::Client) -> Result<FetchedData, Error> {
-    let (providers, title_model_by_engine) =
-        tokio::join!(fetch_providers(req_client), fetch_title_models(req_client),);
+async fn fetch_all(
+    req_client: &reqwest::Client,
+    previous: Option<&ProvidersCache>,
+) -> Result<FetchedData, Error> {
+    let (providers, title_model_by_engine, specialties, price_tiers) = tokio::join!(
+        fetch_providers(req_client),
+        fetch_title_models(req_client),
+        fetch_json(req_client, SPECIALTIES_URL),
+        fetch_json(req_client, PRICE_TIERS_URL),
+    );
     let (providers, plugin_url_by_key) = providers?;
+    let complete = title_model_by_engine.is_ok() && specialties.is_ok() && price_tiers.is_ok();
+    let picker = previous
+        .map(|cache| cache.picker.clone())
+        .unwrap_or_else(PickerMetadata::built_in)
+        .with_catalog(specialties.ok(), price_tiers.ok());
+    let title_model_by_engine = title_model_by_engine.unwrap_or_else(|error| {
+        eprintln!("title generators fetch failed; keeping the previous list: {error}");
+        previous
+            .map(|cache| cache.title_model_by_engine.clone())
+            .unwrap_or_default()
+    });
     Ok(FetchedData {
         providers,
-        title_model_by_engine: title_model_by_engine.unwrap_or_default(),
+        title_model_by_engine,
         plugin_url_by_key,
+        picker,
+        complete,
     })
 }
 
@@ -356,6 +432,12 @@ fn parse_text_model(value: &Value) -> Result<ModelInfo, Error> {
         name,
         engine,
         model_type: ModelType::TextGenerator,
+        specialty: catalog_specialty(value),
+        summaries: catalog_summary(value),
+        summary: None,
+        recommended: catalog_recommended(value),
+        r#default: crate::services::model_picker::catalog_default(value),
+        price_tier: None,
         comment: value
             .get("note")
             .and_then(Value::as_str)
@@ -423,6 +505,12 @@ fn parse_image_model(value: &Value) -> Result<ModelInfo, Error> {
         name,
         engine,
         model_type: ModelType::ImageGenerator,
+        specialty: catalog_specialty(value),
+        summaries: catalog_summary(value),
+        summary: None,
+        recommended: catalog_recommended(value),
+        r#default: crate::services::model_picker::catalog_default(value),
+        price_tier: None,
         comment: value
             .get("note")
             .and_then(Value::as_str)
@@ -473,6 +561,12 @@ fn parse_embed_model(value: &Value, provider_key: &str) -> Result<ModelInfo, Err
         name: id.to_string(),
         engine: provider_key.to_string(),
         model_type: ModelType::TextEmbedder,
+        specialty: catalog_specialty(value),
+        summaries: catalog_summary(value),
+        summary: None,
+        recommended: catalog_recommended(value),
+        r#default: crate::services::model_picker::catalog_default(value),
+        price_tier: None,
         comment: value
             .get("notes")
             .and_then(Value::as_str)

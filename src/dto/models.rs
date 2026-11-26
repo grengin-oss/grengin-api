@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use std::collections::BTreeMap;
+use utoipa::{IntoParams, ToSchema};
 
 #[derive(Serialize, Deserialize, Clone, ToSchema, PartialEq, Debug)]
 #[serde(rename_all = "snake_case")]
@@ -15,6 +16,36 @@ pub enum ModelType {
 #[derive(Serialize, ToSchema)]
 pub struct ModelsResponse {
     pub providers: Vec<ProviderInfo>,
+    pub global_attachments: GlobalAttachments,
+    pub specialties: Vec<SpecialtyInfo>,
+    pub price_tiers: Vec<PriceTierInfo>,
+}
+
+#[derive(Deserialize, IntoParams, ToSchema)]
+pub struct ModelsQuery {
+    #[param(example = "fr-CA")]
+    pub locale: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, ToSchema, PartialEq, Debug)]
+pub struct SpecialtyInfo {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, ToSchema, PartialEq, Debug)]
+pub struct PriceTierInfo {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Serialize, Clone, ToSchema, PartialEq, Debug)]
+pub struct GlobalAttachments {
+    #[schema(example = json!(["image/*", "application/pdf", ".txt"]))]
+    pub accepted_types: Vec<String>,
+    pub max_file_size_bytes: u64,
+    pub max_files_per_message: usize,
 }
 
 impl ModelsResponse {
@@ -27,12 +58,6 @@ impl ModelsResponse {
         let icon = provider.map(|provider| provider.icon.clone());
         let icon_dark = provider.map(|provider| provider.icon_dark.clone());
         (icon, icon_dark)
-    }
-
-    pub fn default() -> Self {
-        ModelsResponse {
-            providers: Vec::new(),
-        }
     }
 }
 
@@ -52,6 +77,16 @@ pub struct ModelInfo {
     pub name: String,
     pub engine: String,
     pub model_type: ModelType,
+    pub specialty: String,
+    // Every catalog translation, kept in the shared cache; responses carry `summary` only.
+    #[serde(skip)]
+    pub summaries: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_tier: Option<String>,
+    pub recommended: bool,
+    pub r#default: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

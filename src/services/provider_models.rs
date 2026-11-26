@@ -6,7 +6,9 @@ use llm_plugin::{ProviderError, ProviderModel, ProviderModelType, ProviderPlugin
 use crate::{
     dto::models::{ModelInfo, ModelType},
     services::{
-        live_models_cache::LiveModelsCache, models_cache::get_model_info_cached,
+        live_models_cache::LiveModelsCache,
+        model_picker::{catalog_recommended, catalog_specialty, catalog_summary},
+        models_cache::get_model_info_cached,
         provider_chat::provider_error_class,
     },
     state::SharedState,
@@ -89,6 +91,12 @@ pub fn to_model_info(provider_key: &str, model: ProviderModel) -> ModelInfo {
         key: model.id.to_string(),
         engine: provider_key.to_string(),
         model_type: resolved_model_type,
+        specialty: catalog_specialty(&model.metadata),
+        summaries: catalog_summary(&model.metadata),
+        summary: None,
+        recommended: catalog_recommended(&model.metadata),
+        r#default: crate::services::model_picker::catalog_default(&model.metadata),
+        price_tier: None,
         comment,
         input_token_rate: metadata_f64(&model, "inputTokenRate"),
         output_token_rate: metadata_f64(&model, "outputTokenRate"),
@@ -168,6 +176,12 @@ mod tests {
             name: "Model 1".to_string(),
             engine: "example".to_string(),
             model_type,
+            specialty: crate::services::model_picker::DEFAULT_SPECIALTY.to_string(),
+            summaries: None,
+            summary: None,
+            recommended: false,
+            r#default: false,
+            price_tier: None,
             comment: None,
             input_token_rate: None,
             output_token_rate: None,
@@ -261,11 +275,24 @@ mod tests {
                 "cachedInputTokenRate": 0.1,
                 "cacheCreationTokenRate": 1.25,
                 "maxInputTokens": 128000,
-                "maxOutputTokens": 64000
+                "maxOutputTokens": 64000,
+                "specialty": "coding",
+                "summary": {"en": "Writes code for the team", "ko": "팀을 위한 코드 작성"}
             }),
         };
 
         let info = to_model_info("custom-provider", model);
+        assert_eq!(
+            info.specialty, "coding",
+            "a plugin may name its own specialty"
+        );
+        assert_eq!(
+            info.summaries
+                .as_ref()
+                .and_then(|summary| summary.get("ko"))
+                .map(String::as_str),
+            Some("팀을 위한 코드 작성")
+        );
         assert_eq!(info.input_token_rate, Some(1.0));
         assert_eq!(info.output_token_rate, Some(5.0));
         assert_eq!(info.cached_input_token_rate, Some(0.1));

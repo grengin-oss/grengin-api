@@ -5,13 +5,17 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::{
+    config::setting::{AttachmentSettings, MAX_ATTACHMENTS_PER_REQUEST},
     dto::{
         chat_stream::MessageRequest,
         files::{Attachment, File},
+        models::GlobalAttachments,
         prompt::Prompt,
     },
     error::AppError,
-    services::file_storage::{read_attachments_for_user, stored_attachments_size},
+    services::file_storage::{
+        StoredAttachment, read_attachments_for_user, stored_attachments, stored_attachments_size,
+    },
     state::SharedState,
 };
 
@@ -20,34 +24,208 @@ use crate::{
 pub async fn validate_incoming_attachments(
     state: &SharedState,
     user_id: Uuid,
-    messages: &[MessageRequest],
+    messages: &mut [MessageRequest],
     image_generation: bool,
 ) -> Result<(), AppError> {
     ensure_attachment_counts(messages)?;
+    ensure_attachments_accepted(state, user_id, messages, image_generation).await?;
     let ids = incoming_stored_ids(messages, image_generation);
     if stored_attachments_size(&state.database, user_id, &ids).await? > MAX_REQUEST_ATTACHMENT_BYTES
     {
         return Err(AppError::ValidationInvalidField { field: "files" });
     }
-    read_attachments_for_user(
+    let stored = read_attachments_for_user(
         &state.database,
         &state.settings.file_storage_root,
         user_id,
         &ids,
     )
     .await?;
+    if image_generation {
+        canonicalize_stored_files(messages, &stored)?;
+    }
     Ok(())
 }
 
-const MAX_REQUEST_ATTACHMENTS: usize = 32;
+fn canonicalize_stored_files(
+    messages: &mut [MessageRequest],
+    stored: &HashMap<Uuid, Attachment>,
+) -> Result<(), AppError> {
+    for file in messages.iter_mut().flat_map(|message| &mut message.files) {
+        let record = stored.get(&file.id).ok_or(AppError::ResourceNotFound)?;
+        file.name = record.name.clone();
+        file.content_type = record.content_type.clone();
+        file.base64 = None;
+        file.openai_id = None;
+        file.size = record.file.as_ref().map(Vec::len);
+    }
+    Ok(())
+}
+
 const MAX_REQUEST_ATTACHMENT_BYTES: u64 = 200 * 1024 * 1024;
+
+pub fn global_attachments(settings: &AttachmentSettings) -> GlobalAttachments {
+    GlobalAttachments {
+        accepted_types: settings.accepted_types.clone(),
+        max_file_size_bytes: settings.max_file_bytes,
+        max_files_per_message: settings.max_files_per_message,
+    }
+}
+
+// Every message in the request is new: it is saved and sent to the model. History is read
+// from the database, so tightening a limit never breaks earlier turns.
+async fn ensure_attachments_accepted(
+    state: &SharedState,
+    user_id: Uuid,
+    messages: &[MessageRequest],
+    image_generation: bool,
+) -> Result<(), AppError> {
+    let stored_ids = messages
+        .iter()
+        .flat_map(|message| &message.files)
+        .filter(|file| uses_stored_bytes(file, image_generation))
+        .map(|file| file.id)
+        .collect::<Vec<_>>();
+    let stored = stored_attachments(&state.database, user_id, &stored_ids).await?;
+    if attachments_accepted(
+        &state.settings.attachments,
+        messages,
+        image_generation,
+        &stored,
+    ) {
+        Ok(())
+    } else {
+        Err(AppError::ValidationInvalidField { field: "files" })
+    }
+}
+
+// Image generation reads stored files by id even when inline bytes are supplied (the same
+// rule as incoming_stored_ids), so those files are judged by their stored record.
+fn uses_stored_bytes(file: &File, image_generation: bool) -> bool {
+    image_generation || file.base64.is_none()
+}
+
+fn attachments_accepted(
+    policy: &AttachmentSettings,
+    messages: &[MessageRequest],
+    image_generation: bool,
+    stored: &[StoredAttachment],
+) -> bool {
+    if messages
+        .iter()
+        .any(|message| message.files.len() > policy.max_files_per_message)
+    {
+        return false;
+    }
+    let inline = messages
+        .iter()
+        .flat_map(|message| &message.files)
+        .filter(|file| !uses_stored_bytes(file, image_generation))
+        .filter_map(|file| {
+            file.base64.as_deref().map(|data| {
+                (
+                    if data.len() as u64 > max_inline_len(policy.max_file_bytes) {
+                        u64::MAX
+                    } else {
+                        inline_size(data)
+                    },
+                    file.content_type.as_str(),
+                    file.name.as_str(),
+                )
+            })
+        });
+    stored
+        .iter()
+        .map(|file| {
+            (
+                file.size.max(0) as u64,
+                file.content_type.as_str(),
+                file.name.as_str(),
+            )
+        })
+        .chain(inline)
+        .all(|(size, content_type, name)| {
+            size <= policy.max_file_bytes
+                && accepts_type(&policy.accepted_types, content_type, name)
+        })
+}
+
+// The longest text an allowed file can take inline: its base64, a line break (CRLF) every 76
+// characters as MIME encoders write it, and a data: header. Anything longer is refused before it
+// is parsed, so whitespace or a long header cannot hide extra bytes.
+fn max_inline_len(max_file_bytes: u64) -> u64 {
+    let encoded = max_file_bytes.div_ceil(3).saturating_mul(4);
+    encoded
+        .saturating_add(encoded.div_ceil(76).saturating_mul(2))
+        .saturating_add(MAX_DATA_HEADER_LEN + "data:,".len() as u64)
+}
+
+const MAX_DATA_HEADER_LEN: u64 = 256;
+
+fn inline_size(data: &str) -> u64 {
+    let payload = if let Some(rest) = data.strip_prefix("data:") {
+        let Some((header, payload)) = rest.split_once(',') else {
+            return u64::MAX;
+        };
+        if header.len() as u64 > MAX_DATA_HEADER_LEN || !header.ends_with(";base64") {
+            return u64::MAX;
+        }
+        payload
+    } else {
+        data
+    };
+    let mut encoded = 0u64;
+    let mut padding = 0u64;
+    for byte in payload.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        } else if byte == b'=' {
+            padding += 1;
+            if padding > 2 {
+                return u64::MAX;
+            }
+        } else if padding == 0 && (byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/') {
+            encoded += 1;
+        } else {
+            return u64::MAX;
+        }
+    }
+    if encoded % 4 == 1
+        || (padding > 0 && (!(encoded + padding).is_multiple_of(4) || encoded % 4 + padding != 4))
+    {
+        return u64::MAX;
+    }
+    encoded * 3 / 4
+}
+
+fn accepts_type(accepted: &[String], content_type: &str, name: &str) -> bool {
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let name = name.to_lowercase();
+    accepted.iter().any(|token| {
+        if token == "*/*" {
+            true
+        } else if token.starts_with('.') {
+            name.len() > token.len() && name.ends_with(token.as_str())
+        } else if let Some(top) = token.strip_suffix("/*") {
+            mime.split_once('/').is_some_and(|(kind, _)| kind == top)
+        } else {
+            mime == *token
+        }
+    })
+}
 
 fn ensure_attachment_counts(messages: &[MessageRequest]) -> Result<(), AppError> {
     let mut total = 0;
     for message in messages {
         total += message.files.len();
         let mut seen = HashSet::with_capacity(message.files.len());
-        if total > MAX_REQUEST_ATTACHMENTS || !message.files.iter().all(|file| seen.insert(file.id))
+        if total > MAX_ATTACHMENTS_PER_REQUEST
+            || !message.files.iter().all(|file| seen.insert(file.id))
         {
             return Err(AppError::ValidationInvalidField { field: "files" });
         }
@@ -99,6 +277,9 @@ fn hydrate_files_from(
         if file.base64.is_none() {
             return Err(AppError::ResourceNotFound);
         }
+        // The stored record, not the request, says what these bytes are.
+        file.content_type = attachment.content_type.clone();
+        file.name = attachment.name.clone();
     }
     Ok(())
 }
@@ -184,10 +365,13 @@ mod tests {
     #[test]
     fn attachment_count_is_capped_across_the_request() {
         let files = |n: usize| (0..n).map(|_| file(Uuid::new_v4(), false)).collect();
-        assert!(ensure_attachment_counts(&[message(files(MAX_REQUEST_ATTACHMENTS))]).is_ok());
+        assert!(ensure_attachment_counts(&[message(files(MAX_ATTACHMENTS_PER_REQUEST))]).is_ok());
         assert!(
-            ensure_attachment_counts(&[message(files(MAX_REQUEST_ATTACHMENTS)), message(files(1))])
-                .is_err()
+            ensure_attachment_counts(&[
+                message(files(MAX_ATTACHMENTS_PER_REQUEST)),
+                message(files(1))
+            ])
+            .is_err()
         );
     }
 
@@ -208,12 +392,212 @@ mod tests {
             id,
             Attachment {
                 file: Some(b"stored".to_vec()),
-                name: "stored.txt".into(),
-                content_type: "text/plain".into(),
+                name: "stored.md".into(),
+                content_type: "text/markdown".into(),
             },
         )]);
         hydrate_files_from(&attachments, &mut files).expect("hydrate");
         assert_eq!(files[0].base64.as_deref(), Some("c3RvcmVk"));
+        assert_eq!(
+            (files[0].name.as_str(), files[0].content_type.as_str()),
+            ("stored.md", "text/markdown"),
+            "a stored file is described by its record, not by the request"
+        );
         assert_eq!(files[1].base64.as_deref(), Some("YQ=="));
+        assert_eq!(files[1].name, "file.txt");
+    }
+
+    #[test]
+    fn accepted_types_match_by_mime_wildcard_and_extension() {
+        let accepted = ["image/*", "application/pdf", ".tar.gz", ".txt"]
+            .map(String::from)
+            .to_vec();
+        assert!(accepts_type(&accepted, "image/PNG", "a.png"));
+        assert!(accepts_type(
+            &accepted,
+            "application/pdf; charset=binary",
+            "report"
+        ));
+        assert!(accepts_type(
+            &accepted,
+            "application/octet-stream",
+            "Backup.TAR.GZ"
+        ));
+        assert!(accepts_type(
+            &accepted,
+            "application/octet-stream",
+            "notes.txt"
+        ));
+        assert!(!accepts_type(&accepted, "application/octet-stream", ".txt"));
+        assert!(!accepts_type(&accepted, "application/zip", "archive.zip"));
+        assert!(!accepts_type(&accepted, "imagex/png", "a.bin"));
+        assert!(accepts_type(&["*/*".to_string()], "", "anything"));
+    }
+
+    #[test]
+    fn inline_size_estimates_decoded_bytes_with_or_without_a_data_url_prefix() {
+        assert_eq!(inline_size("aGVsbG8gd29ybGQ="), 11);
+        assert_eq!(inline_size("data:text/plain;base64,aGVsbG8gd29ybGQ="), 11);
+        assert_eq!(inline_size("aGVs\nbG8="), 5);
+        assert_eq!(
+            inline_size("aGVsbG8gd29ybGQ=,YQ=="),
+            u64::MAX,
+            "a comma inside a plain payload must not hide the bytes before it"
+        );
+    }
+
+    #[test]
+    fn global_attachments_publish_the_configured_limits_in_snake_case() {
+        let settings = AttachmentSettings {
+            accepted_types: vec!["image/*".into(), ".pdf".into()],
+            max_file_bytes: 1024,
+            max_files_per_message: 3,
+        };
+        assert_eq!(
+            serde_json::to_value(global_attachments(&settings)).unwrap(),
+            serde_json::json!({
+                "accepted_types": ["image/*", ".pdf"],
+                "max_file_size_bytes": 1024,
+                "max_files_per_message": 3
+            })
+        );
+    }
+
+    #[test]
+    fn inline_headers_padding_and_whitespace_cannot_hide_large_inputs() {
+        for value in [
+            format!("data:{};base64,YQ==", "a".repeat(257)),
+            "YQ===".into(),
+            "YQ==YQ==".into(),
+            "a".into(),
+        ] {
+            assert_eq!(inline_size(&value), u64::MAX);
+        }
+        assert_eq!(inline_size("YQ"), 1);
+        assert_eq!(inline_size("YWI="), 2);
+        assert_eq!(inline_size("Y W\nI="), 2);
+    }
+
+    #[test]
+    fn whitespace_cannot_hide_bytes_but_mime_line_breaks_are_accepted() {
+        let policy = AttachmentSettings {
+            accepted_types: vec![".txt".into()],
+            max_file_bytes: 3 * 1024,
+            max_files_per_message: 1,
+        };
+        let inline = |data: String| {
+            vec![message(vec![File {
+                base64: Some(data),
+                ..file(Uuid::new_v4(), true)
+            }])]
+        };
+        let full = "QUFB".repeat(1024);
+        let wrapped = full
+            .as_bytes()
+            .chunks(76)
+            .map(|line| std::str::from_utf8(line).unwrap())
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        assert!(attachments_accepted(&policy, &inline(wrapped), false, &[]));
+        let padded = format!("YQ{}==", " ".repeat(64 * 1024));
+        assert_eq!(inline_size(&padded), 1, "the bytes it decodes to are tiny");
+        assert!(
+            !attachments_accepted(&policy, &inline(padded), false, &[]),
+            "but the text sent is far larger than any allowed file"
+        );
+    }
+
+    #[test]
+    fn image_generation_persists_only_canonical_stored_references() {
+        let id = Uuid::new_v4();
+        let mut request = vec![message(vec![File {
+            name: "wrong.exe".into(),
+            content_type: "bad/type".into(),
+            openai_id: Some("untrusted".into()),
+            ..file(id, true)
+        }])];
+        let stored = HashMap::from([(
+            id,
+            Attachment {
+                file: Some(vec![1, 2]),
+                name: "ok.png".into(),
+                content_type: "image/png".into(),
+            },
+        )]);
+        canonicalize_stored_files(&mut request, &stored).unwrap();
+        let file = &request[0].files[0];
+        assert!(file.base64.is_none() && file.openai_id.is_none());
+        assert_eq!(
+            (file.name.as_str(), file.content_type.as_str(), file.size),
+            ("ok.png", "image/png", Some(2))
+        );
+        hydrate_files_from(&stored, &mut request[0].files).unwrap();
+        assert_eq!(request[0].files[0].base64.as_deref(), Some("AQI="));
+    }
+
+    #[test]
+    fn every_message_in_the_request_and_every_stored_file_is_held_to_the_limits() {
+        let policy = AttachmentSettings {
+            accepted_types: vec!["image/*".into(), ".txt".into()],
+            max_file_bytes: 10,
+            max_files_per_message: 1,
+        };
+        let large_inline = File {
+            base64: Some("YWFhYWFhYWFhYWFhYWFhYWFh".into()),
+            ..file(Uuid::new_v4(), true)
+        };
+        let small_inline = file(Uuid::new_v4(), true);
+        let send = |first: Vec<File>, last: Vec<File>| {
+            vec![
+                MessageRequest {
+                    role: ChatRole::User,
+                    content: "first".into(),
+                    files: first,
+                },
+                MessageRequest {
+                    role: ChatRole::User,
+                    content: "last".into(),
+                    files: last,
+                },
+            ]
+        };
+        assert!(attachments_accepted(
+            &policy,
+            &send(vec![], vec![small_inline.clone()]),
+            false,
+            &[]
+        ));
+        assert!(
+            !attachments_accepted(&policy, &send(vec![large_inline], vec![]), false, &[]),
+            "a file on an earlier message of the same request is sent too"
+        );
+        assert!(!attachments_accepted(
+            &policy,
+            &send(vec![small_inline.clone(), small_inline.clone()], vec![]),
+            false,
+            &[]
+        ));
+        let stored = |size: i64, content_type: &str| StoredAttachment {
+            size,
+            content_type: content_type.into(),
+            name: "x.bin".into(),
+        };
+        let messages = send(vec![], vec![small_inline]);
+        assert!(
+            !attachments_accepted(&policy, &messages, true, &[stored(1_000, "image/png")]),
+            "image generation is judged by the stored file it reads, not the inline bytes"
+        );
+        assert!(!attachments_accepted(
+            &policy,
+            &messages,
+            true,
+            &[stored(5, "application/zip")]
+        ));
+        assert!(attachments_accepted(
+            &policy,
+            &messages,
+            true,
+            &[stored(5, "image/png")]
+        ));
     }
 }

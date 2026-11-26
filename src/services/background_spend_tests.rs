@@ -329,6 +329,11 @@ impl Fixture {
                 summary_llm_model: None,
             },
             file_storage_root: storage_root.clone(),
+            attachments: crate::config::setting::AttachmentSettings {
+                accepted_types: vec!["*/*".into()],
+                max_file_bytes: 25 * 1024 * 1024,
+                max_files_per_message: crate::config::setting::MAX_ATTACHMENTS_PER_REQUEST,
+            },
         };
         settings
             .set_ai_engine_cache(
