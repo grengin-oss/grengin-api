@@ -3,8 +3,10 @@
 
 use rust_decimal::Decimal;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, DbErr, EntityTrait,
-    QueryFilter, QuerySelect, TryIntoModel, sea_query::Expr,
+    ActiveModelTrait,
+    ActiveValue::{self, Set},
+    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QuerySelect,
+    sea_query::Expr,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -48,8 +50,12 @@ async fn charge_remaining(
     user_id: Uuid,
     reply: &messages::ActiveModel,
 ) -> Result<(), DbErr> {
-    let reply = reply.clone().try_into_model()?;
-    let identifier = reply.id.to_string();
+    // Read field by field: after inserting the reply the stream unsets its placement fields
+    // (previous message, deleted, inactive branch), so the active model is never a whole model.
+    let (Some(id), Some(cost)) = (value(&reply.id), value(&reply.cost)) else {
+        return Err(DbErr::AttrNotSet("reply id or cost".into()));
+    };
+    let identifier = id.to_string();
     let charged: Option<Decimal> = usage_logs::Entity::find()
         .filter(usage_logs::Column::UserId.eq(user_id))
         .filter(usage_logs::Column::Identifier.eq(identifier.as_str()))
@@ -59,35 +65,40 @@ async fn charge_remaining(
         .one(db)
         .await?
         .flatten();
-    let remaining = reply.cost - charged.unwrap_or_default();
+    let remaining = cost - charged.unwrap_or_default();
     if remaining <= Decimal::ZERO {
         return Ok(());
     }
+    let count = |field: &ActiveValue<i32>| value(field).map(i64::from).unwrap_or_default();
     usage_logs::ActiveModel {
         id: Set(Uuid::new_v4()),
         identifier: Set(identifier),
         user_id: Set(user_id),
-        model_provider: Set(reply.model_provider),
-        model_name: Set(reply.model_name),
+        model_provider: Set(value(&reply.model_provider).unwrap_or_default()),
+        model_name: Set(value(&reply.model_name).unwrap_or_default()),
         conversation_id: Set(None),
-        request_tokens: Set(i64::from(reply.request_tokens)),
-        response_tokens: Set(i64::from(reply.response_tokens)),
-        total_tokens: Set(i64::from(reply.total_tokens)),
+        request_tokens: Set(count(&reply.request_tokens)),
+        response_tokens: Set(count(&reply.response_tokens)),
+        total_tokens: Set(count(&reply.total_tokens)),
         cost_usd: Set(remaining),
-        latency_ms: Set(i64::from(reply.latency)),
+        latency_ms: Set(count(&reply.latency)),
         timestamp: Set(chrono::Utc::now()),
         department: Set(None),
         status: Set(UsageLogStatus::Charged),
         error_message: Set(None),
         metadata: Set(Some(json!({
-            "messageId": reply.id,
-            "conversationId": reply.conversation_id,
+            "messageId": id,
+            "conversationId": value(&reply.conversation_id),
             "conversationDeleted": true,
         }))),
     }
     .insert(db)
     .await
     .map(|_| ())
+}
+
+fn value<V: Into<sea_orm::Value> + Clone>(field: &ActiveValue<V>) -> Option<V> {
+    field.try_as_ref().cloned()
 }
 
 #[cfg(test)]
@@ -139,6 +150,11 @@ mod tests {
             metadata: Set(None),
         };
         reply.clone().insert(&db).await.expect("reply row");
+        // As the stream does once the reply is inserted.
+        reply.previous_message_id = ActiveValue::NotSet;
+        reply.deleted = ActiveValue::NotSet;
+        reply.inactive_branch = ActiveValue::NotSet;
+        reply.created_at = ActiveValue::NotSet;
         reply.cost = Set(Decimal::new(50, 2));
         save_reply(&db, user, &reply)
             .await
