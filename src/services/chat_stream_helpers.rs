@@ -482,6 +482,7 @@ mod tests {
             summaries: None,
             summary: None,
             recommended: false,
+            r#default: false,
             price_tier: None,
             comment: None,
             input_token_rate: None,

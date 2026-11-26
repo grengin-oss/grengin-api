@@ -135,6 +135,9 @@ impl PickerMetadata {
                 model.specialty = known.specialty;
             }
             model.recommended |= known.recommended;
+            if model.engine.eq_ignore_ascii_case(&known.engine) {
+                model.r#default |= known.r#default;
+            }
             if model.summaries.is_none() {
                 model.summaries = known.summaries;
             }
@@ -173,6 +176,13 @@ pub fn catalog_specialty(value: &Value) -> String {
 pub fn catalog_recommended(value: &Value) -> bool {
     value
         .get("recommended")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+pub fn catalog_default(value: &Value) -> bool {
+    value
+        .get("default")
         .and_then(Value::as_bool)
         .unwrap_or(false)
 }
@@ -367,6 +377,7 @@ mod tests {
             summaries: None,
             summary: None,
             recommended: false,
+            r#default: false,
             price_tier: None,
             comment: None,
             input_token_rate: input,
@@ -596,6 +607,36 @@ mod tests {
         for missing in [None, Some(""), Some("../etc"), Some("x"), Some("fr-")] {
             assert_eq!(locale_chain(missing), ["en"], "{missing:?}");
         }
+    }
+
+    #[test]
+    fn catalog_defaults_are_strict_hints_and_do_not_multiply_in_gateway_groups() {
+        assert!(catalog_default(&json!({"default":true})));
+        assert!(!catalog_default(&json!({"default":"true"})));
+        assert!(!catalog_default(&json!({"default":1})));
+        assert!(!catalog_default(&json!({})));
+        let metadata = PickerMetadata::built_in();
+        let mut upstream = model(ModelType::TextGenerator, Some(1.0), Some(2.0));
+        upstream.engine = "openai".into();
+        upstream.key = "gpt-test".into();
+        upstream.r#default = true;
+        let catalog = vec![ProviderInfo {
+            key: "openai".into(),
+            name: "OpenAI".into(),
+            icon: String::new(),
+            icon_dark: String::new(),
+            status: "active".into(),
+            models: vec![upstream],
+        }];
+        let mut direct = model(ModelType::TextGenerator, None, None);
+        direct.engine = "openai".into();
+        direct.key = "gpt-test".into();
+        let direct = metadata.enrich_plugin_model(direct, &catalog);
+        assert_eq!(serde_json::to_value(&direct).unwrap()["default"], true);
+        let mut gateway = model(ModelType::TextGenerator, None, None);
+        gateway.engine = "grengin".into();
+        gateway.key = "openai/gpt-test".into();
+        assert!(!metadata.enrich_plugin_model(gateway, &catalog).r#default);
     }
 
     #[test]
