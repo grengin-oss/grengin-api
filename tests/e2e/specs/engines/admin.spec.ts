@@ -86,7 +86,11 @@ test.describe('AI Engines page', () => {
       await expect(dialog.getByText(`${providers.length} providers available to connect`)).toBeVisible();
       await expect(dialog.getByText(`Showing ${providers.length} of ${providers.length} providers`)).toBeVisible();
       // Groups show three cards until expanded.
-      for (const more of await dialog.getByRole('button', { name: /^\+ Show \d+ more$/ }).all()) await more.click();
+      const more = dialog.getByRole('button', { name: /^\+ Show \d+ more$/ });
+      for (let remaining = await more.count(); remaining > 0; remaining--) {
+        await more.first().click();
+        await expect(more).toHaveCount(remaining - 1);
+      }
       for (const provider of providers) {
         await expect(dialog.getByRole('button', { name: `Connect ${provider.name}`, exact: true })).toBeVisible();
       }

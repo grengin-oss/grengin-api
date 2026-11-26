@@ -120,10 +120,6 @@ test.describe('projects', () => {
   });
 
   test("a message typed in the project page's composer is answered by an available model", async ({ page }) => {
-    // Known bug: ProjectDetailPage starts with selectedModel "gpt-5.2" / provider "openai"
-    // hardcoded instead of the installation's models, and sends them in the ?model=&provider=
-    // of the chat it opens, so the message goes to a model this installation does not offer.
-    test.fail();
     recordApiCalls(page, /^\/api\/chat/);
     const name = unique('E2E Project composer');
     const projectId = await createProject(page, name);

@@ -137,12 +137,7 @@ test.describe('MCP access control', () => {
   });
 
   test('revoking access while a tool request is in flight stops its next tool call', async ({ page, browser }) => {
-    // Known API bug (runtime audit CONNECTOR-01): the current-access re-check at dispatch
-    // (call_with_current_access) only runs for native connector plugins; a remote MCP call uses
-    // the permission captured when the request started. Here the model calls `echo` twice in one
-    // turn; access is revoked while the first call is held, and the second call still reaches the
-    // server. Fixed by grengin-api PR #108 (not merged yet); remove `fail` once it is.
-    test.fail();
+    // Revocation during the held first call must prevent the second call reaching the server.
     test.setTimeout(120_000);
     await setDefaultAccessViaApi(serverId, 'explicit_only');
     await grantUserViaApi(serverId, 'member');
