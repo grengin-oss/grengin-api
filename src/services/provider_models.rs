@@ -4,7 +4,7 @@
 use llm_plugin::{ProviderError, ProviderModel, ProviderModelType, ProviderPlugin};
 
 use crate::{
-    dto::models::{ModelInfo, ModelType},
+    dto::models::{ModelInfo, ModelType, ProviderInfo},
     services::live_models_cache::LiveModelsCache,
 };
 
@@ -42,6 +42,37 @@ pub fn model_type(model: &ProviderModel) -> ModelType {
     }
 }
 
+// An engine's live models join its catalog entry, so each provider is listed once; the catalog
+// entry keeps its icons and models, and only models it lacks are added.
+pub fn add_provider_models(providers: &mut Vec<ProviderInfo>, provider: ProviderInfo) {
+    let Some(listed) = providers
+        .iter_mut()
+        .find(|listed| listed.key.eq_ignore_ascii_case(&provider.key))
+    else {
+        providers.push(provider);
+        return;
+    };
+    for model in provider.models {
+        if !listed.models.iter().any(|known| known.key == model.key) {
+            listed.models.push(model);
+        }
+    }
+}
+
+// Newest launch first; models without a known date follow in the order they were listed.
+pub fn sort_models_newest_first(providers: &mut [ProviderInfo]) {
+    for provider in providers {
+        provider.models.sort_by(
+            |left, right| match (&left.launch_date, &right.launch_date) {
+                (Some(left), Some(right)) => right.cmp(left),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            },
+        );
+    }
+}
+
 pub fn is_chat_selectable_model(model: &ModelInfo) -> bool {
     model.model_type != ModelType::TextEmbedder
 }
@@ -51,6 +82,7 @@ pub fn to_model_info(provider_key: &str, model: ProviderModel) -> ModelInfo {
     let resolved_model_type = model_type(&model);
     let comment = metadata_string(&model, "comment");
     ModelInfo {
+        launch_date: crate::services::models_cache::catalog_launch_date(&model.metadata),
         key: model.id.to_string(),
         engine: provider_key.to_string(),
         model_type: resolved_model_type,
@@ -111,6 +143,7 @@ mod tests {
 
     fn model_info(model_type: ModelType) -> ModelInfo {
         ModelInfo {
+            launch_date: None,
             key: "model-1".to_string(),
             name: "Model 1".to_string(),
             engine: "example".to_string(),
@@ -223,5 +256,77 @@ mod tests {
         assert_eq!(info.max_input_tokens, Some(128000));
         assert_eq!(info.max_output_tokens, Some(64000));
         assert!(info.supports_reasoning);
+    }
+
+    #[test]
+    fn live_models_join_their_catalog_entry_and_every_list_is_newest_first() {
+        let model = |key: &str, date: Option<&str>| ModelInfo {
+            key: key.to_string(),
+            launch_date: date.map(str::to_string),
+            ..model_info(ModelType::TextGenerator)
+        };
+        let provider = |key: &str, icon: &str, models: Vec<ModelInfo>| ProviderInfo {
+            key: key.to_string(),
+            name: key.to_string(),
+            icon: icon.to_string(),
+            icon_dark: String::new(),
+            status: "enabled".to_string(),
+            models,
+        };
+        let mut providers = vec![provider(
+            "openai",
+            "openai.svg",
+            vec![
+                model("gpt-6.1-sol", Some("2026-09-29")),
+                model("gpt-6.1-terra", Some("2026-10-26")),
+            ],
+        )];
+        let live = vec![
+            model("ft-custom", None),
+            model("gpt-6.1-sol", Some("2026-09-29")),
+            model("gpt-6.2-astra", Some("2026-11-17")),
+        ];
+        add_provider_models(&mut providers, provider("OpenAI", "", live));
+        let gateway = vec![
+            model("openai/gpt-5.2", Some("2025-12-11")),
+            model("zz/unknown", None),
+            model("anthropic/claude-opus-5-5", Some("2026-11-01")),
+            model("aa/unknown", None),
+        ];
+        add_provider_models(&mut providers, provider("grengin", "", gateway));
+
+        sort_models_newest_first(&mut providers);
+
+        let keys = |provider: &ProviderInfo| {
+            provider
+                .models
+                .iter()
+                .map(|model| model.key.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(providers.len(), 2);
+        assert_eq!(providers[0].icon, "openai.svg");
+        assert_eq!(
+            keys(&providers[0]),
+            ["gpt-6.2-astra", "gpt-6.1-terra", "gpt-6.1-sol", "ft-custom"]
+        );
+        assert_eq!(
+            keys(&providers[1]),
+            [
+                "anthropic/claude-opus-5-5",
+                "openai/gpt-5.2",
+                "zz/unknown",
+                "aa/unknown"
+            ]
+        );
+        assert_eq!(
+            crate::services::models_cache::catalog_launch_date(
+                &serde_json::json!({"launchDate": " 2026-11-17 "})
+            )
+            .as_deref(),
+            Some("2026-11-17")
+        );
+        let json = serde_json::to_value(&providers[0].models[0]).unwrap();
+        assert!(json.get("launch_date").is_none());
     }
 }

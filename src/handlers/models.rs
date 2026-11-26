@@ -11,8 +11,12 @@ use crate::{
     dto::models::{ModelInfo, ModelsResponse, ProviderInfo},
     models::users,
     services::{
-        chat_stream_helpers::is_model_whitelisted, department_policies::effective_allowed_models,
-        models_cache::load_providers_cached, provider_models::is_chat_selectable_model,
+        chat_stream_helpers::is_model_whitelisted,
+        department_policies::effective_allowed_models,
+        models_cache::load_providers_cached,
+        provider_models::{
+            add_provider_models, is_chat_selectable_model, sort_models_newest_first,
+        },
     },
     state::SharedState,
 };
@@ -153,16 +157,20 @@ pub async fn get_list_models(
         if models.is_empty() {
             continue;
         }
-        filtered_providers.push(ProviderInfo {
-            key: provider_key,
-            name: descriptor.name,
-            icon: String::new(),
-            icon_dark: String::new(),
-            status: "enabled".to_string(),
-            models,
-        });
+        add_provider_models(
+            &mut filtered_providers,
+            ProviderInfo {
+                key: provider_key,
+                name: descriptor.name,
+                icon: String::new(),
+                icon_dark: String::new(),
+                status: "enabled".to_string(),
+                models,
+            },
+        );
     }
 
+    sort_models_newest_first(&mut filtered_providers);
     (
         status,
         Json(ModelsResponse {
