@@ -39,6 +39,8 @@ RUN mkdir -p src llm-plugin/src connector-plugin/src migration/src \
  && echo "" > llm-plugin/src/lib.rs \
  && echo "" > connector-plugin/src/lib.rs \
  && echo "" > migration/src/lib.rs
+COPY swagger-overrides /swagger-overrides
+ENV SWAGGER_UI_OVERWRITE_FOLDER=/swagger-overrides
 RUN cargo fetch --locked
 RUN RUST_TARGET="$(cat /tmp/grengin-rust-target)" \
  && cargo build --release --locked --target "$RUST_TARGET" -p grengin-api -j "$CARGO_BUILD_JOBS"
@@ -48,9 +50,7 @@ COPY src ./src
 COPY llm-plugin ./llm-plugin
 COPY connector-plugin ./connector-plugin
 COPY migration ./migration
-COPY swagger-overrides .
 RUN touch src/main.rs llm-plugin/src/lib.rs connector-plugin/src/lib.rs migration/src/lib.rs
-ENV SWAGGER_UI_OVERWRITE_FOLDER=/swagger-overrides
 
 # build (dynamically linked against glibc; everything else, including OpenSSL, is static)
 RUN RUST_TARGET="$(cat /tmp/grengin-rust-target)" \

@@ -238,7 +238,15 @@ mod tests {
         assert_eq!(it_admin_ai_platform_view_grants(&db).await, 1);
         db.execute(column_query.clone()).await.unwrap();
 
-        Migrator::down(&db, Some(2)).await.unwrap();
+        let migrations = Migrator::migrations();
+        let feature = migrations
+            .iter()
+            .position(|migration| {
+                migration.name() == "m20261113_000001_grant_it_admin_ai_platform_view"
+            })
+            .expect("IT Admin grant migration remains registered");
+        let steps: u32 = (migrations.len() - feature).try_into().unwrap();
+        Migrator::down(&db, Some(steps)).await.unwrap();
         assert_eq!(it_admin_ai_platform_view_grants(&db).await, 0);
         assert!(db.execute(column_query.clone()).await.is_err());
 

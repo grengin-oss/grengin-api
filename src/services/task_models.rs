@@ -12,10 +12,10 @@ use crate::{
     models::ai_engines,
     services::{
         chat_stream_helpers::{is_model_whitelisted, model_identifiers},
-        department_policies::effective_allowed_models,
+        department_policies::{effective_allowed_models, model_policy_key},
         llm_usage_gate::active_user_department,
         provider_models::resolve_model_info,
-        provider_resolver::resolve_provider,
+        provider_resolver::{model_route, resolve_provider},
     },
     state::SharedState,
 };
@@ -76,6 +76,15 @@ pub async fn select_task_model(
     user_id: Uuid,
     capability: TaskCapability,
 ) -> Result<Option<TaskModel>, AppError> {
+    select_task_model_with_gateway(state, user_id, capability, true).await
+}
+
+async fn select_task_model_with_gateway(
+    state: &SharedState,
+    user_id: Uuid,
+    capability: TaskCapability,
+    allow_gateway: bool,
+) -> Result<Option<TaskModel>, AppError> {
     let allowed = department_allowed_models(state, user_id).await?;
     let engines = ai_engines::Entity::find()
         .filter(ai_engines::Column::IsEnabled.eq(true))
@@ -106,7 +115,26 @@ pub async fn select_task_model(
         }
         offers.push(EngineOffer { engine_key, models });
     }
-    Ok(pick_task_model(&offers, capability, allowed.as_ref()))
+    while let Some(choice) = pick_task_model(&offers, capability, allowed.as_ref()) {
+        let routed = route_task_model(state, &choice).await?;
+        if allow_gateway || routed.provider_key != "grengin" {
+            return Ok(Some(routed));
+        }
+        for offer in &mut offers {
+            if offer.engine_key == choice.provider_key {
+                offer.models.retain(|model| model.key != choice.model);
+            }
+        }
+    }
+    Ok(None)
+}
+
+async fn route_task_model(state: &SharedState, choice: &TaskModel) -> Result<TaskModel, AppError> {
+    let (provider_key, model, _) = model_route(state, &choice.provider_key, &choice.model).await?;
+    Ok(TaskModel {
+        provider_key,
+        model,
+    })
 }
 
 // The configured summary model (RAG_SUMMARY_LLM_*) or the conversation's own model, when it can
@@ -152,9 +180,9 @@ pub async fn select_summary_model(
             .await
             .unwrap_or_default();
         let department_allows = allowed.as_ref().is_none_or(|allowed| {
-            identifiers.iter().any(|id| {
-                allowed.contains(&(preferred.provider_key.to_lowercase(), id.to_lowercase()))
-            })
+            identifiers
+                .iter()
+                .any(|id| allowed.contains(&model_policy_key(&preferred.provider_key, id)))
         });
         if writes_text(info.as_ref())
             && state
@@ -164,10 +192,25 @@ pub async fn select_summary_model(
             && is_model_whitelisted(&whitelist, &identifiers)
             && department_allows
         {
-            return Ok(Some(preferred));
+            let routed = route_task_model(state, &preferred).await?;
+            if conversation_provider.eq_ignore_ascii_case("grengin")
+                || routed.provider_key != "grengin"
+                || rag
+                    .summary_llm_provider
+                    .as_deref()
+                    .is_some_and(|provider| provider.eq_ignore_ascii_case("grengin"))
+            {
+                return Ok(Some(routed));
+            }
         }
     }
-    select_task_model(state, user_id, TaskCapability::Text).await
+    select_task_model_with_gateway(
+        state,
+        user_id,
+        TaskCapability::Text,
+        conversation_provider.eq_ignore_ascii_case("grengin"),
+    )
+    .await
 }
 
 async fn department_allowed_models(
@@ -186,7 +229,7 @@ async fn department_allowed_models(
     Ok(allowed.map(|models| {
         models
             .into_iter()
-            .map(|model| (model.provider.to_lowercase(), model.model.to_lowercase()))
+            .map(|model| model_policy_key(&model.provider, &model.model))
             .collect()
     }))
 }
@@ -231,9 +274,9 @@ fn pick_task_model(
 
 fn is_allowed(allowed: Option<&AllowedModels>, engine_key: &str, model: &ModelInfo) -> bool {
     allowed.is_none_or(|allowed| {
-        [&model.key, &model.name].iter().any(|identifier| {
-            allowed.contains(&(engine_key.to_lowercase(), identifier.to_lowercase()))
-        })
+        [&model.key, &model.name]
+            .iter()
+            .any(|identifier| allowed.contains(&model_policy_key(engine_key, identifier)))
     })
 }
 
@@ -371,6 +414,21 @@ mod tests {
         assert_eq!(candidate_order("a", &whitelist), vec!["a", "b"]);
         assert_eq!(candidate_order("<empty>", &whitelist), vec!["b", "a"]);
         assert!(candidate_order("a", &[]).is_empty());
+    }
+
+    #[test]
+    fn department_rules_match_the_same_model_across_funding_routes() {
+        let allowed = AllowedModels::from([model_policy_key("openai", "gpt-5")]);
+        let offers = vec![offer(
+            "grengin",
+            vec![model("grengin", "openai/gpt-5", true, true)],
+        )];
+        assert_eq!(
+            pick_task_model(&offers, TaskCapability::Vision, Some(&allowed)),
+            choice("grengin", "openai/gpt-5")
+        );
+        let forbidden = AllowedModels::from([model_policy_key("openai", "other")]);
+        assert!(pick_task_model(&offers, TaskCapability::Vision, Some(&forbidden)).is_none());
     }
 
     #[test]

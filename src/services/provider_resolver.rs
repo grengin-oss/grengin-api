@@ -22,6 +22,23 @@ pub async fn model_route(
     provider: &str,
     model: &str,
 ) -> Result<(String, String, Option<uuid::Uuid>), AppError> {
+    route_model(state, provider, model, false).await
+}
+
+pub async fn embedding_model_route(
+    state: &SharedState,
+    provider: &str,
+    model: &str,
+) -> Result<(String, String, Option<uuid::Uuid>), AppError> {
+    route_model(state, provider, model, true).await
+}
+
+async fn route_model(
+    state: &SharedState,
+    provider: &str,
+    model: &str,
+    embedding: bool,
+) -> Result<(String, String, Option<uuid::Uuid>), AppError> {
     let requested = (provider.to_owned(), model.to_owned(), None);
     if !provider.eq_ignore_ascii_case("grengin") {
         return Ok(requested);
@@ -42,7 +59,7 @@ pub async fn model_route(
     if engine.plugin_config.is_some() {
         return Ok(requested); // A pre-existing custom engine owns its own credentials.
     }
-    if !engine.whitelist_models.iter().any(|id| id == model) {
+    if !embedding && !engine.whitelist_models.iter().any(|id| id == model) {
         return Err(AppError::DepartmentModelNotAllowed {
             provider: provider.into(),
             model: model.into(),
@@ -51,7 +68,12 @@ pub async fn model_route(
     let (upstream, native) = split_model(model).map_err(|_| AppError::ValidationInvalidField {
         field: "model_name",
     })?;
-    if own_key_covers(state, upstream, native).await? {
+    let own_key = if embedding {
+        direct_engine(state, upstream).await?.is_some()
+    } else {
+        own_key_covers(state, upstream, native).await?
+    };
+    if own_key {
         return Ok((upstream.into(), native.into(), Some(engine.id)));
     }
     Ok(("grengin".into(), model.into(), Some(engine.id)))
@@ -64,14 +86,30 @@ pub async fn own_key_covers(
     upstream: &str,
     native: &str,
 ) -> Result<bool, AppError> {
-    let direct = ai_engines::Entity::find()
+    let direct = direct_engine(state, upstream).await?;
+    own_key_covers_engine(state, direct.as_ref(), upstream, native).await
+}
+
+async fn direct_engine(
+    state: &SharedState,
+    upstream: &str,
+) -> Result<Option<ai_engines::Model>, AppError> {
+    ai_engines::Entity::find()
         .filter(ai_engines::Column::EngineKey.eq(upstream))
         .filter(ai_engines::Column::IsEnabled.eq(true))
         .filter(ai_engines::Column::ApiKey.is_not_null())
         .one(&state.database)
         .await
-        .map_err(|_| AppError::DbTimeout)?;
-    if let Some(decided) = own_key_decision(direct.as_ref(), native) {
+        .map_err(|_| AppError::DbTimeout)
+}
+
+pub async fn own_key_covers_engine(
+    state: &SharedState,
+    direct: Option<&ai_engines::Model>,
+    upstream: &str,
+    native: &str,
+) -> Result<bool, AppError> {
+    if let Some(decided) = own_key_decision(direct, native) {
         return Ok(decided);
     }
     let Some(direct) = direct else {

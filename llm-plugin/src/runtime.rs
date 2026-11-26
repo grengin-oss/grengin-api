@@ -44,6 +44,8 @@ const MAX_SSE_EVENT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CONFIGURATION_BYTES: usize = 1024 * 1024;
 const MAX_IMAGE_COUNT: u8 = 16;
 const MAX_AUTHORIZED_BODY_BYTES: usize = 32 * 1024 * 1024;
+// Intermediate copies are bounded separately from the final wire payload.
+const MAX_AUTHORIZED_MAPPING_BYTES: usize = 128 * 1024 * 1024;
 const TRAILING_USAGE_GRACE: Duration = Duration::from_secs(2);
 const MAX_TRAILING_USAGE_GRACE: Duration = Duration::from_secs(5);
 
@@ -372,19 +374,23 @@ impl DeclarativeProvider {
                         &context,
                         &self.manifest.mappings,
                         1_000_000,
-                        MAX_AUTHORIZED_BODY_BYTES,
+                        MAX_AUTHORIZED_MAPPING_BYTES,
                     )
                 } else {
                     evaluate_mapping(mapping, &context, &self.manifest.mappings)
                 }
             })
             .transpose()?;
-        if self.authorization.is_some()
-            && serde_json::to_vec(&body)?.len() > MAX_AUTHORIZED_BODY_BYTES
-        {
-            return Err(ProviderError::PayloadMapping(
-                "authorized request body is too large".into(),
-            ));
+        if self.authorization.is_some() {
+            let encoded = bounded_json(&body, MAX_AUTHORIZED_BODY_BYTES)?;
+            if matches!(spec.body_encoding, BodyEncoding::Json) && body.is_some() {
+                return Ok((
+                    builder
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(encoded),
+                    token_used,
+                ));
+            }
         }
         builder = apply_body(builder, spec.body_encoding, body)?;
         Ok((builder, token_used))
@@ -536,12 +542,15 @@ impl DeclarativeProvider {
         }
 
         let response_limit = self.response_limit_for(&operation.request);
-        let trailing_grace = if operation.response.done_data.is_some() {
-            self.timeout_for(&operation.request)
-                .min(MAX_TRAILING_USAGE_GRACE)
+        let trailing_grace = (if operation.response.done_data.is_some() {
+            MAX_TRAILING_USAGE_GRACE
         } else {
             TRAILING_USAGE_GRACE
-        };
+        })
+        .min(
+            self.timeout_for(&operation.request)
+                .saturating_sub(Duration::from_millis(10)),
+        );
         let mut mapper = SseEventMapper::new(operation.response.clone());
         let captures = operation.continuation.captures.clone();
         let authorized = self.authorization.is_some();
@@ -1434,6 +1443,33 @@ fn scalar_to_string(value: &Value, label: &str) -> Result<String, ProviderError>
     }
 }
 
+fn bounded_json(value: &impl Serialize, limit: usize) -> Result<Vec<u8>, ProviderError> {
+    struct Writer {
+        bytes: Vec<u8>,
+        limit: usize,
+    }
+    impl std::io::Write for Writer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+                return Err(std::io::Error::other("body limit exceeded"));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = Writer {
+        bytes: Vec::new(),
+        limit,
+    };
+    serde_json::to_writer(&mut writer, value).map_err(|_| {
+        ProviderError::PayloadMapping("authorized request body is too large".into())
+    })?;
+    Ok(writer.bytes)
+}
+
 fn apply_body(
     builder: RequestBuilder,
     encoding: BodyEncoding,
@@ -1913,6 +1949,18 @@ fn mapped_u32(root: &Value, pointer: Option<&str>) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
+
+    #[test]
+    fn authorized_body_limit_counts_escaped_wire_bytes_exactly() {
+        let value = json!({"text":"\n\"é"});
+        let expected = serde_json::to_vec(&value).unwrap();
+        assert_eq!(
+            super::bounded_json(&value, expected.len()).unwrap(),
+            expected
+        );
+        assert!(super::bounded_json(&value, expected.len() - 1).is_err());
+        assert!(super::bounded_json(&"x".repeat(1024), 128).is_err());
+    }
 
     use crate::{
         ChatCapabilities, ChatMessage, ChatRequest, ChatRole, ContentPart, EmbeddingOperation,

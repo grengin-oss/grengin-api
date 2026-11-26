@@ -536,7 +536,6 @@ impl CompiledConnector {
         {
             return Err(ConnectorError::Arguments);
         }
-        let _permit = self.calls.try_acquire().map_err(|_| ConnectorError::Busy)?;
         let _content_permit = if tool.definition.response.is_content() {
             Some(
                 tokio::time::timeout(CONTENT_CALL_ADMISSION_WAIT, content_calls().acquire())
@@ -547,6 +546,7 @@ impl CompiledConnector {
         } else {
             None
         };
+        let _permit = self.calls.try_acquire().map_err(|_| ConnectorError::Busy)?;
         tokio::time::timeout(
             Duration::from_secs(30),
             self.execute(&tool.definition, args, token),
@@ -1034,6 +1034,54 @@ fn validate_schema(value: &Value, depth: usize) -> Result<(), ConnectorError> {
 
 #[cfg(test)]
 mod content_call_tests {
+    #[tokio::test]
+    async fn waiting_content_calls_do_not_reserve_the_connectors_general_call_slots() {
+        use super::*;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let limit = content_calls().available_permits();
+        let held = content_calls().acquire_many(limit as u32).await.unwrap();
+        let plugin = Arc::new(CompiledConnector::compile(ConnectorPluginConfig {
+            manifest: serde_json::json!({
+                "schema_version":1, "id":"queue-test", "name":"Queue", "version":"1.0.0", "base_url":"http://127.0.0.1:9", "auth":"none",
+                "tools":[{"name":"read","description":"Read","read_only":true,"input_schema":{"type":"object"},
+                    "request":{"method":"GET","path":"/content"},"response":{"format":"text"}}]
+            }),
+            allow_insecure_http:true, allow_private_network:true, ..Default::default()
+        }).unwrap());
+        let entered = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..17 {
+            let plugin = plugin.clone();
+            let entered = entered.clone();
+            tasks.push(tokio::spawn(async move {
+                entered.fetch_add(1, Ordering::Relaxed);
+                plugin
+                    .call(
+                        "read",
+                        serde_json::json!({}),
+                        CallContext {
+                            user_id: "fixture",
+                            access_token: None,
+                        },
+                    )
+                    .await
+            }));
+        }
+        while entered.load(Ordering::Relaxed) < 17 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(plugin.calls.available_permits(), 16);
+        assert!(tasks.iter().all(|task| !task.is_finished()));
+        for task in tasks {
+            task.abort();
+            let _ = task.await;
+        }
+        drop(held);
+    }
+
     #[test]
     fn content_call_limit_defaults_and_is_bounded() {
         assert_eq!(

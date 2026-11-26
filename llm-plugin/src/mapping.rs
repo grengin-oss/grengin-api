@@ -546,7 +546,7 @@ impl MappingBudget {
     fn value(&self, value: &Value) -> Result<(), ProviderError> {
         self.spend(1, std::mem::size_of::<Value>())?;
         match value {
-            Value::String(value) => self.spend(0, value.len().saturating_mul(6)),
+            Value::String(value) => self.spend(0, value.len()),
             Value::Array(values) => {
                 for value in values {
                     self.value(value)?;
@@ -639,11 +639,31 @@ fn evaluate(
         }
         MappingExpression::JsonEncode(value) => {
             let value = required_value(evaluate(&value.value, scope, false, child_depth)?)?;
-            scope.copy_value(&value)?;
-            Ok(Evaluation::Value(Value::String(
-                serde_json::to_string(&value)
-                    .map_err(|error| ProviderError::PayloadMapping(error.to_string()))?,
-            )))
+            struct Writer<'a> {
+                bytes: Vec<u8>,
+                scope: Scope<'a>,
+            }
+            impl std::io::Write for Writer<'_> {
+                fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                    self.scope
+                        .allocate(bytes.len())
+                        .map_err(|_| std::io::Error::other("mapping resource budget exceeded"))?;
+                    self.bytes.extend_from_slice(bytes);
+                    Ok(bytes.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let mut writer = Writer {
+                bytes: Vec::new(),
+                scope,
+            };
+            serde_json::to_writer(&mut writer, &value)
+                .map_err(|error| ProviderError::PayloadMapping(error.to_string()))?;
+            let encoded = String::from_utf8(writer.bytes)
+                .map_err(|_| ProviderError::PayloadMapping("invalid JSON encoding".into()))?;
+            Ok(Evaluation::Value(Value::String(encoded)))
         }
         MappingExpression::Base64(value) => {
             let value = required_value(evaluate(&value.value, scope, false, child_depth)?)?;
@@ -789,14 +809,13 @@ fn evaluate(
                     false,
                     child_depth,
                 )?)?;
-                let values = value.as_array().ok_or_else(|| {
-                    ProviderError::PayloadMapping(format!(
+                let Value::Array(values) = value else {
+                    return Err(ProviderError::PayloadMapping(format!(
                         "$flatMap definition {} must produce an array",
                         map.using
-                    ))
-                })?;
-                scope.copy_value(&value)?;
-                output.extend(values.iter().cloned());
+                    )));
+                };
+                output.extend(values);
             }
             Ok(Evaluation::Value(Value::Array(output)))
         }
@@ -853,11 +872,12 @@ fn evaluate(
             let mut merged = Map::new();
             for item in &value.values {
                 let value = required_value(evaluate(item, scope, false, child_depth)?)?;
-                let object = value.as_object().ok_or_else(|| {
-                    ProviderError::PayloadMapping("$merge entries must be objects".to_string())
-                })?;
-                scope.copy_value(&value)?;
-                merged.extend(object.clone());
+                let Value::Object(object) = value else {
+                    return Err(ProviderError::PayloadMapping(
+                        "$merge entries must be objects".to_string(),
+                    ));
+                };
+                merged.extend(object);
             }
             Ok(Evaluation::Value(Value::Object(merged)))
         }
@@ -886,9 +906,11 @@ fn evaluate(
             let mut output = String::new();
             for item in &value.values {
                 let value = required_value(evaluate(item, scope, false, child_depth)?)?;
-                scope.copy_value(&value)?;
                 match value {
-                    Value::String(value) => output.push_str(&value),
+                    Value::String(value) => {
+                        scope.allocate(value.len())?;
+                        output.push_str(&value);
+                    }
                     Value::Bool(value) => output.push_str(if value { "true" } else { "false" }),
                     Value::Number(value) => output.push_str(&value.to_string()),
                     _ => {

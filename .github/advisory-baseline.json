@@ -1,0 +1,343 @@
+{
+  "format_version": 1,
+  "recorded_on": "2026-11-26",
+  "expires_on": "2026-12-26",
+  "findings": [
+    {
+      "kind": "unmaintained",
+      "advisory": "RUSTSEC-2026-0173",
+      "package": "proc-macro-error2",
+      "version": "2.0.1",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "unmaintained",
+      "advisory": "RUSTSEC-2026-0192",
+      "package": "ttf-parser",
+      "version": "0.25.1",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "unmaintained",
+      "advisory": "RUSTSEC-2026-0441",
+      "package": "pin-utils",
+      "version": "0.1.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "unmaintained",
+      "advisory": "RUSTSEC-2026-0543",
+      "package": "chrono",
+      "version": "0.4.42",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "unsound",
+      "advisory": "RUSTSEC-2026-0190",
+      "package": "anyhow",
+      "version": "1.0.100",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "unsound",
+      "advisory": "RUSTSEC-2026-0386",
+      "package": "tokio",
+      "version": "1.48.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2023-0071",
+      "package": "rsa",
+      "version": "0.9.9",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0007",
+      "package": "bytes",
+      "version": "1.11.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0009",
+      "package": "time",
+      "version": "0.3.44",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0049",
+      "package": "rustls-webpki",
+      "version": "0.103.8",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0098",
+      "package": "rustls-webpki",
+      "version": "0.103.8",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0099",
+      "package": "rustls-webpki",
+      "version": "0.103.8",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0104",
+      "package": "rustls-webpki",
+      "version": "0.103.8",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0258",
+      "package": "h2",
+      "version": "0.4.12",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0285",
+      "package": "rustls",
+      "version": "0.23.35",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0346",
+      "package": "rustls",
+      "version": "0.23.35",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0348",
+      "package": "rustls",
+      "version": "0.23.35",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0349",
+      "package": "rustls",
+      "version": "0.23.35",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0367",
+      "package": "zip",
+      "version": "3.0.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0367",
+      "package": "zip",
+      "version": "8.6.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0368",
+      "package": "zip",
+      "version": "3.0.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0368",
+      "package": "zip",
+      "version": "8.6.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0369",
+      "package": "zip",
+      "version": "3.0.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0369",
+      "package": "zip",
+      "version": "8.6.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0381",
+      "package": "webpki-roots",
+      "version": "1.0.4",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0382",
+      "package": "rustls-webpki",
+      "version": "0.103.8",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0387",
+      "package": "crypto-bigint",
+      "version": "0.5.5",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0429",
+      "package": "zip",
+      "version": "3.0.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0429",
+      "package": "zip",
+      "version": "8.6.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0436",
+      "package": "calamine",
+      "version": "0.36.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0462",
+      "package": "rmcp",
+      "version": "3.8.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0463",
+      "package": "openssl",
+      "version": "0.10.75",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0473",
+      "package": "openssl",
+      "version": "0.10.75",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0474",
+      "package": "openssl",
+      "version": "0.10.75",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0475",
+      "package": "openssl",
+      "version": "0.10.75",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0476",
+      "package": "openssl",
+      "version": "0.10.75",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0477",
+      "package": "openssl",
+      "version": "0.10.75",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0478",
+      "package": "openssl",
+      "version": "0.10.75",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0479",
+      "package": "openssl",
+      "version": "0.10.75",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0545",
+      "package": "zip",
+      "version": "3.0.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0545",
+      "package": "zip",
+      "version": "8.6.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0546",
+      "package": "zip",
+      "version": "8.6.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0547",
+      "package": "zip",
+      "version": "8.6.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0548",
+      "package": "zip",
+      "version": "3.0.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0548",
+      "package": "zip",
+      "version": "8.6.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "vulnerability",
+      "advisory": "RUSTSEC-2026-0592",
+      "package": "url",
+      "version": "2.5.7",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "yanked",
+      "advisory": "yanked",
+      "package": "chacha20",
+      "version": "0.10.1",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    {
+      "kind": "yanked",
+      "advisory": "yanked",
+      "package": "spin",
+      "version": "0.9.8",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    }
+  ]
+}

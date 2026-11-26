@@ -28,7 +28,7 @@ use crate::{
             estimate_text_tokens, is_usage_refusal,
         },
         provider_chat::{generate_provider_text, provider_error_class},
-        provider_resolver::{model_route, resolve_provider},
+        provider_resolver::resolve_provider,
         task_models::select_summary_model,
     },
     state::SharedState,
@@ -581,8 +581,12 @@ pub async fn generate_embeddings(
     subject: UsageSubject,
     inputs: Vec<String>,
 ) -> Result<Option<Vec<Vec<f32>>>, AppError> {
-    let (provider, model, _) =
-        model_route(app_state, &config.provider.to_lowercase(), &config.model).await?;
+    let (provider, model, _) = crate::services::provider_resolver::embedding_model_route(
+        app_state,
+        &config.provider.to_lowercase(),
+        &config.model,
+    )
+    .await?;
     let dimensions = storage_embedding_dimensions(&app_state.database, config.dimensions)
         .await
         .map_err(|error| match error {

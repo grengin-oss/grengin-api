@@ -1,6 +1,7 @@
 # Fails the build if a dependency's license is outside the allow list in
 # deny.toml. Also add this workflow (and a copy of deny.toml) to the root
 # repository for the installer crate.
+# The advisory gate reports a time-limited backlog but blocks new findings.
 
 name: License check
 
@@ -10,6 +11,25 @@ on:
     branches: [main]
 
 jobs:
+  vulnerability-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-deny@0.20.2
+          fallback: none
+      - name: Test the advisory gate
+        run: python3 -m unittest discover -s scripts/tests -p 'test_advisory_baseline.py' -v
+      - name: Block new advisories and report the existing backlog
+        run: python3 scripts/check-advisory-baseline.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: advisory-report
+          path: target/advisory-report.jsonl
+          retention-days: 7
+
   cargo-deny:
     runs-on: ubuntu-latest
     steps:

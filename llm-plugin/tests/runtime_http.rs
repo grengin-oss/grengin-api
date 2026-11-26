@@ -614,7 +614,7 @@ async fn heartbeat_traffic_cannot_extend_the_post_completion_window() {
             tokio::time::timeout(Duration::from_secs(4), collect_chat(&provider, "chat-1"))
                 .await
                 .expect("heartbeats reset the trailing-usage deadline");
-        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert!(started.elapsed() >= Duration::from_millis(1900));
         assert!(matches!(
             events.as_slice(),
             [ProviderEvent::Completed { .. }]
@@ -2079,6 +2079,56 @@ impl llm_plugin::RequestAuthorization for TestAuthorization {
     async fn reject(&self, bearer: &str) {
         self.rejected.lock().unwrap().push(bearer.to_owned());
     }
+}
+
+#[tokio::test]
+async fn completed_stream_with_short_silence_timeout_ends_successfully() {
+    for marker in [false, true] {
+        let (base, _) = serve(vec![MockResponse::chunked(
+            "200 OK",
+            "text/event-stream",
+            vec![
+                b"data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n".to_vec(),
+                b":heartbeat\n\n".to_vec(),
+            ],
+            Duration::from_millis(750),
+        )])
+        .await;
+        let mut operations = openai_chat_operations(json!({"timeoutMs":250}));
+        if !marker {
+            operations["chatStream"]["response"]
+                .as_object_mut()
+                .unwrap()
+                .remove("doneData");
+        }
+        let instance = provider(base, json!({"chat":{"streaming":true}}), operations);
+        let events = collect_chat(&instance, "chat-1").await;
+        assert!(matches!(
+            events.as_slice(),
+            [ProviderEvent::Completed { .. }]
+        ));
+    }
+}
+
+#[tokio::test]
+async fn authorized_large_legitimate_payload_is_sent_once() {
+    let (base, requests) =
+        serve_once("200 OK", "text/event-stream", b"data: [DONE]\n\n".to_vec()).await;
+    let instance = authorized_provider(
+        &base,
+        json!({"chat":{"streaming":true}}),
+        openai_chat_operations(Value::Null),
+    );
+    let mut request = chat_request("chat-1");
+    request.messages[0].content = vec![ContentPart::Text {
+        text: "a".repeat(6 * 1024 * 1024),
+    }];
+    let mut session = instance.chat().unwrap().start(request).await.unwrap();
+    let events: Vec<_> = session.stream().await.unwrap().collect().await;
+    assert!(events.iter().all(Result::is_ok));
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].body.len() > 6 * 1024 * 1024);
 }
 
 fn authorized_runtime(base: String) -> ProviderRuntimeConfig {

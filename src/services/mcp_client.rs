@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -985,7 +986,7 @@ pub struct McpServerClient {
     pub url: Option<String>,
     pub connection_config: Value,
     pub db_url: Option<String>,
-    client: Mutex<Option<rmcp::service::RunningService<rmcp::service::RoleClient, ()>>>,
+    client: Mutex<Option<Arc<rmcp::service::RunningService<rmcp::service::RoleClient, ()>>>>,
     http_clients: Result<SessionCache<Uuid, UserHttpClient>, String>,
     connected: Mutex<bool>,
     plugin: Result<Option<CompiledConnector>, String>,
@@ -1057,7 +1058,14 @@ impl McpServerClient {
             return Ok(());
         }
         let mut connected = self.connected.lock().await;
-        if *connected {
+        if *connected
+            && self
+                .client
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|client| !client.is_closed())
+        {
             return Ok(());
         }
 
@@ -1073,7 +1081,7 @@ impl McpServerClient {
                 let service =
                     connect_rmcp_http(base_url, auth_header, &self.connection_config).await?;
                 let mut client = self.client.lock().await;
-                *client = Some(service);
+                *client = Some(Arc::new(service));
             }
             McpTransportType::Websocket => {
                 return Err(McpClientError::Config(
@@ -1084,7 +1092,7 @@ impl McpServerClient {
                 let stdio = parse_stdio_config(&self.connection_config, self.db_url.as_deref())?;
                 let service = connect_rmcp_stdio(&stdio.command, &stdio.args).await?;
                 let mut client = self.client.lock().await;
-                *client = Some(service);
+                *client = Some(Arc::new(service));
             }
         }
 
@@ -1191,8 +1199,7 @@ impl McpServerClient {
             ),
             _ => {
                 self.ensure_connected().await?;
-                let mut client = self.client.lock().await;
-                let service = client.as_mut().ok_or_else(|| {
+                let service = self.client.lock().await.clone().ok_or_else(|| {
                     McpClientError::Rmcp("rmcp client not initialized".to_string())
                 })?;
                 let arguments = rmcp_args_from_value(args)?;
@@ -1212,9 +1219,11 @@ impl McpServerClient {
             return Ok(crate::services::mcp_plugin_helpers::plugin_tools(plugin));
         }
         self.ensure_connected().await?;
-        let mut client = self.client.lock().await;
-        let service = client
-            .as_mut()
+        let service = self
+            .client
+            .lock()
+            .await
+            .clone()
             .ok_or_else(|| McpClientError::Rmcp("rmcp client not initialized".to_string()))?;
         service
             .list_all_tools()
@@ -2311,6 +2320,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slow_shared_tool_does_not_block_listing_or_another_tool() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let router = Router::new().route(
+            "/mcp",
+            post({
+                let entered = entered.clone();
+                let release = release.clone();
+                move |_headers: HeaderMap, Json(message): Json<Value>| {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        if message.get("id").is_none() {
+                            return StatusCode::ACCEPTED.into_response();
+                        }
+                        let result = match message["method"].as_str().unwrap() {
+                            "initialize" => serde_json::json!({
+                                "protocolVersion":message["params"]["protocolVersion"],
+                                "capabilities":{"tools":{}}, "serverInfo":{"name":"concurrency", "version":"1"}
+                            }),
+                            "tools/list" => serde_json::json!({"tools":[]}),
+                            "tools/call" => {
+                                if message["params"]["name"] == "hang" {
+                                    entered.notify_one();
+                                    release.notified().await;
+                                }
+                                serde_json::json!({"content":[{"type":"text","text":"ok"}]})
+                            }
+                            _ => panic!("unexpected MCP method"),
+                        };
+                        Json(serde_json::json!({"jsonrpc":"2.0", "id":message["id"], "result":result})).into_response()
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Arc::new(McpServerClient::new(
+            Uuid::new_v4(),
+            "concurrency".into(),
+            McpTransportType::Http,
+            Some(url),
+            serde_json::json!({}),
+            None,
+        ));
+        let slow = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .call_tool("hang", serde_json::json!({}), None, Some(Uuid::new_v4()))
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        let fast_user = Uuid::new_v4();
+        let fast = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            client.list_tools_with_auth(None, Some(fast_user)).await?;
+            client
+                .call_tool("ping", serde_json::json!({}), None, Some(fast_user))
+                .await
+        })
+        .await;
+        release.notify_one();
+        slow.await.unwrap().unwrap();
+        server.abort();
+        assert!(
+            fast.is_ok(),
+            "another user's network call held the entire client-cache lock"
+        );
+        fast.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn slow_oauth_user_does_not_block_other_users_on_same_mcp_server() {
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
@@ -2396,6 +2481,69 @@ mod tests {
             "another user's network call held the entire client-cache lock"
         );
         fast.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn closed_shared_session_reconnects_only_on_the_next_request() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let initialized = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let router = Router::new().route("/mcp", post({
+            let initialized = initialized.clone();
+            let calls = calls.clone();
+            move |headers: HeaderMap, Json(message): Json<Value>| {
+                let initialized = initialized.clone();
+                let calls = calls.clone();
+                async move {
+                    if message.get("id").is_none() {
+                        return StatusCode::ACCEPTED.into_response();
+                    }
+                    let result = match message["method"].as_str().unwrap() {
+                        "initialize" => {
+                            initialized.fetch_add(1, Ordering::SeqCst);
+                            serde_json::json!({"protocolVersion":message["params"]["protocolVersion"],"capabilities":{"tools":{}},"serverInfo":{"name":"recovery","version":"1"}})
+                        }
+                        "tools/call" => {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            serde_json::json!({"content":[],"structuredContent":{"authorization":headers.get(AUTHORIZATION).and_then(|value| value.to_str().ok()).unwrap_or("")}})
+                        }
+                        _ => return StatusCode::BAD_REQUEST.into_response(),
+                    };
+                    Json(serde_json::json!({"jsonrpc":"2.0","id":message["id"],"result":result})).into_response()
+                }
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = McpServerClient::new(
+            Uuid::new_v4(),
+            "recovery".into(),
+            McpTransportType::Http,
+            Some(url),
+            serde_json::json!({}),
+            None,
+        );
+        for index in 0..2 {
+            client
+                .call_tool("ping", serde_json::json!({}), None, None)
+                .await
+                .unwrap();
+            assert_eq!(initialized.load(Ordering::SeqCst), index + 1);
+            assert_eq!(calls.load(Ordering::SeqCst), index + 1);
+            if index == 0 {
+                let service = client.client.lock().await.clone().unwrap();
+                service.cancellation_token().cancel();
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    while !service.is_closed() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+        }
+        server.abort();
     }
 
     #[tokio::test]

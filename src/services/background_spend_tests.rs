@@ -1016,9 +1016,9 @@ async fn own_key_embeddings_are_priced_and_charged_under_the_resolved_model() {
     let gateway_id = Uuid::new_v4();
     let qualified = format!("openai/{EMBED_MODEL}");
     fixture.db.execute_unprepared(&format!(
-        r#"UPDATE ai_engines SET "engineKey" = 'openai', "apiKey" = 'fixture-only', "whitelistModels" = ARRAY['{EMBED_MODEL}'] WHERE id = '{}';
+        r#"UPDATE ai_engines SET "engineKey" = 'openai', "apiKey" = 'fixture-only', "whitelistModels" = ARRAY['{TEXT_MODEL}'] WHERE id = '{}';
            INSERT INTO ai_engines (id, "displayName", "isEnabled", "engineKey", "apiKeyStatus", "whitelistModels", "defaultModel", "createdAt", "updatedAt")
-             VALUES ('{gateway_id}', 'Gateway fixture', true, 'grengin', 'not_configured', ARRAY['{qualified}'], '{qualified}', now(), now());"#,
+             VALUES ('{gateway_id}', 'Gateway fixture', true, 'grengin', 'not_configured', ARRAY['openai/{TEXT_MODEL}'], 'openai/{TEXT_MODEL}', now(), now());"#,
         fixture.engine_id
     )).await.expect("own-key routing fixtures");
     let mut descriptor = fixture
@@ -1069,6 +1069,163 @@ async fn own_key_embeddings_are_priced_and_charged_under_the_resolved_model() {
     assert_eq!(ledger[0].model_provider, "openai");
     assert_eq!(ledger[0].model_name, EMBED_MODEL);
     assert_eq!(ledger[0].cost_usd, embedding_cost());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+async fn background_models_use_own_keys_and_private_summaries_never_fall_to_gateway() {
+    use crate::services::task_models::{TaskCapability, select_summary_model, select_task_model};
+    let mut fixture = Fixture::new(false).await;
+    let direct_id = Uuid::new_v4();
+    let qualified = format!("openai/{TEXT_MODEL}");
+    fixture.db.execute_unprepared(&format!(r#"
+        UPDATE ai_engines SET "engineKey" = 'grengin', "whitelistModels" = ARRAY['{qualified}'], "defaultModel" = '{qualified}' WHERE id = '{}';
+        INSERT INTO ai_engines (id, "displayName", "isEnabled", "engineKey", "apiKey", "apiKeyStatus", "whitelistModels", "defaultModel", "createdAt", "updatedAt")
+        VALUES ('{direct_id}', 'Own key', true, 'openai', 'fixture-only', 'valid', ARRAY['{TEXT_MODEL}'], '{TEXT_MODEL}', now() + interval '1 second', now());
+        UPDATE department_allowed_models SET provider = 'openai', model = '{TEXT_MODEL}' WHERE "departmentId" = '{}';
+    "#, fixture.engine_id, fixture.department)).await.unwrap();
+    let descriptor = fixture
+        .state
+        .provider_registry
+        .get_by_str(&fixture.engine_key)
+        .await
+        .unwrap()
+        .descriptor()
+        .clone();
+    for (key, model) in [("grengin", qualified.as_str()), ("openai", TEXT_MODEL)] {
+        let mut descriptor = descriptor.clone();
+        descriptor.id = ProviderId::new(key);
+        fixture
+            .state
+            .provider_registry
+            .register(Arc::new(FakeProvider {
+                descriptor,
+                calls: fixture.calls.clone(),
+                text_model: model.into(),
+            }))
+            .await;
+        fixture
+            .state
+            .settings
+            .set_ai_engine_cache(key.into(), None, true, vec![model.into()])
+            .await;
+    }
+    let selected = select_task_model(&fixture.state, fixture.user, TaskCapability::Document)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (selected.provider_key.as_str(), selected.model.as_str()),
+        ("openai", TEXT_MODEL)
+    );
+    let rag = &mut Arc::get_mut(&mut fixture.state).unwrap().settings.rag;
+    rag.summary_llm_provider = Some("grengin".into());
+    rag.summary_llm_model = Some(qualified.clone());
+    let summary = select_summary_model(&fixture.state, fixture.user, "openai", TEXT_MODEL)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.provider_key, "openai");
+    fixture
+        .db
+        .execute_unprepared(&format!(
+            r#"UPDATE ai_engines SET "isEnabled" = false WHERE id = '{direct_id}'"#
+        ))
+        .await
+        .unwrap();
+    fixture
+        .state
+        .settings
+        .set_ai_engine_cache("openai".into(), None, false, vec![TEXT_MODEL.into()])
+        .await;
+    let rag = &mut Arc::get_mut(&mut fixture.state).unwrap().settings.rag;
+    rag.summary_llm_provider = None;
+    rag.summary_llm_model = None;
+    assert_eq!(
+        select_summary_model(&fixture.state, fixture.user, "grengin", &qualified)
+            .await
+            .unwrap()
+            .unwrap()
+            .provider_key,
+        "grengin",
+        "gateway conversations retain their existing summary route"
+    );
+    assert!(
+        select_summary_model(&fixture.state, fixture.user, "openai", TEXT_MODEL)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let rag = &mut Arc::get_mut(&mut fixture.state).unwrap().settings.rag;
+    rag.summary_llm_model = Some(qualified.clone());
+    assert!(
+        select_summary_model(&fixture.state, fixture.user, "openai", TEXT_MODEL)
+            .await
+            .unwrap()
+            .is_none(),
+        "a model-only override does not authorize gateway use"
+    );
+    Arc::get_mut(&mut fixture.state)
+        .unwrap()
+        .settings
+        .rag
+        .summary_llm_provider = Some("Grengin".into());
+    let summary = select_summary_model(&fixture.state, fixture.user, "openai", TEXT_MODEL)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.provider_key, "grengin");
+    assert_eq!(summary.model, qualified);
+    Arc::get_mut(&mut fixture.state)
+        .unwrap()
+        .settings
+        .rag
+        .summary_llm_model = Some("openai/not-allowed".into());
+    assert!(
+        select_summary_model(&fixture.state, fixture.user, "openai", TEXT_MODEL)
+            .await
+            .unwrap()
+            .is_none(),
+        "an invalid explicit preference cannot authorize automatic gateway fallback"
+    );
+    Arc::get_mut(&mut fixture.state)
+        .unwrap()
+        .settings
+        .rag
+        .summary_llm_model = Some(qualified.clone());
+    for (enabled, whitelist, allowed_model) in [
+        (false, vec![qualified.clone()], TEXT_MODEL),
+        (true, Vec::new(), TEXT_MODEL),
+        (true, vec![qualified.clone()], "forbidden"),
+    ] {
+        fixture
+            .state
+            .settings
+            .set_ai_engine_cache("grengin".into(), None, enabled, whitelist)
+            .await;
+        fixture
+            .db
+            .execute_unprepared(&format!(
+                r#"UPDATE department_allowed_models SET model = '{allowed_model}' WHERE "departmentId" = '{}'"#,
+                fixture.department
+            ))
+            .await
+            .unwrap();
+        assert!(
+            select_summary_model(&fixture.state, fixture.user, "openai", TEXT_MODEL)
+                .await
+                .unwrap()
+                .is_none(),
+            "explicit gateway configuration must still honor enablement, whitelist and department policy"
+        );
+    }
+    assert_eq!(fixture.calls.chat.load(Ordering::SeqCst), 0);
+    fixture
+        .db
+        .execute_unprepared(&format!("DELETE FROM ai_engines WHERE id = '{direct_id}'"))
+        .await
+        .unwrap();
+    fixture.cleanup().await;
 }
 
 async fn user_conversations(fixture: &Fixture) -> Vec<crate::models::conversations::Model> {

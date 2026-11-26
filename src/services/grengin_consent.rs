@@ -28,7 +28,7 @@ use crate::{
         grengin_grant::{GRENGIN_CONSENT_VERSION, GrenginGrant},
         grengin_provider::split_model,
         provider_models::model_type,
-        provider_resolver::own_key_covers,
+        provider_resolver::own_key_covers_engine,
         provider_runtime::{
             catalog_config, compile_engine, register_provider, unregister_provider,
         },
@@ -283,10 +283,7 @@ async fn remote_converge(
     access: &dyn ModelAccess,
     enabled: bool,
 ) -> Result<(), (OperationState, String)> {
-    let engine_state = access
-        .engine_state()
-        .await
-        .map_err(|_| (OperationState::Pending, "status_unavailable".to_owned()))?;
+    let engine_state = access.engine_state().await.map_err(classify)?;
     if (engine_state != "off") == enabled {
         return Ok(());
     }
@@ -294,10 +291,7 @@ async fn remote_converge(
     if enabled {
         // Enabled service states include on, low, empty and pending: an empty balance is not
         // a failed enable. Only a status that cannot be read leaves confirmation pending.
-        let engine_state = access
-            .engine_state()
-            .await
-            .map_err(|_| (OperationState::Pending, "status_unavailable".to_owned()))?;
+        let engine_state = access.engine_state().await.map_err(classify)?;
         if engine_state == "off" {
             return Err((OperationState::Pending, "remote_still_off".to_owned()));
         }
@@ -498,14 +492,31 @@ pub async fn catalog(state: &SharedState) -> Result<GrenginCatalog, AuthError> {
         .await
         .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
     let observed_at = Utc::now();
+    let direct = ai_engines::Entity::find()
+        .filter(ai_engines::Column::IsEnabled.eq(true))
+        .filter(ai_engines::Column::ApiKey.is_not_null())
+        .all(&state.database)
+        .await
+        .map_err(|_| AuthError::DbTimeout)?;
     let mut models = Vec::with_capacity(listed.len());
     for model in listed {
         let Ok((provider_id, native_model_id)) = split_model(model.id.as_str()) else {
             continue;
         };
-        let own_key = own_key_covers(state, provider_id, native_model_id)
-            .await
-            .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
+        let Ok(own_key) = own_key_covers_engine(
+            state,
+            direct
+                .iter()
+                .find(|engine| engine.engine_key == provider_id),
+            provider_id,
+            native_model_id,
+        )
+        .await
+        else {
+            // Never advertise gateway funding when own-key coverage could not be verified.
+            eprintln!("Grengin catalog model omitted: own-key coverage unavailable");
+            continue;
+        };
         models.extend(catalog_entry(&model, engine.as_ref(), own_key));
     }
     Ok(GrenginCatalog {
@@ -858,6 +869,71 @@ mod tests {
         .unwrap();
         assert_eq!(again.state, OperationState::Applied);
         assert_eq!(again.error_code, None);
+    }
+
+    struct StatusFailure(u16);
+
+    #[async_trait::async_trait]
+    impl ModelAccess for StatusFailure {
+        async fn engine_state(&self) -> Result<String, ProviderError> {
+            Err(ProviderError::HttpStatus {
+                status: self.0,
+                message: "denied".into(),
+            })
+        }
+        async fn set_enabled(&self, _: bool) -> Result<(), ProviderError> {
+            panic!("must not send after a failed status read")
+        }
+    }
+
+    #[tokio::test]
+    async fn permanent_status_errors_fail_and_transient_errors_wait() {
+        for status in [400, 401, 403] {
+            assert_eq!(
+                remote_converge(&StatusFailure(status), true)
+                    .await
+                    .unwrap_err()
+                    .0,
+                OperationState::Failed
+            );
+        }
+        for status in [429, 500, 503] {
+            assert_eq!(
+                remote_converge(&StatusFailure(status), true)
+                    .await
+                    .unwrap_err()
+                    .0,
+                OperationState::Pending
+            );
+        }
+    }
+
+    struct StatusAfterSet(std::sync::atomic::AtomicBool);
+
+    #[async_trait::async_trait]
+    impl ModelAccess for StatusAfterSet {
+        async fn engine_state(&self) -> Result<String, ProviderError> {
+            if self.0.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                Ok("off".into())
+            } else {
+                Err(ProviderError::HttpStatus {
+                    status: 403,
+                    message: "revoked".into(),
+                })
+            }
+        }
+        async fn set_enabled(&self, _: bool) -> Result<(), ProviderError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn permanent_confirmation_errors_after_a_set_also_fail() {
+        let service = StatusAfterSet(true.into());
+        assert_eq!(
+            remote_converge(&service, true).await.unwrap_err().0,
+            OperationState::Failed
+        );
     }
 
     /// A service whose calls take `delay`; with `lose_next_reply`, the next SET reply is lost
