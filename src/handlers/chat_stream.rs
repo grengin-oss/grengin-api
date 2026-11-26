@@ -10,7 +10,8 @@ use crate::{
         chat_stream::{
             ActiveSkillInfo, ArtifactSavedPayload, BudgetWarningPayload, ChatInput, ChatStream,
             ChatStreamEvent, ChatStreamEvents, ChatStreamPayload, ChatStreamToolCall,
-            ChatStreamToolResult, ChatStreamWebSearchAction, ChatToolKind, SkillsActivePayload,
+            ChatStreamToolResult, ChatStreamWebSearchAction, ChatToolKind, ResumeStreamQuery,
+            SkillsActivePayload,
         },
         files::File,
     },
@@ -37,6 +38,7 @@ use crate::{
         chat_attachments::{hydrate_files, hydrate_prompt_files, validate_incoming_attachments},
         chat_helpers::{
             effective_max_tokens, effective_native_web_search, supports_native_web_search,
+            validate_turn_messages,
         },
         chat_stream_helpers::{
             ContentCheckpoint, DepartmentBudgetGate, ToolRoundOutcome, deliver_reply,
@@ -69,6 +71,7 @@ use crate::{
             embed_retrieval_query, end_history_snapshot, load_recent_prompts, load_summary,
             summary_usable_with_cutoff, update_conversation_summary,
         },
+        reply_feed::{ReplyFeed, record, resumable_reply, resume_position},
         skills_helpers::{load_skill_knowledge_for_stream, load_skills_for_stream},
         system_prompts,
     },
@@ -82,7 +85,8 @@ use crate::{
 };
 use axum::{
     Extension, Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
+    http::HeaderMap,
     response::{
         Sse,
         sse::{Event, KeepAlive},
@@ -220,7 +224,7 @@ use uuid::Uuid;
       })
     )),
     ("response_stopped" = (
-      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation or switched to another version while it was generating, including before it started streaming, or a newer edit of the same message took over; the reply stays with the version it was sent in), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnects (for example a page refresh) keeps generating and is saved complete; GET /chat/{chat_id} returns it.",
+      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message, sent a newer message in this conversation (including from another tab or API client), or switched to another version while it was generating, including before it started streaming, or a newer edit of the same message took over; the reply stays with the version it was sent in), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnects (for example a page refresh) keeps generating and is saved complete; GET /chat/{chat_id} returns it.",
       value = json!({
         "event": "response_stopped",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "stop_reason": "user_cancelled" }
@@ -380,7 +384,7 @@ pub async fn handle_chat_stream_path_doc() {}
       })
     )),
     ("response_stopped" = (
-      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message in this conversation or switched to another version while it was generating, including before it started streaming, or a newer edit of the same message took over; the reply stays with the version it was sent in), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnects (for example a page refresh) keeps generating and is saved complete; GET /chat/{chat_id} returns it.",
+      description = "event:response_stopped — the assistant reply stopped before it finished; sent before stream_finished (when present) and done. stop_reason is user_cancelled (Stop pressed), user_edited (the user edited a message, sent a newer message in this conversation (including from another tab or API client), or switched to another version while it was generating, including before it started streaming, or a newer edit of the same message took over; the reply stays with the version it was sent in), provider_error (the model provider returned an error), network_error (the provider connection failed or dropped), or server_error (the reply could not be saved). The same value is returned as stop_reason on the message by GET /chat/{chat_id}. A reply whose client disconnects (for example a page refresh) keeps generating and is saved complete; GET /chat/{chat_id} returns it.",
       value = json!({
         "event": "response_stopped",
         "data": { "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "stop_reason": "user_cancelled" }
@@ -475,6 +479,38 @@ pub async fn cancel_chat_stream(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/chat/stream/{message_id}/events",
+    tag = "chat",
+    description = "Reconnects to an assistant reply that is still generating, for a page that lost its stream (for example after a refresh). Pass the message_id of a reply that GET /chat/{chat_id} shows with `generating: true`.\n\nThe response is the reply's own server-sent events from the start of its stream (conversation, message_start, deltas, tool and artifact events, stream_finished, done), each with an `id` that is its 1-based position, then the new ones live until the reply ends. To continue after a dropped connection, send the last id received as the Last-Event-ID header or as `after`; only later events are sent. The request needs the bearer token, so open it with fetch rather than the browser's EventSource. If the stream ends without a `done` event, reconnect from the last id. Edit replies can be followed the same way.\n\n404 means there is nothing to reconnect to: the reply has finished, never streamed, grew too large to keep, or is generating on another instance after a restart. Then read GET /chat/{chat_id} and poll it while `generating` is true.",
+    params(
+        ("message_id" = Uuid, Path, description = "Assistant message id of the generating reply"),
+        ResumeStreamQuery,
+        ("Last-Event-ID" = Option<String>, Header, description = "The id of the last event received; takes precedence over `after`")
+    ),
+    responses(
+        (status = 200, content_type = "text/event-stream", description = "The reply's events from the requested position, then live until it ends"),
+        (status = 401, content_type = "application/json", body = Error, description = "Invalid/expired token (code=6103)"),
+        (status = 404, content_type = "application/json", body = ErrorResponse, description = "Nothing to reconnect to, or the message belongs to another user's conversation (code=1001); read the conversation instead"),
+        (status = 503, content_type = "application/json", body = ErrorResponse, description = "DB unavailable (code=5000) or timeout (code=5001)"),
+    )
+)]
+pub async fn resume_chat_stream(
+    claims: Claims,
+    State(app_state): State<SharedState>,
+    Path(message_id): Path<Uuid>,
+    Query(query): Query<ResumeStreamQuery>,
+    headers: HeaderMap,
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, AppError> {
+    let feed = resumable_reply(&app_state, claims.user_id, message_id).await?;
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok());
+    let position = resume_position(last_event_id, query.after);
+    Ok(Sse::new(feed.try_follow(position)?).keep_alive(KeepAlive::new()))
+}
+
 pub async fn handle_chat_stream(
     claims: Claims,
     mut chat_id: Option<Path<Uuid>>,
@@ -482,6 +518,7 @@ pub async fn handle_chat_stream(
     pending_edit: Option<Extension<PendingEdit>>,
     Json(req): Json<ChatInput>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, AppError> {
+    validate_turn_messages(&req)?;
     let start = Instant::now();
     let (provider, model_name, gateway_installation) =
         model_route(&app_state, &req.provider, &req.model_name).await?;
@@ -705,6 +742,16 @@ pub async fn handle_chat_stream(
                 .await?;
         edit_in_progress =
             begin_pending_edit(conversation_id, pending_edit.map(|Extension(edit)| edit));
+        if edit_in_progress.is_none() {
+            let claim = crate::services::message_branches::claim_plain_turn(
+                &app_state.database,
+                conversation_id,
+            )
+            .await?;
+            app_state
+                .interrupt_older_streams(conversation_id, claim)
+                .await;
+        }
         let history_cutoff = edit_in_progress
             .as_ref()
             .map(EditInProgress::history_cutoff);
@@ -1230,6 +1277,8 @@ pub async fn handle_chat_stream(
         None
     };
 
+    let feed = ReplyFeed::new_for_user(claims.user_id);
+    let recorded_feed = feed.clone();
     let sse_stream = async_stream::try_stream! {
        let check_access = || async {
            if let Some(installation) = gateway_installation {
@@ -1501,6 +1550,7 @@ pub async fn handle_chat_stream(
             yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
             return;
         };
+
         let mut provider_session = match chat.start(provider_request).await {
             Ok(session) => session,
             Err(error) => {
@@ -1573,7 +1623,7 @@ pub async fn handle_chat_stream(
         // A plain reply is registered before its row exists, so a page reading the conversation never
         // sees it without generating. An edit's rows stay hidden until it commits, so it registers later.
         let early_cancel = if edit_in_progress.is_none() {
-            Some(app_state.register_stream_cancel(new_message_id, conversation_id, None).await)
+            Some(app_state.register_stream_cancel(new_message_id, conversation_id, None, feed.clone()).await)
         } else {
             None
         };
@@ -1632,6 +1682,7 @@ pub async fn handle_chat_stream(
                         new_message_id,
                         conversation_id,
                         edit_in_progress.as_ref().map(EditInProgress::view),
+                        feed.clone(),
                     )
                     .await
             }
@@ -1649,6 +1700,32 @@ pub async fn handle_chat_stream(
             cancel_handle.clone(),
             app_state.stream_cancellations.clone(),
         );
+
+        if let Some(edit) = &edit_in_progress {
+            match edit.is_current(&app_state.database).await {
+                Ok(true) => {},
+                Ok(false) => {
+                    cancel_handle.cancel(StopReason::UserEdited);
+                    record_stop_reason(&app_state.database, new_message_id, StopReason::UserEdited).await;
+                    content_checkpoint.finish();
+                    yield Event::default().event(ChatStreamEvents::ResponseStopped.to_string()).data(response_stopped_event_data(new_message_id, StopReason::UserEdited));
+                    yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                    return;
+                },
+                Err(_) => {
+                    content_checkpoint.fail_with(StopReason::ServerError);
+                    yield Event::default().event(ChatStreamEvents::AiError.to_string()).data(persistence_error_event_data());
+                    yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                    return;
+                }
+            }
+        }
+        if cancel_handle.is_cancelled() {
+            content_checkpoint.fail_with(cancel_handle.reason().unwrap_or(StopReason::UserCancelled));
+            yield Event::default().event(ChatStreamEvents::ResponseStopped.to_string()).data(response_stopped_event_data(new_message_id, cancel_handle.reason().unwrap_or(StopReason::UserCancelled)));
+            yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+            return;
+        }
 
         // Emit before the event loop so message_start always arrives before any delta,
         // regardless of provider (Gemini fires usageMetadata only on the last chunk).
@@ -2952,7 +3029,8 @@ pub async fn handle_chat_stream(
                    tool_call: None,
                    tool_result: None,
                };
-               let mut turn_visible = edit_in_progress.is_none();
+               let mut turn_visible = edit_in_progress.is_none()
+                   && matches!(is_shown(&app_state.database, new_message_id).await, Ok(true));
                if !turn_failed && let Some(edit) = edit_in_progress.take() {
                    match edit.commit(&app_state.database).await {
                        Ok(EditStatus::Current) => turn_visible = true,
@@ -3000,6 +3078,7 @@ pub async fn handle_chat_stream(
            }
        }
     };
-    let sse_response = Sse::new(deliver_reply(sse_stream)).keep_alive(KeepAlive::new());
+    let sse_response =
+        Sse::new(deliver_reply(record(recorded_feed, sse_stream))).keep_alive(KeepAlive::new());
     Ok(sse_response)
 }

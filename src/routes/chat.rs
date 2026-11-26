@@ -5,7 +5,7 @@ use crate::{
     auth::claims::Claims,
     handlers::{
         chat::{delete_chat_by_id, get_chat_by_id, get_chats, update_chat_by_id},
-        chat_stream::{cancel_chat_stream, handle_chat_stream},
+        chat_stream::{cancel_chat_stream, handle_chat_stream, resume_chat_stream},
     },
     state::SharedState,
 };
@@ -20,6 +20,7 @@ pub fn chat_routes() -> Router<SharedState> {
         .route("/chat/stream", post(handle_chat_stream))
         .route("/chat/stream/{chat_id}", post(handle_chat_stream))
         .route("/chat/stream/{message_id}/cancel", post(cancel_chat_stream))
+        .route("/chat/stream/{message_id}/events", get(resume_chat_stream))
         .route("/chat", get(get_chats))
         .route(
             "/chat/{chat_id}",

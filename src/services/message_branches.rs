@@ -494,6 +494,13 @@ async fn claim_for_branch_switch(
         .ok_or(AppError::ResourceNotFound)
 }
 
+pub async fn claim_plain_turn(db: &DatabaseConnection, chat_id: Uuid) -> Result<i32, AppError> {
+    let txn = db.begin().await.map_err(|_| AppError::DbTimeout)?;
+    let claim = claim_for_branch_switch(&txn, chat_id).await?;
+    txn.commit().await.map_err(|_| AppError::DbTimeout)?;
+    Ok(claim)
+}
+
 // Numbered and claimed like a new edit, so every edit requested before the switch is superseded.
 fn branch_switch_claim(chat_id: Uuid) -> UpdateMany<conversations::Entity> {
     let next = sea_query::Expr::col(conversations::Column::EditRequests).add(1);

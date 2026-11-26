@@ -239,6 +239,12 @@ pub struct ChatInput {
 }
 
 #[derive(Deserialize, ToSchema, IntoParams)]
+pub struct ResumeStreamQuery {
+    #[param(example = 42)]
+    pub after: Option<u64>,
+}
+
+#[derive(Deserialize, ToSchema, IntoParams)]
 pub struct MessageRequest {
     pub role: ChatRole,
     pub content: String,

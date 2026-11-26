@@ -157,6 +157,7 @@ use utoipa::OpenApi;
         chat_stream::handle_chat_stream_doc,
         chat_stream::handle_chat_stream_path_doc,
         chat_stream::cancel_chat_stream,
+        chat_stream::resume_chat_stream,
         message::delete_chat_message_by_id,
         message::edit_chat_message_by_id_and_stream,
         message::show_chat_branch,
