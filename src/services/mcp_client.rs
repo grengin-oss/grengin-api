@@ -903,7 +903,21 @@ fn transport_config(connection_config: &Value) -> Result<TransportConfigInput, M
         .unwrap_or_default()
         .validate()
         .map_err(|_| McpClientError::Config("invalid MCP session cache policy".into()))?;
+    validate_transport_headers(connection_config)?;
     Ok(config)
+}
+
+// Custom headers follow the provider plugins' rules: none may reroute the request (Host,
+// X-Forwarded-*) or smuggle hop-by-hop and cookie state, whatever the destination.
+pub fn validate_transport_headers(connection_config: &Value) -> Result<(), McpClientError> {
+    let headers = connection_config
+        .pointer("/transport_config/headers")
+        .and_then(Value::as_object);
+    for name in headers.into_iter().flat_map(|headers| headers.keys()) {
+        llm_plugin::security::validate_header_name(name)
+            .map_err(|_| McpClientError::Config(format!("HTTP header not allowed: {name}")))?;
+    }
+    Ok(())
 }
 
 pub(super) fn tool_call_timeout(
@@ -2128,6 +2142,23 @@ mod tests {
         for secret in ["APP_KEY", "JWT_SECRET", "DATABASE_URL"] {
             assert!(!names.iter().any(|name| name == secret));
         }
+    }
+
+    #[test]
+    fn custom_headers_cannot_reroute_or_carry_hop_by_hop_state() {
+        for name in [
+            "Host",
+            "x-forwarded-host",
+            "Forwarded",
+            "Cookie",
+            "Proxy-Authorization",
+        ] {
+            let config = serde_json::json!({"transport_config":{"headers":{name:"evil.example"}}});
+            assert!(validate_transport_headers(&config).is_err(), "{name}");
+            assert!(mcp_http_client(&config).is_err(), "{name}");
+        }
+        let allowed = serde_json::json!({"transport_config":{"headers":{"User-Agent":"partner","X-Api-Version":"2"}}});
+        assert!(validate_transport_headers(&allowed).is_ok());
     }
 
     #[test]

@@ -11,6 +11,28 @@ use crate::{
     },
     state::SharedState,
 };
+use sea_orm::{
+    ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+};
+
+// An update reads, checks and writes the row under this lock, so a concurrent update can never
+// pair one request's key with another request's destination.
+pub async fn find_engine_for_update(
+    txn: &DatabaseTransaction,
+    engine_key: &str,
+) -> Result<ai_engines::Model, AuthError> {
+    ai_engines::Entity::find()
+        .filter(ai_engines::Column::EngineKey.eq(engine_key))
+        .order_by_desc(ai_engines::Column::CreatedAt)
+        .lock_exclusive()
+        .one(txn)
+        .await
+        .map_err(|e| {
+            eprintln!("db error lock ai engine {e}");
+            AuthError::DbTimeout
+        })?
+        .ok_or(AuthError::ResourceNotFound)
+}
 
 pub async fn load_models_response(app_state: &SharedState) -> Result<ModelsResponse, AuthError> {
     let cache = load_models_cache(&app_state.req_client)

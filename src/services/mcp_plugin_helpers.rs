@@ -282,6 +282,11 @@ pub async fn save_server(
         model = fresh;
     }
     let preview = model.clone().try_into_model().map_err(database_error)?;
+    crate::services::mcp_client::validate_transport_headers(&preview.connection_config).map_err(
+        |_| AuthError::InvalidRequest {
+            field: "connection_config.transport_config.headers",
+        },
+    )?;
     crate::services::mcp_client::tool_call_timeout(&preview.connection_config).map_err(|_| {
         AuthError::InvalidRequest {
             field: "connection_config.transport_config.tool_timeout_ms",
