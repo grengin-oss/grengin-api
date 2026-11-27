@@ -1548,6 +1548,35 @@ async fn rejects_image_counts_the_provider_did_not_honour() {
 }
 
 #[tokio::test]
+async fn rejects_more_images_than_requested_among_text_parts() {
+    let response = json!({"data": [
+        {"text": "caption"},
+        {"b64_json": "AQID"},
+        {"text": "another caption"},
+        {"b64_json": "BAUG"},
+        {"b64_json": "BwgJ"}
+    ]});
+    let (base_url, _) = serve(vec![MockResponse::json("200 OK", &response)]).await;
+    let provider = provider(
+        base_url,
+        json!({"imageGeneration": true}),
+        json_image_operations(),
+    );
+    let error = provider
+        .images()
+        .unwrap()
+        .generate(image_request(2))
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("more than the 2 requested images"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
 async fn rejects_image_requests_that_ask_for_no_images() {
     // Nothing is served: a zero count is refused before the request goes out.
     let provider = provider(
