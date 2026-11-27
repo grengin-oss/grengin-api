@@ -348,16 +348,15 @@ fn decoded(output: &Value) -> Cow<'_, Value> {
     let Some(parts) = envelope.get("content").and_then(Value::as_array) else {
         return Cow::Borrowed(output);
     };
+    let text = |part: &Value| part.get("text").and_then(Value::as_str).map(str::to_string);
     match parts
         .iter()
-        .find_map(|part| part.get("text").and_then(Value::as_str))
+        .filter_map(text)
+        .find(|text| !text.trim().is_empty())
     {
-        Some(text) => Cow::Owned(
-            serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_string())),
-        ),
-        None if parts.is_empty() => Cow::Owned(Value::Null),
-        // Images, audio and embedded resources hold no text, yet they are a result; nothing about
-        // them is described beyond that.
+        Some(text) => Cow::Owned(serde_json::from_str(&text).unwrap_or(Value::String(text))),
+        None if parts.iter().all(|part| text(part).is_some()) => Cow::Owned(Value::Null),
+        // Images, audio and embedded resources hold no text, yet they are a result.
         None => Cow::Owned(Value::Bool(true)),
     }
 }
@@ -641,6 +640,13 @@ mod tests {
             result_summary(&json!({"content": []}), false).text,
             "No results"
         );
+        assert_eq!(
+            result_summary(&json!({"content": [{"type": "text", "text": " "}]}), false).text,
+            "No results"
+        );
+        let captioned = json!({"content": [{"type": "text", "text": ""},
+            {"type": "image", "data": "aGVsbG8=", "mimeType": "image/png"}]});
+        assert_eq!(result_summary(&captioned, false).text, "Done");
         for part in [
             json!({"type": "image", "data": "aGVsbG8=", "mimeType": "image/png"}),
             json!({"type": "resource", "resource": {"uri": "file:///plan.pdf", "blob": "aGVsbG8="}}),
