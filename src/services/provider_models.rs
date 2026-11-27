@@ -119,7 +119,6 @@ pub fn to_model_info(provider_key: &str, model: ProviderModel) -> ModelInfo {
     let resolved_model_type = model_type(&model);
     let comment = metadata_string(&model, "comment");
     ModelInfo {
-        launch_date: crate::services::models_cache::catalog_launch_date(&model.metadata),
         key: model.id.to_string(),
         engine: provider_key.to_string(),
         model_type: resolved_model_type,
@@ -215,7 +214,6 @@ mod tests {
             summary: None,
             recommended: false,
             r#default: false,
-            launch_date: None,
             price_tier: None,
             comment: None,
             input_token_rate: None,
@@ -402,7 +400,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            crate::services::models_cache::catalog_launch_date(
+            crate::services::model_picker::catalog_launch_date(
                 &serde_json::json!({"launchDate": " 2026-11-17 "})
             )
             .as_deref(),

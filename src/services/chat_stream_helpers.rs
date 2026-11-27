@@ -828,7 +828,6 @@ mod tests {
             summary: None,
             recommended: false,
             r#default: false,
-            launch_date: None,
             price_tier: None,
             comment: None,
             input_token_rate: None,
