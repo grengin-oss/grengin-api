@@ -48,11 +48,9 @@ impl<'a> CsvReader<'a> {
         out
     }
 
-    fn parse_field(&mut self) -> Option<String> {
-        if self.pos >= self.data.len() {
-            return None;
-        }
-        if self.data[self.pos] == b'"' {
+    // At the end of the input a field is empty: "a,b," ends with an empty third field.
+    fn parse_field(&mut self) -> String {
+        if self.pos < self.data.len() && self.data[self.pos] == b'"' {
             self.pos += 1;
             let mut field = Vec::new();
             loop {
@@ -73,7 +71,7 @@ impl<'a> CsvReader<'a> {
                     self.pos += 1;
                 }
             }
-            Some(String::from_utf8_lossy(&field).into_owned())
+            String::from_utf8_lossy(&field).into_owned()
         } else {
             let start = self.pos;
             while self.pos < self.data.len()
@@ -83,7 +81,7 @@ impl<'a> CsvReader<'a> {
             {
                 self.pos += 1;
             }
-            Some(String::from_utf8_lossy(&self.data[start..self.pos]).into_owned())
+            String::from_utf8_lossy(&self.data[start..self.pos]).into_owned()
         }
     }
 
@@ -93,8 +91,7 @@ impl<'a> CsvReader<'a> {
         }
         let mut record = Vec::new();
         loop {
-            let field = self.parse_field()?;
-            record.push(field);
+            record.push(self.parse_field());
             if self.pos >= self.data.len() {
                 break;
             }
@@ -116,11 +113,7 @@ impl<'a> CsvReader<'a> {
                 _ => break,
             }
         }
-        if record.is_empty() {
-            None
-        } else {
-            Some(record)
-        }
+        Some(record)
     }
 }
 
@@ -134,6 +127,17 @@ mod tests {
         let mut r = CsvReader::new(data);
         r.headers();
         assert_eq!(r.records(), vec![vec!["Zoë, café \"ok\" 日本".to_string()]]);
+    }
+
+    #[test]
+    fn a_last_record_ending_in_a_comma_keeps_its_empty_field() {
+        let mut r = CsvReader::new(b"a,b,c\n1,2,\n3,4,").flexible(true);
+        assert_eq!(r.records(), vec![vec!["1", "2", ""], vec!["3", "4", ""]]);
+        let mut header_only = CsvReader::new(b"a,b,");
+        assert_eq!(
+            header_only.headers(),
+            Some(vec!["a".into(), "b".into(), String::new()])
+        );
     }
 
     #[test]
