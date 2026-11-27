@@ -170,9 +170,12 @@ The browser receives a summary of each connector call and result, never its
 arguments or output. The model still receives the full result, and the admin
 execution log (`mcp_executions`) keeps it. This applies to the live stream and to
 chat history; replies saved before this change are summarised when they are read.
-History fails closed: every stored call and result except web search is
-summarised, including calls that never got a result, whatever alias of the tool
-name they used.
+History fails closed: every stored call and result except the providers' own
+web search is summarised, including calls that never got a result, whatever
+alias of the tool name they used. Web search is recognised only by its exact
+tool name (`web_search`, `web_search_call`, `google_search`, ...) and never when
+the entry carries an `mcp` marker, so a connector named like web search is still
+summarised. In the live stream a connector is never marked as web search either.
 
 A connector `tool_call` has no `input` or `input_text`; it carries:
 

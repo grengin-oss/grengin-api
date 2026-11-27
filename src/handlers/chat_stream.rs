@@ -1966,7 +1966,12 @@ pub async fn handle_chat_stream(
                                .tool_name
                                .clone()
                                .unwrap_or_else(|| "tool_call".to_string());
-                           let is_web_search = tool_input.is_web_search();
+                           let connector = mcp_tooling_enabled
+                               .then(|| resolve_mcp_tool_descriptor(&mcp_tool_lookup, &resolved_name))
+                               .flatten()
+                               .map(|tool| (tool.server_name.clone(), tool.original_name.clone()));
+                           // A connector named like web search is still a connector; its arguments stay server-side.
+                           let is_web_search = connector.is_none() && tool_input.is_web_search();
                            let mut parsed_input: Option<Value> = None;
                            if let Some(tool_id) = tool_input.tool_id.as_ref() {
                                let buffer = tool_input_buffers.entry(tool_id.clone()).or_default();
@@ -1991,10 +1996,6 @@ pub async fn handle_chat_stream(
                                    web_search_action.clone(),
                                );
                            }
-                           let connector = mcp_tooling_enabled
-                               .then(|| resolve_mcp_tool_descriptor(&mcp_tool_lookup, &resolved_name))
-                               .flatten()
-                               .map(|tool| (tool.server_name.clone(), tool.original_name.clone()));
                            // A connector call is announced once, when its arguments are complete; they stay server-side.
                            if connector.is_none() {
                                let tool_call = ChatStreamToolCall {
@@ -2144,10 +2145,11 @@ pub async fn handle_chat_stream(
                                    }
                                }
                            }
-                           let is_web_search = call.is_web_search();
-                           if mcp_tooling_enabled
-                               && resolve_mcp_tool_descriptor(&mcp_tool_lookup, &call.tool_name).is_some()
-                           {
+                           let connector = mcp_tooling_enabled
+                               .then(|| resolve_mcp_tool_descriptor(&mcp_tool_lookup, &call.tool_name))
+                               .flatten();
+                           let is_web_search = connector.is_none() && call.is_web_search();
+                           if connector.is_some() {
                                pending_mcp_tool_calls.push(call.clone());
                                if let Some(id) = call.tool_id.as_ref() {
                                    emitted_tc.insert(id.clone(), call.tool_name.clone());
@@ -2161,9 +2163,6 @@ pub async fn handle_chat_stream(
                                    call.web_search.clone(),
                                );
                            }
-                           let connector = mcp_tooling_enabled
-                               .then(|| resolve_mcp_tool_descriptor(&mcp_tool_lookup, &call.tool_name))
-                               .flatten();
                            let tool_call = ChatStreamToolCall {
                                summary: connector.map(|tool| {
                                    call_summary(&tool.server_name, &tool.original_name, Some(&tool_input_to_value(call.input.as_ref())))
@@ -2173,7 +2172,7 @@ pub async fn handle_chat_stream(
                                tool_id: call.tool_id.clone(),
                                input_text: None,
                                kind: Some(if is_web_search { ChatToolKind::WebSearch } else { ChatToolKind::Other }),
-                               web_search: call.web_search.as_ref().map(|action| ChatStreamWebSearchAction {
+                               web_search: call.web_search.as_ref().filter(|_| connector.is_none()).map(|action| ChatStreamWebSearchAction {
                                    query: action.query.clone(),
                                    queries: action.queries.clone(),
                                }),

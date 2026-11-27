@@ -5,10 +5,7 @@ use std::{borrow::Cow, collections::HashMap};
 
 use serde_json::{Map, Value};
 
-use crate::{
-    dto::chat_stream::{ConnectorCallSummary, ConnectorResultSummary},
-    services::provider_stream::tool_name_is_web_search,
-};
+use crate::dto::chat_stream::{ConnectorCallSummary, ConnectorResultSummary};
 
 const MAX_ITEMS: usize = 5;
 const MAX_ITEM_CHARS: usize = 120;
@@ -30,6 +27,15 @@ const ERRORS: [(&str, &str); 9] = [
     ("did not complete", "Did not finish"),
 ];
 const UNKNOWN_CONNECTOR: &str = "Connector";
+// Server-side search tools as the providers and the stream name them.
+const NATIVE_WEB_SEARCH: [&str; 6] = [
+    "web_search",
+    "web_search_call",
+    "web_search_20250305",
+    "web_search_preview",
+    "google_search",
+    "browser_search",
+];
 
 // Arguments worth showing; bodies, message text and IDs are deliberately absent.
 const TARGET_KEYS: [&str; 16] = [
@@ -171,6 +177,8 @@ fn redact_result(
         connectors.insert(id, (server, tool));
     }
     let is_error = result.get("status").and_then(Value::as_str) == Some("error");
+    result.remove("web_search");
+    result.insert("kind".into(), Value::from("other"));
     let output = result.remove("output");
     if !result.contains_key("summary") {
         let summary = result_summary(&output.unwrap_or_default(), is_error);
@@ -189,6 +197,8 @@ fn redact_call(call: &mut Map<String, Value>, connectors: &HashMap<String, (Stri
             (UNKNOWN_CONNECTOR.to_string(), tool_label(&name))
         });
     call.remove("input_text");
+    call.remove("web_search");
+    call.insert("kind".into(), Value::from("other"));
     let input = call.remove("input");
     if !call.contains_key("summary") {
         let arguments = input.as_ref().and_then(|input| input.get("value"));
@@ -199,12 +209,12 @@ fn redact_call(call: &mut Map<String, Value>, connectors: &HashMap<String, (Stri
     }
 }
 
+// Only the providers' own web search survives redaction, recognised by its exact tool name; an
+// `mcp` marker wins, since a connector may be named like web search.
 fn is_web_search(entry: &Map<String, Value>) -> bool {
-    entry.get("kind").and_then(Value::as_str) == Some("web_search")
-        || entry
-            .get("web_search")
-            .is_some_and(|value| !value.is_null())
-        || text_field(entry, "tool_name").is_some_and(|name| tool_name_is_web_search(&name))
+    !entry.contains_key("mcp")
+        && text_field(entry, "tool_name")
+            .is_some_and(|name| NATIVE_WEB_SEARCH.contains(&name.as_str()))
 }
 
 // The tool's own name inside `mcp__<server>__<tool>[__<hash>]` or the gateway's `tool_<n>_<tool>`.
@@ -594,6 +604,46 @@ mod tests {
     }
 
     #[test]
+    fn connectors_named_like_web_search_are_still_redacted() {
+        let calls = vec![
+            json!({"tool_name": "mcp__ab12__web_search_messages__ff00", "tool_id": "c1", "kind": "web_search",
+                   "web_search": {"query": "CONFIDENTIAL"}, "input": {"type": "json", "value": {"query": "invoices", "body": "CONFIDENTIAL"}}}),
+            json!({"tool_name": "tool_0_web_search_messages", "tool_id": "c2", "kind": "web_search",
+                   "input_text": "CONFIDENTIAL"}),
+            json!({"tool_name": "web_search_messages", "tool_id": "c3", "kind": "web_search",
+                   "input": {"type": "json", "value": {"body": "CONFIDENTIAL"}}}),
+            json!({"tool_name": "web_search_call", "tool_id": "w1", "kind": "web_search",
+                   "web_search": {"query": "kept query"}}),
+        ];
+        let results = vec![
+            json!({"tool_name": "web_search_call", "tool_id": "c1", "status": "success",
+                   "mcp": {"server_name": "Gmail", "tool_name": "web_search_messages", "preview": {"text": "CONFIDENTIAL"}},
+                   "output": {"messages": [{"subject": "Hi", "body": "CONFIDENTIAL"}]}}),
+            json!({"tool_name": "web_search_call", "tool_id": "w1", "kind": "web_search", "status": "success",
+                   "web_search": {"results": [{"title": "kept result"}]}}),
+        ];
+        let (calls, results) = redact_history(calls, results);
+        assert!(
+            !serde_json::to_string(&(&calls, &results))
+                .unwrap()
+                .contains("CONFIDENTIAL")
+        );
+        assert_eq!(
+            calls[0]["summary"],
+            json!({"connector": "Gmail", "action": "Web search messages", "target": "invoices"})
+        );
+        assert_eq!(
+            (&calls[0]["kind"], &results[0]["kind"]),
+            (&json!("other"), &json!("other"))
+        );
+        assert_eq!(calls[3]["web_search"]["query"], "kept query");
+        assert_eq!(
+            results[1]["web_search"]["results"][0]["title"],
+            "kept result"
+        );
+    }
+
+    #[test]
     fn calls_name_the_action_and_a_safe_target_only() {
         let summary = call_summary(
             "Gmail",
@@ -630,7 +680,7 @@ mod tests {
         let results = vec![
             json!({"tool_id": "c1", "status": "success", "output": {"messages": [{"subject": "Hi", "body": "secret"}]},
                    "mcp": {"server_name": "Gmail", "tool_name": "search_threads", "preview": {"text": "secret"}}}),
-            json!({"tool_id": "w1", "kind": "web_search", "status": "success", "output": {"kept": true}}),
+            json!({"tool_name": "web_search_call", "tool_id": "w1", "kind": "web_search", "status": "success", "output": {"kept": true}}),
         ];
         let (calls, results) = redact_history(calls, results);
         let stored = serde_json::to_string(&(&calls, &results)).unwrap();
