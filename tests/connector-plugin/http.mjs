@@ -176,6 +176,12 @@ try {
   const badFlow=structuredClone(request);badFlow.connection_config.oauth.flow='unsupported';
   await call('POST','/admin/mcp-servers',badFlow,400);
   check('invalid OAuth installs write no server rows',Number(sql('SELECT count(*) FROM mcp_servers')),initial);
+  for (const name of ['Host','Forwarded','X-Forwarded-Prefix','X-Forwarded-Port','Cookie']) {
+    const invalid=structuredClone(request);
+    invalid.connection_config.transport_config={headers:{[name]:'evil.example'}};
+    await call('POST','/admin/mcp-servers',invalid,400);
+  }
+  check('refused routing headers never install a server',Number(sql('SELECT count(*) FROM mcp_servers')),initial);
   server=(await call('POST','/admin/mcp-servers',request,201)).json();
   await call('GET',`/admin/mcp-servers/${server.id}/overview`,undefined,401,null);
   await call('GET',`/admin/mcp-servers/${server.id}/overview`,undefined,403,member);

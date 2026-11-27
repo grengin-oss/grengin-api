@@ -2152,6 +2152,9 @@ mod tests {
             "Forwarded",
             "Cookie",
             "Proxy-Authorization",
+            "X-Forwarded-Prefix",
+            "X-Forwarded-Port",
+            "x-FoRwArDeD-Server",
         ] {
             let config = serde_json::json!({"transport_config":{"headers":{name:"evil.example"}}});
             assert!(validate_transport_headers(&config).is_err(), "{name}");

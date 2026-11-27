@@ -50,7 +50,7 @@ pub fn validate_header_name(name: &str) -> Result<(), ProviderError> {
     {
         return Err(ProviderError::HeaderNotAllowed(name.to_string()));
     }
-    if BLOCKED_HEADERS.contains(&normalized.as_str()) {
+    if BLOCKED_HEADERS.contains(&normalized.as_str()) || normalized.starts_with("x-forwarded-") {
         return Err(ProviderError::HeaderNotAllowed(name.to_string()));
     }
     Ok(())
@@ -207,7 +207,15 @@ mod tests {
 
     #[test]
     fn rejects_authority_and_forwarding_headers() {
-        for header in ["Host", "Content-Length", "X-Forwarded-For", "Connection"] {
+        for header in [
+            "Host",
+            "Content-Length",
+            "X-Forwarded-For",
+            "X-Forwarded-Prefix",
+            "X-Forwarded-Port",
+            "x-FoRwArDeD-Server",
+            "Connection",
+        ] {
             assert!(validate_header_name(header).is_err(), "{header}");
         }
         assert!(validate_header_name("Authorization").is_ok());
