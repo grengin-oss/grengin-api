@@ -450,7 +450,6 @@ use utoipa::OpenApi;
             ConnectorTopicGroupUpdateResult,
             ConnectorToolUpdate,
             McpToolResultDetails,
-            McpResultPreview,
             McpServerCreate,
             McpServerUpdate,
             PaginatedMcpServers,

@@ -35,6 +35,7 @@ use crate::{
         },
         budget_allocation::refresh_department_budget_available,
         chat_attachments::{hydrate_prompt_files, validate_incoming_attachments},
+        connector_tool_summary::{call_summary, result_summary},
         chat_helpers::{
             effective_max_tokens, effective_native_web_search, supports_native_web_search,
             validate_turn_messages,
@@ -1990,43 +1991,53 @@ pub async fn handle_chat_stream(
                                    web_search_action.clone(),
                                );
                            }
-                           let tool_call = ChatStreamToolCall {
-                               tool_name: resolved_name.clone(),
-                               tool_id: tool_input.tool_id.clone(),
-                               input_text: Some(tool_input.partial_json.clone()),
-                               input: None,
-                               kind: Some(if is_web_search { ChatToolKind::WebSearch } else { ChatToolKind::Other }),
-                               web_search: web_search_action.clone().map(|action| ChatStreamWebSearchAction {
-                                   query: action.query.clone(),
-                                   queries: action.queries.clone(),
-                               }),
-                           };
-                           tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
-                           new_llm_message.tools_calls = Set(tool_calls.clone());
-                           new_llm_message.updated_at = Set(Utc::now());
-                           if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
-                               persist_error = Some(error);
-                               break 'events;
+                           let connector = mcp_tooling_enabled
+                               .then(|| resolve_mcp_tool_descriptor(&mcp_tool_lookup, &resolved_name))
+                               .flatten()
+                               .map(|tool| (tool.server_name.clone(), tool.original_name.clone()));
+                           // A connector's arguments stay server-side, so its partial chunks add nothing after the first.
+                           let announced = connector.is_some()
+                               && tool_input.tool_id.as_ref().is_some_and(|id| emitted_tc.contains_key(id));
+                           if !announced {
+                               let tool_call = ChatStreamToolCall {
+                                   tool_name: resolved_name.clone(),
+                                   tool_id: tool_input.tool_id.clone(),
+                                   input_text: connector.is_none().then(|| tool_input.partial_json.clone()),
+                                   input: None,
+                                   kind: Some(if is_web_search { ChatToolKind::WebSearch } else { ChatToolKind::Other }),
+                                   web_search: web_search_action.clone().map(|action| ChatStreamWebSearchAction {
+                                       query: action.query.clone(),
+                                       queries: action.queries.clone(),
+                                   }),
+                                   summary: connector.as_ref().map(|(server, tool)| call_summary(server, tool, None)),
+                               };
+                               tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
+                               new_llm_message.tools_calls = Set(tool_calls.clone());
+                               new_llm_message.updated_at = Set(Utc::now());
+                               if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
+                                   persist_error = Some(error);
+                                   break 'events;
+                               }
+                               let chat_stream = ChatStream {
+                                   id:None,
+                                   title:None,
+                                   message_id:None, user_message_id: None,
+                                   is_new:None,
+                                   content:None,
+                                   input_tokens:None,
+                                   output_tokens:None,
+                                   latency_ms:None,
+                                   cost:None,
+                                   event:None,
+                                   tool_call:Some(tool_call),
+                                   cached_input_tokens:None,
+
+                                   cache_creation_tokens:None,
+
+                                   tool_result:None,
+                               };
+                               yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(chat_stream.to_string());
                            }
-                           let chat_stream = ChatStream {
-                               id:None,
-                               title:None,
-                               message_id:None, user_message_id: None,
-                               is_new:None,
-                               content:None,
-                               input_tokens:None,
-                               output_tokens:None,
-                               latency_ms:None,
-                               cost:None,
-                               event:None,
-                               tool_call:Some(tool_call),
-                               cached_input_tokens:None,
-
-                               cache_creation_tokens:None,
-
-                               tool_result:None,
-                           };
-                           yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(chat_stream.to_string());
 
                            // Track every MCP tool_call SSE for pending flush — even partial
                            // streaming events where JSON is not yet complete.
@@ -2040,9 +2051,7 @@ pub async fn handle_chat_stream(
                                }
                            }
 
-                           if mcp_tooling_enabled
-                               && resolve_mcp_tool_descriptor(&mcp_tool_lookup, &resolved_name).is_some()
-                           {
+                           if let Some((server, tool)) = connector.as_ref() {
                                if let (Some(tool_id), Some(input_value)) =
                                    (tool_input.tool_id.clone(), parsed_input.clone())
                                {
@@ -2059,10 +2068,11 @@ pub async fn handle_chat_stream(
                                        emitted_tc.insert(tool_id.clone(), resolved_name.clone());
 
                                        let resolved_call = ChatStreamToolCall {
+                                           summary: Some(call_summary(server, tool, Some(&input_value))),
                                            tool_name: resolved_name.clone(),
                                            tool_id: Some(tool_id),
                                            input_text: None,
-                                           input: Some(to_chat_tool_input(&ToolInput::Json(input_value))),
+                                           input: None,
                                            kind: Some(if is_web_search {
                                                ChatToolKind::WebSearch
                                            } else {
@@ -2165,12 +2175,17 @@ pub async fn handle_chat_stream(
                                    call.web_search.clone(),
                                );
                            }
-                           let input = call.input.as_ref().map(to_chat_tool_input);
+                           let connector = mcp_tooling_enabled
+                               .then(|| resolve_mcp_tool_descriptor(&mcp_tool_lookup, &call.tool_name))
+                               .flatten();
                            let tool_call = ChatStreamToolCall {
+                               summary: connector.map(|tool| {
+                                   call_summary(&tool.server_name, &tool.original_name, Some(&tool_input_to_value(call.input.as_ref())))
+                               }),
+                               input: if connector.is_some() { None } else { call.input.as_ref().map(to_chat_tool_input) },
                                tool_name: call.tool_name.clone(),
                                tool_id: call.tool_id.clone(),
                                input_text: None,
-                               input,
                                kind: Some(if is_web_search { ChatToolKind::WebSearch } else { ChatToolKind::Other }),
                                web_search: call.web_search.as_ref().map(|action| ChatStreamWebSearchAction {
                                    query: action.query.clone(),
@@ -2225,6 +2240,7 @@ pub async fn handle_chat_stream(
                                        query: entry.query.clone(),
                                        queries: entry.queries.clone(),
                                    }),
+                                   summary: None,
                                };
                                tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
                                new_llm_message.tools_calls = Set(tool_calls.clone());
@@ -2271,6 +2287,7 @@ pub async fn handle_chat_stream(
                                    status: Some("success".to_string()),
                                    output: None,
                                    web_search: Some(to_chat_web_search_result(&entry)),
+                                   summary: None,
                                };
                                tool_results.push(serde_json::to_value(&tool_result).unwrap_or_else(|_| json!({})));
                                new_llm_message.tools_results = Set(tool_results.clone());
@@ -2313,6 +2330,7 @@ pub async fn handle_chat_stream(
                                status: tool_result_status_from_output(&result.output),
                                output: result.output.clone(),
                                web_search: None,
+                               summary: None,
                            };
                            tool_results.push(serde_json::to_value(&tool_result).unwrap_or_else(|_| json!({})));
                            new_llm_message.tools_results = Set(tool_results.clone());
@@ -2595,14 +2613,14 @@ pub async fn handle_chat_stream(
                                        tool_name: tool_ref.original_name.clone(),
                                        duration_ms,
                                        executed_at,
-                                       preview: crate::services::connector_console_helpers::result_preview(&output_payload),
                                    }),
                                    tool_name: Some(call.tool_name.clone()),
                                    tool_id: call.tool_id.clone(),
                                    kind: Some(ChatToolKind::Other),
                                    status: Some(if is_error { "error" } else { "success" }.to_string()),
-                                   output: Some(output_payload.clone()),
+                                   output: None,
                                    web_search: None,
+                                   summary: Some(result_summary(&output_payload, is_error)),
                                };
                                tool_results.push(
                                    serde_json::to_value(&tool_result).unwrap_or_else(|_| json!({})),
@@ -2805,8 +2823,9 @@ pub async fn handle_chat_stream(
                            tool_id: Some(tool_id.clone()),
                            kind: Some(ChatToolKind::Other),
                            status: Some("error".to_string()),
-                           output: Some(json!({"error": "Tool execution did not complete"})),
+                           output: None,
                            web_search: None,
+                           summary: Some(result_summary(&json!({"error": "Tool execution did not complete"}), true)),
                        };
                        tool_results.push(serde_json::to_value(&failed).unwrap_or_else(|_| json!({})));
                        new_llm_message.tools_results = Set(tool_results.clone());

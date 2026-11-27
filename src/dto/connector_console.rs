@@ -135,14 +135,4 @@ pub struct McpToolResultDetails {
     pub tool_name: String,
     pub duration_ms: i32,
     pub executed_at: DateTime<Utc>,
-    pub preview: McpResultPreview,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct McpResultPreview {
-    pub text: String,
-    pub truncated: bool,
-    pub empty: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub item_count: Option<usize>,
 }

@@ -12,7 +12,6 @@ use sea_orm::{
     QueryFilter, QueryOrder, QuerySelect, QueryTrait, Set, TransactionTrait, sea_query::Expr,
 };
 use serde::Deserialize;
-use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
@@ -726,61 +725,6 @@ impl<'a> ConnectorConsoleService<'a> {
     }
 }
 
-pub fn result_preview(value: &Value) -> McpResultPreview {
-    let item_count = value.as_array().map(Vec::len).or_else(|| {
-        [
-            "value", "items", "results", "files", "messages", "events", "data",
-        ]
-        .iter()
-        .find_map(|key| value.get(key).and_then(Value::as_array).map(Vec::len))
-    });
-    let empty = value.is_null()
-        || value.as_array().is_some_and(Vec::is_empty)
-        || value.as_object().is_some_and(serde_json::Map::is_empty)
-        || value.as_str().is_some_and(str::is_empty);
-    let mut writer = PreviewWriter {
-        bytes: Vec::new(),
-        truncated: false,
-    };
-    let text = if empty {
-        std::borrow::Cow::Borrowed("No data returned")
-    } else if let Some(text) = value.as_str() {
-        std::borrow::Cow::Borrowed(text)
-    } else {
-        // Stop serialization at the preview budget instead of allocating a full vendor response.
-        writer.truncated = serde_json::to_writer_pretty(&mut writer, value).is_err();
-        String::from_utf8_lossy(&writer.bytes)
-    };
-    let truncated = writer.truncated || text.chars().nth(2048).is_some();
-    McpResultPreview {
-        text: text.chars().take(2048).collect(),
-        truncated,
-        empty,
-        item_count,
-    }
-}
-
-struct PreviewWriter {
-    bytes: Vec<u8>,
-    truncated: bool,
-}
-
-impl std::io::Write for PreviewWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let remaining = 8192usize.saturating_sub(self.bytes.len());
-        if bytes.len() > remaining {
-            self.bytes.extend_from_slice(&bytes[..remaining]);
-            return Err(std::io::Error::other("preview limit"));
-        }
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -955,22 +899,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn result_previews_are_useful_bounded_and_unicode_safe() {
-        assert!(result_preview(&Value::Null).empty);
-        assert_eq!(result_preview(&json!({"files":[1,2]})).item_count, Some(2));
-        assert!(
-            result_preview(&json!({"message":"tool response"}))
-                .text
-                .contains("tool response")
-        );
-        let long = result_preview(&json!("\u{1f600}".repeat(3000)));
-        assert!(long.truncated);
-        assert_eq!(long.text.chars().count(), 2048);
-        assert!(!result_preview(&json!(false)).empty);
-        assert!(!result_preview(&json!(0)).empty);
-        let nested = result_preview(&json!({"data":"x".repeat(100_000)}));
-        assert!(nested.truncated);
-        assert!(nested.text.len() <= 2048);
-    }
 }

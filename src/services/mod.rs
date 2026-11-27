@@ -27,6 +27,7 @@ pub mod client_ip;
 pub mod connector_broker;
 pub mod connector_console_helpers;
 pub mod connector_limits;
+pub mod connector_tool_summary;
 pub mod connectors_helpers;
 pub mod conversation_access;
 pub mod conversation_titles;

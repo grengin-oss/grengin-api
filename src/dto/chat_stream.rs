@@ -146,6 +146,8 @@ pub struct ChatStreamToolCall {
     pub kind: Option<ChatToolKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_search: Option<ChatStreamWebSearchAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<ConnectorCallSummary>,
 }
 
 #[derive(Serialize, ToSchema, IntoParams)]
@@ -165,6 +167,27 @@ pub struct ChatStreamToolResult {
     pub output: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_search: Option<ChatStreamWebSearchResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<ConnectorResultSummary>,
+}
+
+// What the user sees of a connector call; its arguments stay server-side.
+#[derive(Serialize, ToSchema)]
+pub struct ConnectorCallSummary {
+    pub connector: String,
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+// What the user sees of a connector result, e.g. email subjects but never bodies.
+#[derive(Serialize, ToSchema)]
+pub struct ConnectorResultSummary {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_count: Option<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<String>,
 }
 
 #[derive(Serialize, ToSchema, IntoParams)]
