@@ -169,7 +169,9 @@ package bytes remain unchanged.
 The browser receives a summary of each connector call and result, never its
 arguments or output. The model still receives the full result, and the admin
 execution log (`mcp_executions`) keeps it. This applies to the live stream and to
-chat history; replies saved before this change are summarised when they are read.
+chat history; replies saved before this change are summarised when they are read,
+including connector calls that never got a result (recognised by their
+`mcp__…` or `tool_<n>_…` name).
 
 A connector `tool_call` has no `input` or `input_text`; it carries:
 
@@ -184,8 +186,8 @@ A connector `tool_call` has no `input` or `input_text`; it carries:
 
 `target` is optional and is taken only from a search, name, path, channel or
 recipient argument, clipped to 80 characters. Bodies, message text and IDs are
-never shown. The first partial chunk of a connector call is sent once; later
-chunks are not, since they would carry nothing new.
+never shown. A connector call is sent exactly once, when its arguments are
+complete; no partial chunks are sent for it.
 
 A connector `tool_result` has no `output`; it carries `mcp` (execution details)
 and `summary`:
@@ -208,8 +210,12 @@ and `summary`:
 ```
 
 `summary.text` is always present: a count (`2 messages`, `No results`), the
-title of a single item, `Done` when the result has no title, or a short error
-message (`Sign-in required` when the connector needs signing in again).
+title of a single item, `Done` when the result has no title, or one of these
+fixed error messages: `Sign-in required`, `Sign-in failed`,
+`Connector unavailable, try again`, `Access denied`, `Connector not connected`,
+`Timed out`, `Did not finish`, `The tool returned an error`. Error text from
+the connector or vendor is never forwarded, since it can quote a message body
+or a credential; it stays in the execution log.
 `item_count` and `items` appear only for lists; `items` holds at most five
 titles (email subject, file or page name, event or issue summary), each clipped
 to 120 characters. Snippets and bodies are never included. Render text as text,

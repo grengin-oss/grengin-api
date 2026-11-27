@@ -35,7 +35,6 @@ use crate::{
         },
         budget_allocation::refresh_department_budget_available,
         chat_attachments::{hydrate_prompt_files, validate_incoming_attachments},
-        connector_tool_summary::{call_summary, result_summary},
         chat_helpers::{
             effective_max_tokens, effective_native_web_search, supports_native_web_search,
             validate_turn_messages,
@@ -46,6 +45,7 @@ use crate::{
             model_identifiers, next_tool_round, persistence_error_event_data, record_stop_reason,
             response_stopped_event_data, stop_reason_for_provider_error, with_stop_reason,
         },
+        connector_tool_summary::{call_summary, result_summary},
         conversation_access::{
             can_access_conversation, find_active_conversation_for_user,
             load_readable_linked_projects,
@@ -1995,21 +1995,19 @@ pub async fn handle_chat_stream(
                                .then(|| resolve_mcp_tool_descriptor(&mcp_tool_lookup, &resolved_name))
                                .flatten()
                                .map(|tool| (tool.server_name.clone(), tool.original_name.clone()));
-                           // A connector's arguments stay server-side, so its partial chunks add nothing after the first.
-                           let announced = connector.is_some()
-                               && tool_input.tool_id.as_ref().is_some_and(|id| emitted_tc.contains_key(id));
-                           if !announced {
+                           // A connector call is announced once, when its arguments are complete; they stay server-side.
+                           if connector.is_none() {
                                let tool_call = ChatStreamToolCall {
                                    tool_name: resolved_name.clone(),
                                    tool_id: tool_input.tool_id.clone(),
-                                   input_text: connector.is_none().then(|| tool_input.partial_json.clone()),
+                                   input_text: Some(tool_input.partial_json.clone()),
                                    input: None,
                                    kind: Some(if is_web_search { ChatToolKind::WebSearch } else { ChatToolKind::Other }),
                                    web_search: web_search_action.clone().map(|action| ChatStreamWebSearchAction {
                                        query: action.query.clone(),
                                        queries: action.queries.clone(),
                                    }),
-                                   summary: connector.as_ref().map(|(server, tool)| call_summary(server, tool, None)),
+                                   summary: None,
                                };
                                tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
                                new_llm_message.tools_calls = Set(tool_calls.clone());
@@ -2037,18 +2035,6 @@ pub async fn handle_chat_stream(
                                    tool_result:None,
                                };
                                yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(chat_stream.to_string());
-                           }
-
-                           // Track every MCP tool_call SSE for pending flush — even partial
-                           // streaming events where JSON is not yet complete.
-                           if mcp_tooling_enabled
-                               && !is_web_search
-                               && resolve_mcp_tool_descriptor(&mcp_tool_lookup, &resolved_name).is_some()
-                           {
-                               if let Some(tool_id) = tool_input.tool_id.as_ref() {
-                                   emitted_tc.entry(tool_id.clone())
-                                       .or_insert_with(|| resolved_name.clone());
-                               }
                            }
 
                            if let Some((server, tool)) = connector.as_ref() {
