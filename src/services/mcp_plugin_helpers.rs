@@ -175,6 +175,49 @@ fn endpoint_is_safe(raw: &str) -> bool {
     connector_plugin::validate_endpoint_url(&url, true, true).is_ok()
 }
 
+// Every host a server's credentials can reach: the MCP endpoint, the OAuth endpoints that receive
+// the client secret, and for a connector plugin each base URL its requests may use.
+#[derive(Debug, PartialEq)]
+struct CredentialDestination<'a> {
+    url: Option<&'a str>,
+    sse_url: Option<&'a Value>,
+    oauth_token_url: Option<&'a Value>,
+    oauth_refresh_token_url: Option<&'a Value>,
+    plugin_base_url: Option<&'a str>,
+    plugin_additional_base_urls: Option<&'a Value>,
+    allow_insecure_http: bool,
+    allow_private_network: bool,
+}
+
+impl<'a> CredentialDestination<'a> {
+    fn of(server: &'a mcp_servers::Model) -> Self {
+        let config = &server.connection_config;
+        let plugin = config.get("connector_plugin");
+        let flag = |name: &str| {
+            plugin
+                .and_then(|plugin| plugin.get(name))
+                .and_then(Value::as_bool)
+                .unwrap_or_default()
+        };
+        Self {
+            url: server.url.as_deref(),
+            sse_url: config.get("sse_url"),
+            oauth_token_url: config.pointer("/oauth/token_url"),
+            oauth_refresh_token_url: config.pointer("/oauth/refresh_token_url"),
+            plugin_base_url: plugin.and_then(|plugin| {
+                plugin
+                    .get("base_url_override")
+                    .and_then(Value::as_str)
+                    .or_else(|| plugin.pointer("/manifest/base_url").and_then(Value::as_str))
+            }),
+            plugin_additional_base_urls: plugin
+                .and_then(|plugin| plugin.pointer("/manifest/additional_base_urls")),
+            allow_insecure_http: flag("allow_insecure_http"),
+            allow_private_network: flag("allow_private_network"),
+        }
+    }
+}
+
 fn ensure_server_destination(server: &mcp_servers::Model, plugin: bool) -> Result<(), AuthError> {
     match server.transport_type {
         McpTransportType::Stdio => {
@@ -218,6 +261,7 @@ pub async fn save_server(
     actor: Uuid,
 ) -> Result<mcp_servers::Model, AuthError> {
     let id = model.clone().try_into_model().map_err(database_error)?.id;
+    let client_secret_supplied = model.client_secret.is_set();
     let _guard = tokio::time::timeout(Duration::from_secs(5), CONFIG_LOCKS.lock(Uuid::nil(), id))
         .await
         .map_err(|_| AuthError::ServiceTemporarilyUnavailable)?;
@@ -322,14 +366,26 @@ pub async fn save_server(
             field: "connection_config.connector_plugin",
         });
     }
-    // Stored user tokens are not bound to a URL, so any destination or OAuth change must drop them.
-    let reset_credentials = previous.as_ref().is_some_and(|old| {
-        old.url != preview.url
-            || old.connection_config.get("sse_url") != preview.connection_config.get("sse_url")
-            || (old.transport_type != preview.transport_type
+    // Stored user tokens and the OAuth client secret are not bound to a host, so any destination or
+    // OAuth change drops the tokens, and the stored secret is never sent somewhere new.
+    let destination_changed = previous
+        .as_ref()
+        .is_some_and(|old| CredentialDestination::of(old) != CredentialDestination::of(&preview));
+    if destination_changed
+        && !client_secret_supplied
+        && broker.is_none()
+        && preview.client_secret.is_some()
+    {
+        return Err(AuthError::InvalidRequest {
+            field: "client_secret",
+        });
+    }
+    let reset_credentials = destination_changed
+        || previous.as_ref().is_some_and(|old| {
+            old.transport_type != preview.transport_type
+                || old.connection_config.get("oauth") != preview.connection_config.get("oauth")
                 || old.client_id != preview.client_id
                 || old.client_secret != preview.client_secret
-                || old.connection_config.get("oauth") != preview.connection_config.get("oauth")
                 || old.connection_config.pointer("/connector_plugin/auth_mode")
                     != preview
                         .connection_config
@@ -346,8 +402,8 @@ pub async fn save_server(
                     != preview
                         .connection_config
                         .pointer("/connector_plugin/manifest/credential_delivery")
-                || old.connection_config.get("connector_plugin").is_some() != plugin.is_some())
-    });
+                || old.connection_config.get("connector_plugin").is_some() != plugin.is_some()
+        });
     let saved = if create {
         model.insert(&transaction).await
     } else {
@@ -755,5 +811,63 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn every_host_a_plugin_can_reach_is_part_of_its_credential_destination() {
+        let server = |connection_config: Value| mcp_servers::Model {
+            id: Uuid::nil(),
+            name: "Jira".into(),
+            description: None,
+            icon: None,
+            transport_type: McpTransportType::Http,
+            connection_config,
+            client_id: None,
+            client_secret: None,
+            url: None,
+            enabled: true,
+            status: None,
+            status_message: None,
+            tool_count: 0,
+            default_access: crate::models::mcp_servers::McpDefaultAccess::AllUsers,
+            last_connected_at: None,
+            last_synced_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let original = server(config("https://graph.microsoft.com/v1.0", "oauth2"));
+        let same = CredentialDestination::of(&original);
+        let mut edited = original.clone();
+        edited.connection_config["connector_plugin"]["configuration"] = json!({"cloud_id": "abc"});
+        edited.connection_config["connector_plugin"]["manifest"]["name"] = json!("Renamed");
+        assert_eq!(CredentialDestination::of(&edited), same);
+        edited.connection_config["connector_plugin"]["allow_private_network"] = json!(false);
+        assert_eq!(CredentialDestination::of(&edited), same);
+        for change in [
+            json!({"base_url_override": "https://attacker.example/v1.0"}),
+            json!({"allow_private_network": true}),
+            json!({"allow_insecure_http": true}),
+        ] {
+            let mut moved = original.clone();
+            for (key, value) in change.as_object().unwrap() {
+                moved.connection_config["connector_plugin"][key] = value.clone();
+            }
+            assert_ne!(CredentialDestination::of(&moved), same, "{change}");
+        }
+        let mut moved = original.clone();
+        moved.connection_config["connector_plugin"]["manifest"]["base_url"] =
+            json!("https://attacker.example/v1.0");
+        assert_ne!(CredentialDestination::of(&moved), same);
+        let mut moved = original.clone();
+        moved.connection_config["connector_plugin"]["manifest"]["additional_base_urls"] =
+            json!({"files": "https://attacker.example/"});
+        assert_ne!(CredentialDestination::of(&moved), same);
+        let mut moved = original.clone();
+        moved.connection_config["oauth"]["token_url"] = json!("https://attacker.example/token");
+        assert_ne!(CredentialDestination::of(&moved), same);
+        let mut callback = original.clone();
+        callback.connection_config["oauth"]["redirect_url"] = json!("https://app.example/callback");
+        callback.connection_config["oauth"]["scopes"] = json!(["Mail.Read", "Mail.Send"]);
+        assert_eq!(CredentialDestination::of(&callback), same);
     }
 }

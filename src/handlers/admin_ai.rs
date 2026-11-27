@@ -22,8 +22,8 @@ use crate::{
     services::{
         ai_engine_defaults::{enabled_after_key, starter_models},
         ai_plugin::{
-            apply_base_url_override, apply_grengin_update, is_catalog_grengin,
-            validate_grengin_connection,
+            apply_base_url_override, apply_grengin_update, ensure_key_follows_destination,
+            is_catalog_grengin, validate_grengin_connection,
         },
         authorization::{AuthorizationService, PermissionScopeMode},
         grengin_consent::set_enabled as set_grengin_enabled,
@@ -366,6 +366,7 @@ pub async fn update_ai_engines_by_key(
     } else {
         None
     };
+    let key_supplied = req.api_key.is_some();
     let first_key = ai_engine.api_key.is_none()
         && req
             .api_key
@@ -468,6 +469,7 @@ pub async fn update_ai_engines_by_key(
         eprintln!("db error model parse error {e}");
         AuthError::DbTimeout
     })?;
+    ensure_key_follows_destination(&ai_engine, &model, key_supplied)?;
     let decrypted_api_key = match &model.api_key {
         Some(api_key) => Some(
             decrypt_key(&app_state.settings.auth.app_key, api_key).map_err(|e| {

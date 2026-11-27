@@ -312,6 +312,9 @@ try {
   sql('DROP TRIGGER delay_plugin_update ON mcp_servers; DROP FUNCTION delay_plugin_update()');
   await stop();await start();
   await chat();check('restart reloads installed manifest and per-user encrypted credentials',vendorCalls.at(-1),'Bearer fixture-alice');
+  const movedToken=structuredClone(concurrent);movedToken.oauth.token_url=vendor+'/elsewhere/token';
+  const refusedMove=await call('PUT',`/admin/mcp-servers/${server.id}`,{connection_config:movedToken},400);
+  check('a new token endpoint is refused without the client secret, keeping saved tokens',[refusedMove.text.includes('client_secret'),JSON.parse(sql(`SELECT "connectionConfig" FROM mcp_servers WHERE id=${quote(server.id)}`)).oauth.token_url,sql(`SELECT count(*)>0 FROM mcp_connections WHERE "serverId"=${quote(server.id)} AND "accessToken" IS NOT NULL`)],[true,vendor+'/token','t']);
   await call('PUT',`/admin/mcp-servers/${server.id}`,{client_id:'replacement-client'});
   check('changing the OAuth binding invalidates all old saved tokens',sql(`SELECT count(*) FROM mcp_connections WHERE "serverId"=${quote(server.id)} AND (connected=true OR "accessToken" IS NOT NULL OR "refreshToken" IS NOT NULL)`),'0');
   const count=vendorCalls.length;await chat();check('changed OAuth identity cannot reuse an earlier token',vendorCalls.length,count);
