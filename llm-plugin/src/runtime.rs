@@ -1083,6 +1083,7 @@ impl DeclarativeProvider {
                 .to_string();
             validate_image_media_type(&media_type)?;
             if let Some(encoded) = encoded {
+                budget.admit_encoded(encoded)?;
                 let bytes = STANDARD.decode(encoded).map_err(|error| {
                     ProviderError::ResponseMapping(format!(
                         "provider image is not valid base64: {error}"
@@ -1180,6 +1181,22 @@ impl ImageBudget {
                 "provider returned more than the {} requested images",
                 self.expected
             )));
+        }
+        if self.remaining == 0 {
+            return Err(ProviderError::ResponseTooLarge);
+        }
+        Ok(())
+    }
+
+    fn admit_encoded(&self, encoded: &str) -> Result<(), ProviderError> {
+        let padding = encoded
+            .bytes()
+            .rev()
+            .take_while(|byte| *byte == b'=')
+            .count();
+        let bytes = base64::decoded_len_estimate(encoded.len()).saturating_sub(padding);
+        if bytes > self.remaining {
+            return Err(ProviderError::ResponseTooLarge);
         }
         Ok(())
     }
@@ -2011,6 +2028,21 @@ mod tests {
             Err(crate::ProviderError::ResponseTooLarge)
         ));
         assert!(budget.admit(2).is_err());
+    }
+
+    #[test]
+    fn inline_images_check_remaining_bytes_before_decoding_without_rejecting_padding() {
+        let mut budget = super::ImageBudget::new(2, 1);
+        assert!(budget.admit_encoded("YQ==").is_ok());
+        assert!(matches!(
+            budget.admit_encoded("YWI="),
+            Err(crate::ProviderError::ResponseTooLarge)
+        ));
+        budget.charge(1).unwrap();
+        assert!(matches!(
+            budget.admit(1),
+            Err(crate::ProviderError::ResponseTooLarge)
+        ));
     }
 
     #[test]
