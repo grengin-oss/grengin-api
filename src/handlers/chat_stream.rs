@@ -45,7 +45,7 @@ use crate::{
             model_identifiers, next_tool_round, persistence_error_event_data, record_stop_reason,
             response_stopped_event_data, stop_reason_for_provider_error, with_stop_reason,
         },
-        connector_tool_summary::{connector_call_summary, result_summary},
+        connector_tool_summary::{connector_call_summary, result_summary, stored_tool_call},
         conversation_access::{
             can_access_conversation, find_active_conversation_for_user,
             load_readable_linked_projects,
@@ -2033,7 +2033,7 @@ pub async fn handle_chat_stream(
                                None
                            };
                            if let Some(tool_call) = tool_call {
-                               tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
+                               tool_calls.push(stored_tool_call(&tool_call));
                                new_llm_message.tools_calls = Set(tool_calls.clone());
                                new_llm_message.updated_at = Set(Utc::now());
                                if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
@@ -2118,7 +2118,7 @@ pub async fn handle_chat_stream(
                                kind: Some(ChatToolKind::Other),
                                web_search: None,
                            };
-                           tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
+                           tool_calls.push(stored_tool_call(&tool_call));
                            new_llm_message.tools_calls = Set(tool_calls.clone());
                            new_llm_message.updated_at = Set(Utc::now());
                            if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
@@ -2168,7 +2168,7 @@ pub async fn handle_chat_stream(
                                    }),
                                    summary: None,
                                };
-                               tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
+                               tool_calls.push(stored_tool_call(&tool_call));
                                new_llm_message.tools_calls = Set(tool_calls.clone());
                                new_llm_message.updated_at = Set(Utc::now());
                                if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {

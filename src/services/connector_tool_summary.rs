@@ -1,12 +1,17 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{borrow::Cow, collections::HashMap};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+};
 
 use serde_json::{Map, Value};
 
 use crate::{
-    dto::chat_stream::{ConnectorCallSummary, ConnectorResultSummary},
+    dto::chat_stream::{
+        ChatStreamToolCall, ChatToolKind, ConnectorCallSummary, ConnectorResultSummary,
+    },
     services::mcp_tools::McpToolDescriptor,
 };
 
@@ -30,6 +35,8 @@ const ERRORS: [(&str, &str); 9] = [
     ("did not complete", "Did not finish"),
 ];
 const UNKNOWN_CONNECTOR: &str = "Connector";
+// Stored only, never sent: marks a call the provider's own search made, as told by stream origin.
+const NATIVE_SEARCH_MARK: &str = "native_web_search";
 // Server-side search tools as the providers and the stream name them.
 const NATIVE_WEB_SEARCH: [&str; 6] = [
     "web_search",
@@ -105,6 +112,16 @@ const ENVELOPE_KEYS: [&str; 6] = [
     "meta",
 ];
 
+pub fn stored_tool_call(call: &ChatStreamToolCall) -> Value {
+    let mut value = serde_json::to_value(call).unwrap_or_else(|_| Value::Object(Map::new()));
+    if matches!(call.kind, Some(ChatToolKind::WebSearch))
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert(NATIVE_SEARCH_MARK.into(), Value::Bool(true));
+    }
+    value
+}
+
 // Every function call is a connector's; an unknown or ambiguous name still gets only a summary.
 pub fn connector_call_summary(
     descriptor: Option<&McpToolDescriptor>,
@@ -156,6 +173,12 @@ pub fn result_summary(output: &Value, is_error: bool) -> ConnectorResultSummary 
 // Chat history stored before summaries existed still holds raw connector arguments and output.
 pub fn redact_history(calls: Vec<Value>, results: Vec<Value>) -> (Vec<Value>, Vec<Value>) {
     let mut connectors: HashMap<String, (String, String)> = HashMap::new();
+    let searched: HashSet<String> = results
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|result| is_web_search(result))
+        .filter_map(|result| text_field(result, "tool_id"))
+        .collect();
     let results = results
         .into_iter()
         .map(|mut result| {
@@ -169,7 +192,7 @@ pub fn redact_history(calls: Vec<Value>, results: Vec<Value>) -> (Vec<Value>, Ve
         .into_iter()
         .map(|mut call| {
             if let Some(object) = call.as_object_mut() {
-                redact_call(object, &connectors);
+                redact_call(object, &connectors, &searched);
             }
             call
         })
@@ -213,10 +236,19 @@ fn redact_result(
     }
 }
 
-fn redact_call(call: &mut Map<String, Value>, connectors: &HashMap<String, (String, String)>) {
+fn redact_call(
+    call: &mut Map<String, Value>,
+    connectors: &HashMap<String, (String, String)>,
+    searched: &HashSet<String>,
+) {
+    let marked = call.remove(NATIVE_SEARCH_MARK) == Some(Value::Bool(true));
+    let id = text_field(call, "tool_id");
     // A result recorded for a connector identifies its call, whatever name the call carries.
-    let known = text_field(call, "tool_id").and_then(|id| connectors.get(&id).cloned());
-    if known.is_none() && is_web_search(call) {
+    let known = id.as_ref().and_then(|id| connectors.get(id).cloned());
+    // Older replies classified calls by name, so an unmarked call is the provider's search only
+    // once its search results were recorded; an unfinished one may be a connector's.
+    let native = marked || id.is_some_and(|id| searched.contains(&id));
+    if known.is_none() && native && is_web_search(call) {
         return;
     }
     let (server, tool) = known.unwrap_or_else(|| {
@@ -316,7 +348,10 @@ fn decoded(output: &Value) -> Cow<'_, Value> {
         Some(text) => Cow::Owned(
             serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_string())),
         ),
-        None => Cow::Owned(Value::Null),
+        None if parts.is_empty() => Cow::Owned(Value::Null),
+        // Images, audio and embedded resources hold no text, yet they are a result; nothing about
+        // them is described beyond that.
+        None => Cow::Owned(Value::Bool(true)),
     }
 }
 
@@ -557,6 +592,17 @@ mod tests {
             "Done"
         );
         assert_eq!(result_summary(&Value::Null, false).text, "No results");
+        assert_eq!(
+            result_summary(&json!({"content": []}), false).text,
+            "No results"
+        );
+        for part in [
+            json!({"type": "image", "data": "aGVsbG8=", "mimeType": "image/png"}),
+            json!({"type": "resource", "resource": {"uri": "file:///plan.pdf", "blob": "aGVsbG8="}}),
+        ] {
+            let result = result_summary(&json!({"content": [part]}), false);
+            assert_eq!((result.text.as_str(), result.item_count), ("Done", None));
+        }
     }
 
     #[test]
@@ -632,7 +678,7 @@ mod tests {
             secret("c4", "send_mail"),
             json!({"tool_name": "tool_call", "tool_id": "c5", "input_text": "CONFIDENTIAL"}),
             json!({"tool_name": "web_search_call", "tool_id": "w1", "kind": "web_search",
-                   "web_search": {"query": "kept query"}}),
+                   "web_search": {"query": "kept query"}, "native_web_search": true}),
         ];
         let results = vec![
             json!({"tool_name": "tool_0_send_mail", "tool_id": "c1", "status": "error",
@@ -654,6 +700,7 @@ mod tests {
         }
         assert_eq!(results[1]["summary"]["text"], "Hi");
         assert_eq!(calls[5]["web_search"]["query"], "kept query");
+        assert!(calls[5].get("native_web_search").is_none());
     }
 
     #[test]
@@ -760,7 +807,10 @@ mod tests {
             json!({"tool_name": "web_search", "tool_id": "c2", "kind": "other",
                    "summary": {"connector": "Gmail", "action": "Web search"}, "input_text": "CONFIDENTIAL"}),
             json!({"tool_name": "web_search", "tool_id": "w1", "kind": "web_search",
-                   "web_search": {"query": "kept query"}}),
+                   "web_search": {"query": "kept query"}, "native_web_search": true}),
+            json!({"tool_name": "web_search", "tool_id": "c3", "kind": "web_search",
+                   "web_search": {"query": "CONFIDENTIAL"},
+                   "input": {"type": "json", "value": {"query": "unfinished", "body": "CONFIDENTIAL"}}}),
         ];
         let results = vec![
             json!({"tool_name": "web_search", "tool_id": "c1", "status": "success",
@@ -778,6 +828,10 @@ mod tests {
             json!({"connector": "Gmail", "action": "Web search", "target": "invoices"})
         );
         assert_eq!(calls[2]["web_search"]["query"], "kept query");
+        assert_eq!(
+            calls[3]["summary"],
+            json!({"connector": "Connector", "action": "Web search", "target": "unfinished"})
+        );
     }
 
     #[test]

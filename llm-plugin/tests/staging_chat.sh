@@ -243,29 +243,15 @@ stream "MCP db_status" "$mcp_payload"
 require_successful_stream "MCP db_status" conversation tool_call tool_result message_end done
 mcp_result=$(sed -n 's/^data:[[:space:]]*//p' "$BODY_FILE" \
   | jq -sc 'map(select(.tool_result != null)) | last')
+# The browser receives only a summary of a connector result, never its output.
 jq -e '
-  def db_status:
-    .tool_result.output as $output
-    | if $output.database_type? != null then
-        $output
-      elif $output.structuredContent? != null then
-        $output.structuredContent
-      elif ($output.content? | type) == "array" then
-        ([
-          $output.content[]?
-          | select(.type == "text")
-          | .text
-          | fromjson?
-        ] | map(select(. != null)) | first // {})
-      else
-        {}
-      end;
   .tool_result.status == "success"
     and ((.tool_result.tool_name // "") | contains("__db_status__"))
-    and (db_status.database_type == "PostgreSQL")
-    and (db_status.read_only == true)
+    and ((.tool_result.summary.text // null) | type) == "string"
+    and (.tool_result | has("output") | not)
+    and (.tool_result.mcp.preview? == null)
 ' <<<"$mcp_result" >/dev/null \
-  || fail "MCP db_status did not return a successful read-only PostgreSQL status"
-pass "MCP db_status returned read-only PostgreSQL status"
+  || fail "MCP db_status did not succeed with a summary-only result"
+pass "MCP db_status succeeded and the stream carried only its summary"
 
 printf 'All provider API checks passed. Created conversations will now be removed.\n'
