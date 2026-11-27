@@ -17,8 +17,8 @@ use crate::{
     },
     models::ai_engines::{self, ApiKeyStatus},
     services::ai_engine_helpers::{
-        find_engine_for_update, load_models_response, load_models_response_refreshed,
-        sort_engines_by_readiness,
+        find_engine, load_models_response, load_models_response_refreshed,
+        save_engine_if_unchanged, sort_engines_by_readiness,
     },
     services::{
         ai_engine_defaults::{enabled_after_key, starter_models},
@@ -46,7 +46,7 @@ use llm_plugin::ProviderError;
 use reqwest::StatusCode;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
-    QueryOrder, TransactionTrait, TryIntoModel,
+    QueryOrder, TryIntoModel,
 };
 
 #[utoipa::path(
@@ -342,11 +342,7 @@ pub async fn update_ai_engines_by_key(
             None,
         )
         .await?;
-    let txn = app_state.database.begin().await.map_err(|e| {
-        eprintln!("db error begin ai engine update {e}");
-        AuthError::DbTimeout
-    })?;
-    let ai_engine = find_engine_for_update(&txn, &ai_engine_key).await?;
+    let ai_engine = find_engine(&app_state.database, &ai_engine_key).await?;
     let mut active_model = ai_engine.clone().into_active_model();
     let catalog_grengin = is_catalog_grengin(&ai_engine);
     let (icon, icon_dark) = if catalog_grengin {
@@ -508,14 +504,7 @@ pub async fn update_ai_engines_by_key(
     } else {
         None
     };
-    let model = active_model.update(&txn).await.map_err(|e| {
-        eprintln!("db error update one {e}");
-        AuthError::DbTimeout
-    })?;
-    txn.commit().await.map_err(|e| {
-        eprintln!("db error commit ai engine update {e}");
-        AuthError::DbTimeout
-    })?;
+    let model = save_engine_if_unchanged(&app_state.database, &ai_engine, active_model).await?;
     app_state
         .live_models_cache
         .invalidate(&model.engine_key)

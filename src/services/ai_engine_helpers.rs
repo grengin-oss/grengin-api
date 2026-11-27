@@ -12,26 +12,51 @@ use crate::{
     state::SharedState,
 };
 use sea_orm::{
-    ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, TransactionTrait,
 };
 
-// An update reads, checks and writes the row under this lock, so a concurrent update can never
-// pair one request's key with another request's destination.
-pub async fn find_engine_for_update(
-    txn: &DatabaseTransaction,
+pub async fn find_engine(
+    db: &DatabaseConnection,
     engine_key: &str,
 ) -> Result<ai_engines::Model, AuthError> {
     ai_engines::Entity::find()
         .filter(ai_engines::Column::EngineKey.eq(engine_key))
         .order_by_desc(ai_engines::Column::CreatedAt)
-        .lock_exclusive()
-        .one(txn)
+        .one(db)
         .await
         .map_err(|e| {
-            eprintln!("db error lock ai engine {e}");
+            eprintln!("db error get ai engine {e}");
             AuthError::DbTimeout
         })?
         .ok_or(AuthError::ResourceNotFound)
+}
+
+// An update is checked against the row it read, without holding a lock across its provider
+// calls; it is written only if that row is still unchanged, so two concurrent updates can never
+// pair one request's key with another request's destination.
+pub async fn save_engine_if_unchanged(
+    db: &DatabaseConnection,
+    read: &ai_engines::Model,
+    update: ai_engines::ActiveModel,
+) -> Result<ai_engines::Model, AuthError> {
+    let db_error = |e: sea_orm::DbErr| {
+        eprintln!("db error update ai engine {e}");
+        AuthError::DbTimeout
+    };
+    let txn = db.begin().await.map_err(db_error)?;
+    let current = ai_engines::Entity::find_by_id(read.id)
+        .lock_exclusive()
+        .one(&txn)
+        .await
+        .map_err(db_error)?
+        .ok_or(AuthError::ResourceNotFound)?;
+    if &current != read {
+        return Err(AuthError::DbConflict);
+    }
+    let saved = update.update(&txn).await.map_err(db_error)?;
+    txn.commit().await.map_err(db_error)?;
+    Ok(saved)
 }
 
 pub async fn load_models_response(app_state: &SharedState) -> Result<ModelsResponse, AuthError> {
