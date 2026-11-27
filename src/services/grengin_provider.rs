@@ -35,12 +35,21 @@ impl GrenginProvider {
         manifest: &ProviderManifestV1,
         catalog: DiscoveryCatalog,
     ) -> Result<Self, ProviderError> {
-        let upstreams: BTreeSet<_> = manifest.native_providers.iter().cloned().collect();
+        let declared: BTreeSet<_> = manifest.native_providers.iter().cloned().collect();
+        // A newer catalog may name an upstream this API version cannot route yet; skipping it
+        // keeps every other Grengin provider working.
+        let upstreams: BTreeSet<_> = declared
+            .iter()
+            .filter(|id| supported_provider(id))
+            .cloned()
+            .collect();
+        for skipped in declared.difference(&upstreams) {
+            eprintln!("Grengin upstream {skipped} is not supported by this API version; skipped");
+        }
         if manifest.id != "grengin"
             || manifest.base_url != "https://service.grengin.com/v1/infer/"
             || upstreams.is_empty()
-            || upstreams.len() != manifest.native_providers.len()
-            || upstreams.iter().any(|id| !supported_provider(id))
+            || declared.len() != manifest.native_providers.len()
         {
             return Err(ProviderError::InvalidManifest(
                 "invalid Grengin nativeProviders".into(),
@@ -315,6 +324,7 @@ fn supported_provider(provider: &str) -> bool {
             | "sarvam"
             | "sakana"
             | "tinker"
+            | "nvidia"
     )
 }
 
@@ -831,6 +841,60 @@ mod tests {
             image_generation: true,
             model_listing: true,
         }
+    }
+
+    fn grengin_manifest(native_providers: &[&str]) -> ProviderManifestV1 {
+        ProviderManifestV1::from_json(
+            json!({
+                "manifestVersion":"1.0", "id":"grengin", "version":"1.1", "name":"Grengin",
+                "baseUrl":"https://service.grengin.com/v1/infer/",
+                "capabilities":{"chat":{"streaming":true,"tools":true,"vision":true,"reasoning":true},
+                    "embeddings":true,"imageGeneration":true,"modelListing":true},
+                "nativeProviders":native_providers, "operations":{}
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn nvidia_is_a_grengin_upstream_and_unknown_upstreams_are_skipped() {
+        let catalog =
+            || DiscoveryCatalog::new(reqwest::Client::new(), "http://127.0.0.1:9").unwrap();
+        let grengin = GrenginProvider::new(
+            &grengin_manifest(&["openai", "nvidia", "future-ai"]),
+            catalog(),
+        )
+        .unwrap();
+        assert_eq!(
+            grengin
+                .upstreams
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["nvidia", "openai"]
+        );
+        assert_eq!(
+            grengin.resolve("nvidia/nvidia/nemotron-model").unwrap(),
+            ("nvidia", "nvidia/nemotron-model".to_string())
+        );
+        assert!(grengin.resolve("future-ai/model").is_err());
+        assert!(GrenginProvider::new(&grengin_manifest(&["future-ai"]), catalog()).is_err());
+
+        let mut nvidia = ProviderManifestV1::from_json(include_bytes!(
+            "../../llm-plugin/examples/openai-compatible.provider.json"
+        ))
+        .unwrap();
+        nvidia.id = "nvidia".into();
+        nvidia.operations.embeddings = None;
+        nvidia.operations.image_generation = None;
+        nvidia.operations.image_edit = None;
+        assert!(prepare_native_manifest("nvidia", nvidia).is_ok());
+        let origin = "https://service.grengin.com";
+        let route = |path: &str| Url::parse(&format!("{origin}/v1/infer/nvidia/{path}")).unwrap();
+        assert!(validate_gateway_url(origin, "nvidia", &route("chat/completions")).is_ok());
+        assert!(validate_gateway_url(origin, "nvidia", &route("embeddings")).is_err());
     }
 
     #[test]
