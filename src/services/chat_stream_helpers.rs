@@ -22,8 +22,14 @@ use crate::{
         departments::ActionOnExceed,
         messages,
         messages::{ChatRole, StopReason},
+        users,
     },
-    services::budget_allocation::{BudgetHealth, get_department_budget_status},
+    services::{
+        budget_allocation::{
+            BudgetHealth, get_department_budget_status, refresh_department_budget_available,
+        },
+        notifications::emit_budget_alerts,
+    },
     state::{EditView, GeneratingSnapshot, SharedState, StreamCancel, StreamCancellations},
 };
 
@@ -421,6 +427,30 @@ async fn stop_request_within(cancel: &StreamCancel, grace: Duration) -> Option<S
         .await
         .ok()
         .and_then(|_| cancel.reason())
+}
+
+// Runs after every charged reply, including one whose save failed after the charge, so the
+// department's available budget and its alerts never lag behind the ledger.
+pub async fn refresh_spender_budget(state: &SharedState, user_id: Uuid) {
+    let department_id = match users::Entity::find_by_id(user_id)
+        .one(&state.database)
+        .await
+    {
+        Ok(Some(user)) => user.department_id,
+        Ok(None) => None,
+        Err(error) => {
+            eprintln!("budget refresh user lookup error: {error}");
+            None
+        }
+    };
+    let Some(department_id) = department_id else {
+        return;
+    };
+    if let Err(error) = refresh_department_budget_available(&state.database, department_id).await {
+        eprintln!("refresh budget available error: {error}");
+    } else if let Err(error) = emit_budget_alerts(state, department_id).await {
+        eprintln!("emit budget alert error: {error:?}");
+    }
 }
 
 pub async fn record_stop_reason(db: &DatabaseConnection, message_id: Uuid, reason: StopReason) {

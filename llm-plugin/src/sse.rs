@@ -374,7 +374,10 @@ impl MapperState {
                         input_tokens: optional_u32(rule, value, "inputTokens")?,
                         text_input_tokens: optional_u32(rule, value, "textInputTokens")?,
                         image_input_tokens: optional_u32(rule, value, "imageInputTokens")?,
-                        output_tokens: optional_u32(rule, value, "outputTokens")?,
+                        output_tokens: with_reasoning_output(
+                            optional_u32(rule, value, "outputTokens")?,
+                            optional_u32(rule, value, "reasoningOutputTokens")?,
+                        )?,
                         total_tokens: optional_u32(rule, value, "totalTokens")?,
                         cached_input_tokens: optional_u32(rule, value, "cachedInputTokens")?,
                         cache_creation_tokens: optional_u32(rule, value, "cacheCreationTokens")?,
@@ -724,6 +727,21 @@ pub(crate) fn value_to_u32(value: &Value) -> Option<u32> {
 
 // Converts provider-specific cache accounting into the canonical usage contract.
 // Canonical input and total counters include both cache-read and cache-write tokens.
+// Some providers (Gemini) count reasoning outside their output counter, but bill it as output.
+pub(crate) fn with_reasoning_output(
+    output: Option<u32>,
+    reasoning: Option<u32>,
+) -> Result<Option<u32>, ProviderError> {
+    match reasoning {
+        Some(reasoning) => output
+            .unwrap_or(0)
+            .checked_add(reasoning)
+            .map(Some)
+            .ok_or_else(token_usage_overflow),
+        None => Ok(output),
+    }
+}
+
 pub(crate) fn normalize_token_usage(
     mut usage: TokenUsage,
     input_tokens_include_cached: bool,

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
+use rust_decimal::Decimal;
 use serde_json::Value;
 
 use crate::services::llm_usage_gate::estimate_text_tokens;
@@ -26,6 +27,14 @@ impl UsageTotals {
             cached_input: self.cached_input.saturating_add(other.cached_input),
             cache_creation: self.cache_creation.saturating_add(other.cache_creation),
             estimated: self.estimated || other.estimated,
+        }
+    }
+
+    fn input_priced_as(self, cached_input: i32, cache_creation: i32) -> Self {
+        Self {
+            cached_input,
+            cache_creation,
+            ..self
         }
     }
 }
@@ -91,10 +100,13 @@ impl RoundUsage {
 // Token usage of one chat turn, which spans one provider request per tool round. Providers report
 // running totals for the current request, so within a round the latest value wins; rounds add up.
 // A count the provider never reported is estimated, never charged as zero.
+// The spend trigger charges every increase of a message's cost and never refunds a decrease, so
+// the cost saved for a message never goes down: a lower save followed by a higher one charges twice.
 #[derive(Debug, Clone)]
 pub struct TurnUsage {
     finished: UsageTotals,
     round: RoundUsage,
+    charged: Decimal,
 }
 
 impl TurnUsage {
@@ -106,6 +118,7 @@ impl TurnUsage {
                 started: true,
                 ..RoundUsage::default()
             },
+            charged: Decimal::ZERO,
         }
     }
 
@@ -121,7 +134,11 @@ impl TurnUsage {
         let round = &mut self.round;
         round.input = input.map(tokens).or(round.input);
         round.output = output.map(tokens).or(round.output);
-        round.total = total.map(tokens).or(round.total);
+        round.total = match total {
+            Some(total) => Some(tokens(total)),
+            None if input.is_some() || output.is_some() => None,
+            None => round.total,
+        };
         round.cached_input = cached_input.map(tokens).or(round.cached_input);
         round.cache_creation = cache_creation.map(tokens).or(round.cache_creation);
     }
@@ -162,6 +179,27 @@ impl TurnUsage {
 
     pub fn interrupted_totals(&self) -> UsageTotals {
         self.finished.add(self.round.totals(true))
+    }
+
+    // A mid-stream save prices the open round's input at the cheapest input rate, because a later
+    // usage update may still move tokens into a cheaper cache bucket.
+    pub fn checkpoint_cost(&mut self, cost_of: impl Fn(&UsageTotals) -> Decimal) -> Decimal {
+        let open = self.round.reported();
+        let floor = [
+            open.input_priced_as(0, 0),
+            open.input_priced_as(open.input, 0),
+            open.input_priced_as(0, open.input),
+        ]
+        .iter()
+        .map(&cost_of)
+        .min()
+        .unwrap_or_default();
+        self.charge(cost_of(&self.finished) + floor)
+    }
+
+    pub fn charge(&mut self, cost: Decimal) -> Decimal {
+        self.charged = self.charged.max(cost);
+        self.charged
     }
 }
 
@@ -255,6 +293,42 @@ mod tests {
         let fresh = TurnUsage::new(5_000);
         assert_eq!(fresh.reported_totals(), UsageTotals::default());
         assert_eq!(fresh.totals().input, 5_000);
+    }
+
+    fn priced(totals: &UsageTotals) -> Decimal {
+        let regular = totals.input - totals.cached_input - totals.cache_creation;
+        Decimal::from(
+            regular * 10 + totals.cached_input + totals.cache_creation * 12 + totals.output * 40,
+        )
+    }
+
+    #[test]
+    fn a_late_cache_count_never_lowers_a_saved_cost() {
+        let mut usage = TurnUsage::new(0);
+        usage.record(Some(1_000), Some(1), None, None, None);
+        let early = usage.checkpoint_cost(priced);
+        usage.record(Some(1_000), Some(50), Some(1_050), Some(900), None);
+        let late = usage.checkpoint_cost(priced);
+        let fin = usage.charge(priced(&usage.totals()));
+        assert_eq!((early, late), (Decimal::from(1_040), Decimal::from(3_000)));
+        assert_eq!(fin, Decimal::from(1_000 + 900 + 2_000));
+        assert!(early <= late && late <= fin);
+    }
+
+    #[test]
+    fn the_saved_cost_only_ratchets_up() {
+        let mut usage = TurnUsage::new(0);
+        assert_eq!(usage.charge(Decimal::from(5)), Decimal::from(5));
+        assert_eq!(usage.charge(Decimal::from(3)), Decimal::from(5));
+        assert_eq!(usage.charge(Decimal::from(8)), Decimal::from(8));
+    }
+
+    #[test]
+    fn a_total_is_dropped_when_later_counts_arrive_without_one() {
+        let mut usage = TurnUsage::new(0);
+        usage.record(Some(1_000), Some(1), Some(1_001), None, None);
+        usage.record(None, Some(350), None, None, None);
+        assert_eq!(usage.totals().total, 1_350);
     }
 
     #[test]

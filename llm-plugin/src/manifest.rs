@@ -448,6 +448,8 @@ pub struct UsageMapping {
     #[serde(default)]
     pub output_tokens: Option<String>,
     #[serde(default)]
+    pub reasoning_output_tokens: Option<String>,
+    #[serde(default)]
     pub total_tokens: Option<String>,
     #[serde(default)]
     pub cached_input_tokens: Option<String>,
@@ -472,6 +474,7 @@ impl Default for UsageMapping {
             text_input_tokens: None,
             image_input_tokens: None,
             output_tokens: None,
+            reasoning_output_tokens: None,
             total_tokens: None,
             cached_input_tokens: None,
             cache_creation_tokens: None,

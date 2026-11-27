@@ -46,10 +46,6 @@ pub fn calculate_llm_cost(
     let cached_rate_val = cached_input_rate.unwrap_or(input_rate_val);
     let creation_rate_val = cache_creation_rate.unwrap_or(input_rate_val);
 
-    if input_rate_val == 0.0 && output_rate_val == 0.0 {
-        return Decimal::from(0);
-    }
-
     let regular = (input_tokens - cached_input_tokens - cache_creation_tokens).max(0);
     let cost = (regular as f64 * input_rate_val
         + cached_input_tokens as f64 * cached_rate_val
@@ -170,5 +166,12 @@ mod tests {
         let cost = calculate_llm_cost(1_000, 300, 200, 100, None, None, None, None);
 
         assert_eq!(cost, Decimal::ZERO);
+    }
+
+    #[test]
+    fn cache_tokens_are_charged_when_only_cache_rates_are_priced() {
+        let cost = calculate_llm_cost(1_000, 300, 200, 0, Some(0.0), Some(1.0), Some(5.0), None);
+
+        assert_eq!(cost, Decimal::from_str_exact("0.0013").unwrap());
     }
 }

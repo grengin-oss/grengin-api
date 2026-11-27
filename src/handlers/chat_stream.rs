@@ -33,7 +33,6 @@ use crate::{
             ARTIFACT_SYSTEM_HINT, ArtifactAccum, ArtifactParseEvent, ArtifactParser,
             content_type_to_ext,
         },
-        budget_allocation::refresh_department_budget_available,
         chat_attachments::{hydrate_prompt_files, validate_incoming_attachments},
         chat_helpers::{
             effective_max_tokens, effective_native_web_search, supports_native_web_search,
@@ -43,7 +42,8 @@ use crate::{
             ContentCheckpoint, DepartmentBudgetGate, ToolRoundOutcome, deliver_reply,
             department_budget_status, ensure_budget_pricing, ensure_model_whitelisted,
             model_identifiers, next_tool_round, persistence_error_event_data, record_stop_reason,
-            response_stopped_event_data, stop_reason_for_provider_error, with_stop_reason,
+            refresh_spender_budget, response_stopped_event_data, stop_reason_for_provider_error,
+            with_stop_reason,
         },
         chat_usage::{TurnUsage, UsageTotals, with_usage_estimated},
         conversation_access::{
@@ -59,7 +59,6 @@ use crate::{
         mcp_tools::{gateway_tool_output, load_mcp_tools, request_local_tool_names},
         message_branches::{ThreadEntry, add_to_thread, is_shown, last_shown_message},
         message_helpers::{EditInProgress, EditStatus, PendingEdit, begin_pending_edit},
-        notifications::emit_budget_alerts,
         provider_chat::{
             LlmStreamError, LlmStreamEvent, PluginStreamParser, build_plugin_chat_request,
             estimate_request_tokens, plugin_event_stream, provider_error_class,
@@ -1389,6 +1388,7 @@ pub async fn handle_chat_stream(
                     if let Err(e) = inserted {
                         eprintln!("image gen message insert error: {e:?}");
                         charge_unsaved_reply(&app_state.database, claims.user_id, &img_msg).await;
+                        refresh_spender_budget(&app_state, claims.user_id).await;
                         yield Event::default()
                             .event(ChatStreamEvents::AiError.to_string())
                             .data(persistence_error_event_data());
@@ -1414,6 +1414,7 @@ pub async fn handle_chat_stream(
                             }
                             Err(error) => {
                                 eprintln!("edit commit error: {error:?}");
+                                refresh_spender_budget(&app_state, claims.user_id).await;
                                 yield Event::default()
                                     .event(ChatStreamEvents::AiError.to_string())
                                     .data(persistence_error_event_data());
@@ -1432,18 +1433,7 @@ pub async fn handle_chat_stream(
                         active_conv.updated_at = Set(now);
                         let _ = active_conv.update(&app_state.database).await;
                     }
-                    if let Ok(Some(user)) = users::Entity::find_by_id(claims.user_id)
-                        .one(&app_state.database)
-                        .await
-                    {
-                        if let Some(department_id) = user.department_id {
-                            if let Err(e) = refresh_department_budget_available(&app_state.database, department_id).await {
-                                eprintln!("image gen budget refresh error: {e}");
-                            } else if let Err(e) = emit_budget_alerts(&app_state, department_id).await {
-                                eprintln!("image gen budget alert error: {e:?}");
-                            }
-                        }
-                    }
+                    refresh_spender_budget(&app_state, claims.user_id).await;
                     if superseded {
                         yield Event::default()
                             .event(ChatStreamEvents::ResponseStopped.to_string())
@@ -1517,51 +1507,6 @@ pub async fn handle_chat_stream(
                 .data(data);
             yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
             return;
-        };
-
-        let mut provider_session = match chat.start(provider_request).await {
-            Ok(session) => session,
-            Err(error) => {
-                eprintln!("provider chat start failed: {}", provider_error_class(&error));
-                let stream_err = ChatStreamError::ProviderError {
-                    provider: provider.clone(),
-                    message: format!(
-                        "provider plugin request failed ({})",
-                        provider_error_class(&error)
-                    ),
-                };
-                let data = serde_json::to_string(&stream_err.to_response())
-                    .unwrap_or_else(|_| "{}".to_string());
-                yield Event::default()
-                    .event(ChatStreamEvents::AiError.to_string())
-                    .data(data);
-                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
-                return;
-            }
-        };
-        let mut event_source = match provider_session.stream().await {
-            Ok(source) => plugin_event_stream(source),
-            Err(error) => {
-                eprintln!("provider stream start failed: {}", provider_error_class(&error));
-                let stream_err = if matches!(error.underlying(), llm_plugin::ProviderError::QuotaExhausted) {
-                    ChatStreamError::ApiQuotaExhausted { provider: provider.clone() }
-                } else {
-                    ChatStreamError::ProviderError {
-                        provider: provider.clone(),
-                        message: format!(
-                            "provider plugin request failed ({})",
-                            provider_error_class(&error)
-                        ),
-                    }
-                };
-                let data = serde_json::to_string(&stream_err.to_response())
-                    .unwrap_or_else(|_| "{}".to_string());
-                yield Event::default()
-                    .event(ChatStreamEvents::AiError.to_string())
-                    .data(data);
-                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
-                return;
-            }
         };
 
         let new_message_id = Uuid::new_v4();
@@ -1695,6 +1640,54 @@ pub async fn handle_chat_stream(
             return;
         }
 
+        // The provider request opens only once the reply row can record what it costs.
+        let mut provider_session = match chat.start(provider_request).await {
+            Ok(session) => session,
+            Err(error) => {
+                eprintln!("provider chat start failed: {}", provider_error_class(&error));
+                content_checkpoint.fail_with(stop_reason_for_provider_error(&error));
+                let stream_err = ChatStreamError::ProviderError {
+                    provider: provider.clone(),
+                    message: format!(
+                        "provider plugin request failed ({})",
+                        provider_error_class(&error)
+                    ),
+                };
+                let data = serde_json::to_string(&stream_err.to_response())
+                    .unwrap_or_else(|_| "{}".to_string());
+                yield Event::default()
+                    .event(ChatStreamEvents::AiError.to_string())
+                    .data(data);
+                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                return;
+            }
+        };
+        let mut event_source = match provider_session.stream().await {
+            Ok(source) => plugin_event_stream(source),
+            Err(error) => {
+                eprintln!("provider stream start failed: {}", provider_error_class(&error));
+                content_checkpoint.fail_with(stop_reason_for_provider_error(&error));
+                let stream_err = if matches!(error.underlying(), llm_plugin::ProviderError::QuotaExhausted) {
+                    ChatStreamError::ApiQuotaExhausted { provider: provider.clone() }
+                } else {
+                    ChatStreamError::ProviderError {
+                        provider: provider.clone(),
+                        message: format!(
+                            "provider plugin request failed ({})",
+                            provider_error_class(&error)
+                        ),
+                    }
+                };
+                let data = serde_json::to_string(&stream_err.to_response())
+                    .unwrap_or_else(|_| "{}".to_string());
+                yield Event::default()
+                    .event(ChatStreamEvents::AiError.to_string())
+                    .data(data);
+                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                return;
+            }
+        };
+
         // Emit before the event loop so message_start always arrives before any delta,
         // regardless of provider (Gemini fires usageMetadata only on the last chunk).
         yield Event::default()
@@ -1716,7 +1709,7 @@ pub async fn handle_chat_stream(
                biased;
                _ = cancel_handle.cancelled() => {
                    let totals = usage.interrupted_totals();
-                   let cancel_cost = cost_of(&totals);
+                   let cancel_cost = usage.charge(cost_of(&totals));
                    let cancel_reason = cancel_handle.reason().unwrap_or(StopReason::UserCancelled);
                    stop_reason = Some(cancel_reason);
                    new_llm_message.updated_at = Set(Utc::now());
@@ -1786,7 +1779,7 @@ pub async fn handle_chat_stream(
                            new_llm_message.request_tokens = Set(totals.input);
                            new_llm_message.response_tokens = Set(totals.output);
                            new_llm_message.total_tokens = Set(totals.total);
-                           new_llm_message.cost = Set(cost_of(&totals));
+                           new_llm_message.cost = Set(usage.checkpoint_cost(cost_of));
                            let now = Instant::now();
                            if content_checkpoint.is_due(now) {
                                if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
@@ -1850,7 +1843,7 @@ pub async fn handle_chat_stream(
                           new_llm_message.request_tokens = Set(totals.input);
                           new_llm_message.response_tokens = Set(totals.output);
                           new_llm_message.total_tokens = Set(totals.total);
-                          new_llm_message.cost = Set(cost_of(&totals));
+                          new_llm_message.cost = Set(usage.checkpoint_cost(cost_of));
                           new_llm_message.metadata = Set(Some(json!({
                               "webSearch": req.web_search,
                               "cachedInputTokens": totals.cached_input,
@@ -1870,7 +1863,7 @@ pub async fn handle_chat_stream(
                           new_llm_message.request_tokens = Set(totals.input);
                           new_llm_message.response_tokens = Set(totals.output);
                           new_llm_message.total_tokens = Set(totals.total);
-                          new_llm_message.cost = Set(cost_of(&totals));
+                          new_llm_message.cost = Set(usage.checkpoint_cost(cost_of));
                           new_llm_message.metadata = Set(Some(json!({
                               "webSearch": req.web_search,
                               "cachedInputTokens": totals.cached_input,
@@ -2276,7 +2269,7 @@ pub async fn handle_chat_stream(
                          stop_reason = Some(StopReason::ProviderError);
                          turn_failed = true;
                          stream_finished = true;
-                         break;
+                         break 'events;
                        }
                        StreamParseResult::None => {}
                    }
@@ -2286,7 +2279,7 @@ pub async fn handle_chat_stream(
                    match e {
                      LlmStreamError::Ended => {
                        let totals = usage.totals();
-                       let message_cost = cost_of(&totals);
+                       let message_cost = usage.charge(cost_of(&totals));
                        new_llm_message.latency = Set(latency);
                        new_llm_message.request_tokens = Set(totals.input);
                        new_llm_message.response_tokens = Set(totals.output);
@@ -2666,7 +2659,7 @@ pub async fn handle_chat_stream(
                } else {
                    usage.totals()
                };
-               let token_cost = cost_of(&totals);
+               let token_cost = usage.charge(cost_of(&totals));
                let message_cost = token_cost + image_gen_cost;
                new_llm_message.request_tokens = Set(totals.input);
                new_llm_message.response_tokens = Set(totals.output);
@@ -2689,20 +2682,7 @@ pub async fn handle_chat_stream(
                  active_conversation.updated_at = Set(Utc::now());
                  let _ = active_conversation.update(&app_state.database).await;
                }
-               if let Ok(Some(user)) = users::Entity::find_by_id(claims.user_id)
-                   .one(&app_state.database)
-                   .await
-               {
-                   if let Some(department_id) = user.department_id {
-                       if let Err(e) =
-                           refresh_department_budget_available(&app_state.database, department_id).await
-                       {
-                           eprintln!("refresh budget available error: {e}");
-                       } else if let Err(e) = emit_budget_alerts(&app_state, department_id).await {
-                           eprintln!("emit budget alert error: {:?}", e);
-                       }
-                   }
-               }
+               refresh_spender_budget(&app_state, claims.user_id).await;
                if !message_content.trim().is_empty() {
                    embedding_targets.push(EmbeddingTarget {
                        message_id: new_message_id,
