@@ -169,9 +169,10 @@ package bytes remain unchanged.
 The browser receives a summary of each connector call and result, never its
 arguments or output. The model still receives the full result, and the admin
 execution log (`mcp_executions`) keeps it. This applies to the live stream and to
-chat history; replies saved before this change are summarised when they are read,
-including connector calls that never got a result (recognised by their
-`mcp__…` or `tool_<n>_…` name).
+chat history; replies saved before this change are summarised when they are read.
+History fails closed: every stored call and result except web search is
+summarised, including calls that never got a result, whatever alias of the tool
+name they used.
 
 A connector `tool_call` has no `input` or `input_text`; it carries:
 

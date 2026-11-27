@@ -5,7 +5,10 @@ use std::{borrow::Cow, collections::HashMap};
 
 use serde_json::{Map, Value};
 
-use crate::dto::chat_stream::{ConnectorCallSummary, ConnectorResultSummary};
+use crate::{
+    dto::chat_stream::{ConnectorCallSummary, ConnectorResultSummary},
+    services::provider_stream::tool_name_is_web_search,
+};
 
 const MAX_ITEMS: usize = 5;
 const MAX_ITEM_CHARS: usize = 120;
@@ -141,42 +144,50 @@ pub fn redact_history(calls: Vec<Value>, results: Vec<Value>) -> (Vec<Value>, Ve
     (calls, results)
 }
 
+// Fails closed: every stored call and result except web search is treated as a connector's, since
+// the runtime accepts several aliases for a connector tool (plain, unhashed, request-local) and
+// older replies have no marker; web search is the only other tool a reply records.
 fn redact_result(
     result: &mut Map<String, Value>,
     connectors: &mut HashMap<String, (String, String)>,
 ) {
-    let Some(mcp) = result.get_mut("mcp").and_then(Value::as_object_mut) else {
+    if is_web_search(result) {
         return;
-    };
-    mcp.remove("preview");
-    let server = text_field(mcp, "server_name").unwrap_or_default();
-    let tool = text_field(mcp, "tool_name").unwrap_or_default();
+    }
+    let mcp = result
+        .get_mut("mcp")
+        .and_then(Value::as_object_mut)
+        .map(|mcp| {
+            mcp.remove("preview");
+            (
+                text_field(mcp, "server_name").unwrap_or_else(|| UNKNOWN_CONNECTOR.to_string()),
+                text_field(mcp, "tool_name"),
+            )
+        });
     if let Some(id) = text_field(result, "tool_id") {
+        let (server, tool) = mcp.unwrap_or_else(|| (UNKNOWN_CONNECTOR.to_string(), None));
+        let tool = tool
+            .unwrap_or_else(|| tool_label(&text_field(result, "tool_name").unwrap_or_default()));
         connectors.insert(id, (server, tool));
     }
     let is_error = result.get("status").and_then(Value::as_str) == Some("error");
-    if let Some(output) = result.remove("output")
-        && !result.contains_key("summary")
-    {
-        result.insert(
-            "summary".into(),
-            to_value(&result_summary(&output, is_error)),
-        );
+    let output = result.remove("output");
+    if !result.contains_key("summary") {
+        let summary = result_summary(&output.unwrap_or_default(), is_error);
+        result.insert("summary".into(), to_value(&summary));
     }
 }
 
 fn redact_call(call: &mut Map<String, Value>, connectors: &HashMap<String, (String, String)>) {
-    let known = text_field(call, "tool_id")
-        .and_then(|id| connectors.get(&id))
-        .cloned();
-    // A call that never got a result is still a connector call; its name says so.
-    let Some((server, tool)) = known.or_else(|| {
-        text_field(call, "tool_name")
-            .and_then(|name| connector_tool(&name))
-            .map(|tool| (UNKNOWN_CONNECTOR.to_string(), tool))
-    }) else {
+    if is_web_search(call) {
         return;
-    };
+    }
+    let (server, tool) = text_field(call, "tool_id")
+        .and_then(|id| connectors.get(&id).cloned())
+        .unwrap_or_else(|| {
+            let name = text_field(call, "tool_name").unwrap_or_default();
+            (UNKNOWN_CONNECTOR.to_string(), tool_label(&name))
+        });
     call.remove("input_text");
     let input = call.remove("input");
     if !call.contains_key("summary") {
@@ -188,20 +199,41 @@ fn redact_call(call: &mut Map<String, Value>, connectors: &HashMap<String, (Stri
     }
 }
 
-// Connector tools reach the model as `mcp__<server>__<tool>__<hash>` or, through the gateway,
-// `tool_<n>_<tool>`; `tool_call` is the stream's placeholder for a call that arrived unnamed.
-fn connector_tool(name: &str) -> Option<String> {
-    if name == "tool_call" {
-        return Some(name.to_string());
-    }
+fn is_web_search(entry: &Map<String, Value>) -> bool {
+    entry.get("kind").and_then(Value::as_str) == Some("web_search")
+        || entry
+            .get("web_search")
+            .is_some_and(|value| !value.is_null())
+        || text_field(entry, "tool_name").is_some_and(|name| tool_name_is_web_search(&name))
+}
+
+// The tool's own name inside `mcp__<server>__<tool>[__<hash>]` or the gateway's `tool_<n>_<tool>`.
+fn tool_label(name: &str) -> String {
     if let Some(rest) = name.strip_prefix("mcp__") {
-        let parts: Vec<&str> = rest.split("__").collect();
-        return (parts.len() >= 3).then(|| parts[1..parts.len() - 1].join("__"));
+        let mut parts: Vec<&str> = rest.split("__").collect();
+        if parts.len() >= 3
+            && parts
+                .last()
+                .is_some_and(|hash| hash.chars().all(|character| character.is_ascii_hexdigit()))
+        {
+            parts.pop();
+        }
+        if parts.len() >= 2 {
+            return parts[1..].join("__");
+        }
     }
-    let rest = name.strip_prefix("tool_")?;
-    let digits = rest.find(|character: char| !character.is_ascii_digit())?;
-    let tool = rest[digits..].strip_prefix('_')?;
-    (digits > 0 && !tool.is_empty()).then(|| tool.to_string())
+    if let Some(rest) = name.strip_prefix("tool_") {
+        let digits = rest
+            .find(|character: char| !character.is_ascii_digit())
+            .unwrap_or(rest.len());
+        if let Some(tool) = rest[digits..].strip_prefix('_')
+            && digits > 0
+            && !tool.is_empty()
+        {
+            return tool.to_string();
+        }
+    }
+    name.to_string()
 }
 
 fn summary(text: String) -> ConnectorResultSummary {
@@ -511,50 +543,54 @@ mod tests {
     }
 
     #[test]
-    fn connector_tool_names_are_recognised_without_a_result() {
-        assert_eq!(
-            connector_tool("mcp__ab12cd34__search_threads__9f8e7d6c").as_deref(),
-            Some("search_threads")
-        );
-        assert_eq!(
-            connector_tool("tool_3_send_mail").as_deref(),
-            Some("send_mail")
-        );
-        assert_eq!(connector_tool("tool_call").as_deref(), Some("tool_call"));
-        for other in [
-            "web_search_call",
-            "web_search",
-            "code_execution",
-            "tool_",
-            "tool_x_y",
-            "mcp__only",
+    fn tool_labels_cover_every_alias_the_runtime_accepts() {
+        for (name, label) in [
+            ("mcp__ab12cd34__search_threads__9f8e7d6c", "search_threads"),
+            ("mcp__ab12__send_mail", "send_mail"),
+            ("tool_3_send_mail", "send_mail"),
+            ("send_mail", "send_mail"),
+            ("tool_call", "tool_call"),
+            ("tool_x_y", "tool_x_y"),
         ] {
-            assert_eq!(connector_tool(other), None, "{other}");
+            assert_eq!(tool_label(name), label, "{name}");
         }
     }
 
     #[test]
     fn unfinished_connector_calls_in_history_lose_their_arguments() {
+        let secret = |id: &str, name: &str| {
+            json!({"tool_name": name, "tool_id": id, "kind": "other",
+                   "input": {"type": "json", "value": {"to": "b@example.com", "body": "CONFIDENTIAL_BODY"}}})
+        };
         let calls = vec![
             json!({"tool_name": "tool_0_send_mail", "tool_id": "c1", "input_text": "{\"body\":\"CONFIDENTIAL"}),
-            json!({"tool_name": "mcp__ab12__send_mail__ff00", "tool_id": "c2",
-                   "input": {"type": "json", "value": {"to": "b@example.com", "body": "CONFIDENTIAL_BODY"}}}),
-            json!({"tool_name": "tool_call", "tool_id": "c3", "input_text": "CONFIDENTIAL"}),
+            secret("c2", "mcp__ab12__send_mail__ff00"),
+            secret("c3", "mcp__ab12__send_mail"),
+            secret("c4", "send_mail"),
+            json!({"tool_name": "tool_call", "tool_id": "c5", "input_text": "CONFIDENTIAL"}),
+            json!({"tool_name": "web_search_call", "tool_id": "w1", "kind": "web_search",
+                   "web_search": {"query": "kept query"}}),
         ];
         let results = vec![
             json!({"tool_name": "tool_0_send_mail", "tool_id": "c1", "status": "error",
-                                  "output": {"error": "Tool execution did not complete"}}),
+                   "output": {"error": "Tool execution did not complete"}}),
+            json!({"tool_name": "send_mail", "tool_id": "c4", "status": "success",
+                   "output": {"subject": "Hi", "body": "CONFIDENTIAL_BODY"}}),
         ];
-        let (calls, _) = redact_history(calls, results);
+        let (calls, results) = redact_history(calls, results);
         assert!(
-            !serde_json::to_string(&calls)
+            !serde_json::to_string(&(&calls, &results))
                 .unwrap()
                 .contains("CONFIDENTIAL")
         );
-        assert_eq!(
-            calls[1]["summary"],
-            json!({"connector": "Connector", "action": "Send mail", "target": "b@example.com"})
-        );
+        for index in [1, 2, 3] {
+            assert_eq!(
+                calls[index]["summary"],
+                json!({"connector": "Connector", "action": "Send mail", "target": "b@example.com"})
+            );
+        }
+        assert_eq!(results[1]["summary"]["text"], "Hi");
+        assert_eq!(calls[5]["web_search"]["query"], "kept query");
     }
 
     #[test]
@@ -594,7 +630,7 @@ mod tests {
         let results = vec![
             json!({"tool_id": "c1", "status": "success", "output": {"messages": [{"subject": "Hi", "body": "secret"}]},
                    "mcp": {"server_name": "Gmail", "tool_name": "search_threads", "preview": {"text": "secret"}}}),
-            json!({"tool_id": "w1", "status": "success", "output": {"kept": true}}),
+            json!({"tool_id": "w1", "kind": "web_search", "status": "success", "output": {"kept": true}}),
         ];
         let (calls, results) = redact_history(calls, results);
         let stored = serde_json::to_string(&(&calls, &results)).unwrap();
