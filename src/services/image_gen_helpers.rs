@@ -11,7 +11,33 @@ use crate::{
     models::files::{self, FileUploadStatus},
     services::file_storage::{FileWrite, StorageCategory, read_model_bytes, store_file_bytes},
     state::SharedState,
+    utils::cost_calc::calculate_cost_decimal,
 };
+
+#[derive(Debug, Clone, Copy)]
+pub struct ImageTokenRates {
+    pub input: Option<f64>,
+    pub output: Option<f64>,
+    pub image_input: Option<f64>,
+    pub image_output: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ImageTokens {
+    pub text_input: i32,
+    pub image_input: i32,
+    pub output: i32,
+}
+
+impl ImageTokens {
+    // A generator's output is the image, whether or not an image went in; a tariff the catalog
+    // leaves out falls back to the base rate instead of making the tokens free.
+    pub fn cost(self, rates: ImageTokenRates) -> rust_decimal::Decimal {
+        calculate_cost_decimal(self.text_input, 0, rates.input, None)
+            + calculate_cost_decimal(self.image_input, 0, rates.image_input.or(rates.input), None)
+            + calculate_cost_decimal(0, self.output, None, rates.image_output.or(rates.output))
+    }
+}
 
 pub async fn generate_and_save(
     app_state: &SharedState,
@@ -165,6 +191,38 @@ fn to_i32(value: u32) -> Option<i32> {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[test]
+    fn text_to_image_output_is_priced_as_an_image() {
+        let rates = |output| ImageTokenRates {
+            input: Some(5.0),
+            output,
+            image_input: Some(8.0),
+            image_output: Some(32.0),
+        };
+        let text_only = ImageTokens {
+            text_input: 1_000_000,
+            image_input: 0,
+            output: 1_000_000,
+        };
+        assert_eq!(
+            text_only.cost(rates(Some(10.0))),
+            rust_decimal::Decimal::from(37)
+        );
+        assert_eq!(text_only.cost(rates(None)), rust_decimal::Decimal::from(37));
+        let edit = ImageTokens {
+            image_input: 1_000_000,
+            ..text_only
+        };
+        assert_eq!(edit.cost(rates(None)), rust_decimal::Decimal::from(45));
+        let catalog_gap = ImageTokenRates {
+            input: Some(5.0),
+            output: Some(30.0),
+            image_input: None,
+            image_output: None,
+        };
+        assert_eq!(edit.cost(catalog_gap), rust_decimal::Decimal::from(40));
+    }
 
     fn stored_file(owner: Uuid, status: FileUploadStatus) -> files::Model {
         let now = Utc::now();

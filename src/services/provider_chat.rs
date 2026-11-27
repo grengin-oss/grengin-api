@@ -235,7 +235,7 @@ pub async fn generate_provider_response(
     })
 }
 
-fn estimate_request_tokens(request: &ChatRequest) -> i32 {
+pub fn estimate_request_tokens(request: &ChatRequest) -> i32 {
     request
         .messages
         .iter()
