@@ -420,6 +420,7 @@ impl PluginStreamParser {
                     Some(tool.name.clone()),
                     Some(id.to_string()),
                     None,
+                    false,
                 ))
             }
             ProviderEvent::ToolCallEnd { id } => {
@@ -477,6 +478,7 @@ impl PluginStreamParser {
                     Some(name),
                     Some(id),
                     web_search,
+                    true,
                 ))
             }
             ProviderEvent::ServerToolResult { id, name, results } => {
@@ -673,7 +675,7 @@ mod tests {
                 id: id.clone(),
                 fragment: "{\"city\":".to_string(),
             }),
-            StreamParseResult::ToolInput(_)
+            StreamParseResult::ToolInput(delta) if !delta.server_tool
         ));
         let _ = parser.provider_event(ProviderEvent::ToolArgumentsDelta {
             id: id.clone(),
@@ -795,6 +797,7 @@ mod tests {
             panic!("expected a web-search query delta");
         };
         assert_eq!(delta.tool_id.as_deref(), Some(id.as_str()));
+        assert!(delta.server_tool);
         assert_eq!(
             delta.web_search.and_then(|action| action.query),
             Some("Rust".to_string())

@@ -5,7 +5,10 @@ use std::{borrow::Cow, collections::HashMap};
 
 use serde_json::{Map, Value};
 
-use crate::dto::chat_stream::{ConnectorCallSummary, ConnectorResultSummary};
+use crate::{
+    dto::chat_stream::{ConnectorCallSummary, ConnectorResultSummary},
+    services::mcp_tools::McpToolDescriptor,
+};
 
 const MAX_ITEMS: usize = 5;
 const MAX_ITEM_CHARS: usize = 120;
@@ -93,8 +96,28 @@ const LIST_KEYS: [&str; 22] = [
     "notes",
 ];
 const GENERIC_LISTS: [&str; 6] = ["value", "data", "results", "records", "entries", "rows"];
+const ENVELOPE_KEYS: [&str; 6] = [
+    "content",
+    "structuredContent",
+    "isError",
+    "is_error",
+    "_meta",
+    "meta",
+];
 
-pub fn call_summary(
+// Every function call is a connector's; an unknown or ambiguous name still gets only a summary.
+pub fn connector_call_summary(
+    descriptor: Option<&McpToolDescriptor>,
+    called_name: &str,
+    arguments: Option<&Value>,
+) -> ConnectorCallSummary {
+    match descriptor {
+        Some(tool) => call_summary(&tool.server_name, &tool.original_name, arguments),
+        None => call_summary(UNKNOWN_CONNECTOR, &tool_label(called_name), arguments),
+    }
+}
+
+fn call_summary(
     connector: &str,
     tool_name: &str,
     arguments: Option<&Value>,
@@ -111,14 +134,18 @@ pub fn result_summary(output: &Value, is_error: bool) -> ConnectorResultSummary 
     if is_error {
         return summary(error_text(&output));
     }
-    if let Some((noun, list)) = known_listing(&output) {
+    let own_title = title(&output);
+    // An empty list beside a title (an issue without labels) describes the item, not a search.
+    if let Some((noun, list)) = known_listing(&output)
+        && (!list.is_empty() || own_title.is_none())
+    {
         return listing(noun, list);
+    }
+    if let Some(title) = own_title {
+        return summary(title);
     }
     if is_empty(&output) {
         return summary("No results".to_string());
-    }
-    if let Some(title) = title(&output) {
-        return summary(title);
     }
     match generic_listing(&output) {
         Some((noun, list)) => listing(noun, list),
@@ -187,15 +214,15 @@ fn redact_result(
 }
 
 fn redact_call(call: &mut Map<String, Value>, connectors: &HashMap<String, (String, String)>) {
-    if is_web_search(call) {
+    // A result recorded for a connector identifies its call, whatever name the call carries.
+    let known = text_field(call, "tool_id").and_then(|id| connectors.get(&id).cloned());
+    if known.is_none() && is_web_search(call) {
         return;
     }
-    let (server, tool) = text_field(call, "tool_id")
-        .and_then(|id| connectors.get(&id).cloned())
-        .unwrap_or_else(|| {
-            let name = text_field(call, "tool_name").unwrap_or_default();
-            (UNKNOWN_CONNECTOR.to_string(), tool_label(&name))
-        });
+    let (server, tool) = known.unwrap_or_else(|| {
+        let name = text_field(call, "tool_name").unwrap_or_default();
+        (UNKNOWN_CONNECTOR.to_string(), tool_label(&name))
+    });
     call.remove("input_text");
     call.remove("web_search");
     call.insert("kind".into(), Value::from("other"));
@@ -209,10 +236,11 @@ fn redact_call(call: &mut Map<String, Value>, connectors: &HashMap<String, (Stri
     }
 }
 
-// Only the providers' own web search survives redaction, recognised by its exact tool name; an
-// `mcp` marker wins, since a connector may be named like web search.
+// Only the providers' own web search survives redaction, recognised by its exact tool name; a
+// connector marker (`mcp` details or a summary) wins, since a connector may be named like web search.
 fn is_web_search(entry: &Map<String, Value>) -> bool {
     !entry.contains_key("mcp")
+        && !entry.contains_key("summary")
         && text_field(entry, "tool_name")
             .is_some_and(|name| NATIVE_WEB_SEARCH.contains(&name.as_str()))
 }
@@ -262,9 +290,23 @@ fn listing(noun: &str, list: &[Value]) -> ConnectorResultSummary {
     }
 }
 
-// A tool without structured content answers in MCP text parts, usually holding JSON.
+// A tool without structured content answers in MCP text parts, usually holding JSON. Only a bare
+// MCP envelope is unwrapped; an item's own `content` field is part of the item.
 fn decoded(output: &Value) -> Cow<'_, Value> {
-    let Some(parts) = output.get("content").and_then(Value::as_array) else {
+    let Some(envelope) = output.as_object().filter(|object| {
+        object
+            .keys()
+            .all(|key| ENVELOPE_KEYS.contains(&key.as_str()))
+    }) else {
+        return Cow::Borrowed(output);
+    };
+    if let Some(structured) = envelope
+        .get("structuredContent")
+        .filter(|value| !value.is_null())
+    {
+        return Cow::Borrowed(structured);
+    }
+    let Some(parts) = envelope.get("content").and_then(Value::as_array) else {
         return Cow::Borrowed(output);
     };
     match parts
@@ -305,12 +347,19 @@ fn known_listing(output: &Value) -> Option<(&'static str, &[Value])> {
         return Some(("results", list));
     }
     let object = output.as_object()?;
-    LIST_KEYS.iter().find_map(|key| {
+    let mut lists = LIST_KEYS.iter().filter_map(|key| {
         object
             .get(*key)
             .and_then(Value::as_array)
             .map(|list| (noun(key), list.as_slice()))
-    })
+    });
+    let first = lists.next()?;
+    Some(
+        std::iter::once(first)
+            .chain(lists)
+            .find(|(_, list)| !list.is_empty())
+            .unwrap_or(first),
+    )
 }
 
 fn generic_listing(output: &Value) -> Option<(&'static str, &[Value])> {
@@ -352,8 +401,7 @@ fn title(item: &Value) -> Option<String> {
     let object = item.as_object()?;
     TITLE_KEYS
         .iter()
-        .find_map(|key| object.get(*key).and_then(Value::as_str))
-        .filter(|text| !text.trim().is_empty())
+        .find_map(|key| object.get(*key).and_then(Value::as_str).filter(is_present))
         .map(str::to_string)
         .or_else(|| subject_header(object))
         .or_else(|| object.get("fields").and_then(title))
@@ -373,8 +421,13 @@ fn subject_header(object: &Map<String, Value>) -> Option<String> {
             .and_then(Value::as_str)
             .filter(|name| name.eq_ignore_ascii_case("subject"))
             .and_then(|_| header.get("value").and_then(Value::as_str))
+            .filter(is_present)
             .map(str::to_string)
     })
+}
+
+fn is_present(text: &&str) -> bool {
+    !text.trim().is_empty()
 }
 
 fn target(arguments: &Value) -> Option<String> {
@@ -696,5 +749,93 @@ mod tests {
             redact_history(calls.clone(), results.clone()),
             (calls, results)
         );
+    }
+
+    #[test]
+    fn a_connector_called_by_a_native_search_name_is_still_redacted() {
+        let calls = vec![
+            json!({"tool_name": "web_search", "tool_id": "c1", "kind": "web_search",
+                   "web_search": {"query": "CONFIDENTIAL"},
+                   "input": {"type": "json", "value": {"query": "invoices", "body": "CONFIDENTIAL"}}}),
+            json!({"tool_name": "web_search", "tool_id": "c2", "kind": "other",
+                   "summary": {"connector": "Gmail", "action": "Web search"}, "input_text": "CONFIDENTIAL"}),
+            json!({"tool_name": "web_search", "tool_id": "w1", "kind": "web_search",
+                   "web_search": {"query": "kept query"}}),
+        ];
+        let results = vec![
+            json!({"tool_name": "web_search", "tool_id": "c1", "status": "success",
+                   "mcp": {"server_name": "Gmail", "tool_name": "web_search"},
+                   "output": {"messages": [{"subject": "Hi", "body": "CONFIDENTIAL"}]}}),
+        ];
+        let (calls, _) = redact_history(calls, results);
+        assert!(
+            !serde_json::to_string(&calls)
+                .unwrap()
+                .contains("CONFIDENTIAL")
+        );
+        assert_eq!(
+            calls[0]["summary"],
+            json!({"connector": "Gmail", "action": "Web search", "target": "invoices"})
+        );
+        assert_eq!(calls[2]["web_search"]["query"], "kept query");
+    }
+
+    #[test]
+    fn unresolved_function_calls_get_only_a_summary() {
+        let arguments = json!({"to": "b@example.com", "body": "CONFIDENTIAL"});
+        for name in [
+            "mcp__ab12__send_mail__ff00",
+            "tool_4_send_mail",
+            "send_mail",
+        ] {
+            let summary = connector_call_summary(None, name, Some(&arguments));
+            assert_eq!(
+                (summary.connector.as_str(), summary.action.as_str()),
+                ("Connector", "Send mail"),
+                "{name}"
+            );
+            assert!(
+                !serde_json::to_string(&summary)
+                    .unwrap()
+                    .contains("CONFIDENTIAL")
+            );
+        }
+    }
+
+    #[test]
+    fn titled_items_are_not_reported_as_empty() {
+        assert_eq!(
+            result_summary(
+                &json!({"key": "P-1", "title": "Login fails", "labels": []}),
+                false
+            )
+            .text,
+            "Login fails"
+        );
+        let document =
+            json!({"title": "Roadmap", "content": [{"paragraph": {"text": "CONFIDENTIAL"}}]});
+        assert_eq!(result_summary(&document, false).text, "Roadmap");
+        let envelope = json!({"content": [{"type": "text", "text": "CONFIDENTIAL"}],
+                              "structuredContent": {"title": "Roadmap"}, "isError": false});
+        assert_eq!(result_summary(&envelope, false).text, "Roadmap");
+        let listing = json!({"labels": [], "messages": [{"subject": "Hi"}]});
+        assert_eq!(result_summary(&listing, false).items, ["Hi"]);
+        assert_eq!(
+            result_summary(&json!({"messages": [], "labels": []}), false).text,
+            "No results"
+        );
+    }
+
+    #[test]
+    fn blank_title_fields_fall_through_to_the_next_one() {
+        assert_eq!(
+            result_summary(&json!({"subject": "", "title": "Plan"}), false).text,
+            "Plan"
+        );
+        let message = json!({"snippet": "CONFIDENTIAL", "payload": {"headers": [{"name": "Subject", "value": "  "}]}});
+        let summary = result_summary(&message, false);
+        assert_eq!(summary.text, "Done");
+        let thread = json!({"messages": [message, {"subject": " ", "name": "Draft"}]});
+        assert_eq!(result_summary(&thread, false).items, ["Draft"]);
     }
 }

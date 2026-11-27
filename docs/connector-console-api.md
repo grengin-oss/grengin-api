@@ -170,12 +170,15 @@ The browser receives a summary of each connector call and result, never its
 arguments or output. The model still receives the full result, and the admin
 execution log (`mcp_executions`) keeps it. This applies to the live stream and to
 chat history; replies saved before this change are summarised when they are read.
-History fails closed: every stored call and result except the providers' own
-web search is summarised, including calls that never got a result, whatever
-alias of the tool name they used. Web search is recognised only by its exact
-tool name (`web_search`, `web_search_call`, `google_search`, ...) and never when
-the entry carries an `mcp` marker, so a connector named like web search is still
-summarised. In the live stream a connector is never marked as web search either.
+Both fail closed. In the live stream only the provider's own server-side web
+search is web search; every function call is a connector's, including names
+that match no connector or more than one, which are summarised as `Connector`.
+In history every stored call and result except the providers' own web search
+is summarised, including calls that never got a result, whatever alias of the
+tool name they used. A stored entry counts as web search only by its exact tool
+name (`web_search`, `web_search_call`, `google_search`, ...) and only when
+neither it nor its result carries a connector marker (`mcp` or `summary`), so a
+connector named like web search is still summarised.
 
 A connector `tool_call` has no `input` or `input_text`; it carries:
 
@@ -214,7 +217,8 @@ and `summary`:
 ```
 
 `summary.text` is always present: a count (`2 messages`, `No results`), the
-title of a single item, `Done` when the result has no title, or one of these
+title of a single item (an empty list beside a title, such as an issue without
+labels, still shows the title), `Done` when the result has no title, or one of these
 fixed error messages: `Sign-in required`, `Sign-in failed`,
 `Connector unavailable, try again`, `Access denied`, `Connector not connected`,
 `Timed out`, `Did not finish`, `The tool returned an error`. Error text from
@@ -223,8 +227,7 @@ or a credential; it stays in the execution log.
 `item_count` and `items` appear only for lists; `items` holds at most five
 titles (email subject, file or page name, event or issue summary), each clipped
 to 120 characters. Snippets and bodies are never included. Render text as text,
-not raw HTML. Non-connector tool events (web search, built-in tools) are
-unchanged and omit `mcp` and `summary`.
+not raw HTML. Web search events are unchanged and omit `mcp` and `summary`.
 
 `execution_id` correlates with the existing execution audit when its best-effort
 write succeeds; this change does not make execution auditing transactional with

@@ -246,7 +246,7 @@ try {
   check('chat consumes the plugin result through the existing tool loop',streamed.includes('Plugin completed.'),true);
   const resultEvent=streamed.split('\n').filter(line=>line.startsWith('data:')).map(line=>{try{return JSON.parse(line.slice(5));}catch{return null;}}).find(value=>value?.tool_result?.mcp)?.tool_result;
   assert(resultEvent,'MCP tool-result details missing');
-  check('tool result includes readable preview and stable connector identity',[resultEvent.mcp.server_id,resultEvent.mcp.tool_name,resultEvent.mcp.preview.empty,resultEvent.mcp.preview.text.includes('plugin-result')],[server.id,'plugin_echo',false,true]);
+  check('tool result carries a summary and stable connector identity, never the raw output',[resultEvent.mcp.server_id,resultEvent.mcp.tool_name,typeof resultEvent.summary?.text,'output' in resultEvent,'preview' in resultEvent.mcp,JSON.stringify(resultEvent).includes('plugin-result')],[server.id,'plugin_echo','string',false,false,false]);
   check('tool-result metadata is saved with the reply',sql(`SELECT count(*) FROM messages WHERE "toolsResults"::text LIKE '%${resultEvent.mcp.execution_id}%'`)!=='0',true);
   const usage=(await call('GET',`/admin/mcp-servers/${server.id}/overview`)).json().usage;
   check('usage counts actual recorded executions',usage.tool_calls,usage.successful_tool_calls+usage.failed_tool_calls);
