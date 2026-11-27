@@ -72,7 +72,6 @@
         "usage": {
           "inputTokens": "/usageMetadata/promptTokenCount",
           "outputTokens": "/usageMetadata/candidatesTokenCount",
-          "reasoningOutputTokens": "/usageMetadata/thoughtsTokenCount",
           "totalTokens": "/usageMetadata/totalTokenCount"
         }
       }

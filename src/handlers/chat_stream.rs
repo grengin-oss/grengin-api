@@ -45,7 +45,7 @@ use crate::{
             refresh_spender_budget, response_stopped_event_data, stop_reason_for_provider_error,
             with_stop_reason,
         },
-        chat_usage::{TurnUsage, UsageTotals, with_usage_estimated},
+        chat_usage::{TurnEnd, TurnUsage, UsageTotals, with_usage_estimated},
         connector_tool_summary::{connector_call_summary, result_summary, stored_tool_call},
         conversation_access::{
             can_access_conversation, find_active_conversation_for_user,
@@ -1706,7 +1706,7 @@ pub async fn handle_chat_stream(
            'events: while let Some(event) = tokio::select! {
                biased;
                _ = cancel_handle.cancelled() => {
-                   let totals = usage.interrupted_totals();
+                   let totals = usage.ended_as(TurnEnd::Interrupted);
                    let cancel_cost = usage.charge(cost_of(&totals));
                    let cancel_reason = cancel_handle.reason().unwrap_or(StopReason::UserCancelled);
                    stop_reason = Some(cancel_reason);
@@ -1847,9 +1847,14 @@ pub async fn handle_chat_stream(
                               "cachedInputTokens": totals.cached_input,
                               "cacheCreationTokens": totals.cache_creation,
                           })));
-                          if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
-                              persist_error = Some(error);
-                              break 'events;
+                          // Some providers report usage on every chunk; the end of the round saves the final count.
+                          let now = Instant::now();
+                          if content_checkpoint.is_due(now) {
+                              if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
+                                  persist_error = Some(error);
+                                  break 'events;
+                              }
+                              content_checkpoint.saved(now);
                           }
                        }
                        StreamParseResult::MessageStart { request_id:req_id,input_tokens,output_tokens,cached_input_tokens,cache_creation_tokens} => {
@@ -2178,6 +2183,7 @@ pub async fn handle_chat_stream(
                Err(e) => {
                    match e {
                      LlmStreamError::Ended => {
+                       usage.round_ended();
                        let totals = usage.totals();
                        let message_cost = usage.charge(cost_of(&totals));
                        new_llm_message.latency = Set(latency);
@@ -2521,11 +2527,11 @@ pub async fn handle_chat_stream(
                            };
                            match continuation {
                                Ok(stream) => {
-                                   usage.round_opened();
                                    event_source = plugin_event_stream(stream);
                                    continue;
                                }
                                Err(error) => {
+                                   usage.round_refused();
                                    eprintln!(
                                        "provider continuation failed: {}",
                                        provider_error_class(&error)
@@ -2554,11 +2560,11 @@ pub async fn handle_chat_stream(
 
            if stream_finished {
                // A turn that stopped early is charged from estimates where the provider sent no usage.
-               let totals = if stop_reason.is_some() {
-                   usage.interrupted_totals()
-               } else {
-                   usage.totals()
-               };
+               let totals = usage.ended_as(match stop_reason {
+                   None => TurnEnd::Completed,
+                   Some(StopReason::ProviderError) => TurnEnd::Refused,
+                   Some(_) => TurnEnd::Interrupted,
+               });
                let token_cost = usage.charge(cost_of(&totals));
                let message_cost = token_cost + image_gen_cost;
                new_llm_message.request_tokens = Set(totals.input);

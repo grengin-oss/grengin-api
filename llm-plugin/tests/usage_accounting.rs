@@ -127,3 +127,18 @@ fn separately_counted_reasoning_is_billed_as_output() {
     let thinking_only = map_usage(rule, json!({"input": 20, "thoughts": 40})).unwrap();
     assert_eq!(thinking_only.output_tokens, Some(40));
 }
+
+#[test]
+fn a_chunk_with_null_usage_reports_nothing() {
+    let rule = json!({"id": "usage", "when": {"pointer": "/usage", "exists": true},
+        "emit": "usage", "fields": {"inputTokens": "/usage/prompt_tokens"}});
+    assert!(map_usage(rule, json!({"usage": null})).is_err());
+}
+
+#[test]
+fn zero_reasoning_does_not_invent_an_output_count() {
+    let mut rule = usage_rule();
+    rule["fields"]["reasoningOutputTokens"] = json!("/thoughts");
+    let usage = map_usage(rule, json!({"input": 20, "thoughts": 0})).unwrap();
+    assert_eq!(usage.output_tokens, None);
+}
