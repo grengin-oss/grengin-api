@@ -1,0 +1,38 @@
+{
+  "$schema": "https://meta.grengin.com/schemas/provider-plugin-v1.schema.json",
+  "manifestVersion": "1.0",
+  "id": "grengin",
+  "version": "1.2",
+  "name": "Grengin",
+  "description": "Use the connected workspace AI balance and native provider protocols.",
+  "baseUrl": "https://service.grengin.com/v1/infer/",
+  "capabilities": {
+    "chat": {
+      "streaming": true,
+      "tools": true,
+      "vision": true,
+      "reasoning": true
+    },
+    "embeddings": true,
+    "imageGeneration": true,
+    "modelListing": true
+  },
+  "nativeProviders": [
+    "anthropic",
+    "cerebras",
+    "deepseek",
+    "gemini",
+    "glm",
+    "groq",
+    "kimi",
+    "minimax",
+    "mistral",
+    "nvidia",
+    "openai",
+    "qwen",
+    "sakana",
+    "tinker",
+    "xai"
+  ],
+  "operations": {}
+}

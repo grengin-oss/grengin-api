@@ -105,7 +105,12 @@ pub fn build_plugin_chat_request(
 
     ChatRequest {
         model: ModelId::new(model),
-        messages: prompts.into_iter().map(prompt_to_message).collect(),
+        // A reply that failed before any text is stored empty; providers reject empty messages.
+        messages: prompts
+            .into_iter()
+            .map(prompt_to_message)
+            .filter(|message| !message.content.is_empty())
+            .collect(),
         temperature,
         max_tokens,
         tool_choice: (!tool_definitions.is_empty()).then_some(ToolChoice::Auto),
@@ -235,8 +240,8 @@ pub async fn generate_provider_response(
     })
 }
 
-fn estimate_request_tokens(request: &ChatRequest) -> i32 {
-    request
+pub fn estimate_request_tokens(request: &ChatRequest) -> i32 {
+    let messages = request
         .messages
         .iter()
         .flat_map(|message| message.content.iter())
@@ -251,7 +256,15 @@ fn estimate_request_tokens(request: &ChatRequest) -> i32 {
             }
             ContentPart::FileReference { .. } => AttachmentKind::Document.estimated_tokens(0),
         })
-        .fold(0i32, i32::saturating_add)
+        .fold(0i32, i32::saturating_add);
+    let tools = if request.tools.is_empty() {
+        0
+    } else {
+        serde_json::to_string(&request.tools)
+            .map(|tools| estimate_text_tokens(&tools))
+            .unwrap_or_default()
+    };
+    messages.saturating_add(tools)
 }
 
 fn base64_decoded_len(data: &str) -> usize {
@@ -420,6 +433,7 @@ impl PluginStreamParser {
                     Some(tool.name.clone()),
                     Some(id.to_string()),
                     None,
+                    false,
                 ))
             }
             ProviderEvent::ToolCallEnd { id } => {
@@ -477,6 +491,7 @@ impl PluginStreamParser {
                     Some(name),
                     Some(id),
                     web_search,
+                    true,
                 ))
             }
             ProviderEvent::ServerToolResult { id, name, results } => {
@@ -673,7 +688,7 @@ mod tests {
                 id: id.clone(),
                 fragment: "{\"city\":".to_string(),
             }),
-            StreamParseResult::ToolInput(_)
+            StreamParseResult::ToolInput(delta) if !delta.server_tool
         ));
         let _ = parser.provider_event(ProviderEvent::ToolArgumentsDelta {
             id: id.clone(),
@@ -705,8 +720,37 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_stored_empty_is_left_out_of_the_next_request() {
+        let prompt = |role, text: &str| Prompt {
+            text: text.to_string(),
+            role,
+            files: Vec::new(),
+        };
+        let request = build_plugin_chat_request(
+            "model",
+            vec![
+                prompt(ChatRole::User, "first"),
+                prompt(ChatRole::Assistant, ""),
+                prompt(ChatRole::User, "again"),
+            ],
+            None,
+            None,
+            &HashMap::new(),
+            false,
+            Value::Null,
+        );
+        assert_eq!(request.messages.len(), 2);
+        assert!(
+            request
+                .messages
+                .iter()
+                .all(|message| !message.content.is_empty())
+        );
+    }
+
+    #[test]
     fn request_estimates_count_text_and_attachments() {
-        let request = ChatRequest {
+        let mut request = ChatRequest {
             model: ModelId::new("model"),
             messages: vec![ChatMessage {
                 role: PluginChatRole::User,
@@ -735,6 +779,14 @@ mod tests {
             options: Value::Null,
         };
         assert_eq!(estimate_request_tokens(&request), 100 + 1_600 + 3_000);
+        request.tools.push(ToolDefinition {
+            name: "search".into(),
+            description: Some("tool description ".repeat(1_000)),
+            parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}}}),
+        });
+        let schema_tokens = estimate_text_tokens(&serde_json::to_string(&request.tools).unwrap());
+        assert!(schema_tokens > 1_000);
+        assert_eq!(estimate_request_tokens(&request), 4_700 + schema_tokens);
     }
 
     #[test]
@@ -795,6 +847,7 @@ mod tests {
             panic!("expected a web-search query delta");
         };
         assert_eq!(delta.tool_id.as_deref(), Some(id.as_str()));
+        assert!(delta.server_tool);
         assert_eq!(
             delta.web_search.and_then(|action| action.query),
             Some("Rust".to_string())

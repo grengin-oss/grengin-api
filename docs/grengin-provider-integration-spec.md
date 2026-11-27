@@ -329,13 +329,17 @@ Sources: [connection.ts](../../grengin-website/workers/src/handlers/connection.t
 ### Installation and persistence
 
 Reserve `engine_key:"grengin"`. It represents one service-backed engine covering
-multiple upstream providers, not one direct engine per provider. Install it
-explicitly through existing `POST /admin/ai-engines` with `engine_key:"grengin"`
+multiple upstream providers. Administrators may install it through the existing `POST /admin/ai-engines` with `engine_key:"grengin"`
 and model policy. Allow this reserved engine without `api_key`/`plugin_config`;
 reject either field if provided. Persist exactly one `ai_engines` row with both
 fields NULL. Startup and catalog reads must not create/recreate a deleted row or
-auto-install direct providers. Existing managed setup will invoke explicit
-installation after its operator-managed identity is available.
+auto-install direct providers. For a new managed workspace with an attached identity,
+the first creator’s verified SSO login installs the native engine enabled in the
+owner transaction. The allowlist starts empty and neither model default is set.
+Login requires no service status or consent request. Model requests still require
+an authorized workspace identity and service access. Later logins preserve
+administrator changes and deletion. Existing managed confirmations from earlier
+releases resume through the reconciler.
 
 The existing engine-key index is not unique. Add a migration enforcing a partial
 unique index on the existing `"engineKey"` column for value `grengin`, and perform
@@ -344,7 +348,7 @@ custom engine or duplicate with that name; report an actionable migration confli
 and preserve its data. Do not silently overwrite or reinterpret an existing
 custom plugin as the reserved service engine.
 
-Installation defaults to `is_enabled:false`. Explicit `is_enabled:true` requires
+Explicit administrator installation defaults to `is_enabled:false`. Requesting `is_enabled:true` requires
 the added create field `consent_version:"grengin-models-v1"` and the same durable
 remote-confirmation procedure as PUT. Store the row disabled until confirmation;
 return 201 when installation/configuration completes or 202 while confirmation is
@@ -446,7 +450,7 @@ gets a new generation and never resumes an older install's pending enable. An
 already-dispatched remote SET may still finish; that must not resurrect local
 routing or be described as a successful remote disconnect.
 
-Enabling requires `consent_version:"grengin-models-v1"` and service
+An administrator’s enable request requires `consent_version:"grengin-models-v1"` and service
 `PUT /v1/connect/grengin-models` with `{enabled:true,consent_version}`. Disabling
 sends `{enabled:false}`. Close local routing immediately for disable; open it for
 enable only after remote confirmation and local policy commit. Read status after
@@ -549,7 +553,7 @@ The transport resolves only the following routes under
 | mistral | `conversations`, `chat/completions`, `embeddings` | `models` |
 | gemini | `models/{model}:generateContent`, `models/{model}:streamGenerateContent`, `openai/embeddings` | `openai/models` |
 | qwen, xai | `responses`, `chat/completions` | `models` |
-| deepseek, kimi, groq, cerebras, glm, minimax, sarvam, sakana | `chat/completions` | `models` |
+| deepseek, kimi, groq, cerebras, glm, minimax, sarvam, sakana, nvidia | `chat/completions` | `models` |
 | tinker | `chat/completions` | none |
 
 `google` is a service alias for `gemini`; publish canonical IDs locally. Bedrock,
@@ -683,8 +687,8 @@ second Rust-only approximation. Use ephemeral test keys, never workspace secrets
 | Grants | Concurrent callers coalesce; frozen-time/restart/expiry behavior; request-time refresh; 429/backoff; introspection active:false; changed installation/org refused; no grant leakage. |
 | Pairing | Pending/denied/expired/approved flows; device code private; managed mode rejected; polling grant never used for inference; separate hybrid refresh required. |
 | Rotation/revocation | New key version rejects old grant; lost rotation response and restart recover using saved pending keys without overwriting old; revoked state cannot be recreated by restart or retry. |
-| Engine policy | Explicit installation only; reserved key cannot take custom plugin/API key; deletion stays deleted after restart; empty list denies all; bounded defaults; invalid defaults/model capabilities rejected. |
-| Configuration | Manage permission on every mutation; view-only cannot enable; disabled-by-default install; pending operations survive restart; timeout/readback; concurrent revisions; disable closes local routing across processes; delete/reinstall changes generation so stale completion cannot re-enable. No false atomicity claim. |
+| Engine policy | First managed creator preinstallation and explicit administrator installation; reserved key cannot take custom plugin/API key; deletion stays deleted after restart; empty list denies all; bounded defaults; invalid defaults/model capabilities rejected. |
+| Configuration | Manage permission on every administrator mutation; view-only cannot enable; explicit installs default to disabled; managed first-creator installs start enabled with empty model policy; pending operations survive restart; timeout/readback; concurrent revisions; disable closes local routing across processes; delete/reinstall changes generation so stale completion cannot re-enable. |
 | Routing | Native OpenAI Responses, Anthropic Messages, Mistral Conversations, Gemini content and compatible chat; image generate/edit and embeddings; reject unsupported routes/queries; service sees bearer only and exact native model ID. |
 | Continuations | Grant expires between tool rounds: next dispatch uses fresh grant without replaying previous output or tool execution. No grant captured by a long-lived cloned plugin session. |
 | Models/provenance | First-slash parsing and case preserved; same listing/dispatch precedence; department policy retained; own-key failures never charge Grengin; cache invalidation works across config/key/identity changes. |
@@ -719,8 +723,8 @@ publishes its durable identity through the agreed file interface, and registers
 the public keys from the correct regional network without changing its UUID,
 organization, origin credential or existing credit receipts.
 
-Verify a hybrid refresh/introspection, status and catalog, then explicitly install
-and configure the Grengin engine. With an operator-authorized small generation,
+Verify a hybrid refresh/introspection, status and catalog. Confirm the new managed
+creator sees the enabled engine with no models allowed, then configure the tenant’s model allowlist. With an operator-authorized small generation,
 prove native response/stream success and service usage/wallet settlement; record
 only safe IDs, timestamps and amounts. Exercise a later request after grant
 refresh and a restart to prove durable identity and continued routing. Own-key

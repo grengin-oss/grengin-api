@@ -16,6 +16,7 @@ use utoipa::ToSchema;
 )]
 #[serde(rename_all = "lowercase")]
 pub enum OperationState {
+    Confirming,
     Applying,
     Pending,
     Applied,

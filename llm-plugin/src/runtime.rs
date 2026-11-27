@@ -1049,8 +1049,29 @@ impl DeclarativeProvider {
             operation.response.images_pointer.as_deref(),
             "images",
         )?;
-        let mut images = Vec::with_capacity(items.len());
+        let mut budget =
+            ImageBudget::new(expected_count, self.response_limit_for(&operation.request));
+        let mut images = Vec::new();
         for item in items {
+            let encoded = operation
+                .response
+                .base64_pointer
+                .as_deref()
+                .and_then(|pointer| select(item, pointer))
+                .and_then(Value::as_str);
+            let link = operation
+                .response
+                .url_pointer
+                .as_deref()
+                .and_then(|pointer| select(item, pointer))
+                .and_then(Value::as_str);
+            // Some providers return text and image parts in the same array (Gemini's
+            // generateContent response is one example). Non-image parts are not malformed image
+            // data, so ignore them and let the final count check catch missing output images.
+            if encoded.is_none() && link.is_none() {
+                continue;
+            }
+            budget.admit(images.len())?;
             let media_type = operation
                 .response
                 .media_type_pointer
@@ -1061,9 +1082,8 @@ impl DeclarativeProvider {
                 .unwrap_or("image/png")
                 .to_string();
             validate_image_media_type(&media_type)?;
-            if let Some(pointer) = operation.response.base64_pointer.as_deref()
-                && let Some(encoded) = select(item, pointer).and_then(Value::as_str)
-            {
+            if let Some(encoded) = encoded {
+                budget.admit_encoded(encoded)?;
                 let bytes = STANDARD.decode(encoded).map_err(|error| {
                     ProviderError::ResponseMapping(format!(
                         "provider image is not valid base64: {error}"
@@ -1074,52 +1094,48 @@ impl DeclarativeProvider {
                         "provider returned an empty image".to_string(),
                     ));
                 }
+                budget.charge(bytes.len())?;
                 images.push(GeneratedImage { bytes, media_type });
                 continue;
             }
-            if let Some(pointer) = operation.response.url_pointer.as_deref()
-                && let Some(value) = select(item, pointer).and_then(Value::as_str)
-            {
-                if self.authorization.is_some() {
-                    return Err(ProviderError::UrlNotAllowed(
-                        "authorized providers require inline image responses".into(),
-                    ));
-                }
-                let url = Url::parse(value).map_err(|error| {
-                    ProviderError::ResponseMapping(format!("invalid image URL: {error}"))
-                })?;
-                if url.scheme() != "https" {
-                    return Err(ProviderError::UrlNotAllowed(
-                        "generated image downloads require HTTPS".to_string(),
-                    ));
-                }
-                self.validate_destination(&url).await?;
-                let request = self
-                    .client
-                    .get(url)
-                    .timeout(self.timeout_for(&operation.request));
-                let response = ensure_success(request.send().await?).await?;
-                let headers = response.headers().clone();
-                let bytes =
-                    read_limited(response, self.response_limit_for(&operation.request)).await?;
-                if bytes.is_empty() {
-                    return Err(ProviderError::ResponseMapping(
-                        "provider returned an empty image".to_string(),
-                    ));
-                }
-                let media_type = headers
-                    .get(CONTENT_TYPE)
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(|value| value.split(';').next())
-                    .unwrap_or(&media_type)
-                    .to_string();
-                validate_image_media_type(&media_type)?;
-                images.push(GeneratedImage { bytes, media_type });
+            let Some(value) = link else {
                 continue;
+            };
+            if self.authorization.is_some() {
+                return Err(ProviderError::UrlNotAllowed(
+                    "authorized providers require inline image responses".into(),
+                ));
             }
-            // Some providers return text and image parts in the same array (Gemini's
-            // generateContent response is one example). Non-image parts are not malformed image
-            // data, so ignore them and let the final count check catch missing output images.
+            let url = Url::parse(value).map_err(|error| {
+                ProviderError::ResponseMapping(format!("invalid image URL: {error}"))
+            })?;
+            if url.scheme() != "https" {
+                return Err(ProviderError::UrlNotAllowed(
+                    "generated image downloads require HTTPS".to_string(),
+                ));
+            }
+            self.validate_destination(&url).await?;
+            let request = self
+                .client
+                .get(url)
+                .timeout(self.timeout_for(&operation.request));
+            let response = ensure_success(request.send().await?).await?;
+            let headers = response.headers().clone();
+            let bytes = read_limited(response, budget.remaining).await?;
+            if bytes.is_empty() {
+                return Err(ProviderError::ResponseMapping(
+                    "provider returned an empty image".to_string(),
+                ));
+            }
+            budget.charge(bytes.len())?;
+            let media_type = headers
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(';').next())
+                .unwrap_or(&media_type)
+                .to_string();
+            validate_image_media_type(&media_type)?;
+            images.push(GeneratedImage { bytes, media_type });
         }
         if images.is_empty() {
             return Err(ProviderError::ResponseMapping(
@@ -1141,6 +1157,57 @@ impl DeclarativeProvider {
                 .map(|usage| map_usage(&root, usage))
                 .transpose()?,
         })
+    }
+}
+
+// Nothing past the requested count is decoded or downloaded, and all of one response's images
+// together stay within the operation's response budget, however many parts or links it lists.
+struct ImageBudget {
+    expected: usize,
+    remaining: usize,
+}
+
+impl ImageBudget {
+    fn new(expected: u8, limit: usize) -> Self {
+        Self {
+            expected: usize::from(expected),
+            remaining: limit,
+        }
+    }
+
+    fn admit(&self, decoded: usize) -> Result<(), ProviderError> {
+        if decoded >= self.expected {
+            return Err(ProviderError::ResponseMapping(format!(
+                "provider returned more than the {} requested images",
+                self.expected
+            )));
+        }
+        if self.remaining == 0 {
+            return Err(ProviderError::ResponseTooLarge);
+        }
+        Ok(())
+    }
+
+    fn admit_encoded(&self, encoded: &str) -> Result<(), ProviderError> {
+        let padding = encoded
+            .bytes()
+            .rev()
+            .take_while(|byte| *byte == b'=')
+            .count()
+            .min(2);
+        let bytes = base64::decoded_len_estimate(encoded.len()).saturating_sub(padding);
+        if bytes > self.remaining {
+            return Err(ProviderError::ResponseTooLarge);
+        }
+        Ok(())
+    }
+
+    fn charge(&mut self, bytes: usize) -> Result<(), ProviderError> {
+        self.remaining = self
+            .remaining
+            .checked_sub(bytes)
+            .ok_or(ProviderError::ResponseTooLarge)?;
+        Ok(())
     }
 }
 
@@ -1930,7 +1997,10 @@ fn map_usage(root: &Value, mapping: &UsageMapping) -> Result<TokenUsage, Provide
             input_tokens: mapped_u32(root, mapping.input_tokens.as_deref()),
             text_input_tokens: mapped_u32(root, mapping.text_input_tokens.as_deref()),
             image_input_tokens: mapped_u32(root, mapping.image_input_tokens.as_deref()),
-            output_tokens: mapped_u32(root, mapping.output_tokens.as_deref()),
+            output_tokens: crate::sse::with_reasoning_output(
+                mapped_u32(root, mapping.output_tokens.as_deref()),
+                mapped_u32(root, mapping.reasoning_output_tokens.as_deref()),
+            )?,
             total_tokens: mapped_u32(root, mapping.total_tokens.as_deref()),
             cached_input_tokens: mapped_u32(root, mapping.cached_input_tokens.as_deref()),
             cache_creation_tokens: mapped_u32(root, mapping.cache_creation_tokens.as_deref()),
@@ -1949,6 +2019,35 @@ fn mapped_u32(root: &Value, pointer: Option<&str>) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
+
+    #[test]
+    fn image_responses_stop_at_the_requested_count_and_share_one_byte_budget() {
+        let mut budget = super::ImageBudget::new(2, 10);
+        assert!(budget.admit(0).is_ok());
+        assert!(budget.charge(6).is_ok());
+        assert!(budget.admit(1).is_ok());
+        assert_eq!(budget.remaining, 4);
+        assert!(matches!(
+            budget.charge(5),
+            Err(crate::ProviderError::ResponseTooLarge)
+        ));
+        assert!(budget.admit(2).is_err());
+    }
+
+    #[test]
+    fn inline_images_check_remaining_bytes_before_decoding_without_rejecting_padding() {
+        let mut budget = super::ImageBudget::new(2, 1);
+        assert!(budget.admit_encoded("YQ==").is_ok());
+        assert!(matches!(
+            budget.admit_encoded("YWI="),
+            Err(crate::ProviderError::ResponseTooLarge)
+        ));
+        budget.charge(1).unwrap();
+        assert!(matches!(
+            budget.admit(1),
+            Err(crate::ProviderError::ResponseTooLarge)
+        ));
+    }
 
     #[test]
     fn authorized_body_limit_counts_escaped_wire_bytes_exactly() {

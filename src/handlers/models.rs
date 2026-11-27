@@ -18,7 +18,7 @@ use crate::{
         chat_stream_helpers::is_model_whitelisted,
         department_policies::{effective_allowed_models, model_policy_key},
         model_picker::{PickerMetadata, localize},
-        models_cache::load_models_cache,
+        models_cache::{load_models_cache, provider_icons},
         provider_models::{
             add_provider_models, is_chat_selectable_model, sort_models_newest_first,
         },
@@ -78,6 +78,7 @@ pub async fn get_list_models(
     };
     let catalog_providers = providers.clone();
 
+    let catalog_icons = provider_icons(&providers);
     let mut filtered_providers = Vec::new();
     for provider in providers {
         let is_enabled = app_state
@@ -170,13 +171,17 @@ pub async fn get_list_models(
         if models.is_empty() {
             continue;
         }
+        let (icon, icon_dark) = catalog_icons
+            .get(&provider_key.to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default();
         add_provider_models(
             &mut filtered_providers,
             ProviderInfo {
                 key: provider_key,
                 name: descriptor.name,
-                icon: String::new(),
-                icon_dark: String::new(),
+                icon,
+                icon_dark,
                 status: "enabled".to_string(),
                 models,
             },

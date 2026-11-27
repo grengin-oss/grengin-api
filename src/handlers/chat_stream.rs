@@ -33,7 +33,6 @@ use crate::{
             ARTIFACT_SYSTEM_HINT, ArtifactAccum, ArtifactParseEvent, ArtifactParser,
             content_type_to_ext,
         },
-        budget_allocation::refresh_department_budget_available,
         chat_attachments::{hydrate_prompt_files, validate_incoming_attachments},
         chat_helpers::{
             effective_max_tokens, effective_native_web_search, supports_native_web_search,
@@ -43,8 +42,11 @@ use crate::{
             ContentCheckpoint, DepartmentBudgetGate, ToolRoundOutcome, deliver_reply,
             department_budget_status, ensure_budget_pricing, ensure_model_whitelisted,
             model_identifiers, next_tool_round, persistence_error_event_data, record_stop_reason,
-            response_stopped_event_data, stop_reason_for_provider_error, with_stop_reason,
+            refresh_spender_budget, response_stopped_event_data, stop_reason_for_provider_error,
+            with_stop_reason,
         },
+        chat_usage::{TurnEnd, TurnUsage, UsageTotals, with_usage_estimated},
+        connector_tool_summary::{connector_call_summary, result_summary, stored_tool_call},
         conversation_access::{
             can_access_conversation, find_active_conversation_for_user,
             load_readable_linked_projects,
@@ -58,10 +60,9 @@ use crate::{
         mcp_tools::{gateway_tool_output, load_mcp_tools, request_local_tool_names},
         message_branches::{ThreadEntry, add_to_thread, is_shown, last_shown_message},
         message_helpers::{EditInProgress, EditStatus, PendingEdit, begin_pending_edit},
-        notifications::emit_budget_alerts,
         provider_chat::{
             LlmStreamError, LlmStreamEvent, PluginStreamParser, build_plugin_chat_request,
-            plugin_event_stream, provider_error_class,
+            estimate_request_tokens, plugin_event_stream, provider_error_class,
         },
         provider_resolver::{ResolveProviderError, model_route, resolve_provider},
         rag::{
@@ -75,12 +76,12 @@ use crate::{
         skills_helpers::{load_skill_knowledge_for_stream, load_skills_for_stream},
         system_prompts,
     },
-    services::{image_gen_helpers::generate_and_save, models_cache::get_model_info_cached},
-    state::SharedState,
-    utils::cost_calc::{
-        calculate_cost_decimal, calculate_llm_cost, to_chat_tool_input, to_chat_web_search_result,
-        tool_input_to_value, tool_result_status_from_output,
+    services::{
+        image_gen_helpers::{ImageTokenRates, ImageTokens, generate_and_save},
+        models_cache::get_model_info_cached,
     },
+    state::SharedState,
+    utils::cost_calc::{calculate_llm_cost, to_chat_web_search_result, tool_input_to_value},
     utils::llm_error::extract_llm_error_message,
 };
 use axum::{
@@ -1248,11 +1249,19 @@ pub async fn handle_chat_stream(
        let mut message_content = String::new();
        let mut artifact_parser = ArtifactParser::new();
        let mut artifact_accumulator: HashMap<String, ArtifactAccum> = HashMap::new();
-       let mut request_tokens = 0;
-       let mut response_tokens = 0;
-       let mut total_tokens = 0;
-       let mut cached_input_tokens_acc: i32 = 0;
-       let mut cache_creation_tokens_acc: i32 = 0;
+       let mut usage = TurnUsage::new(
+           provider_request.as_ref().map(estimate_request_tokens).unwrap_or_default(),
+       );
+       let cost_of = move |totals: &UsageTotals| calculate_llm_cost(
+           totals.input,
+           totals.cached_input,
+           totals.cache_creation,
+           totals.output,
+           input_rate,
+           cached_input_rate,
+           cache_creation_rate,
+           output_rate,
+       );
        let mut image_gen_cost: Decimal = Decimal::ZERO;
        let mut request_id: Option<String> = None;
        let mut tool_calls: Vec<serde_json::Value> = Vec::new();
@@ -1332,11 +1341,17 @@ pub async fn handle_chat_stream(
                         }).unwrap_or_default()
                     }).collect();
                     let (total_text_input, total_image_input, total_output) = generated.iter().fold((0i32, 0i32, 0i32), |acc, (_, _, ti, ii, o)| (acc.0 + ti, acc.1 + ii, acc.2 + o));
-                    let effective_output_rate = if total_image_input > 0 { image_output_rate.or(output_rate) } else { output_rate };
-                    image_gen_cost =
-                        calculate_cost_decimal(total_text_input, 0, input_rate, None)
-                        + calculate_cost_decimal(total_image_input, 0, image_input_rate, None)
-                        + calculate_cost_decimal(0, total_output, None, effective_output_rate);
+                    image_gen_cost = ImageTokens {
+                        text_input: total_text_input,
+                        image_input: total_image_input,
+                        output: total_output,
+                    }
+                    .cost(ImageTokenRates {
+                        input: input_rate,
+                        output: output_rate,
+                        image_input: image_input_rate,
+                        image_output: image_output_rate,
+                    });
                     let total_input_tokens = total_text_input + total_image_input;
                     let mut img_msg = messages::ActiveModel {
                         id: Set(img_message_id),
@@ -1371,6 +1386,7 @@ pub async fn handle_chat_stream(
                     if let Err(e) = inserted {
                         eprintln!("image gen message insert error: {e:?}");
                         charge_unsaved_reply(&app_state.database, claims.user_id, &img_msg).await;
+                        refresh_spender_budget(&app_state, claims.user_id).await;
                         yield Event::default()
                             .event(ChatStreamEvents::AiError.to_string())
                             .data(persistence_error_event_data());
@@ -1396,6 +1412,7 @@ pub async fn handle_chat_stream(
                             }
                             Err(error) => {
                                 eprintln!("edit commit error: {error:?}");
+                                refresh_spender_budget(&app_state, claims.user_id).await;
                                 yield Event::default()
                                     .event(ChatStreamEvents::AiError.to_string())
                                     .data(persistence_error_event_data());
@@ -1414,18 +1431,7 @@ pub async fn handle_chat_stream(
                         active_conv.updated_at = Set(now);
                         let _ = active_conv.update(&app_state.database).await;
                     }
-                    if let Ok(Some(user)) = users::Entity::find_by_id(claims.user_id)
-                        .one(&app_state.database)
-                        .await
-                    {
-                        if let Some(department_id) = user.department_id {
-                            if let Err(e) = refresh_department_budget_available(&app_state.database, department_id).await {
-                                eprintln!("image gen budget refresh error: {e}");
-                            } else if let Err(e) = emit_budget_alerts(&app_state, department_id).await {
-                                eprintln!("image gen budget alert error: {e:?}");
-                            }
-                        }
-                    }
+                    refresh_spender_budget(&app_state, claims.user_id).await;
                     if superseded {
                         yield Event::default()
                             .event(ChatStreamEvents::ResponseStopped.to_string())
@@ -1501,51 +1507,6 @@ pub async fn handle_chat_stream(
             return;
         };
 
-        let mut provider_session = match chat.start(provider_request).await {
-            Ok(session) => session,
-            Err(error) => {
-                eprintln!("provider chat start failed: {}", provider_error_class(&error));
-                let stream_err = ChatStreamError::ProviderError {
-                    provider: provider.clone(),
-                    message: format!(
-                        "provider plugin request failed ({})",
-                        provider_error_class(&error)
-                    ),
-                };
-                let data = serde_json::to_string(&stream_err.to_response())
-                    .unwrap_or_else(|_| "{}".to_string());
-                yield Event::default()
-                    .event(ChatStreamEvents::AiError.to_string())
-                    .data(data);
-                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
-                return;
-            }
-        };
-        let mut event_source = match provider_session.stream().await {
-            Ok(source) => plugin_event_stream(source),
-            Err(error) => {
-                eprintln!("provider stream start failed: {}", provider_error_class(&error));
-                let stream_err = if matches!(error.underlying(), llm_plugin::ProviderError::QuotaExhausted) {
-                    ChatStreamError::ApiQuotaExhausted { provider: provider.clone() }
-                } else {
-                    ChatStreamError::ProviderError {
-                        provider: provider.clone(),
-                        message: format!(
-                            "provider plugin request failed ({})",
-                            provider_error_class(&error)
-                        ),
-                    }
-                };
-                let data = serde_json::to_string(&stream_err.to_response())
-                    .unwrap_or_else(|_| "{}".to_string());
-                yield Event::default()
-                    .event(ChatStreamEvents::AiError.to_string())
-                    .data(data);
-                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
-                return;
-            }
-        };
-
         let new_message_id = Uuid::new_v4();
         let mut assistant_created_at = Utc::now();
         let mut new_llm_message = messages::ActiveModel {
@@ -1559,13 +1520,13 @@ pub async fn handle_chat_stream(
            model_provider: Set(provider.clone()),
            model_name: Set(model_name.clone()),
            request_id: Set(request_id.clone()),
-           request_tokens: Set(request_tokens),
-           response_tokens: Set(response_tokens),
+           request_tokens: Set(0),
+           response_tokens: Set(0),
            tools_calls: Set(Vec::new()),
            tools_results: Set(Vec::new()),
            created_at: Set(assistant_created_at),
            updated_at: Set(assistant_created_at),
-           total_tokens: Set(total_tokens),
+           total_tokens: Set(0),
            latency: Set(latency),
            cost: Set(Decimal::from(0)),
            metadata: Set(Some(json!({"webSearch":req.web_search}))),
@@ -1677,6 +1638,54 @@ pub async fn handle_chat_stream(
             return;
         }
 
+        // The provider request opens only once the reply row can record what it costs.
+        let mut provider_session = match chat.start(provider_request).await {
+            Ok(session) => session,
+            Err(error) => {
+                eprintln!("provider chat start failed: {}", provider_error_class(&error));
+                content_checkpoint.fail_with(stop_reason_for_provider_error(&error));
+                let stream_err = ChatStreamError::ProviderError {
+                    provider: provider.clone(),
+                    message: format!(
+                        "provider plugin request failed ({})",
+                        provider_error_class(&error)
+                    ),
+                };
+                let data = serde_json::to_string(&stream_err.to_response())
+                    .unwrap_or_else(|_| "{}".to_string());
+                yield Event::default()
+                    .event(ChatStreamEvents::AiError.to_string())
+                    .data(data);
+                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                return;
+            }
+        };
+        let mut event_source = match provider_session.stream().await {
+            Ok(source) => plugin_event_stream(source),
+            Err(error) => {
+                eprintln!("provider stream start failed: {}", provider_error_class(&error));
+                content_checkpoint.fail_with(stop_reason_for_provider_error(&error));
+                let stream_err = if matches!(error.underlying(), llm_plugin::ProviderError::QuotaExhausted) {
+                    ChatStreamError::ApiQuotaExhausted { provider: provider.clone() }
+                } else {
+                    ChatStreamError::ProviderError {
+                        provider: provider.clone(),
+                        message: format!(
+                            "provider plugin request failed ({})",
+                            provider_error_class(&error)
+                        ),
+                    }
+                };
+                let data = serde_json::to_string(&stream_err.to_response())
+                    .unwrap_or_else(|_| "{}".to_string());
+                yield Event::default()
+                    .event(ChatStreamEvents::AiError.to_string())
+                    .data(data);
+                yield Event::default().event(ChatStreamEvents::Done.to_string()).data("{}");
+                return;
+            }
+        };
+
         // Emit before the event loop so message_start always arrives before any delta,
         // regardless of provider (Gemini fires usageMetadata only on the last chunk).
         yield Event::default()
@@ -1688,7 +1697,6 @@ pub async fn handle_chat_stream(
                 latency_ms: None, cost: None, event: None, tool_call: None, tool_result: None,
             }.to_string());
 
-       let mut final_message_cost = Decimal::from(0);
        let mut persist_error: Option<sea_orm::DbErr> = None;
        let mut turn_failed = false;
        let mut stop_reason: Option<StopReason> = None;
@@ -1698,31 +1706,22 @@ pub async fn handle_chat_stream(
            'events: while let Some(event) = tokio::select! {
                biased;
                _ = cancel_handle.cancelled() => {
-                   let cancel_cost = calculate_llm_cost(
-                       request_tokens,
-                       cached_input_tokens_acc,
-                       cache_creation_tokens_acc,
-                       response_tokens,
-                       input_rate,
-                       cached_input_rate,
-                       cache_creation_rate,
-                       output_rate,
-                   );
-                   final_message_cost = cancel_cost;
+                   let totals = usage.ended_as(TurnEnd::Interrupted);
+                   let cancel_cost = usage.charge(cost_of(&totals));
                    let cancel_reason = cancel_handle.reason().unwrap_or(StopReason::UserCancelled);
                    stop_reason = Some(cancel_reason);
                    new_llm_message.updated_at = Set(Utc::now());
-                   new_llm_message.request_tokens = Set(request_tokens);
-                   new_llm_message.response_tokens = Set(response_tokens);
-                   new_llm_message.total_tokens = Set(request_tokens + response_tokens);
+                   new_llm_message.request_tokens = Set(totals.input);
+                   new_llm_message.response_tokens = Set(totals.output);
+                   new_llm_message.total_tokens = Set(totals.total);
                    new_llm_message.cost = Set(cancel_cost);
                    new_llm_message.message_content = Set(message_content.clone());
                    new_llm_message.metadata = Set(Some(json!({
                        "webSearch": req.web_search,
                        "cancelled": true,
                        "stopReason": cancel_reason.as_str(),
-                       "cachedInputTokens": cached_input_tokens_acc,
-                       "cacheCreationTokens": cache_creation_tokens_acc,
+                       "cachedInputTokens": totals.cached_input,
+                       "cacheCreationTokens": totals.cache_creation,
                    })));
                    match save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
                        Ok(_) => content_checkpoint.saved(Instant::now()),
@@ -1735,8 +1734,8 @@ pub async fn handle_chat_stream(
                        message_id: Some(new_message_id), user_message_id: None,
                        is_new: None,
                        content: None,
-                       input_tokens: Some(request_tokens),
-                       output_tokens: Some(response_tokens),
+                       input_tokens: Some(totals.input),
+                       output_tokens: Some(totals.output),
                        cached_input_tokens: None,
                        cache_creation_tokens: None,
                        latency_ms: Some(latency),
@@ -1769,23 +1768,16 @@ pub async fn handle_chat_stream(
                    match &parse_result {
                        StreamParseResult::TextDelta { text, request_id: rid } => {
                            message_content.push_str(text);
+                           usage.streamed_output(text);
+                           let totals = usage.reported_totals();
                            request_id = rid.clone();
                            new_llm_message.request_id = Set(request_id);
                            new_llm_message.updated_at = Set(Utc::now());
                            new_llm_message.message_content = Set(message_content.clone());
-                           new_llm_message.request_tokens = Set(request_tokens);
-                           new_llm_message.response_tokens = Set(response_tokens);
-                           new_llm_message.total_tokens = Set(request_tokens + response_tokens);
-                           new_llm_message.cost = Set(calculate_llm_cost(
-                               request_tokens,
-                               cached_input_tokens_acc,
-                               cache_creation_tokens_acc,
-                               response_tokens,
-                               input_rate,
-                               cached_input_rate,
-                               cache_creation_rate,
-                               output_rate,
-                           ));
+                           new_llm_message.request_tokens = Set(totals.input);
+                           new_llm_message.response_tokens = Set(totals.output);
+                           new_llm_message.total_tokens = Set(totals.total);
+                           new_llm_message.cost = Set(usage.checkpoint_cost(cost_of));
                            let now = Instant::now();
                            if content_checkpoint.is_due(now) {
                                if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
@@ -1841,119 +1833,44 @@ pub async fn handle_chat_stream(
                            }
                        }
                        StreamParseResult::TokenUsage{ request_id:req_id,input_tokens, output_tokens, total_tokens:t_tokens, cached_input_tokens, cache_creation_tokens} => {
-                          let accumulate_tokens = mcp_tooling_enabled && tool_round > 0;
-                          if let Some(tokens) = input_tokens {
-                            if accumulate_tokens {
-                              request_tokens += tokens.clone() as i32;
-                            } else {
-                              request_tokens = tokens.clone() as i32;
-                            }
-                          }
-                          if let Some(tokens) = output_tokens {
-                            if accumulate_tokens {
-                              response_tokens += tokens.clone() as i32;
-                            } else {
-                              response_tokens = tokens.clone() as i32;
-                            }
-                          }
-                          if let Some(tokens) = t_tokens{
-                            if accumulate_tokens {
-                              total_tokens += tokens.clone() as i32;
-                            } else {
-                              total_tokens = tokens.clone() as i32;
-                            }
-                          }
-                          if let Some(tokens) = cached_input_tokens {
-                            if accumulate_tokens {
-                              cached_input_tokens_acc += *tokens as i32;
-                            } else {
-                              cached_input_tokens_acc = *tokens as i32;
-                            }
-                          }
-                          if let Some(tokens) = cache_creation_tokens {
-                            if accumulate_tokens {
-                              cache_creation_tokens_acc += *tokens as i32;
-                            } else {
-                              cache_creation_tokens_acc = *tokens as i32;
-                            }
-                          }
+                          usage.record(*input_tokens, *output_tokens, *t_tokens, *cached_input_tokens, *cache_creation_tokens);
+                          let totals = usage.reported_totals();
                           request_id = req_id.clone();
-                          let cost = calculate_llm_cost(
-                              request_tokens,
-                              cached_input_tokens_acc,
-                              cache_creation_tokens_acc,
-                              response_tokens,
-                              input_rate,
-                              cached_input_rate,
-                              cache_creation_rate,
-                              output_rate,
-                          );
                           new_llm_message.request_id = Set(request_id);
                           new_llm_message.updated_at = Set(Utc::now());
-                          new_llm_message.request_tokens = Set(request_tokens);
-                          new_llm_message.response_tokens = Set(response_tokens);
-                          new_llm_message.total_tokens = Set(request_tokens + response_tokens);
-                          new_llm_message.cost = Set(cost);
+                          new_llm_message.request_tokens = Set(totals.input);
+                          new_llm_message.response_tokens = Set(totals.output);
+                          new_llm_message.total_tokens = Set(totals.total);
+                          new_llm_message.cost = Set(usage.checkpoint_cost(cost_of));
                           new_llm_message.metadata = Set(Some(json!({
                               "webSearch": req.web_search,
-                              "cachedInputTokens": cached_input_tokens_acc,
-                              "cacheCreationTokens": cache_creation_tokens_acc,
+                              "cachedInputTokens": totals.cached_input,
+                              "cacheCreationTokens": totals.cache_creation,
                           })));
-                          if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
-                              persist_error = Some(error);
-                              break 'events;
+                          // Some providers report usage on every chunk; the end of the round saves the final count.
+                          let now = Instant::now();
+                          if content_checkpoint.is_due(now) {
+                              if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
+                                  persist_error = Some(error);
+                                  break 'events;
+                              }
+                              content_checkpoint.saved(now);
                           }
                        }
                        StreamParseResult::MessageStart { request_id:req_id,input_tokens,output_tokens,cached_input_tokens,cache_creation_tokens} => {
-                          let accumulate_tokens = mcp_tooling_enabled && tool_round > 0;
-                          if let Some(tokens) = input_tokens {
-                            if accumulate_tokens {
-                              request_tokens += tokens.clone() as i32;
-                            } else {
-                              request_tokens = tokens.clone() as i32;
-                            }
-                          }
-                          if let Some(tokens) = output_tokens {
-                            if accumulate_tokens {
-                              response_tokens += tokens.clone() as i32;
-                            } else {
-                              response_tokens = tokens.clone() as i32;
-                            }
-                          }
-                          if let Some(tokens) = cached_input_tokens {
-                            if accumulate_tokens {
-                              cached_input_tokens_acc += *tokens as i32;
-                            } else {
-                              cached_input_tokens_acc = *tokens as i32;
-                            }
-                          }
-                          if let Some(tokens) = cache_creation_tokens {
-                            if accumulate_tokens {
-                              cache_creation_tokens_acc += *tokens as i32;
-                            } else {
-                              cache_creation_tokens_acc = *tokens as i32;
-                            }
-                          }
+                          usage.record(*input_tokens, *output_tokens, None, *cached_input_tokens, *cache_creation_tokens);
+                          let totals = usage.reported_totals();
                           request_id = Some(req_id.clone());
                           new_llm_message.request_id = Set(request_id);
                           new_llm_message.updated_at = Set(Utc::now());
-                          new_llm_message.request_tokens = Set(request_tokens);
-                          new_llm_message.response_tokens = Set(response_tokens);
-                          new_llm_message.total_tokens = Set(request_tokens + response_tokens);
-                          new_llm_message.cost = Set(calculate_llm_cost(
-                              request_tokens,
-                              cached_input_tokens_acc,
-                              cache_creation_tokens_acc,
-                              response_tokens,
-                              input_rate,
-                              cached_input_rate,
-                              cache_creation_rate,
-                              output_rate,
-                          ));
+                          new_llm_message.request_tokens = Set(totals.input);
+                          new_llm_message.response_tokens = Set(totals.output);
+                          new_llm_message.total_tokens = Set(totals.total);
+                          new_llm_message.cost = Set(usage.checkpoint_cost(cost_of));
                           new_llm_message.metadata = Set(Some(json!({
                               "webSearch": req.web_search,
-                              "cachedInputTokens": cached_input_tokens_acc,
-                              "cacheCreationTokens": cache_creation_tokens_acc,
+                              "cachedInputTokens": totals.cached_input,
+                              "cacheCreationTokens": totals.cache_creation,
                           })));
                           if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
                               persist_error = Some(error);
@@ -1961,11 +1878,17 @@ pub async fn handle_chat_stream(
                           }
                        }
                        StreamParseResult::ToolInput(tool_input) => {
+                           usage.streamed_output(&tool_input.partial_json);
                            let resolved_name = tool_input
                                .tool_name
                                .clone()
                                .unwrap_or_else(|| "tool_call".to_string());
-                           let is_web_search = tool_input.is_web_search();
+                           // Only the provider's server tool is web search; every function call is a
+                           // connector's, resolved or not, and its arguments stay server-side.
+                           let is_web_search = tool_input.server_tool;
+                           let descriptor = (!is_web_search && mcp_tooling_enabled)
+                               .then(|| resolve_mcp_tool_descriptor(&mcp_tool_lookup, &resolved_name))
+                               .flatten();
                            let mut parsed_input: Option<Value> = None;
                            if let Some(tool_id) = tool_input.tool_id.as_ref() {
                                let buffer = tool_input_buffers.entry(tool_id.clone()).or_default();
@@ -1975,140 +1898,92 @@ pub async fn handle_chat_stream(
                                    parsed_input = Some(value);
                                }
                            }
-                           let parsed_web_search = is_web_search
-                               .then(|| parsed_input.as_ref().and_then(parse_web_search_action))
-                               .flatten();
-                           let web_search_action = tool_input
-                               .web_search
-                               .clone()
-                               .or(parsed_web_search);
-                           if is_web_search {
+                           let tool_call = if is_web_search {
+                               let web_search_action = tool_input
+                                   .web_search
+                                   .clone()
+                                   .or_else(|| parsed_input.as_ref().and_then(parse_web_search_action));
                                let _ = update_web_search_action_state(
                                    &mut web_search_state,
                                    &mut last_web_search_call_id,
                                    tool_input.tool_id.clone(),
                                    web_search_action.clone(),
                                );
-                           }
-                           let tool_call = ChatStreamToolCall {
-                               tool_name: resolved_name.clone(),
-                               tool_id: tool_input.tool_id.clone(),
-                               input_text: Some(tool_input.partial_json.clone()),
-                               input: None,
-                               kind: Some(if is_web_search { ChatToolKind::WebSearch } else { ChatToolKind::Other }),
-                               web_search: web_search_action.clone().map(|action| ChatStreamWebSearchAction {
-                                   query: action.query.clone(),
-                                   queries: action.queries.clone(),
-                               }),
-                           };
-                           tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
-                           new_llm_message.tools_calls = Set(tool_calls.clone());
-                           new_llm_message.updated_at = Set(Utc::now());
-                           if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
-                               persist_error = Some(error);
-                               break 'events;
-                           }
-                           let chat_stream = ChatStream {
-                               id:None,
-                               title:None,
-                               message_id:None, user_message_id: None,
-                               is_new:None,
-                               content:None,
-                               input_tokens:None,
-                               output_tokens:None,
-                               latency_ms:None,
-                               cost:None,
-                               event:None,
-                               tool_call:Some(tool_call),
-                               cached_input_tokens:None,
-
-                               cache_creation_tokens:None,
-
-                               tool_result:None,
-                           };
-                           yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(chat_stream.to_string());
-
-                           // Track every MCP tool_call SSE for pending flush — even partial
-                           // streaming events where JSON is not yet complete.
-                           if mcp_tooling_enabled
-                               && !is_web_search
-                               && resolve_mcp_tool_descriptor(&mcp_tool_lookup, &resolved_name).is_some()
+                               Some(ChatStreamToolCall {
+                                   tool_name: resolved_name.clone(),
+                                   tool_id: tool_input.tool_id.clone(),
+                                   input_text: Some(tool_input.partial_json.clone()),
+                                   input: None,
+                                   kind: Some(ChatToolKind::WebSearch),
+                                   web_search: web_search_action.map(|action| ChatStreamWebSearchAction {
+                                       query: action.query,
+                                       queries: action.queries,
+                                   }),
+                                   summary: None,
+                               })
+                           } else if let (Some(tool_id), Some(input_value)) =
+                               (tool_input.tool_id.clone(), parsed_input.as_ref())
                            {
-                               if let Some(tool_id) = tool_input.tool_id.as_ref() {
-                                   emitted_tc.entry(tool_id.clone())
-                                       .or_insert_with(|| resolved_name.clone());
-                               }
-                           }
-
-                           if mcp_tooling_enabled
-                               && resolve_mcp_tool_descriptor(&mcp_tool_lookup, &resolved_name).is_some()
-                           {
-                               if let (Some(tool_id), Some(input_value)) =
-                                   (tool_input.tool_id.clone(), parsed_input.clone())
-                               {
-                                   if seen_tool_call_ids.insert(tool_id.clone()) {
-                                       let call = ToolCall {
+                               // A connector call is announced once, when its arguments are complete.
+                               seen_tool_call_ids.insert(tool_id.clone()).then(|| {
+                                   if descriptor.is_some() {
+                                       pending_mcp_tool_calls.push(ToolCall {
                                            tool_name: resolved_name.clone(),
                                            tool_id: Some(tool_id.clone()),
                                            input: Some(ToolInput::Json(input_value.clone())),
                                            index: tool_input.index,
                                            raw: None,
-                                           web_search: web_search_action.clone(),
-                                       };
-                                       pending_mcp_tool_calls.push(call);
+                                           web_search: None,
+                                       });
                                        emitted_tc.insert(tool_id.clone(), resolved_name.clone());
-
-                                       let resolved_call = ChatStreamToolCall {
-                                           tool_name: resolved_name.clone(),
-                                           tool_id: Some(tool_id),
-                                           input_text: None,
-                                           input: Some(to_chat_tool_input(&ToolInput::Json(input_value))),
-                                           kind: Some(if is_web_search {
-                                               ChatToolKind::WebSearch
-                                           } else {
-                                               ChatToolKind::Other
-                                           }),
-                                           web_search: web_search_action
-                                               .clone()
-                                               .map(|action| ChatStreamWebSearchAction {
-                                                   query: action.query.clone(),
-                                                   queries: action.queries.clone(),
-                                               }),
-                                       };
-                                       tool_calls.push(
-                                           serde_json::to_value(&resolved_call)
-                                               .unwrap_or_else(|_| json!({})),
-                                       );
-                                       new_llm_message.tools_calls = Set(tool_calls.clone());
-                                       new_llm_message.updated_at = Set(Utc::now());
-                                       if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
-                                           persist_error = Some(error);
-                                           break 'events;
-                                       }
-                                       let resolved_stream = ChatStream {
-                                           id: None,
-                                           title: None,
-                                           message_id: None, user_message_id: None,
-                                           is_new: None,
-                                           content: None,
-                                           input_tokens: None,
-                                           output_tokens: None,
-                                           cached_input_tokens: None,
-                                           cache_creation_tokens: None,
-                                           latency_ms: None,
-                                           cost: None,
-                                           event: None,
-                                           tool_call: Some(resolved_call),
-                                           tool_result: None,
-                                       };
-                                       yield Event::default()
-                                           .event(ChatStreamEvents::ToolCall.to_string())
-                                           .data(resolved_stream.to_string());
                                    }
+                                   ChatStreamToolCall {
+                                       summary: Some(connector_call_summary(descriptor, &resolved_name, Some(input_value))),
+                                       tool_name: resolved_name.clone(),
+                                       tool_id: Some(tool_id),
+                                       input_text: None,
+                                       input: None,
+                                       kind: Some(ChatToolKind::Other),
+                                       web_search: None,
+                                   }
+                               })
+                           } else {
+                               None
+                           };
+                           if let Some(tool_call) = tool_call {
+                               tool_calls.push(stored_tool_call(&tool_call));
+                               new_llm_message.tools_calls = Set(tool_calls.clone());
+                               new_llm_message.updated_at = Set(Utc::now());
+                               if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
+                                   persist_error = Some(error);
+                                   break 'events;
                                }
+                               let chat_stream = ChatStream {
+                                   id:None,
+                                   title:None,
+                                   message_id:None, user_message_id: None,
+                                   is_new:None,
+                                   content:None,
+                                   input_tokens:None,
+                                   output_tokens:None,
+                                   latency_ms:None,
+                                   cost:None,
+                                   event:None,
+                                   tool_call:Some(tool_call),
+                                   cached_input_tokens:None,
+
+                                   cache_creation_tokens:None,
+
+                                   tool_result:None,
+                               };
+                               yield Event::default().event(ChatStreamEvents::ToolCall.to_string()).data(chat_stream.to_string());
                            }
                        }
                        StreamParseResult::EventLog { event_type, message, data } => {
+                           // Reasoning is billed as output.
+                           if event_type == "thinking_delta" {
+                               usage.streamed_output(message.as_deref().unwrap_or_default());
+                           }
                            let event = ChatStreamEvent {
                                event_type:event_type.clone(),
                                text: message.clone(),
@@ -2140,44 +2015,32 @@ pub async fn handle_chat_stream(
                                    continue;
                                }
                            }
+                           let arguments = tool_input_to_value(call.input.as_ref());
                            if let Some(tool_id) = call.tool_id.as_ref() {
-                               if let Some(input) = call.input.as_ref() {
-                                   let value = tool_input_to_value(Some(input));
-                                   if !value.is_null() {
-                                       tool_inputs.insert(tool_id.clone(), value);
-                                   }
+                               if !arguments.is_null() {
+                                   tool_inputs.insert(tool_id.clone(), arguments.clone());
                                }
                            }
-                           let is_web_search = call.is_web_search();
-                           if mcp_tooling_enabled
-                               && resolve_mcp_tool_descriptor(&mcp_tool_lookup, &call.tool_name).is_some()
-                           {
+                           // Only function tools end in a call, so this is always a connector's, resolved or not.
+                           let descriptor = mcp_tooling_enabled
+                               .then(|| resolve_mcp_tool_descriptor(&mcp_tool_lookup, &call.tool_name))
+                               .flatten();
+                           if descriptor.is_some() {
                                pending_mcp_tool_calls.push(call.clone());
                                if let Some(id) = call.tool_id.as_ref() {
                                    emitted_tc.insert(id.clone(), call.tool_name.clone());
                                }
                            }
-                           if is_web_search {
-                               let _ = update_web_search_action_state(
-                                   &mut web_search_state,
-                                   &mut last_web_search_call_id,
-                                   call.tool_id.clone(),
-                                   call.web_search.clone(),
-                               );
-                           }
-                           let input = call.input.as_ref().map(to_chat_tool_input);
                            let tool_call = ChatStreamToolCall {
+                               summary: Some(connector_call_summary(descriptor, &call.tool_name, Some(&arguments))),
+                               input: None,
                                tool_name: call.tool_name.clone(),
                                tool_id: call.tool_id.clone(),
                                input_text: None,
-                               input,
-                               kind: Some(if is_web_search { ChatToolKind::WebSearch } else { ChatToolKind::Other }),
-                               web_search: call.web_search.as_ref().map(|action| ChatStreamWebSearchAction {
-                                   query: action.query.clone(),
-                                   queries: action.queries.clone(),
-                               }),
+                               kind: Some(ChatToolKind::Other),
+                               web_search: None,
                            };
-                           tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
+                           tool_calls.push(stored_tool_call(&tool_call));
                            new_llm_message.tools_calls = Set(tool_calls.clone());
                            new_llm_message.updated_at = Set(Utc::now());
                            if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
@@ -2225,8 +2088,9 @@ pub async fn handle_chat_stream(
                                        query: entry.query.clone(),
                                        queries: entry.queries.clone(),
                                    }),
+                                   summary: None,
                                };
-                               tool_calls.push(serde_json::to_value(&tool_call).unwrap_or_else(|_| json!({})));
+                               tool_calls.push(stored_tool_call(&tool_call));
                                new_llm_message.tools_calls = Set(tool_calls.clone());
                                new_llm_message.updated_at = Set(Utc::now());
                                if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
@@ -2271,6 +2135,7 @@ pub async fn handle_chat_stream(
                                    status: Some("success".to_string()),
                                    output: None,
                                    web_search: Some(to_chat_web_search_result(&entry)),
+                                   summary: None,
                                };
                                tool_results.push(serde_json::to_value(&tool_result).unwrap_or_else(|_| json!({})));
                                new_llm_message.tools_results = Set(tool_results.clone());
@@ -2300,47 +2165,6 @@ pub async fn handle_chat_stream(
                                yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(chat_stream.to_string());
                            }
                        }
-                       StreamParseResult::ToolResult(result) => {
-                           if let Some(id) = result.tool_id.as_ref() {
-                               completed_tr.insert(id.clone());
-                           }
-                           let is_web_search = result.is_web_search();
-                           let tool_result = ChatStreamToolResult {
-                               mcp: None,
-                               tool_name: result.tool_name.clone(),
-                               tool_id: result.tool_id.clone(),
-                               kind: Some(if is_web_search { ChatToolKind::WebSearch } else { ChatToolKind::Other }),
-                               status: tool_result_status_from_output(&result.output),
-                               output: result.output.clone(),
-                               web_search: None,
-                           };
-                           tool_results.push(serde_json::to_value(&tool_result).unwrap_or_else(|_| json!({})));
-                           new_llm_message.tools_results = Set(tool_results.clone());
-                           new_llm_message.updated_at = Set(Utc::now());
-                           if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
-                               persist_error = Some(error);
-                               break 'events;
-                           }
-                           let chat_stream = ChatStream {
-                               id:None,
-                               title:None,
-                               message_id:None, user_message_id: None,
-                               is_new:None,
-                               content:None,
-                               input_tokens:None,
-                               output_tokens:None,
-                               latency_ms:None,
-                               cost:None,
-                               event:None,
-                               tool_call:None,
-                               cached_input_tokens:None,
-
-                               cache_creation_tokens:None,
-
-                               tool_result:Some(tool_result),
-                           };
-                           yield Event::default().event(ChatStreamEvents::ToolResult.to_string()).data(chat_stream.to_string());
-                       }
                        StreamParseResult::Error { kind, message } => {
                          eprintln!("Stream error ({:?}): {}", kind, message);
                          let data = serde_json::to_string(
@@ -2350,7 +2174,7 @@ pub async fn handle_chat_stream(
                          stop_reason = Some(StopReason::ProviderError);
                          turn_failed = true;
                          stream_finished = true;
-                         break;
+                         break 'events;
                        }
                        StreamParseResult::None => {}
                    }
@@ -2359,24 +2183,13 @@ pub async fn handle_chat_stream(
                Err(e) => {
                    match e {
                      LlmStreamError::Ended => {
-                       if total_tokens == 0 {
-                           total_tokens = request_tokens + response_tokens;
-                         }
-                         let message_cost = calculate_llm_cost(
-                           request_tokens,
-                           cached_input_tokens_acc,
-                           cache_creation_tokens_acc,
-                           response_tokens,
-                           input_rate,
-                           cached_input_rate,
-                           cache_creation_rate,
-                           output_rate,
-                         );
-                         final_message_cost = message_cost;
+                       usage.round_ended();
+                       let totals = usage.totals();
+                       let message_cost = usage.charge(cost_of(&totals));
                        new_llm_message.latency = Set(latency);
-                       new_llm_message.request_tokens = Set(request_tokens);
-                       new_llm_message.response_tokens = Set(response_tokens);
-                       new_llm_message.total_tokens = Set(total_tokens);
+                       new_llm_message.request_tokens = Set(totals.input);
+                       new_llm_message.response_tokens = Set(totals.output);
+                       new_llm_message.total_tokens = Set(totals.total);
                        new_llm_message.cost = Set(message_cost);
                        new_llm_message.tools_calls = Set(tool_calls.clone());
                        new_llm_message.tools_results = Set(tool_results.clone());
@@ -2390,10 +2203,10 @@ pub async fn handle_chat_stream(
                            .data(ChatStream {
                                id: None, title: None, message_id: Some(new_message_id), user_message_id: None,
                                is_new: None, content: None,
-                               input_tokens: Some(request_tokens),
-                               output_tokens: Some(response_tokens),
-                               cached_input_tokens: (cached_input_tokens_acc > 0).then_some(cached_input_tokens_acc),
-                               cache_creation_tokens: (cache_creation_tokens_acc > 0).then_some(cache_creation_tokens_acc),
+                               input_tokens: Some(totals.input),
+                               output_tokens: Some(totals.output),
+                               cached_input_tokens: (totals.cached_input > 0).then_some(totals.cached_input),
+                               cache_creation_tokens: (totals.cache_creation > 0).then_some(totals.cache_creation),
                                latency_ms: Some(latency),
                                cost: message_cost.to_f32(),
                                event: None, tool_call: None, tool_result: None,
@@ -2595,14 +2408,14 @@ pub async fn handle_chat_stream(
                                        tool_name: tool_ref.original_name.clone(),
                                        duration_ms,
                                        executed_at,
-                                       preview: crate::services::connector_console_helpers::result_preview(&output_payload),
                                    }),
                                    tool_name: Some(call.tool_name.clone()),
                                    tool_id: call.tool_id.clone(),
                                    kind: Some(ChatToolKind::Other),
                                    status: Some(if is_error { "error" } else { "success" }.to_string()),
-                                   output: Some(output_payload.clone()),
+                                   output: None,
                                    web_search: None,
+                                   summary: Some(result_summary(&output_payload, is_error)),
                                };
                                tool_results.push(
                                    serde_json::to_value(&tool_result).unwrap_or_else(|_| json!({})),
@@ -2703,6 +2516,7 @@ pub async fn handle_chat_stream(
                    let results = next_tool_results.take();
                    match results {
                        Some(results) => {
+                           usage.next_round(&results);
                            let continuation = tokio::select! {
                                biased;
                                _ = cancel_handle.cancelled() => continue,
@@ -2717,6 +2531,7 @@ pub async fn handle_chat_stream(
                                    continue;
                                }
                                Err(error) => {
+                                   usage.round_refused();
                                    eprintln!(
                                        "provider continuation failed: {}",
                                        provider_error_class(&error)
@@ -2744,48 +2559,36 @@ pub async fn handle_chat_stream(
            }
 
            if stream_finished {
-               if total_tokens == 0 {
-                   total_tokens = request_tokens + response_tokens;
-               }
-               let token_cost = if final_message_cost > Decimal::from(0) {
-                   final_message_cost
-               } else {
-                   calculate_llm_cost(
-                       request_tokens,
-                       cached_input_tokens_acc,
-                       cache_creation_tokens_acc,
-                       response_tokens,
-                       input_rate,
-                       cached_input_rate,
-                       cache_creation_rate,
-                       output_rate,
-                   )
-               };
+               // A turn that stopped early is charged from estimates where the provider sent no usage.
+               let totals = usage.ended_as(match stop_reason {
+                   None => TurnEnd::Completed,
+                   Some(StopReason::ProviderError) => TurnEnd::Refused,
+                   Some(_) => TurnEnd::Interrupted,
+               });
+               let token_cost = usage.charge(cost_of(&totals));
                let message_cost = token_cost + image_gen_cost;
+               new_llm_message.request_tokens = Set(totals.input);
+               new_llm_message.response_tokens = Set(totals.output);
+               new_llm_message.total_tokens = Set(totals.total);
+               new_llm_message.cost = Set(token_cost);
+               if totals.estimated {
+                   let metadata = new_llm_message.metadata.clone().take().flatten();
+                   new_llm_message.metadata = Set(Some(with_usage_estimated(metadata)));
+               }
+               if let Err(error) = save_reply(&app_state.database, claims.user_id, &new_llm_message).await {
+                   eprintln!("assistant message usage save error: {error}");
+               }
                if let Ok(Some(conversation)) = conversations::Entity::find_by_id(conversation_id.clone())
                  .one(&app_state.database)
                  .await
                 {
                  let mut active_conversation = conversation.clone().into_active_model();
-                 active_conversation.total_tokens = Set(conversation.total_tokens + total_tokens as i64);
+                 active_conversation.total_tokens = Set(conversation.total_tokens + totals.total as i64);
                  active_conversation.total_cost = Set(conversation.total_cost + message_cost);
                  active_conversation.updated_at = Set(Utc::now());
                  let _ = active_conversation.update(&app_state.database).await;
                }
-               if let Ok(Some(user)) = users::Entity::find_by_id(claims.user_id)
-                   .one(&app_state.database)
-                   .await
-               {
-                   if let Some(department_id) = user.department_id {
-                       if let Err(e) =
-                           refresh_department_budget_available(&app_state.database, department_id).await
-                       {
-                           eprintln!("refresh budget available error: {e}");
-                       } else if let Err(e) = emit_budget_alerts(&app_state, department_id).await {
-                           eprintln!("emit budget alert error: {:?}", e);
-                       }
-                   }
-               }
+               refresh_spender_budget(&app_state, claims.user_id).await;
                if !message_content.trim().is_empty() {
                    embedding_targets.push(EmbeddingTarget {
                        message_id: new_message_id,
@@ -2805,8 +2608,9 @@ pub async fn handle_chat_stream(
                            tool_id: Some(tool_id.clone()),
                            kind: Some(ChatToolKind::Other),
                            status: Some("error".to_string()),
-                           output: Some(json!({"error": "Tool execution did not complete"})),
+                           output: None,
                            web_search: None,
+                           summary: Some(result_summary(&json!({"error": "Tool execution did not complete"}), true)),
                        };
                        tool_results.push(serde_json::to_value(&failed).unwrap_or_else(|_| json!({})));
                        new_llm_message.tools_results = Set(tool_results.clone());
@@ -2945,9 +2749,14 @@ pub async fn handle_chat_stream(
                        let metadata = json!({
                            "webSearch": req.web_search,
                            "artifacts": saved_artifacts,
-                           "cachedInputTokens": cached_input_tokens_acc,
-                           "cacheCreationTokens": cache_creation_tokens_acc,
+                           "cachedInputTokens": totals.cached_input,
+                           "cacheCreationTokens": totals.cache_creation,
                        });
+                       let metadata = if totals.estimated {
+                           with_usage_estimated(Some(metadata))
+                       } else {
+                           metadata
+                       };
                        new_llm_message.metadata = Set(Some(match stop_reason {
                            Some(reason) => with_stop_reason(Some(metadata), reason),
                            None => metadata,
@@ -2962,10 +2771,10 @@ pub async fn handle_chat_stream(
                    message_id: Some(new_message_id), user_message_id: None,
                    is_new: None,
                    content: None,
-                   input_tokens: Some(request_tokens),
-                   output_tokens: Some(response_tokens),
-                   cached_input_tokens: (cached_input_tokens_acc > 0).then_some(cached_input_tokens_acc),
-                   cache_creation_tokens: (cache_creation_tokens_acc > 0).then_some(cache_creation_tokens_acc),
+                   input_tokens: Some(totals.input),
+                   output_tokens: Some(totals.output),
+                   cached_input_tokens: (totals.cached_input > 0).then_some(totals.cached_input),
+                   cache_creation_tokens: (totals.cache_creation > 0).then_some(totals.cache_creation),
                    latency_ms: Some(latency),
                    cost: message_cost.to_f32(),
                    event: None,

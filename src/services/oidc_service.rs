@@ -376,6 +376,7 @@ struct SsoLogin<'a> {
     hosted_domain: Option<&'a str>,
     email_linking: &'a EmailLinkingMode,
     jit_provisioning: bool,
+    proxy_assertion: bool,
 }
 
 impl SsoLogin<'_> {
@@ -526,6 +527,7 @@ async fn claim_existing_user(
 async fn provision_sso_user(
     txn: &DatabaseTransaction,
     login: &SsoLogin<'_>,
+    attachment: impl FnOnce() -> Result<bool, llm_plugin::ProviderError>,
 ) -> Result<users::Model, AuthError> {
     let is_first_user = users::Entity::find().count(txn).await.map_err(|e| {
         eprintln!("db error while counting users {:?}", e);
@@ -605,6 +607,12 @@ async fn provision_sso_user(
         eprintln!("db error while assigning the new user's role {e:?}");
         AuthError::ServiceTemporarilyUnavailable
     })?;
+    if is_first_user
+        && login.proxy_assertion
+        && attachment().map_err(|_| AuthError::ServiceTemporarilyUnavailable)?
+    {
+        super::grengin_consent::preinstall_for_managed_creator(txn).await?;
+    }
     Ok(inserted_user)
 }
 
@@ -612,6 +620,19 @@ async fn provision_sso_user(
 async fn resolve_sso_user(
     database: &DatabaseConnection,
     login: &SsoLogin<'_>,
+) -> Result<users::Model, AuthError> {
+    resolve_sso_user_with_attachment(
+        database,
+        login,
+        super::grengin_grant::GrenginGrant::has_managed_attachment,
+    )
+    .await
+}
+
+async fn resolve_sso_user_with_attachment(
+    database: &DatabaseConnection,
+    login: &SsoLogin<'_>,
+    attachment: impl FnOnce() -> Result<bool, llm_plugin::ProviderError>,
 ) -> Result<users::Model, AuthError> {
     let txn = begin_login_transaction(database).await?;
     if let Some(user) = claim_existing_user(&txn, login).await? {
@@ -628,7 +649,7 @@ async fn resolve_sso_user(
         commit_login_transaction(txn).await?;
         return Ok(user);
     }
-    let user = provision_sso_user(&txn, login).await?;
+    let user = provision_sso_user(&txn, login, attachment).await?;
     commit_login_transaction(txn).await?;
     let _ = AuthorizationService::new(database)
         .recompute_effective_permissions(user.id)
@@ -918,6 +939,7 @@ pub async fn oidc_oauth_callback(
         hosted_domain: hd.as_deref(),
         email_linking: &runtime.configuration.email_linking,
         jit_provisioning: app_state.sso_jit_provisioning_enabled(&provider).await,
+        proxy_assertion: cb.assertion.is_some(),
     };
     let user = resolve_sso_user(&app_state.database, &login).await?;
 
@@ -1548,7 +1570,128 @@ mod tests {
             hosted_domain: None,
             email_linking,
             jit_provisioning: true,
+            proxy_assertion: false,
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+    async fn managed_first_login_installs_atomically_and_retries_preserve_deletion() {
+        let fresh = FreshDatabase::create().await;
+        let linking = EmailLinkingMode::VerifiedEmail;
+        let mut login = keycloak_login("managed-creator", "creator@example.com", &linking);
+        login.proxy_assertion = true;
+        assert!(
+            resolve_sso_user_with_attachment(&fresh.db, &login, || {
+                Err(llm_plugin::ProviderError::Configuration(
+                    "test invalid identity".into(),
+                ))
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(user_count(&fresh.db).await, 0);
+        assert_eq!(
+            crate::models::ai_engines::Entity::find()
+                .count(&fresh.db)
+                .await
+                .unwrap(),
+            0
+        );
+
+        let user = resolve_sso_user_with_attachment(&fresh.db, &login, || Ok(true))
+            .await
+            .unwrap();
+        assert_eq!(role_names(&fresh.db, user.id).await, vec![ROLE_SUPER_ADMIN]);
+        let engine = crate::models::ai_engines::Entity::find()
+            .one(&fresh.db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            engine.is_enabled
+                && engine.whitelist_models.is_empty()
+                && engine.default_model.is_empty()
+        );
+        assert!(engine.api_key.is_none() && engine.plugin_config.is_none());
+
+        let mut closed: crate::models::ai_engines::ActiveModel = engine.clone().into();
+        closed.is_enabled = Set(false);
+        closed.update(&fresh.db).await.unwrap();
+        resolve_sso_user_with_attachment(&fresh.db, &login, || {
+            panic!("repeat login must not reload identity")
+        })
+        .await
+        .unwrap();
+        assert!(
+            !crate::models::ai_engines::Entity::find_by_id(engine.id)
+                .one(&fresh.db)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_enabled
+        );
+        crate::models::ai_engines::Entity::delete_by_id(engine.id)
+            .exec(&fresh.db)
+            .await
+            .unwrap();
+        resolve_sso_user_with_attachment(&fresh.db, &login, || {
+            panic!("repeat login must not reinstall")
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::models::ai_engines::Entity::find()
+                .count(&fresh.db)
+                .await
+                .unwrap(),
+            0
+        );
+        fresh.remove().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable database)"]
+    async fn concurrent_managed_first_logins_install_one_engine_and_owner() {
+        let fresh = FreshDatabase::create().await;
+        let holder = fresh.db.begin().await.unwrap();
+        lock_first_user_bootstrap(&holder).await.unwrap();
+        let logins: Vec<_> = (0..2)
+            .map(|_| {
+                let db = fresh.db.clone();
+                tokio::spawn(async move {
+                    let linking = EmailLinkingMode::VerifiedEmail;
+                    let mut login = keycloak_login("managed-race", "creator@example.com", &linking);
+                    login.proxy_assertion = true;
+                    resolve_sso_user_with_attachment(&db, &login, || Ok(true))
+                        .await
+                        .unwrap()
+                        .id
+                })
+            })
+            .collect();
+        wait_for_bootstrap_lock_waiters(&fresh.db, 2).await;
+        holder.commit().await.unwrap();
+        let mut ids = Vec::new();
+        for task in logins {
+            ids.push(
+                tokio::time::timeout(std::time::Duration::from_secs(20), task)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        assert_eq!(ids[0], ids[1]);
+        assert_eq!(user_count(&fresh.db).await, 1);
+        assert_eq!(role_names(&fresh.db, ids[0]).await, vec![ROLE_SUPER_ADMIN]);
+        assert_eq!(
+            crate::models::ai_engines::Entity::find()
+                .count(&fresh.db)
+                .await
+                .unwrap(),
+            1
+        );
+        fresh.remove().await;
     }
 
     async fn user_count(db: &DatabaseConnection) -> u64 {

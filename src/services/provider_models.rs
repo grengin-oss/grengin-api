@@ -204,6 +204,7 @@ mod tests {
 
     fn model_info(model_type: ModelType) -> ModelInfo {
         ModelInfo {
+            launch_date: None,
             key: "model-1".to_string(),
             name: "Model 1".to_string(),
             engine: "example".to_string(),
@@ -213,7 +214,6 @@ mod tests {
             summary: None,
             recommended: false,
             r#default: false,
-            launch_date: None,
             price_tier: None,
             comment: None,
             input_token_rate: None,
@@ -399,5 +399,14 @@ mod tests {
                 "aa/unknown"
             ]
         );
+        assert_eq!(
+            crate::services::model_picker::catalog_launch_date(
+                &serde_json::json!({"launchDate": " 2026-11-17 "})
+            )
+            .as_deref(),
+            Some("2026-11-17")
+        );
+        let json = serde_json::to_value(&providers[0].models[0]).unwrap();
+        assert!(json.get("launch_date").is_none());
     }
 }

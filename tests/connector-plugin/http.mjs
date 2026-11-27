@@ -27,6 +27,8 @@ function bearer(id) {
 }
 const vendorCalls = [];
 let modelGate;
+let modelRequests = 0;
+let failAfterToolCall = false;
 const fixture = createServer(async (req,res) => {
   let raw = ''; for await (const chunk of req) raw += chunk;
   const distribution=/^\/metadata\/distributions\/grengin-api\/(\d+\.\d+\.\d+)\/index.json$/.exec(req.url);
@@ -48,6 +50,8 @@ const fixture = createServer(async (req,res) => {
   } else if (req.url.includes('/chat/completions')) {
     const body = JSON.parse(raw);
     const tool = body.tools?.find(tool=>tool.function?.name.includes('plugin_echo'));
+    // Optional title generation is not a connector turn or a continuation.
+    if (tool) modelRequests++;
     const finished = body.messages.some(message=>message.role==='tool');
     if (tool && !finished && modelGate) {
       const gate = modelGate; modelGate = undefined;
@@ -57,6 +61,7 @@ const fixture = createServer(async (req,res) => {
     const events = tool && !finished ? [
       {choices:[{delta:{tool_calls:[{index:0,id:'plugin-call',type:'function',function:{name:tool.function.name,arguments:'{}'}}]}}]},
       {choices:[{delta:{},finish_reason:'tool_calls'}],usage:{prompt_tokens:5,completion_tokens:3,total_tokens:8}},
+      ...(failAfterToolCall ? [{type:'error',error:{type:'server_error',message:'fixture failure'}}] : []),
     ] : [{choices:[{delta:{content:'Plugin completed.'}}]},{choices:[{delta:{},finish_reason:'stop'}],usage:{prompt_tokens:5,completion_tokens:3,total_tokens:8}}];
     for (const event of events) res.write(`data: ${JSON.stringify(event)}\n\n`);
     res.end('data: [DONE]\n\n');
@@ -176,6 +181,12 @@ try {
   const badFlow=structuredClone(request);badFlow.connection_config.oauth.flow='unsupported';
   await call('POST','/admin/mcp-servers',badFlow,400);
   check('invalid OAuth installs write no server rows',Number(sql('SELECT count(*) FROM mcp_servers')),initial);
+  for (const name of ['Host','Forwarded','X-Forwarded-Prefix','X-Forwarded-Port','Cookie']) {
+    const invalid=structuredClone(request);
+    invalid.connection_config.transport_config={headers:{[name]:'evil.example'}};
+    await call('POST','/admin/mcp-servers',invalid,400);
+  }
+  check('refused routing headers never install a server',Number(sql('SELECT count(*) FROM mcp_servers')),initial);
   server=(await call('POST','/admin/mcp-servers',request,201)).json();
   await call('GET',`/admin/mcp-servers/${server.id}/overview`,undefined,401,null);
   await call('GET',`/admin/mcp-servers/${server.id}/overview`,undefined,403,member);
@@ -203,6 +214,7 @@ try {
   check('installed tools reach the existing user tool listing',JSON.stringify(tools).includes('plugin_echo'),true);
   const provider=JSON.parse(await readFile(`${root}/llm-plugin/examples/openai-compatible.provider.json`,'utf8'));
   provider.id='plugin-chat-fixture';provider.name='Plugin fixture';delete provider.operations.listModels;
+  provider.operations.chatStream.response.rules.push({id:'error',when:{pointer:'/type',equals:'error'},emit:'error',fields:{kind:'/error/type',message:'/error/message'}});
   provider.models=[{id:'fixture-model',name:'Fixture model',modelType:'text_generator',capabilities:{chat:provider.capabilities.chat},metadata:{inputTokenRate:0,outputTokenRate:0}}];
   await call('POST','/admin/ai-engines',{api_key:'fixture-only',is_enabled:true,whitelisted_models:['fixture-model'],default_model:'fixture-model',plugin_config:{manifest:provider,configuration:{},baseUrlOverride:vendor+'/',allowInsecureHttp:true,allowPrivateNetwork:true}},201);
   const before=vendorCalls.length;
@@ -246,8 +258,13 @@ try {
   check('chat consumes the plugin result through the existing tool loop',streamed.includes('Plugin completed.'),true);
   const resultEvent=streamed.split('\n').filter(line=>line.startsWith('data:')).map(line=>{try{return JSON.parse(line.slice(5));}catch{return null;}}).find(value=>value?.tool_result?.mcp)?.tool_result;
   assert(resultEvent,'MCP tool-result details missing');
-  check('tool result includes readable preview and stable connector identity',[resultEvent.mcp.server_id,resultEvent.mcp.tool_name,resultEvent.mcp.preview.empty,resultEvent.mcp.preview.text.includes('plugin-result')],[server.id,'plugin_echo',false,true]);
+  check('tool result carries a summary and stable connector identity, never the raw output',[resultEvent.mcp.server_id,resultEvent.mcp.tool_name,typeof resultEvent.summary?.text,'output' in resultEvent,'preview' in resultEvent.mcp,JSON.stringify(resultEvent).includes('plugin-result')],[server.id,'plugin_echo','string',false,false,false]);
   check('tool-result metadata is saved with the reply',sql(`SELECT count(*) FROM messages WHERE "toolsResults"::text LIKE '%${resultEvent.mcp.execution_id}%'`)!=='0',true);
+  failAfterToolCall=true;
+  const [callsBefore,requestsBefore]=[vendorCalls.length,modelRequests];
+  const failed=await call('POST','/chat/stream',{provider:'plugin-chat-fixture',model_name:'fixture-model',selected_mcp_servers:[server.id],messages:[{role:'user',content:'Use plugin_echo',files:[]}]});
+  failAfterToolCall=false;
+  check('a provider error ends the turn: its tool calls never run and no tool round follows',[failed.text.includes('ai_error'),vendorCalls.length-callsBefore,modelRequests-requestsBefore],[true,0,1]);
   const usage=(await call('GET',`/admin/mcp-servers/${server.id}/overview`)).json().usage;
   check('usage counts actual recorded executions',usage.tool_calls,usage.successful_tool_calls+usage.failed_tool_calls);
   check('admin call uses only the admin connection token',vendorCalls.at(-1),'Bearer fixture-alice');
@@ -312,6 +329,9 @@ try {
   sql('DROP TRIGGER delay_plugin_update ON mcp_servers; DROP FUNCTION delay_plugin_update()');
   await stop();await start();
   await chat();check('restart reloads installed manifest and per-user encrypted credentials',vendorCalls.at(-1),'Bearer fixture-alice');
+  const movedToken=structuredClone(concurrent);movedToken.oauth.token_url=vendor+'/elsewhere/token';
+  const refusedMove=await call('PUT',`/admin/mcp-servers/${server.id}`,{connection_config:movedToken},400);
+  check('a new token endpoint is refused without the client secret, keeping saved tokens',[refusedMove.text.includes('client_secret'),JSON.parse(sql(`SELECT "connectionConfig" FROM mcp_servers WHERE id=${quote(server.id)}`)).oauth.token_url,sql(`SELECT count(*)>0 FROM mcp_connections WHERE "serverId"=${quote(server.id)} AND "accessToken" IS NOT NULL`)],[true,vendor+'/token','t']);
   await call('PUT',`/admin/mcp-servers/${server.id}`,{client_id:'replacement-client'});
   check('changing the OAuth binding invalidates all old saved tokens',sql(`SELECT count(*) FROM mcp_connections WHERE "serverId"=${quote(server.id)} AND (connected=true OR "accessToken" IS NOT NULL OR "refreshToken" IS NOT NULL)`),'0');
   const count=vendorCalls.length;await chat();check('changed OAuth identity cannot reuse an earlier token',vendorCalls.length,count);

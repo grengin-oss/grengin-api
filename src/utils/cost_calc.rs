@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    dto::chat_stream::{
-        ChatStreamToolInput, ChatStreamWebSearchResult, ChatStreamWebSearchResultItem,
-    },
+    dto::chat_stream::{ChatStreamWebSearchResult, ChatStreamWebSearchResultItem},
     services::provider_stream::{StreamWebSearchState, ToolInput},
 };
 use rust_decimal::prelude::{Decimal, FromPrimitive};
@@ -46,10 +44,6 @@ pub fn calculate_llm_cost(
     let cached_rate_val = cached_input_rate.unwrap_or(input_rate_val);
     let creation_rate_val = cache_creation_rate.unwrap_or(input_rate_val);
 
-    if input_rate_val == 0.0 && output_rate_val == 0.0 {
-        return Decimal::from(0);
-    }
-
     let regular = (input_tokens - cached_input_tokens - cache_creation_tokens).max(0);
     let cost = (regular as f64 * input_rate_val
         + cached_input_tokens as f64 * cached_rate_val
@@ -77,15 +71,6 @@ pub fn to_chat_web_search_result(state: &StreamWebSearchState) -> ChatStreamWebS
     }
 }
 
-pub fn to_chat_tool_input(input: &ToolInput) -> ChatStreamToolInput {
-    match input {
-        ToolInput::Text(text) => ChatStreamToolInput::Text { text: text.clone() },
-        ToolInput::Json(value) => ChatStreamToolInput::Json {
-            value: value.clone(),
-        },
-    }
-}
-
 pub fn tool_input_to_value(input: Option<&ToolInput>) -> Value {
     match input {
         Some(ToolInput::Json(value)) => value.clone(),
@@ -94,47 +79,6 @@ pub fn tool_input_to_value(input: Option<&ToolInput>) -> Value {
         }
         None => Value::Null,
     }
-}
-
-pub fn output_indicates_error(output: &Value) -> bool {
-    match output {
-        Value::Object(map) => {
-            if map
-                .get("is_error")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                return true;
-            }
-            if map.get("isError").and_then(Value::as_bool).unwrap_or(false) {
-                return true;
-            }
-            if map.get("success").and_then(Value::as_bool) == Some(false) {
-                return true;
-            }
-            if map.get("ok").and_then(Value::as_bool) == Some(false) {
-                return true;
-            }
-            if let Some(status) = map.get("status").and_then(Value::as_str) {
-                let status = status.to_ascii_lowercase();
-                if status == "error" || status == "failed" {
-                    return true;
-                }
-            }
-            if let Some(err) = map.get("error") {
-                if !err.is_null() {
-                    return true;
-                }
-            }
-            false
-        }
-        _ => false,
-    }
-}
-
-pub fn tool_result_status_from_output(output: &Option<Value>) -> Option<String> {
-    let is_error = output.as_ref().map(output_indicates_error).unwrap_or(false);
-    Some(if is_error { "error" } else { "success" }.to_string())
 }
 
 #[cfg(test)]
@@ -170,5 +114,12 @@ mod tests {
         let cost = calculate_llm_cost(1_000, 300, 200, 100, None, None, None, None);
 
         assert_eq!(cost, Decimal::ZERO);
+    }
+
+    #[test]
+    fn cache_tokens_are_charged_when_only_cache_rates_are_priced() {
+        let cost = calculate_llm_cost(1_000, 300, 200, 0, Some(0.0), Some(1.0), Some(5.0), None);
+
+        assert_eq!(cost, Decimal::from_str_exact("0.0013").unwrap());
     }
 }

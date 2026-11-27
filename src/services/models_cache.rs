@@ -113,6 +113,20 @@ pub async fn get_model_info_cached(
     Ok(find_provider_model(&cache.providers, provider_key, model_key).cloned())
 }
 
+// Engines that come from a provider plugin rather than the catalog lists (the Grengin gateway)
+// still have a catalog entry with their icons; /models uses it instead of sending none.
+pub fn provider_icons(providers: &[ProviderInfo]) -> HashMap<String, (String, String)> {
+    providers
+        .iter()
+        .map(|provider| {
+            (
+                provider.key.to_ascii_lowercase(),
+                (provider.icon.clone(), provider.icon_dark.clone()),
+            )
+        })
+        .collect()
+}
+
 fn find_provider_model<'a>(
     providers: &'a [ProviderInfo],
     provider_key: &str,
@@ -779,5 +793,26 @@ mod tests {
         assert_eq!(image.image_cached_input_token_rate, Some(0.25));
         assert_eq!(image.image_output_token_rate, Some(8.0));
         assert!(image.supports_multiple_images);
+    }
+
+    #[test]
+    fn plugin_engines_take_their_icons_from_the_catalog_entry() {
+        let provider = |key: &str, icon: &str| ProviderInfo {
+            key: key.to_string(),
+            name: key.to_string(),
+            icon: icon.to_string(),
+            icon_dark: format!("{icon}-dark"),
+            status: "active".to_string(),
+            models: Vec::new(),
+        };
+        let icons = provider_icons(&[provider("Grengin", "https://meta/grengin.svg")]);
+        assert_eq!(
+            icons.get("grengin"),
+            Some(&(
+                "https://meta/grengin.svg".to_string(),
+                "https://meta/grengin.svg-dark".to_string()
+            ))
+        );
+        assert!(icons.get("unknown").is_none());
     }
 }

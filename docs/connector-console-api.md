@@ -166,35 +166,68 @@ package bytes remain unchanged.
 
 ## Tool Results
 
-The SDK already returns structured content **and** a text content block. A blank
-UI is not by itself a blank vendor response. Existing `tool_result.output` stays
-unchanged; the backend now supplies an additive `tool_result.mcp` object:
+The browser receives a summary of each connector call and result, never its
+arguments or output. The model still receives the full result, and the admin
+execution log (`mcp_executions`) keeps it. This applies to the live stream and to
+chat history; replies saved before this change are summarised when they are read.
+Both fail closed. In the live stream only the provider's own server-side web
+search is web search; every function call is a connector's, including names
+that match no connector or more than one, which are summarised as `Connector`.
+In history every stored call and result except the providers' own web search
+is summarised, including calls that never got a result, whatever alias of the
+tool name they used. A stored entry counts as web search only by its exact tool
+name (`web_search`, `web_search_call`, `google_search`, ...) and only when
+neither it nor its result carries a connector marker (`mcp` or `summary`), so a
+connector named like web search is still summarised.
+
+A connector `tool_call` has no `input` or `input_text`; it carries:
 
 ```json
 {
-  "execution_id": "96dbd42d-1a45-4e26-a217-dba38ad52c66",
-  "server_id": "8c2fa647-4a8e-4ac1-9f38-93df735621c0",
-  "server_name": "Gmail",
-  "tool_name": "list_messages",
-  "duration_ms": 140,
-  "executed_at": "2026-11-05T08:00:00Z",
-  "preview": {
-    "text": "{\"messages\":[{\"id\":\"example\"}]}",
-    "truncated": false,
-    "empty": false,
-    "item_count": 1
-  }
+  "tool_name": "tool_0_search_threads",
+  "tool_id": "call_1",
+  "kind": "other",
+  "summary": { "connector": "Gmail", "action": "Search threads", "target": "from:acme invoice" }
 }
 ```
 
-Render the connector and tool names, execution status, duration, timestamp and
-preview in a collapsible result. Render text as text, not raw HTML. The preview
-is limited to 2,048 Unicode characters; the authenticated chat's existing output
-remains available for a JSON viewer. `item_count` is optional and refers only to
-a recognized result list, not a total across vendor pages. `empty` distinguishes
-a genuinely empty result from a UI rendering failure. Errors retain error status
-and are never relabeled as successful empty responses. Non-MCP tool events omit
-`mcp` entirely. Reply persistence preserves these details for chat reloads.
+`target` is optional and is taken only from a search, name, path, channel or
+recipient argument, clipped to 80 characters. Bodies, message text and IDs are
+never shown. A connector call is sent exactly once, when its arguments are
+complete; no partial chunks are sent for it.
+
+A connector `tool_result` has no `output`; it carries `mcp` (execution details)
+and `summary`:
+
+```json
+{
+  "tool_id": "call_1",
+  "status": "success",
+  "kind": "other",
+  "mcp": {
+    "execution_id": "96dbd42d-1a45-4e26-a217-dba38ad52c66",
+    "server_id": "8c2fa647-4a8e-4ac1-9f38-93df735621c0",
+    "server_name": "Gmail",
+    "tool_name": "search_threads",
+    "duration_ms": 140,
+    "executed_at": "2026-11-05T08:00:00Z"
+  },
+  "summary": { "text": "2 messages", "item_count": 2, "items": ["Invoice #123", "Re: Payment"] }
+}
+```
+
+`summary.text` is always present: a count (`2 messages`, `No results`), the
+title of a single item (an empty list beside a title, such as an issue without
+labels, still shows the title), `Done` when the result has no title, or one of these
+fixed error messages: `Sign-in required`, `Sign-in failed`,
+`Connector unavailable, try again`, `Access denied`, `Connector not connected`,
+`Timed out`, `Did not finish`, `The tool returned an error`. Error text from
+the connector or vendor is never forwarded, since it can quote a message body
+or a credential; it stays in the execution log.
+`item_count` and `items` appear only for lists; `items` holds at most five
+titles (email subject, file or page name, event or issue summary), each clipped
+to 120 characters. Snippets and bodies are never included. Render text as text,
+not raw HTML. Web search events are unchanged and omit `mcp` and `summary`.
 
 `execution_id` correlates with the existing execution audit when its best-effort
 write succeeds; this change does not make execution auditing transactional with

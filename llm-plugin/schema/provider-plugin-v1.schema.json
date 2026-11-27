@@ -1437,6 +1437,13 @@
           "type": "boolean",
           "default": true
         },
+        "reasoningOutputTokens": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "outputTokens": {
           "type": [
             "string",

@@ -53,6 +53,10 @@ await expect('PUT',`/admin/ai-engines/${manifest.id}`,{whitelisted_models:['olde
 const rotated=await expect('PUT',`/admin/ai-engines/${manifest.id}`,{api_key:'rotated-fixture-key'},200);
 check('rotation preserves configured models and disabled state',[rotated.is_enabled,rotated.whitelisted_models,rotated.default_model],[false,['older'],'older']);
 await expect('PUT',`/admin/ai-engines/${manifest.id}`,{api_key:'   '},400);
+const moved=config();moved.manifest.baseUrl='https://elsewhere.example/v1/';
+await expect('PUT',`/admin/ai-engines/${manifest.id}`,{plugin_config:moved},400);
+check('a new endpoint is refused until the key is entered again',sql(`SELECT "pluginConfig"->'manifest'->>'baseUrl' FROM ai_engines WHERE "engineKey"=${q(manifest.id)}`),manifest.baseUrl);
+await expect('PUT',`/admin/ai-engines/${manifest.id}`,{plugin_config:config()},200);
 const empty=config();empty.manifest.id=`empty-${randomUUID()}`;
 const explicit=await expect('POST','/admin/ai-engines',{plugin_config:empty,api_key:'fixture-key',is_enabled:false,whitelisted_models:[]},201);
 check('explicit empty whitelist and disabled state win',[explicit.is_enabled,explicit.whitelisted_models],[false,[]]);

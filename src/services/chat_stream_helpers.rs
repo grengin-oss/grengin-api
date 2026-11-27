@@ -22,8 +22,14 @@ use crate::{
         departments::ActionOnExceed,
         messages,
         messages::{ChatRole, StopReason},
+        users,
     },
-    services::budget_allocation::{BudgetHealth, get_department_budget_status},
+    services::{
+        budget_allocation::{
+            BudgetHealth, get_department_budget_status, refresh_department_budget_available,
+        },
+        notifications::emit_budget_alerts,
+    },
     state::{EditView, GeneratingSnapshot, SharedState, StreamCancel, StreamCancellations},
 };
 
@@ -124,16 +130,29 @@ pub fn ensure_budget_pricing(
     if !budget_configured {
         return Ok(());
     }
-    let valid_rate =
-        |rate: Option<f64>| rate.is_some_and(|value| value.is_finite() && value >= 0.0);
-    // Embedders only bill input tokens, so they carry no output rate.
+    let valid = |value: f64| value.is_finite() && value >= 0.0;
+    let valid_rate = |rate: Option<f64>| rate.is_some_and(valid);
+    // Embedders bill input only; images need their own output rate (the text rate would undercharge
+    // them), while image input falls back to the text input rate. No set rate may be negative.
     let priced = model.is_some_and(|model| {
-        valid_rate(model.input_token_rate)
-            && (model.model_type == crate::dto::models::ModelType::TextEmbedder
-                || valid_rate(model.output_token_rate))
-            && (model.model_type != crate::dto::models::ModelType::ImageGenerator
-                || (valid_rate(model.image_input_token_rate)
-                    && valid_rate(model.image_output_token_rate)))
+        let optional_rates_valid = [
+            model.output_token_rate,
+            model.cached_input_token_rate,
+            model.cache_creation_token_rate,
+            model.image_input_token_rate,
+            model.image_cached_input_token_rate,
+            model.image_output_token_rate,
+        ]
+        .into_iter()
+        .all(|rate| rate.is_none_or(valid));
+        let output_priced = match model.model_type {
+            crate::dto::models::ModelType::TextEmbedder => true,
+            crate::dto::models::ModelType::ImageGenerator => {
+                valid_rate(model.image_output_token_rate)
+            }
+            _ => valid_rate(model.output_token_rate),
+        };
+        valid_rate(model.input_token_rate) && optional_rates_valid && output_priced
     });
     if priced {
         Ok(())
@@ -421,6 +440,30 @@ async fn stop_request_within(cancel: &StreamCancel, grace: Duration) -> Option<S
         .await
         .ok()
         .and_then(|_| cancel.reason())
+}
+
+// Runs after every charged reply, including one whose save failed after the charge, so the
+// department's available budget and its alerts never lag behind the ledger.
+pub async fn refresh_spender_budget(state: &SharedState, user_id: Uuid) {
+    let department_id = match users::Entity::find_by_id(user_id)
+        .one(&state.database)
+        .await
+    {
+        Ok(Some(user)) => user.department_id,
+        Ok(None) => None,
+        Err(error) => {
+            eprintln!("budget refresh user lookup error: {error}");
+            None
+        }
+    };
+    let Some(department_id) = department_id else {
+        return;
+    };
+    if let Err(error) = refresh_department_budget_available(&state.database, department_id).await {
+        eprintln!("refresh budget available error: {error}");
+    } else if let Err(error) = emit_budget_alerts(state, department_id).await {
+        eprintln!("emit budget alert error: {error:?}");
+    }
 }
 
 pub async fn record_stop_reason(db: &DatabaseConnection, message_id: Uuid, reason: StopReason) {
@@ -788,6 +831,7 @@ mod tests {
 
     fn model(engine: &str, key: &str, name: &str) -> ModelInfo {
         ModelInfo {
+            launch_date: None,
             key: key.to_string(),
             name: name.to_string(),
             engine: engine.to_string(),
@@ -797,7 +841,6 @@ mod tests {
             summary: None,
             recommended: false,
             r#default: false,
-            launch_date: None,
             price_tier: None,
             comment: None,
             input_token_rate: None,
@@ -864,9 +907,15 @@ mod tests {
         info.input_token_rate = Some(1.0);
         info.output_token_rate = Some(2.0);
         assert!(ensure_budget_pricing(true, Some(&info)).is_err());
-        info.image_input_token_rate = Some(3.0);
         info.image_output_token_rate = Some(4.0);
         assert!(ensure_budget_pricing(true, Some(&info)).is_ok());
+        info.output_token_rate = None;
+        assert!(ensure_budget_pricing(true, Some(&info)).is_ok());
+        info.image_input_token_rate = Some(-3.0);
+        assert!(ensure_budget_pricing(true, Some(&info)).is_err());
+        info.image_input_token_rate = Some(3.0);
+        info.cached_input_token_rate = Some(f64::NAN);
+        assert!(ensure_budget_pricing(true, Some(&info)).is_err());
     }
 
     #[test]

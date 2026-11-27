@@ -32,10 +32,12 @@ docker run -d --rm --name "$container" --memory=384m --memory-swap=384m --cpus=1
   -e POSTGRES_USER=local -e POSTGRES_PASSWORD="$password" -e POSTGRES_DB=grengin_plugin_test \
   -p 127.0.0.1::5432 pgvector/pgvector:pg16 -c shared_buffers=32MB -c max_connections=30 \
   -c log_statement=all -c 'log_line_prefix=contract-sql:%a: ' >/dev/null
+ready=false
 for _ in $(seq 1 60); do
-  if docker exec "$container" pg_isready -U local -d grengin_plugin_test >/dev/null 2>&1; then break; fi
+  if docker exec "$container" pg_isready -h 127.0.0.1 -U local -d grengin_plugin_test >/dev/null 2>&1; then ready=true; break; fi
   sleep 1
 done
+[[ "$ready" == true ]] || { printf 'Disposable PostgreSQL did not become ready.\n' >&2; exit 1; }
 port=$(docker port "$container" 5432/tcp | sed 's/.*://')
 export DATABASE_URL="postgres://local:$password@127.0.0.1:$port/grengin_plugin_test?application_name=connector-contract"
 node "$root/tests/connector-plugin/$scenario.mjs"

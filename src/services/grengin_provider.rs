@@ -35,12 +35,21 @@ impl GrenginProvider {
         manifest: &ProviderManifestV1,
         catalog: DiscoveryCatalog,
     ) -> Result<Self, ProviderError> {
-        let upstreams: BTreeSet<_> = manifest.native_providers.iter().cloned().collect();
+        let declared: BTreeSet<_> = manifest.native_providers.iter().cloned().collect();
+        // A newer catalog may name an upstream this API version cannot route yet; skipping it
+        // keeps every other Grengin provider working.
+        let upstreams: BTreeSet<_> = declared
+            .iter()
+            .filter(|id| supported_provider(id))
+            .cloned()
+            .collect();
+        for skipped in declared.difference(&upstreams) {
+            eprintln!("Grengin upstream {skipped} is not supported by this API version; skipped");
+        }
         if manifest.id != "grengin"
             || manifest.base_url != "https://service.grengin.com/v1/infer/"
             || upstreams.is_empty()
-            || upstreams.len() != manifest.native_providers.len()
-            || upstreams.iter().any(|id| !supported_provider(id))
+            || declared.len() != manifest.native_providers.len()
         {
             return Err(ProviderError::InvalidManifest(
                 "invalid Grengin nativeProviders".into(),
@@ -315,6 +324,7 @@ fn supported_provider(provider: &str) -> bool {
             | "sarvam"
             | "sakana"
             | "tinker"
+            | "nvidia"
     )
 }
 
@@ -833,6 +843,60 @@ mod tests {
         }
     }
 
+    fn grengin_manifest(native_providers: &[&str]) -> ProviderManifestV1 {
+        ProviderManifestV1::from_json(
+            json!({
+                "manifestVersion":"1.0", "id":"grengin", "version":"1.1", "name":"Grengin",
+                "baseUrl":"https://service.grengin.com/v1/infer/",
+                "capabilities":{"chat":{"streaming":true,"tools":true,"vision":true,"reasoning":true},
+                    "embeddings":true,"imageGeneration":true,"modelListing":true},
+                "nativeProviders":native_providers, "operations":{}
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn nvidia_is_a_grengin_upstream_and_unknown_upstreams_are_skipped() {
+        let catalog =
+            || DiscoveryCatalog::new(reqwest::Client::new(), "http://127.0.0.1:9").unwrap();
+        let grengin = GrenginProvider::new(
+            &grengin_manifest(&["openai", "nvidia", "future-ai"]),
+            catalog(),
+        )
+        .unwrap();
+        assert_eq!(
+            grengin
+                .upstreams
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["nvidia", "openai"]
+        );
+        assert_eq!(
+            grengin.resolve("nvidia/nvidia/nemotron-model").unwrap(),
+            ("nvidia", "nvidia/nemotron-model".to_string())
+        );
+        assert!(grengin.resolve("future-ai/model").is_err());
+        assert!(GrenginProvider::new(&grengin_manifest(&["future-ai"]), catalog()).is_err());
+
+        let mut nvidia = ProviderManifestV1::from_json(include_bytes!(
+            "../../llm-plugin/examples/openai-compatible.provider.json"
+        ))
+        .unwrap();
+        nvidia.id = "nvidia".into();
+        nvidia.operations.embeddings = None;
+        nvidia.operations.image_generation = None;
+        nvidia.operations.image_edit = None;
+        assert!(prepare_native_manifest("nvidia", nvidia).is_ok());
+        let origin = "https://service.grengin.com";
+        let route = |path: &str| Url::parse(&format!("{origin}/v1/infer/nvidia/{path}")).unwrap();
+        assert!(validate_gateway_url(origin, "nvidia", &route("chat/completions")).is_ok());
+        assert!(validate_gateway_url(origin, "nvidia", &route("embeddings")).is_err());
+    }
+
     #[test]
     fn canonical_ids_and_routes_are_narrow_without_changing_native_ids() {
         assert_eq!(
@@ -842,6 +906,11 @@ mod tests {
         assert_eq!(
             split_model("google/Gemini-Case").unwrap(),
             ("gemini", "Gemini-Case")
+        );
+        // NVIDIA's own model IDs carry a vendor prefix that first-slash parsing keeps.
+        assert_eq!(
+            split_model("nvidia/nvidia/nemotron-3-ultra-550b-a55b").unwrap(),
+            ("nvidia", "nvidia/nemotron-3-ultra-550b-a55b")
         );
         for model in [
             "openrouter/model",
@@ -867,6 +936,15 @@ mod tests {
                 .is_ok()
             );
         }
+        let nvidia = |operation: &str| {
+            validate_gateway_url(
+                origin,
+                "nvidia",
+                &Url::parse(&format!("{origin}/v1/infer/nvidia/{operation}")).unwrap(),
+            )
+        };
+        assert!(nvidia("chat/completions").is_ok());
+        assert!(nvidia("models").is_err() && nvidia("responses").is_err());
         for url in [
             "https://evil.invalid/v1/infer/openai/responses",
             "https://service.grengin.com/v1/infer/openai/responses?api_key=secret",
@@ -940,6 +1018,7 @@ mod tests {
             ("deepseek", "max_tokens", true),
             ("kimi", "max_completion_tokens", true),
             ("sarvam", "max_tokens", false),
+            ("nvidia", "max_completion_tokens", true),
         ] {
             let mut package = ProviderManifestV1::from_json(include_bytes!(
                 "../../llm-plugin/examples/openai-compatible.provider.json"
@@ -1178,6 +1257,43 @@ mod tests {
             .unwrap()
             .len(),
             2
+        );
+    }
+
+    #[tokio::test]
+    async fn grengin_package_accepts_the_actual_catalog_native_providers() {
+        let fixture = include_bytes!("../../tests/fixtures/grengin-1.2.provider.json");
+        if let Some(root) = std::env::var_os("GRENGIN_CATALOG_REVIEW_ROOT") {
+            let actual = std::fs::read(
+                std::path::Path::new(&root)
+                    .join("master-data/ai-providers/grengin/versions/1.2/plugin.json"),
+            )
+            .unwrap();
+            assert_eq!(
+                actual, fixture,
+                "runtime fixture must match the real immutable package"
+            );
+        }
+        let mut package = ProviderManifestV1::from_json(fixture).unwrap();
+        let catalog =
+            DiscoveryCatalog::new(reqwest::Client::new(), "https://meta.grengin.com/").unwrap();
+        let provider = GrenginProvider::new(&package, catalog.clone()).unwrap();
+        assert_eq!(
+            provider
+                .resolve("nvidia/nvidia/nemotron-3-ultra-550b-a55b")
+                .unwrap(),
+            ("nvidia", "nvidia/nemotron-3-ultra-550b-a55b".into())
+        );
+        for native in &package.native_providers {
+            assert!(provider.resolve(&format!("{native}/fixture-model")).is_ok());
+        }
+        package.native_providers.push("openrouter".into());
+        let provider = GrenginProvider::new(&package, catalog).unwrap();
+        assert!(provider.resolve("openrouter/fixture-model").is_err());
+        assert!(
+            provider
+                .resolve("nvidia/nvidia/nemotron-3-ultra-550b-a55b")
+                .is_ok()
         );
     }
 }

@@ -373,6 +373,15 @@ impl GrenginGrant {
         })
     }
 
+    pub(super) fn has_managed_attachment() -> Result<bool, ProviderError> {
+        // A variable left blank by a deployment template means no managed attachment.
+        let set = |name: &str| std::env::var(name).is_ok_and(|value| !value.trim().is_empty());
+        if !set("HATCHERY_WORKSPACE_ID") || !set("GRENGIN_IDENTITY_FILE") {
+            return Ok(false);
+        }
+        Ok(Self::configured()?.identity.workspace_id.is_some())
+    }
+
     pub fn origin(&self) -> &'static str {
         self.identity.origin
     }
@@ -440,7 +449,19 @@ impl GrenginGrant {
         let bytes = read_body_capped(response, MAX_BYTES).await.map_err(|_| {
             ProviderError::ResponseMapping("invalid Grengin workspace status".into())
         })?;
-        workspace_document(&bytes)
+        let status = workspace_document(&bytes)?;
+        if let Some(expected_workspace) = &self.identity.workspace_id {
+            let state = self.state.lock().await;
+            if status.workspace_id.as_ref() != Some(expected_workspace)
+                || state.binding.as_ref().map(|(id, _)| id) != status.installation_id.as_ref()
+                || status.installation_id.is_none()
+            {
+                return Err(ProviderError::Configuration(
+                    "Grengin status does not match the managed identity".into(),
+                ));
+            }
+        }
+        Ok(status)
     }
 
     /// Sends a control request with the current grant. The service refuses an invalid grant
@@ -989,7 +1010,7 @@ mod tests {
                 if bearer == "Bearer token-1" || rejecting.load(Ordering::SeqCst) {
                     return rejected().into_response();
                 }
-                Json(json!({"engine_state":"on"})).into_response()
+                Json(json!({"engine_state":"empty","workspace_id":"cw_a","installation_id":"inst_a","available_microdollars":0})).into_response()
             }
         });
         let models = axum::routing::put(move |headers: HeaderMap| async move {
@@ -1029,7 +1050,16 @@ mod tests {
         // A cached grant the service has invalidated (for example after rotation).
         assert_eq!(grant.bearer().await.unwrap(), "token-1");
         make_old(&grant).await;
-        assert_eq!(grant.status().await.unwrap(), "on");
+        grant.identity.workspace_id = Some("cw_a".into());
+        let workspace = grant.workspace().await.unwrap();
+        assert_eq!(workspace.engine_state, "empty");
+        assert_eq!(workspace.available_microdollars, Some(0));
+        grant.identity.workspace_id = Some("cw_other".into());
+        assert!(grant.status().await.is_err());
+        grant.identity.workspace_id = Some("cw_a".into());
+        grant.state.lock().await.binding = Some(("inst_other".into(), "org_a".into()));
+        assert!(grant.status().await.is_err());
+        grant.state.lock().await.binding = Some(("inst_a".into(), "org_a".into()));
         assert_eq!(issued.load(Ordering::SeqCst), 2);
         assert_eq!(grant.bearer().await.unwrap(), "token-2");
 

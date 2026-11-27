@@ -19,6 +19,7 @@ use crate::{
     services::{
         chat_helpers::{delete_chat_owned, resolve_web_search_enabled},
         chat_stream_helpers::messages_with_generating,
+        connector_tool_summary::redact_history,
         message_branches::load_message_versions,
         search,
     },
@@ -419,6 +420,8 @@ pub async fn get_chat_by_id(
                 .cloned()
                 .and_then(|v| serde_json::from_value(v).ok())
         });
+        let (tool_calls, tools_results) =
+            redact_history(message_model.tools_calls, message_model.tools_results);
         let message = MessageResponse {
             versions: versions.get(&message_model.id).cloned(),
             id: message_model.id,
@@ -429,8 +432,8 @@ pub async fn get_chat_by_id(
             request_id: message_model.request_id,
             model: message_model.model_name,
             model_params: model_params,
-            tool_calls: message_model.tools_calls,
-            tools_results: message_model.tools_results,
+            tool_calls,
+            tools_results,
             parts: MessageParts {
                 text: message_model.message_content,
                 files,
