@@ -374,9 +374,9 @@ impl GrenginGrant {
     }
 
     pub(super) fn has_managed_attachment() -> Result<bool, ProviderError> {
-        if std::env::var_os("HATCHERY_WORKSPACE_ID").is_none()
-            || std::env::var_os("GRENGIN_IDENTITY_FILE").is_none()
-        {
+        // A variable left blank by a deployment template means no managed attachment.
+        let set = |name: &str| std::env::var(name).is_ok_and(|value| !value.trim().is_empty());
+        if !set("HATCHERY_WORKSPACE_ID") || !set("GRENGIN_IDENTITY_FILE") {
             return Ok(false);
         }
         Ok(Self::configured()?.identity.workspace_id.is_some())
