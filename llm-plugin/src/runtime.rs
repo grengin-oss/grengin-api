@@ -1996,7 +1996,10 @@ fn map_usage(root: &Value, mapping: &UsageMapping) -> Result<TokenUsage, Provide
             input_tokens: mapped_u32(root, mapping.input_tokens.as_deref()),
             text_input_tokens: mapped_u32(root, mapping.text_input_tokens.as_deref()),
             image_input_tokens: mapped_u32(root, mapping.image_input_tokens.as_deref()),
-            output_tokens: mapped_u32(root, mapping.output_tokens.as_deref()),
+            output_tokens: crate::sse::with_reasoning_output(
+                mapped_u32(root, mapping.output_tokens.as_deref()),
+                mapped_u32(root, mapping.reasoning_output_tokens.as_deref()),
+            )?,
             total_tokens: mapped_u32(root, mapping.total_tokens.as_deref()),
             cached_input_tokens: mapped_u32(root, mapping.cached_input_tokens.as_deref()),
             cache_creation_tokens: mapped_u32(root, mapping.cache_creation_tokens.as_deref()),

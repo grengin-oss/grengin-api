@@ -113,3 +113,17 @@ fn rejects_overflow_while_normalizing_exclusive_cache_tokens() {
 
     assert!(error.to_string().contains("supported range"), "{error}");
 }
+
+#[test]
+fn separately_counted_reasoning_is_billed_as_output() {
+    let mut rule = usage_rule();
+    rule["fields"]["reasoningOutputTokens"] = json!("/thoughts");
+    let usage = map_usage(
+        rule.clone(),
+        json!({"input": 20, "output": 7, "thoughts": 40, "total": 67}),
+    )
+    .unwrap();
+    assert_eq!(usage.output_tokens, Some(47));
+    let thinking_only = map_usage(rule, json!({"input": 20, "thoughts": 40})).unwrap();
+    assert_eq!(thinking_only.output_tokens, Some(40));
+}

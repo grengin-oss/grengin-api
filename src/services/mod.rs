@@ -23,6 +23,7 @@ pub mod chat_helpers;
 pub mod chat_share_notifications;
 pub mod chat_shares_helpers;
 pub mod chat_stream_helpers;
+pub mod chat_usage;
 pub mod client_ip;
 pub mod connector_broker;
 pub mod connector_console_helpers;
