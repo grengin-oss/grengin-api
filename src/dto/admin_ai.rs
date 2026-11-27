@@ -199,7 +199,6 @@ pub struct AiModel {
     pub model_type: ModelType,
     pub is_whitelisted: bool,
     pub capabilities: AiModelCapabilities,
-    pub comment: Option<String>,
     pub input_token_rate: Option<f64>,
     pub output_token_rate: Option<f64>,
     pub image_input_token_rate: Option<f64>,

@@ -296,7 +296,6 @@ fn ai_model_from_info(model: ModelInfo, is_whitelisted: bool) -> AiModel {
             embeddings,
             image_generation,
         },
-        comment: model.comment,
         input_token_rate: model.input_token_rate,
         output_token_rate: model.output_token_rate,
         image_input_token_rate: model.image_input_token_rate,
