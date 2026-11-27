@@ -119,6 +119,7 @@ pub fn to_model_info(provider_key: &str, model: ProviderModel) -> ModelInfo {
     let resolved_model_type = model_type(&model);
     let comment = metadata_string(&model, "comment");
     ModelInfo {
+        launch_date: crate::services::models_cache::catalog_launch_date(&model.metadata),
         key: model.id.to_string(),
         engine: provider_key.to_string(),
         model_type: resolved_model_type,
@@ -204,6 +205,7 @@ mod tests {
 
     fn model_info(model_type: ModelType) -> ModelInfo {
         ModelInfo {
+            launch_date: None,
             key: "model-1".to_string(),
             name: "Model 1".to_string(),
             engine: "example".to_string(),
@@ -399,5 +401,14 @@ mod tests {
                 "aa/unknown"
             ]
         );
+        assert_eq!(
+            crate::services::models_cache::catalog_launch_date(
+                &serde_json::json!({"launchDate": " 2026-11-17 "})
+            )
+            .as_deref(),
+            Some("2026-11-17")
+        );
+        let json = serde_json::to_value(&providers[0].models[0]).unwrap();
+        assert!(json.get("launch_date").is_none());
     }
 }

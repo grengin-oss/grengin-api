@@ -316,6 +316,15 @@ async fn fetch_image_models(
     parse_catalog_models_newest_first(arr, parse_image_model)
 }
 
+pub fn catalog_launch_date(value: &Value) -> Option<String> {
+    value
+        .get("launchDate")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|date| !date.is_empty())
+        .map(str::to_string)
+}
+
 fn parse_catalog_models_newest_first(
     values: &[Value],
     parser: fn(&Value) -> Result<ModelInfo, Error>,
@@ -442,6 +451,7 @@ fn parse_text_model(value: &Value) -> Result<ModelInfo, Error> {
         .map(|v| v as i32);
 
     Ok(ModelInfo {
+        launch_date: catalog_launch_date(value),
         key,
         name,
         engine,
@@ -516,6 +526,7 @@ fn parse_image_model(value: &Value) -> Result<ModelInfo, Error> {
         .unwrap_or(false);
 
     Ok(ModelInfo {
+        launch_date: catalog_launch_date(value),
         key,
         name,
         engine,
@@ -573,6 +584,7 @@ fn parse_embed_model(value: &Value, provider_key: &str) -> Result<ModelInfo, Err
         .map(|value| value as i32);
 
     Ok(ModelInfo {
+        launch_date: catalog_launch_date(value),
         key: id.to_string(),
         name: id.to_string(),
         engine: provider_key.to_string(),
