@@ -236,7 +236,7 @@ pub async fn generate_provider_response(
 }
 
 pub fn estimate_request_tokens(request: &ChatRequest) -> i32 {
-    request
+    let messages = request
         .messages
         .iter()
         .flat_map(|message| message.content.iter())
@@ -251,7 +251,15 @@ pub fn estimate_request_tokens(request: &ChatRequest) -> i32 {
             }
             ContentPart::FileReference { .. } => AttachmentKind::Document.estimated_tokens(0),
         })
-        .fold(0i32, i32::saturating_add)
+        .fold(0i32, i32::saturating_add);
+    let tools = if request.tools.is_empty() {
+        0
+    } else {
+        serde_json::to_string(&request.tools)
+            .map(|tools| estimate_text_tokens(&tools))
+            .unwrap_or_default()
+    };
+    messages.saturating_add(tools)
 }
 
 fn base64_decoded_len(data: &str) -> usize {
@@ -706,7 +714,7 @@ mod tests {
 
     #[test]
     fn request_estimates_count_text_and_attachments() {
-        let request = ChatRequest {
+        let mut request = ChatRequest {
             model: ModelId::new("model"),
             messages: vec![ChatMessage {
                 role: PluginChatRole::User,
@@ -735,6 +743,14 @@ mod tests {
             options: Value::Null,
         };
         assert_eq!(estimate_request_tokens(&request), 100 + 1_600 + 3_000);
+        request.tools.push(ToolDefinition {
+            name: "search".into(),
+            description: Some("tool description ".repeat(1_000)),
+            parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}}}),
+        });
+        let schema_tokens = estimate_text_tokens(&serde_json::to_string(&request.tools).unwrap());
+        assert!(schema_tokens > 1_000);
+        assert_eq!(estimate_request_tokens(&request), 4_700 + schema_tokens);
     }
 
     #[test]

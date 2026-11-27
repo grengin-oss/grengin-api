@@ -1096,6 +1096,7 @@ fn validate_usage_mapping(mapping: Option<&UsageMapping>) -> Result<(), Provider
         mapping.text_input_tokens.as_deref(),
         mapping.image_input_tokens.as_deref(),
         mapping.output_tokens.as_deref(),
+        mapping.reasoning_output_tokens.as_deref(),
         mapping.total_tokens.as_deref(),
         mapping.cached_input_tokens.as_deref(),
         mapping.cache_creation_tokens.as_deref(),
@@ -1169,7 +1170,18 @@ fn validate_capability(name: &str, capability: bool, operation: bool) -> Result<
 mod tests {
     use serde_json::{Value, json};
 
-    use super::ProviderManifestV1;
+    use super::{ProviderManifestV1, UsageMapping, validate_usage_mapping};
+
+    #[test]
+    fn reasoning_usage_mapping_requires_a_valid_json_pointer() {
+        let mut mapping = UsageMapping {
+            reasoning_output_tokens: Some("thoughtsTokenCount".into()),
+            ..UsageMapping::default()
+        };
+        assert!(validate_usage_mapping(Some(&mapping)).is_err());
+        mapping.reasoning_output_tokens = Some("/usageMetadata/thoughtsTokenCount".into());
+        assert!(validate_usage_mapping(Some(&mapping)).is_ok());
+    }
 
     fn chat_manifest() -> Value {
         json!({

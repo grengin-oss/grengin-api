@@ -48,9 +48,10 @@ const fixture = createServer(async (req,res) => {
     vendorCalls.push(req.headers.authorization);
     res.writeHead(200,{'Content-Type':'application/json'}); res.end(JSON.stringify({message:'plugin-result'}));
   } else if (req.url.includes('/chat/completions')) {
-    modelRequests++;
     const body = JSON.parse(raw);
     const tool = body.tools?.find(tool=>tool.function?.name.includes('plugin_echo'));
+    // Optional title generation is not a connector turn or a continuation.
+    if (tool) modelRequests++;
     const finished = body.messages.some(message=>message.role==='tool');
     if (tool && !finished && modelGate) {
       const gate = modelGate; modelGate = undefined;
