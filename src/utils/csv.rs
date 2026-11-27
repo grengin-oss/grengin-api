@@ -71,6 +71,13 @@ impl<'a> CsvReader<'a> {
                     self.pos += 1;
                 }
             }
+            // Text after the closing quote (`"a" ,b`) stays in this field, as lenient readers do,
+            // instead of ending the record mid-line.
+            while self.pos < self.data.len() && !matches!(self.data[self.pos], b',' | b'\r' | b'\n')
+            {
+                field.push(self.data[self.pos]);
+                self.pos += 1;
+            }
             String::from_utf8_lossy(&field).into_owned()
         } else {
             let start = self.pos;
@@ -138,6 +145,12 @@ mod tests {
             header_only.headers(),
             Some(vec!["a".into(), "b".into(), String::new()])
         );
+    }
+
+    #[test]
+    fn text_after_a_closing_quote_stays_in_its_field() {
+        let mut r = CsvReader::new(b"a,b\n\"foo\" ,2\n\"x\"y,3\n");
+        assert_eq!(r.records(), vec![vec!["foo ", "2"], vec!["xy", "3"]]);
     }
 
     #[test]

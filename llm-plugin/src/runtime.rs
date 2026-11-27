@@ -1193,7 +1193,8 @@ impl ImageBudget {
             .bytes()
             .rev()
             .take_while(|byte| *byte == b'=')
-            .count();
+            .count()
+            .min(2);
         let bytes = base64::decoded_len_estimate(encoded.len()).saturating_sub(padding);
         if bytes > self.remaining {
             return Err(ProviderError::ResponseTooLarge);
