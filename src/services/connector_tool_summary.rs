@@ -248,7 +248,12 @@ fn redact_call(
     // Older replies classified calls by name, so an unmarked call is the provider's search only
     // once its search results were recorded; an unfinished one may be a connector's.
     let native = marked || id.is_some_and(|id| searched.contains(&id));
-    if known.is_none() && native && is_web_search(call) {
+    if known.is_none()
+        && native
+        && call.get("kind").and_then(Value::as_str) != Some("other")
+        && !call.contains_key("mcp")
+        && !call.contains_key("summary")
+    {
         return;
     }
     let (server, tool) = known.unwrap_or_else(|| {
@@ -273,6 +278,8 @@ fn redact_call(
 fn is_web_search(entry: &Map<String, Value>) -> bool {
     !entry.contains_key("mcp")
         && !entry.contains_key("summary")
+        && entry.get("kind").and_then(Value::as_str) == Some("web_search")
+        && entry.get("status").and_then(Value::as_str) == Some("success")
         && text_field(entry, "tool_name")
             .is_some_and(|name| NATIVE_WEB_SEARCH.contains(&name.as_str()))
 }
@@ -528,6 +535,44 @@ fn to_value<T: serde::Serialize>(value: &T) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn unfinished_native_named_connector_results_cannot_authorize_raw_history() {
+        for name in NATIVE_WEB_SEARCH {
+            for status in ["error", "success"] {
+                let call = json!({"tool_name":name, "tool_id":"c1", "kind":"other",
+                    "input_text":"CONFIDENTIAL", "input":{"type":"json","value":{"body":"CONFIDENTIAL"}}});
+                let result = json!({"tool_name":name, "tool_id":"c1", "kind":"other", "status":status,
+                    "output":{"error":"CONFIDENTIAL", "body":"CONFIDENTIAL"}});
+                let history = redact_history(vec![call], vec![result]);
+                assert!(
+                    !serde_json::to_string(&history)
+                        .unwrap()
+                        .contains("CONFIDENTIAL")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn untyped_legacy_results_fail_closed_and_completed_native_search_is_preserved() {
+        let call = json!({"tool_name":"web_search_call", "tool_id":"w1", "input_text":"query"});
+        let result = json!({"tool_name":"web_search_call", "tool_id":"w1", "status":"success",
+            "kind":"web_search", "web_search":{"results":[{"title":"Public result"}]}});
+        assert_eq!(
+            redact_history(vec![call.clone()], vec![result.clone()]),
+            (vec![call], vec![result])
+        );
+
+        let result = json!({"tool_name":"web_search", "tool_id":"c1", "status":"success",
+            "output":{"body":"CONFIDENTIAL"}});
+        let history = redact_history(vec![], vec![result]);
+        assert!(
+            !serde_json::to_string(&history)
+                .unwrap()
+                .contains("CONFIDENTIAL")
+        );
+    }
 
     #[test]
     fn email_results_show_subjects_never_bodies() {
