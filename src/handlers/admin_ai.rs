@@ -17,13 +17,14 @@ use crate::{
     },
     models::ai_engines::{self, ApiKeyStatus},
     services::ai_engine_helpers::{
-        load_models_response, load_models_response_refreshed, sort_engines_by_readiness,
+        find_engine_for_update, load_models_response, load_models_response_refreshed,
+        sort_engines_by_readiness,
     },
     services::{
         ai_engine_defaults::{enabled_after_key, starter_models},
         ai_plugin::{
-            apply_base_url_override, apply_grengin_update, is_catalog_grengin,
-            validate_grengin_connection,
+            apply_base_url_override, apply_grengin_update, ensure_key_follows_destination,
+            is_catalog_grengin, validate_grengin_connection,
         },
         authorization::{AuthorizationService, PermissionScopeMode},
         grengin_consent::set_enabled as set_grengin_enabled,
@@ -45,7 +46,7 @@ use llm_plugin::ProviderError;
 use reqwest::StatusCode;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
-    QueryOrder, TryIntoModel,
+    QueryOrder, TransactionTrait, TryIntoModel,
 };
 
 #[utoipa::path(
@@ -342,16 +343,11 @@ pub async fn update_ai_engines_by_key(
             None,
         )
         .await?;
-    let ai_engine = ai_engines::Entity::find()
-        .filter(ai_engines::Column::EngineKey.eq(ai_engine_key.clone()))
-        .order_by_desc(ai_engines::Column::CreatedAt)
-        .one(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("db error get all {e}");
-            AuthError::DbTimeout
-        })?
-        .ok_or(AuthError::ResourceNotFound)?;
+    let txn = app_state.database.begin().await.map_err(|e| {
+        eprintln!("db error begin ai engine update {e}");
+        AuthError::DbTimeout
+    })?;
+    let ai_engine = find_engine_for_update(&txn, &ai_engine_key).await?;
     let mut active_model = ai_engine.clone().into_active_model();
     let catalog_grengin = is_catalog_grengin(&ai_engine);
     let (icon, icon_dark) = if catalog_grengin {
@@ -366,6 +362,7 @@ pub async fn update_ai_engines_by_key(
     } else {
         None
     };
+    let key_supplied = req.api_key.is_some();
     let first_key = ai_engine.api_key.is_none()
         && req
             .api_key
@@ -468,6 +465,7 @@ pub async fn update_ai_engines_by_key(
         eprintln!("db error model parse error {e}");
         AuthError::DbTimeout
     })?;
+    ensure_key_follows_destination(&ai_engine, &model, key_supplied)?;
     let decrypted_api_key = match &model.api_key {
         Some(api_key) => Some(
             decrypt_key(&app_state.settings.auth.app_key, api_key).map_err(|e| {
@@ -511,13 +509,14 @@ pub async fn update_ai_engines_by_key(
     } else {
         None
     };
-    let model = active_model
-        .update(&app_state.database)
-        .await
-        .map_err(|e| {
-            eprintln!("db error update one {e}");
-            AuthError::DbTimeout
-        })?;
+    let model = active_model.update(&txn).await.map_err(|e| {
+        eprintln!("db error update one {e}");
+        AuthError::DbTimeout
+    })?;
+    txn.commit().await.map_err(|e| {
+        eprintln!("db error commit ai engine update {e}");
+        AuthError::DbTimeout
+    })?;
     app_state
         .live_models_cache
         .invalidate(&model.engine_key)

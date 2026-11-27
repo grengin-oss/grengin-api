@@ -168,6 +168,15 @@ pub fn build_draft_config(
         .map_err(|_| AuthError::InvalidProvider {
             provider: Some(provider.clone()),
         })?;
+    // Validation and sign-in send the client secret to the provider's token endpoint, so a stored
+    // secret is never reused for a new destination; it must be entered again.
+    if client_secret.is_none()
+        && secret_destination_changed(model, &provider, &tenant_id, &issuer_url, &configuration)
+    {
+        return Err(AuthError::InvalidRequest {
+            field: "client_secret",
+        });
+    }
 
     Ok(SsoDraftConfig {
         provider,
@@ -182,6 +191,26 @@ pub fn build_draft_config(
         redirect_url,
         configuration,
     })
+}
+
+fn secret_destination_changed(
+    model: &sso_providers::Model,
+    provider: &str,
+    tenant_id: &Option<String>,
+    issuer_url: &str,
+    configuration: &OidcProviderConfiguration,
+) -> bool {
+    let stored_oauth2 = OidcProviderConfiguration::from_value_for_provider(
+        model.configuration.as_ref(),
+        &model.provider,
+    )
+    .map(|stored| stored.oauth2)
+    .ok()
+    .flatten();
+    provider != model.provider.trim().to_lowercase()
+        || tenant_id != &model.tenant_id
+        || issuer_url != model.issuer_url
+        || configuration.oauth2 != stored_oauth2
 }
 
 pub fn has_sensitive_changes(
@@ -632,5 +661,65 @@ mod tests {
         .expect("Apple API callback");
 
         assert_eq!(redirect, "https://api.example.com/auth/apple/callback");
+    }
+
+    #[test]
+    fn a_stored_secret_is_only_reused_for_its_own_destination() {
+        let model = sso_providers::Model {
+            id: Uuid::new_v4(),
+            provider: "keycloak".to_string(),
+            name: "Keycloak".to_string(),
+            tenant_id: None,
+            client_id: "client-id".to_string(),
+            client_secret: String::new(),
+            issuer_url: "https://id.example.com/realms/acme".to_string(),
+            redirect_url: "https://app.example.com/auth/keycloak/callback".to_string(),
+            allowed_domains: Vec::new(),
+            is_enabled: true,
+            is_default: false,
+            use_grengin_proxy: false,
+            jit_provisioning: false,
+            configuration: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let same = OidcProviderConfiguration::default();
+        assert!(!secret_destination_changed(
+            &model,
+            "keycloak",
+            &None,
+            &model.issuer_url,
+            &same
+        ));
+        assert!(secret_destination_changed(
+            &model,
+            "keycloak",
+            &None,
+            "https://attacker.example/realms/acme",
+            &same
+        ));
+        assert!(secret_destination_changed(
+            &model,
+            "okta",
+            &None,
+            &model.issuer_url,
+            &same
+        ));
+        assert!(secret_destination_changed(
+            &model,
+            "keycloak",
+            &Some("other".to_string()),
+            &model.issuer_url,
+            &same
+        ));
+        let mut scopes_only = same.clone();
+        scopes_only.scopes.push("groups".to_string());
+        assert!(!secret_destination_changed(
+            &model,
+            "keycloak",
+            &None,
+            &model.issuer_url,
+            &scopes_only
+        ));
     }
 }

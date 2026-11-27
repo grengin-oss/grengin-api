@@ -25,7 +25,7 @@ use crate::{
         authorization::{AuthorizationService, PermissionScopeMode},
         provider_chat::provider_error_class,
         provider_runtime::{
-            ProviderLoadError, build_provider, compile_engine, parse_manifest,
+            ProviderLoadError, build_provider, compile_engine, parse_manifest, parse_plugin_config,
             provider_plugin_version,
         },
     },
@@ -55,6 +55,52 @@ fn catalog_base_url_override(engine_key: &str, raw: &str) -> Result<Option<Strin
     llm_plugin::security::validate_provider_url(&url, false, false)
         .map_err(|_| BASE_URL_OVERRIDE_FIELD)?;
     Ok(Some(url.to_string()))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Destination {
+    base_url: Option<String>,
+    allow_insecure_http: bool,
+    allow_private_network: bool,
+}
+
+impl Destination {
+    // None for a catalog engine's own catalog URL; the plugin's URL for a custom engine.
+    fn of(engine: &ai_engines::Model) -> Option<Self> {
+        let Some(value) = engine.plugin_config.as_ref() else {
+            return Some(Self {
+                base_url: engine.base_url_override.clone(),
+                allow_insecure_http: false,
+                allow_private_network: false,
+            });
+        };
+        let config = parse_plugin_config(value).ok()?;
+        let base_url = match config.base_url_override.clone() {
+            Some(url) => url,
+            None => parse_manifest(&config).ok()?.base_url,
+        };
+        Some(Self {
+            base_url: Some(base_url),
+            allow_insecure_http: config.allow_insecure_http,
+            allow_private_network: config.allow_private_network,
+        })
+    }
+}
+
+// Requests carry the engine's key to wherever the engine points, so a stored key never follows a
+// new destination; the key must be entered again with it.
+pub fn ensure_key_follows_destination(
+    previous: &ai_engines::Model,
+    updated: &ai_engines::Model,
+    key_supplied: bool,
+) -> Result<(), AuthError> {
+    if previous.api_key.is_none()
+        || key_supplied
+        || Destination::of(previous) == Destination::of(updated)
+    {
+        return Ok(());
+    }
+    Err(AuthError::InvalidRequest { field: "api_key" })
 }
 
 // A custom engine keeps its endpoint inside plugin_config, so the column only belongs to catalog engines.
@@ -746,6 +792,43 @@ mod tests {
             apply_base_url_override(&mut active, &catalog, Some("https://example.com/"), true)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_stored_key_never_follows_a_new_destination() {
+        let mut catalog = engine(None);
+        catalog.api_key = Some("encrypted".to_string());
+        catalog.base_url_override = Some("https://contoso.services.ai.azure.com/".to_string());
+        let mut moved = catalog.clone();
+        moved.base_url_override = Some("https://attacker.example/".to_string());
+        assert!(ensure_key_follows_destination(&catalog, &moved, false).is_err());
+        assert!(ensure_key_follows_destination(&catalog, &moved, true).is_ok());
+        let mut renamed = catalog.clone();
+        renamed.display_name = "Azure".to_string();
+        assert!(ensure_key_follows_destination(&catalog, &renamed, false).is_ok());
+        let mut cleared = catalog.clone();
+        cleared.base_url_override = None;
+        assert!(ensure_key_follows_destination(&catalog, &cleared, false).is_err());
+        let mut keyless = moved.clone();
+        keyless.api_key = None;
+        assert!(ensure_key_follows_destination(&keyless, &catalog, false).is_ok());
+
+        let config = |base_url: &str, private: bool| {
+            serde_json::json!({"manifest": {}, "configuration": {}, "baseUrlOverride": base_url,
+                               "allowPrivateNetwork": private})
+        };
+        let mut custom = engine(Some(config("https://llm.example.com/v1/", false)));
+        custom.api_key = Some("encrypted".to_string());
+        let mut same = custom.clone();
+        same.plugin_config = Some(config("https://llm.example.com/v1/", false));
+        assert!(ensure_key_follows_destination(&custom, &same, false).is_ok());
+        let mut private = custom.clone();
+        private.plugin_config = Some(config("https://llm.example.com/v1/", true));
+        assert!(ensure_key_follows_destination(&custom, &private, false).is_err());
+        let mut elsewhere = custom.clone();
+        elsewhere.plugin_config = Some(config("https://attacker.example/v1/", false));
+        assert!(ensure_key_follows_destination(&custom, &elsewhere, false).is_err());
+        assert!(ensure_key_follows_destination(&custom, &catalog, false).is_err());
     }
 
     #[test]

@@ -130,6 +130,8 @@ POST /connectors/{connection_id}/disconnect
 Catalog entries are not installed automatically. Executing tools still needs an
 accessible, enabled admin-configured HTTP MCP server at the pinned catalog URL.
 Use its OAuth configuration and map additional catalog MCP headers into the
-existing transport_config.headers field, not OAuth credentials. Only streamable
+existing transport_config.headers field, not OAuth credentials. Routing,
+cookie and hop-by-hop headers (`Host`, `Forwarded`, `X-Forwarded-*`, `Cookie`,
+`Proxy-Authorization`, `Connection`, ...) are refused there. Only streamable
 HTTP is broker-supported in this patch; listing an SSE/stdio transport does not
 enable those execution paths.
