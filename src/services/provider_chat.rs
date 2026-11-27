@@ -105,7 +105,12 @@ pub fn build_plugin_chat_request(
 
     ChatRequest {
         model: ModelId::new(model),
-        messages: prompts.into_iter().map(prompt_to_message).collect(),
+        // A reply that failed before any text is stored empty; providers reject empty messages.
+        messages: prompts
+            .into_iter()
+            .map(prompt_to_message)
+            .filter(|message| !message.content.is_empty())
+            .collect(),
         temperature,
         max_tokens,
         tool_choice: (!tool_definitions.is_empty()).then_some(ToolChoice::Auto),
@@ -710,6 +715,35 @@ mod tests {
         assert_eq!(response.input_tokens, Some(9));
         assert_eq!(response.output_tokens, Some(3));
         assert!(response.estimated_input_tokens > 0);
+    }
+
+    #[test]
+    fn a_reply_stored_empty_is_left_out_of_the_next_request() {
+        let prompt = |role, text: &str| Prompt {
+            text: text.to_string(),
+            role,
+            files: Vec::new(),
+        };
+        let request = build_plugin_chat_request(
+            "model",
+            vec![
+                prompt(ChatRole::User, "first"),
+                prompt(ChatRole::Assistant, ""),
+                prompt(ChatRole::User, "again"),
+            ],
+            None,
+            None,
+            &HashMap::new(),
+            false,
+            Value::Null,
+        );
+        assert_eq!(request.messages.len(), 2);
+        assert!(
+            request
+                .messages
+                .iter()
+                .all(|message| !message.content.is_empty())
+        );
     }
 
     #[test]

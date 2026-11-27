@@ -368,8 +368,8 @@ impl MapperState {
                     },
                 }]
             }
-            EventKind::Usage => vec![ProviderEvent::Usage {
-                usage: normalize_token_usage(
+            EventKind::Usage => {
+                let usage = normalize_token_usage(
                     TokenUsage {
                         input_tokens: optional_u32(rule, value, "inputTokens")?,
                         text_input_tokens: optional_u32(rule, value, "textInputTokens")?,
@@ -384,8 +384,14 @@ impl MapperState {
                     },
                     rule.input_tokens_include_cached,
                     rule.input_tokens_include_cache_creation,
-                )?,
-            }],
+                )?;
+                // A chunk carrying `"usage": null` (OpenAI-compatible streams) reports nothing.
+                if usage == TokenUsage::default() {
+                    Vec::new()
+                } else {
+                    vec![ProviderEvent::Usage { usage }]
+                }
+            }
             EventKind::ProviderEvent => vec![ProviderEvent::ProviderEvent {
                 kind: required_string(rule, value, "kind")?,
                 data: rule
@@ -733,6 +739,7 @@ pub(crate) fn with_reasoning_output(
     reasoning: Option<u32>,
 ) -> Result<Option<u32>, ProviderError> {
     match reasoning {
+        Some(0) => Ok(output),
         Some(reasoning) => output
             .unwrap_or(0)
             .checked_add(reasoning)

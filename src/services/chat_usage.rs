@@ -39,6 +39,13 @@ impl UsageTotals {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnEnd {
+    Completed,
+    Interrupted,
+    Refused,
+}
+
 #[derive(Debug, Clone, Default)]
 struct RoundUsage {
     input: Option<i32>,
@@ -49,11 +56,11 @@ struct RoundUsage {
     estimated_input: i32,
     streamed: String,
     started: bool,
+    ended: bool,
 }
 
 impl RoundUsage {
-    // What the provider has reported so far; nothing is estimated, so a checkpoint never charges
-    // more than the final count (the spend trigger charges increases and never refunds).
+    // Reported counts only, so a mid-stream save never charges more than the final count.
     fn reported(&self) -> UsageTotals {
         let input = self.input.unwrap_or_default();
         let output = self.output.unwrap_or_default();
@@ -67,17 +74,19 @@ impl RoundUsage {
         }
     }
 
-    // An interrupted round may stop before its final usage update, so streamed output (reply,
-    // reasoning, tool arguments) sets a floor under a stale output count; Anthropic reports one
-    // output token at message start.
-    fn totals(&self, interrupted: bool) -> UsageTotals {
-        if !self.started {
+    fn totals(&self, end: TurnEnd) -> UsageTotals {
+        let nothing_back =
+            self.input.is_none() && self.output.is_none() && self.streamed.is_empty();
+        if !self.started || (end == TurnEnd::Refused && nothing_back) {
             return UsageTotals::default();
         }
         let streamed_estimate = estimate_text_tokens(&self.streamed);
         let input = self.input.unwrap_or(self.estimated_input);
+        // A stream cut before its last usage update may hold a stale output count (Anthropic
+        // reports one token at message start), so streamed text sets a floor under it.
+        let cut_short = end != TurnEnd::Completed && !self.ended;
         let (output, output_estimated) = match self.output {
-            Some(output) if interrupted && streamed_estimate > output => (streamed_estimate, true),
+            Some(output) if cut_short && streamed_estimate > output => (streamed_estimate, true),
             Some(output) => (output, false),
             None => (streamed_estimate, true),
         };
@@ -97,11 +106,8 @@ impl RoundUsage {
     }
 }
 
-// Token usage of one chat turn, which spans one provider request per tool round. Providers report
-// running totals for the current request, so within a round the latest value wins; rounds add up.
-// A count the provider never reported is estimated, never charged as zero.
-// The spend trigger charges every increase of a message's cost and never refunds a decrease, so
-// the cost saved for a message never goes down: a lower save followed by a higher one charges twice.
+// Usage of one chat turn: one provider request per tool round, each reporting running totals.
+// The spend trigger never refunds, so the cost saved for a message only ever goes up.
 #[derive(Debug, Clone)]
 pub struct TurnUsage {
     finished: UsageTotals,
@@ -122,6 +128,7 @@ impl TurnUsage {
         }
     }
 
+    // Running totals never shrink within a request, so a lower or zero count is a partial update.
     pub fn record(
         &mut self,
         input: Option<u32>,
@@ -131,26 +138,34 @@ impl TurnUsage {
         cache_creation: Option<u32>,
     ) {
         let tokens = |value: u32| i32::try_from(value).unwrap_or(i32::MAX);
+        let highest =
+            |reported: Option<u32>, known: Option<i32>| match (reported.map(tokens), known) {
+                (Some(reported), Some(known)) => Some(reported.max(known)),
+                (reported, known) => reported.or(known),
+            };
         let round = &mut self.round;
-        round.input = input.map(tokens).or(round.input);
-        round.output = output.map(tokens).or(round.output);
+        round.input = highest(input, round.input);
+        round.output = highest(output, round.output);
         round.total = match total {
-            Some(total) => Some(tokens(total)),
+            Some(_) => highest(total, round.total),
             None if input.is_some() || output.is_some() => None,
             None => round.total,
         };
-        round.cached_input = cached_input.map(tokens).or(round.cached_input);
-        round.cache_creation = cache_creation.map(tokens).or(round.cache_creation);
+        round.cached_input = highest(cached_input, round.cached_input);
+        round.cache_creation = highest(cache_creation, round.cache_creation);
     }
 
     pub fn streamed_output(&mut self, text: &str) {
         self.round.streamed.push_str(text);
     }
 
+    pub fn round_ended(&mut self) {
+        self.round.ended = true;
+    }
+
     // The next request resends this round's prompt with the reply and the tool results appended.
-    // It counts only once its stream opens; a continuation the provider refused costs nothing.
     pub fn next_round(&mut self, tool_results: &[llm_plugin::ToolResult]) {
-        let round = self.round.totals(false);
+        let round = self.round.totals(TurnEnd::Completed);
         let results = tool_results
             .iter()
             .map(|result| estimate_text_tokens(&result.output.to_string()))
@@ -161,12 +176,14 @@ impl TurnUsage {
                 .input
                 .saturating_add(round.output)
                 .saturating_add(results),
+            started: true,
             ..RoundUsage::default()
         };
     }
 
-    pub fn round_opened(&mut self) {
-        self.round.started = true;
+    // A continuation the provider refused to open costs nothing.
+    pub fn round_refused(&mut self) {
+        self.round.started = false;
     }
 
     pub fn reported_totals(&self) -> UsageTotals {
@@ -174,15 +191,15 @@ impl TurnUsage {
     }
 
     pub fn totals(&self) -> UsageTotals {
-        self.finished.add(self.round.totals(false))
+        self.ended_as(TurnEnd::Completed)
     }
 
-    pub fn interrupted_totals(&self) -> UsageTotals {
-        self.finished.add(self.round.totals(true))
+    pub fn ended_as(&self, end: TurnEnd) -> UsageTotals {
+        self.finished.add(self.round.totals(end))
     }
 
-    // A mid-stream save prices the open round's input at the cheapest input rate, because a later
-    // usage update may still move tokens into a cheaper cache bucket.
+    // Prices the open round's input at the cheapest input rate: a later update may still move
+    // tokens into a cheaper cache bucket.
     pub fn checkpoint_cost(&mut self, cost_of: impl Fn(&UsageTotals) -> Decimal) -> Decimal {
         let open = self.round.reported();
         let floor = [
@@ -222,7 +239,6 @@ mod tests {
         usage.record(Some(1_000), Some(1), None, Some(200), None);
         usage.record(Some(1_000), Some(350), Some(1_350), None, None);
         usage.next_round(&[]);
-        usage.round_opened();
         usage.record(Some(1_500), Some(1), None, None, Some(40));
         usage.record(Some(1_500), Some(80), None, None, None);
         let totals = usage.totals();
@@ -243,7 +259,7 @@ mod tests {
     fn a_cancel_before_any_usage_is_estimated_not_free() {
         let mut usage = TurnUsage::new(1_200);
         usage.streamed_output(&"word ".repeat(80));
-        let totals = usage.interrupted_totals();
+        let totals = usage.ended_as(TurnEnd::Interrupted);
         assert_eq!((totals.input, totals.output), (1_200, 100));
         assert!(totals.estimated);
     }
@@ -254,7 +270,7 @@ mod tests {
         usage.record(Some(900), Some(1), None, None, None);
         usage.streamed_output(&"x".repeat(400));
         assert_eq!(usage.totals().output, 1);
-        let interrupted = usage.interrupted_totals();
+        let interrupted = usage.ended_as(TurnEnd::Interrupted);
         assert_eq!((interrupted.input, interrupted.output), (900, 100));
         assert!(interrupted.estimated);
     }
@@ -273,11 +289,11 @@ mod tests {
         let mut usage = TurnUsage::new(0);
         usage.record(Some(1_000), Some(100), None, None, None);
         usage.next_round(&[tool_result(&"r".repeat(398))]);
-        assert_eq!(usage.interrupted_totals().input, 1_000);
-        usage.round_opened();
-        let totals = usage.interrupted_totals();
+        let totals = usage.ended_as(TurnEnd::Interrupted);
         assert_eq!((totals.input, totals.output), (1_000 + 1_100 + 100, 100));
         assert!(totals.estimated);
+        usage.round_refused();
+        assert_eq!(usage.ended_as(TurnEnd::Interrupted).input, 1_000);
     }
 
     #[test]
@@ -287,7 +303,7 @@ mod tests {
         usage.streamed_output(&"x".repeat(4_000));
         let checkpoint = usage.reported_totals();
         assert_eq!((checkpoint.input, checkpoint.output), (900, 1));
-        for end in [usage.totals(), usage.interrupted_totals()] {
+        for end in [usage.totals(), usage.ended_as(TurnEnd::Interrupted)] {
             assert!(end.input >= checkpoint.input && end.output >= checkpoint.output);
         }
         let fresh = TurnUsage::new(5_000);
@@ -329,6 +345,38 @@ mod tests {
         usage.record(Some(1_000), Some(1), Some(1_001), None, None);
         usage.record(None, Some(350), None, None, None);
         assert_eq!(usage.totals().total, 1_350);
+    }
+
+    #[test]
+    fn a_refused_request_with_nothing_back_costs_nothing() {
+        let usage = TurnUsage::new(1_200);
+        assert_eq!(usage.ended_as(TurnEnd::Refused), UsageTotals::default());
+        assert_eq!(usage.ended_as(TurnEnd::Interrupted).input, 1_200);
+        let mut partial = TurnUsage::new(1_200);
+        partial.streamed_output("partial reply");
+        assert_eq!(partial.ended_as(TurnEnd::Refused).input, 1_200);
+    }
+
+    #[test]
+    fn a_round_that_ended_keeps_its_reported_output_when_the_turn_is_stopped() {
+        let mut usage = TurnUsage::new(0);
+        usage.record(Some(900), Some(5), None, None, None);
+        usage.streamed_output(&" ".repeat(400));
+        usage.round_ended();
+        let totals = usage.ended_as(TurnEnd::Interrupted);
+        assert_eq!((totals.output, totals.estimated), (5, false));
+    }
+
+    #[test]
+    fn a_partial_update_never_lowers_a_running_count() {
+        let mut usage = TurnUsage::new(0);
+        usage.record(Some(1_000), Some(40), None, Some(300), None);
+        usage.record(Some(0), Some(60), None, Some(0), None);
+        let totals = usage.totals();
+        assert_eq!(
+            (totals.input, totals.output, totals.cached_input),
+            (1_000, 60, 300)
+        );
     }
 
     #[test]
