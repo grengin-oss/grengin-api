@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Perter Technology Solutions Private Limited
 // SPDX-License-Identifier: Apache-2.0
 
-//! Enabling and disabling the Grengin engine. Local routing opens only after the service has
-//! confirmed model access, and only if no newer intent or deletion superseded the request.
+//! Managed creator installation and administrator consent changes for the Grengin engine.
 use chrono::Utc;
 use llm_plugin::ProviderError;
 use sea_orm::{
@@ -70,6 +69,29 @@ async fn lock_lifecycle(txn: &DatabaseTransaction) -> Result<lifecycle::Model, A
         .await
         .map_err(|_| AuthError::DbTimeout)?
         .ok_or(AuthError::DbTimeout)
+}
+
+// Keep this in the creator transaction; prior installs and deletions must remain authoritative.
+pub(super) async fn preinstall_for_managed_creator(
+    txn: &DatabaseTransaction,
+) -> Result<(), AuthError> {
+    super::ai_plugin::lock_engine_installation(txn, ENGINE_KEY).await?;
+    let life = lock_lifecycle(txn).await?;
+    if life.generation == 0
+        && life.revision == 0
+        && ai_engines::Entity::find()
+            .filter(ai_engines::Column::EngineKey.eq(ENGINE_KEY))
+            .one(txn)
+            .await
+            .map_err(|_| AuthError::DbTimeout)?
+            .is_none()
+    {
+        ai_engines::ActiveModel::native(ENGINE_KEY.into(), "Grengin".into(), true, Utc::now())
+            .insert(txn)
+            .await
+            .map_err(|_| AuthError::DbTimeout)?;
+    }
+    Ok(())
 }
 
 async fn set_local_enabled<C: ConnectionTrait>(db: &C, enabled: bool) -> Result<u64, AuthError> {
@@ -150,31 +172,40 @@ pub async fn set_enabled(
 async fn record(db: &DatabaseConnection, enabled: bool) -> Result<operations::Model, AuthError> {
     let txn = db.begin().await.map_err(|_| AuthError::DbTimeout)?;
     let current = lock_lifecycle(&txn).await?;
+    let op = record_locked(&txn, current, enabled, OperationState::Applying).await?;
+    txn.commit().await.map_err(|_| AuthError::DbTimeout)?;
+    Ok(op)
+}
+
+async fn record_locked(
+    txn: &DatabaseTransaction,
+    current: lifecycle::Model,
+    enabled: bool,
+    state: OperationState,
+) -> Result<operations::Model, AuthError> {
     let revision = current.revision + 1;
     let mut life: lifecycle::ActiveModel = current.clone().into();
     life.revision = Set(revision);
     life.updated_at = Set(Utc::now());
-    life.update(&txn).await.map_err(|_| AuthError::DbTimeout)?;
-    supersede_open(&txn).await?;
+    life.update(txn).await.map_err(|_| AuthError::DbTimeout)?;
+    supersede_open(txn).await?;
     if !enabled {
-        set_local_enabled(&txn, false).await?;
+        set_local_enabled(txn, false).await?;
     }
     let now = Utc::now();
-    let operation = operations::ActiveModel {
+    operations::ActiveModel {
         id: Set(Uuid::new_v4()),
         generation: Set(current.generation),
         revision: Set(revision),
         desired_enabled: Set(enabled),
-        state: Set(OperationState::Applying),
+        state: Set(state),
         error_code: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
     }
-    .insert(&txn)
+    .insert(txn)
     .await
-    .map_err(|_| AuthError::DbTimeout)?;
-    txn.commit().await.map_err(|_| AuthError::DbTimeout)?;
-    Ok(operation)
+    .map_err(|_| AuthError::DbTimeout)
 }
 
 async fn supersede_open(txn: &DatabaseTransaction) -> Result<(), AuthError> {
@@ -185,9 +216,11 @@ async fn supersede_open(txn: &DatabaseTransaction) -> Result<(), AuthError> {
         )
         .col_expr(operations::Column::ErrorCode, Expr::value("superseded"))
         .col_expr(operations::Column::UpdatedAt, Expr::value(Utc::now()))
-        .filter(
-            operations::Column::State.is_in([OperationState::Applying, OperationState::Pending]),
-        )
+        .filter(operations::Column::State.is_in([
+            OperationState::Confirming,
+            OperationState::Applying,
+            OperationState::Pending,
+        ]))
         .exec(txn)
         .await
         .map(|_| ())
@@ -228,6 +261,10 @@ async fn converge_with(
         return txn.commit().await.map_err(|_| AuthError::DbTimeout);
     };
     match latest.state {
+        OperationState::Confirming => {
+            let outcome = confirm_registration(access).await;
+            finish(&txn, &life, latest, true, outcome).await?;
+        }
         OperationState::Applying | OperationState::Pending => {
             let enabled = latest.desired_enabled;
             let outcome = match access {
@@ -245,6 +282,29 @@ async fn converge_with(
         OperationState::Applied | OperationState::Failed => {}
     }
     txn.commit().await.map_err(|_| AuthError::DbTimeout)
+}
+
+async fn confirm_registration(
+    access: Option<&dyn ModelAccess>,
+) -> Result<(), (OperationState, String)> {
+    let access = access.ok_or((OperationState::Failed, "setup_needed".into()))?;
+    let status = access.engine_state().await.map_err(|error| {
+        let (state, code) = classify(error);
+        // A retry must stay read-only; Pending dispatches the administrator consent path.
+        (
+            if state == OperationState::Pending {
+                OperationState::Confirming
+            } else {
+                state
+            },
+            code,
+        )
+    })?;
+    match status.as_str() {
+        "on" | "low" | "empty" | "pending" => Ok(()),
+        "off" => Err((OperationState::Failed, "remote_off".into())),
+        _ => Err((OperationState::Confirming, "status_unavailable".into())),
+    }
 }
 
 async fn try_lock_lifecycle(
@@ -365,13 +425,13 @@ async fn complete(
 
 /// Converges after restarts and temporary failures, and re-checks the service after a
 /// superseded intent. Skips when another process holds the lifecycle.
-pub async fn reconcile(state: &SharedState) -> Result<(), AuthError> {
+async fn reconcile(state: &SharedState, wait: LockWait) -> Result<(), AuthError> {
     let access = service_access();
     converge_with(
         &state.database,
         access.as_ref().map(|access| access as &dyn ModelAccess),
         Utc::now(),
-        LockWait::Skip,
+        wait,
     )
     .await?;
     refresh_local_engine(state).await.map(|_| ())
@@ -380,7 +440,7 @@ pub async fn reconcile(state: &SharedState) -> Result<(), AuthError> {
 pub fn spawn_reconciler(state: SharedState) {
     tokio::spawn(async move {
         loop {
-            if let Err(error) = reconcile(&state).await {
+            if let Err(error) = reconcile(&state, LockWait::Skip).await {
                 eprintln!("Grengin intent reconciliation failed: {error:?}");
             }
             tokio::time::sleep(RECONCILE_EVERY).await;
@@ -447,7 +507,10 @@ fn operation_status(operation: &operations::Model) -> GrenginOperationStatus {
         id: operation.id,
         revision: operation.revision,
         desired_enabled: operation.desired_enabled,
-        state: operation.state,
+        state: match operation.state {
+            OperationState::Confirming => OperationState::Pending,
+            state => state,
+        },
         error_code: operation.error_code.clone(),
     }
 }
@@ -563,7 +626,7 @@ fn catalog_entry(
 
 /// Safe local and service status, available even when the identity or the local row is missing.
 pub async fn status(state: &SharedState) -> Result<GrenginStatus, AuthError> {
-    if let Err(error) = reconcile(state).await {
+    if let Err(error) = reconcile(state, LockWait::Skip).await {
         eprintln!("Grengin intent reconciliation failed: {error:?}");
     }
     let engine = ai_engines::Entity::find()
@@ -724,6 +787,272 @@ mod tests {
             .await
             .unwrap()
             .map(|engine| engine.is_enabled)
+    }
+
+    async fn managed_database() -> DatabaseConnection {
+        let url = std::env::var("GRENGIN_SECURITY_TEST_DATABASE_URL").unwrap();
+        let mut options = sea_orm::ConnectOptions::new(url);
+        options.max_connections(1);
+        let db = sea_orm::Database::connect(options).await.unwrap();
+        for table in [
+            "ai_engines",
+            "grengin_engine_lifecycle",
+            "grengin_engine_operations",
+        ] {
+            db.execute_unprepared(&format!(
+                "CREATE TEMP TABLE {table} (LIKE public.{table} INCLUDING ALL)"
+            ))
+            .await
+            .unwrap();
+        }
+        db
+    }
+
+    async fn managed_creator(db: &DatabaseConnection) -> ai_engines::Model {
+        let txn = db.begin().await.unwrap();
+        preinstall_for_managed_creator(&txn).await.unwrap();
+        let initial = ai_engines::Entity::find().one(&txn).await.unwrap().unwrap();
+        txn.commit().await.unwrap();
+        initial
+    }
+
+    struct RegisteredStatus(&'static str);
+
+    #[async_trait::async_trait]
+    impl ModelAccess for RegisteredStatus {
+        async fn engine_state(&self) -> Result<String, ProviderError> {
+            match self.0 {
+                "timeout" => Err(ProviderError::Transport("timeout".into())),
+                "unauthorized" => Err(ProviderError::HttpStatus {
+                    status: 401,
+                    message: "unauthorized".into(),
+                }),
+                "forbidden" => Err(ProviderError::HttpStatus {
+                    status: 403,
+                    message: "forbidden".into(),
+                }),
+                "rate_limited" => Err(ProviderError::HttpStatus {
+                    status: 429,
+                    message: "rate_limited".into(),
+                }),
+                "unavailable" => Err(ProviderError::HttpStatus {
+                    status: 503,
+                    message: "unavailable".into(),
+                }),
+                "mismatch" => Err(ProviderError::Configuration("identity mismatch".into())),
+                state => Ok(state.into()),
+            }
+        }
+
+        async fn set_enabled(&self, _: bool) -> Result<(), ProviderError> {
+            panic!("managed registration confirmation must never write consent")
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_confirmation_classifies_permanent_errors_without_writing_consent() {
+        for remote in ["unauthorized", "forbidden", "mismatch", "off"] {
+            assert_eq!(
+                confirm_registration(Some(&RegisteredStatus(remote)))
+                    .await
+                    .unwrap_err()
+                    .0,
+                OperationState::Failed
+            );
+        }
+        for remote in ["timeout", "rate_limited", "unavailable", "unknown"] {
+            assert_eq!(
+                confirm_registration(Some(&RegisteredStatus(remote)))
+                    .await
+                    .unwrap_err()
+                    .0,
+                OperationState::Confirming
+            );
+        }
+        assert_eq!(
+            confirm_registration(None).await.unwrap_err().0,
+            OperationState::Failed
+        );
+        for remote in ["on", "low", "empty", "pending"] {
+            assert!(
+                confirm_registration(Some(&RegisteredStatus(remote)))
+                    .await
+                    .is_ok()
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable, migrated database)"]
+    async fn managed_confirmation_permanent_denial_is_terminal_across_reconcile_passes() {
+        for remote in ["unauthorized", "forbidden", "mismatch"] {
+            let db = managed_database().await;
+            let txn = db.begin().await.unwrap();
+            ai_engines::ActiveModel::native(ENGINE_KEY.into(), "Grengin".into(), false, Utc::now())
+                .insert(&txn)
+                .await
+                .unwrap();
+            let life = lock_lifecycle(&txn).await.unwrap();
+            record_locked(&txn, life, true, OperationState::Confirming)
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+            converge_with(
+                &db,
+                Some(&RegisteredStatus(remote)),
+                Utc::now(),
+                LockWait::Skip,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                latest_unapplied(&db).await.unwrap().unwrap().state,
+                OperationState::Failed
+            );
+            converge_with(
+                &db,
+                Some(&RegisteredStatus("on")),
+                Utc::now(),
+                LockWait::Skip,
+            )
+            .await
+            .unwrap();
+            assert_eq!(enabled(&db).await, Some(false));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable, migrated database)"]
+    async fn existing_managed_confirmations_recover_without_writing_consent() {
+        for remote in ["on", "low", "empty", "pending", "off"] {
+            let db = managed_database().await;
+            let txn = db.begin().await.unwrap();
+            let initial = ai_engines::ActiveModel::native(
+                ENGINE_KEY.into(),
+                "Grengin".into(),
+                false,
+                Utc::now(),
+            )
+            .insert(&txn)
+            .await
+            .unwrap();
+            let life = lock_lifecycle(&txn).await.unwrap();
+            record_locked(&txn, life, true, OperationState::Confirming)
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+            converge_with(
+                &db,
+                Some(&RegisteredStatus("timeout")),
+                Utc::now(),
+                LockWait::Skip,
+            )
+            .await
+            .unwrap();
+            assert_eq!(enabled(&db).await, Some(false));
+            assert_eq!(
+                latest_unapplied(&db).await.unwrap().unwrap().state,
+                OperationState::Pending
+            );
+
+            converge_with(
+                &db,
+                Some(&RegisteredStatus(remote)),
+                Utc::now(),
+                LockWait::Skip,
+            )
+            .await
+            .unwrap();
+            let row = managed_creator(&db).await;
+            assert_eq!(row.id, initial.id);
+            assert_eq!(row.is_enabled, remote != "off");
+            assert!(row.whitelist_models.is_empty() && row.default_model.is_empty());
+            assert!(row.default_image_gen_model.is_none());
+            assert_eq!(operations::Entity::find().all(&db).await.unwrap().len(), 1);
+            if remote == "off" {
+                assert_eq!(
+                    latest_unapplied(&db).await.unwrap().unwrap().state,
+                    OperationState::Failed
+                );
+                converge_with(
+                    &db,
+                    Some(&RegisteredStatus("on")),
+                    Utc::now(),
+                    LockWait::Skip,
+                )
+                .await
+                .unwrap();
+                assert_eq!(enabled(&db).await, Some(false));
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs GRENGIN_SECURITY_TEST_DATABASE_URL (disposable, migrated database)"]
+    async fn managed_creator_starts_enabled_and_preserves_policy_disable_and_deletion() {
+        let db = managed_database().await;
+        let initial = managed_creator(&db).await;
+        assert!(crate::services::ai_plugin::is_catalog_grengin(&initial));
+        assert_eq!(initial.display_name, "Grengin");
+        assert_eq!(initial.api_key_status, ApiKeyStatus::NotConfigured);
+        assert!(
+            initial.is_enabled
+                && initial.whitelist_models.is_empty()
+                && initial.default_model.is_empty()
+        );
+        assert!(
+            initial.default_image_gen_model.is_none()
+                && initial.base_url_override.is_none()
+                && initial.api_key.is_none()
+                && initial.api_key_validated_at.is_none()
+        );
+        assert!(operations::Entity::find().one(&db).await.unwrap().is_none());
+
+        let custom_db = managed_database().await;
+        let mut custom = ai_engines::ActiveModel::native(
+            ENGINE_KEY.into(),
+            "Existing provider".into(),
+            false,
+            Utc::now(),
+        );
+        custom.plugin_config = Set(Some(serde_json::json!({"existing": true})));
+        let custom = custom.insert(&custom_db).await.unwrap();
+        assert_eq!(managed_creator(&custom_db).await, custom);
+
+        let mut edited: ai_engines::ActiveModel = initial.clone().into();
+        edited.whitelist_models = Set(vec!["openai/example".into()]);
+        let edited = edited.update(&db).await.unwrap();
+        assert_eq!(managed_creator(&db).await, edited);
+        assert!(operations::Entity::find().one(&db).await.unwrap().is_none());
+
+        record(&db, false).await.unwrap();
+        let remote = FakeService::new(true, 1);
+        converge(&db, &remote, LockWait::Skip).await;
+        assert!(!managed_creator(&db).await.is_enabled);
+        assert!(!remote.remote());
+        assert_eq!(*remote.sets.lock().unwrap(), vec![false]);
+
+        let db = managed_database().await;
+        let initial = managed_creator(&db).await;
+        close_installation(&db, initial.id).await.unwrap();
+        converge_with(
+            &db,
+            Some(&RegisteredStatus("on")),
+            Utc::now(),
+            LockWait::Skip,
+        )
+        .await
+        .unwrap();
+        let txn = db.begin().await.unwrap();
+        preinstall_for_managed_creator(&txn).await.unwrap();
+        assert!(
+            ai_engines::Entity::find()
+                .one(&txn)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        txn.rollback().await.unwrap();
     }
 
     #[tokio::test]

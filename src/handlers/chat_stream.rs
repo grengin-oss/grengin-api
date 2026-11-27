@@ -81,9 +81,7 @@ use crate::{
         models_cache::get_model_info_cached,
     },
     state::SharedState,
-    utils::cost_calc::{
-        calculate_llm_cost, to_chat_web_search_result, tool_input_to_value,
-    },
+    utils::cost_calc::{calculate_llm_cost, to_chat_web_search_result, tool_input_to_value},
     utils::llm_error::extract_llm_error_message,
 };
 use axum::{

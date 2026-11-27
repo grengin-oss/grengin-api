@@ -3,9 +3,10 @@
 
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait,
-    IntoActiveModel, QueryFilter, Statement, TransactionTrait,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseBackend,
+    DatabaseTransaction, EntityTrait, IntoActiveModel, QueryFilter, Statement, TransactionTrait,
 };
+#[cfg(test)]
 use uuid::Uuid;
 
 use crate::{
@@ -470,6 +471,21 @@ pub fn grengin_model_policy(
     Ok((selected, text, image))
 }
 
+pub(super) async fn lock_engine_installation(
+    txn: &DatabaseTransaction,
+    key: &str,
+) -> Result<(), AuthError> {
+    // SeaORM cannot express PostgreSQL advisory locks; serialize same-key installations.
+    txn.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        [format!("grengin-engine:{key}").into()],
+    ))
+    .await
+    .map(|_| ())
+    .map_err(|_| AuthError::DbTimeout)
+}
+
 pub async fn create_engine(
     state: &SharedState,
     request: AIEngineCreate,
@@ -624,14 +640,7 @@ pub async fn create_engine(
         .begin()
         .await
         .map_err(|_| AuthError::DbTimeout)?;
-    // SeaORM cannot express PostgreSQL advisory locks; serialize same-key installations.
-    txn.execute(Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-        [format!("grengin-engine:{}", manifest.id).into()],
-    ))
-    .await
-    .map_err(|_| AuthError::DbTimeout)?;
+    lock_engine_installation(&txn, &manifest.id).await?;
     if ai_engines::Entity::find()
         .filter(ai_engines::Column::EngineKey.eq(&manifest.id))
         .one(&txn)
@@ -642,12 +651,6 @@ pub async fn create_engine(
         return Err(AuthError::DbConflict);
     }
     let engine = ai_engines::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        display_name: Set(request
-            .display_name
-            .unwrap_or_else(|| manifest.name.clone())),
-        is_enabled: Set(is_enabled),
-        engine_key: Set(manifest.id.clone()),
         api_key_status: Set(if encrypted_api_key.is_some() {
             ApiKeyStatus::NotValidated
         } else {
@@ -659,9 +662,14 @@ pub async fn create_engine(
         default_image_gen_model: Set(default_image_gen_model),
         plugin_config: Set(plugin_config),
         base_url_override: Set(base_url_override),
-        api_key_validated_at: Set(None),
-        created_at: Set(now),
-        updated_at: Set(now),
+        ..ai_engines::ActiveModel::native(
+            manifest.id.clone(),
+            request
+                .display_name
+                .unwrap_or_else(|| manifest.name.clone()),
+            is_enabled,
+            now,
+        )
     }
     .insert(&txn)
     .await

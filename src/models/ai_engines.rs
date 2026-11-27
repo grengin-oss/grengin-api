@@ -67,3 +67,30 @@ pub struct Model {
 pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
+
+impl ActiveModel {
+    pub fn native(
+        engine_key: String,
+        display_name: String,
+        is_enabled: bool,
+        now: DateTime<Utc>,
+    ) -> Self {
+        use sea_orm::Set;
+        Self {
+            id: Set(Uuid::new_v4()),
+            engine_key: Set(engine_key),
+            display_name: Set(display_name),
+            is_enabled: Set(is_enabled),
+            api_key_status: Set(ApiKeyStatus::NotConfigured),
+            api_key: Set(None),
+            api_key_validated_at: Set(None),
+            whitelist_models: Set(Vec::new()),
+            default_model: Set(String::new()),
+            default_image_gen_model: Set(None),
+            plugin_config: Set(None),
+            base_url_override: Set(None),
+            created_at: Set(now),
+            updated_at: Set(now),
+        }
+    }
+}

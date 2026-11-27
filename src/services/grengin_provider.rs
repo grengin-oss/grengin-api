@@ -907,6 +907,11 @@ mod tests {
             split_model("google/Gemini-Case").unwrap(),
             ("gemini", "Gemini-Case")
         );
+        // NVIDIA's own model IDs carry a vendor prefix that first-slash parsing keeps.
+        assert_eq!(
+            split_model("nvidia/nvidia/nemotron-3-ultra-550b-a55b").unwrap(),
+            ("nvidia", "nvidia/nemotron-3-ultra-550b-a55b")
+        );
         for model in [
             "openrouter/model",
             "bedrock/model",
@@ -931,6 +936,15 @@ mod tests {
                 .is_ok()
             );
         }
+        let nvidia = |operation: &str| {
+            validate_gateway_url(
+                origin,
+                "nvidia",
+                &Url::parse(&format!("{origin}/v1/infer/nvidia/{operation}")).unwrap(),
+            )
+        };
+        assert!(nvidia("chat/completions").is_ok());
+        assert!(nvidia("models").is_err() && nvidia("responses").is_err());
         for url in [
             "https://evil.invalid/v1/infer/openai/responses",
             "https://service.grengin.com/v1/infer/openai/responses?api_key=secret",
@@ -1004,6 +1018,7 @@ mod tests {
             ("deepseek", "max_tokens", true),
             ("kimi", "max_completion_tokens", true),
             ("sarvam", "max_tokens", false),
+            ("nvidia", "max_completion_tokens", true),
         ] {
             let mut package = ProviderManifestV1::from_json(include_bytes!(
                 "../../llm-plugin/examples/openai-compatible.provider.json"
@@ -1242,6 +1257,43 @@ mod tests {
             .unwrap()
             .len(),
             2
+        );
+    }
+
+    #[tokio::test]
+    async fn grengin_package_accepts_the_actual_catalog_native_providers() {
+        let fixture = include_bytes!("../../tests/fixtures/grengin-1.2.provider.json");
+        if let Some(root) = std::env::var_os("GRENGIN_CATALOG_REVIEW_ROOT") {
+            let actual = std::fs::read(
+                std::path::Path::new(&root)
+                    .join("master-data/ai-providers/grengin/versions/1.2/plugin.json"),
+            )
+            .unwrap();
+            assert_eq!(
+                actual, fixture,
+                "runtime fixture must match the real immutable package"
+            );
+        }
+        let mut package = ProviderManifestV1::from_json(fixture).unwrap();
+        let catalog =
+            DiscoveryCatalog::new(reqwest::Client::new(), "https://meta.grengin.com/").unwrap();
+        let provider = GrenginProvider::new(&package, catalog.clone()).unwrap();
+        assert_eq!(
+            provider
+                .resolve("nvidia/nvidia/nemotron-3-ultra-550b-a55b")
+                .unwrap(),
+            ("nvidia", "nvidia/nemotron-3-ultra-550b-a55b".into())
+        );
+        for native in &package.native_providers {
+            assert!(provider.resolve(&format!("{native}/fixture-model")).is_ok());
+        }
+        package.native_providers.push("openrouter".into());
+        let provider = GrenginProvider::new(&package, catalog).unwrap();
+        assert!(provider.resolve("openrouter/fixture-model").is_err());
+        assert!(
+            provider
+                .resolve("nvidia/nvidia/nemotron-3-ultra-550b-a55b")
+                .is_ok()
         );
     }
 }

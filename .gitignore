@@ -7,6 +7,8 @@
 files
 CLAUDE.md
 /tests/*
+!/tests/fixtures/
+!/tests/fixtures/*.provider.json
 !/tests/auth/
 !/tests/auth/*.sh
 !/tests/discovery_api.sh
